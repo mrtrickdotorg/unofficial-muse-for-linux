@@ -469,6 +469,7 @@ mod native {
         refresh: gtk::Button,
         older: gtk::Button,
         history: gtk::Box,
+        scroll: gtk::ScrolledWindow,
         history_notice: gtk::Label,
         tasks: gtk::Box,
         tasks_notice: gtk::Label,
@@ -1187,6 +1188,7 @@ mod native {
             refresh,
             older,
             history,
+            scroll,
             history_notice,
             tasks,
             tasks_notice,
@@ -1923,6 +1925,22 @@ mod native {
                     role,
                     &super::presentation_text(&message.text),
                 );
+            }
+            // The newest message sits at the bottom of the transcript, so a
+            // fresh load should show it. Follow only while the reader is
+            // already there: scrolling up into older history must survive the
+            // reply polling that re-renders every couple of seconds.
+            let adjustment = self.scroll.vadjustment();
+            let follows_bottom =
+                adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0;
+            if follows_bottom {
+                let scroll = self.scroll.clone();
+                gtk::glib::timeout_add_local_once(Duration::from_millis(0), move || {
+                    // After allocation: `upper` only accounts for the new rows
+                    // once the widgets have been laid out.
+                    let adjustment = scroll.vadjustment();
+                    adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+                });
             }
             super::super::clear_chat(&self.tasks);
             if let Some(tasks) = &state.tasks {
