@@ -1,8 +1,11 @@
 name: AppImage
 
+# Every push builds an AppImage — any branch, any tag — so no commit is ever
+# left without a build. Only refs/heads/main republishes the rolling release.
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "**" ]
+    tags: [ "**" ]
   workflow_dispatch:
 
 # Publishing the rolling download needs write access to releases.
@@ -11,7 +14,9 @@ permissions:
 
 concurrency:
   group: appimage-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel: a superseded push must still finish its own build, otherwise
+  # that commit has no AppImage at all. Runs for one ref simply queue.
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,12 +68,15 @@ jobs:
     - name: Upload workflow artifact
       uses: actions/upload-artifact@v4
       with:
-        name: unofficial-muse-for-linux-x86_64-AppImage
+        name: unofficial-muse-for-linux-x86_64-AppImage-${{ github.sha }}
         path: dist/unofficial-muse-for-linux-x86_64.AppImage
         if-no-files-found: error
         retention-days: 30
 
     - name: Publish rolling download
+      # Other refs keep their build as a workflow artifact only; the rolling
+      # release must always track main.
+      if: github.ref == 'refs/heads/main'
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
