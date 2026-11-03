@@ -18,6 +18,12 @@ from pathlib import Path
 import sys
 import time
 
+# Kernel file timestamps come from a coarse clock, so a file written immediately
+# after the launch record can carry a timestamp a few milliseconds older than it.
+# Allow that bounded skew; it stays far below the age of a file left behind by a
+# previous browser launch, which must still be refused.
+CLOCK_SKEW_NS = 250_000_000
+
 MESSAGES = {
     "invalid_request": "A valid sign-in request is required.",
     "unsafe_config": "Choose a private app configuration directory without existing unrelated credentials.",
@@ -234,9 +240,10 @@ def read_devtools_endpoint(profile, process, launched_ns):
         raise LoginError("unsafe_devtools") from None
     try:
         info = os.fstat(fd)
+        fresh_after = launched_ns - CLOCK_SKEW_NS
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                 or info.st_nlink != 1 or info.st_mode & 0o022
-                or info.st_mtime_ns < launched_ns or info.st_ctime_ns < launched_ns
+                or info.st_mtime_ns < fresh_after or info.st_ctime_ns < fresh_after
                 or not 1 <= info.st_size <= 512):
             raise LoginError("unsafe_devtools")
         try:

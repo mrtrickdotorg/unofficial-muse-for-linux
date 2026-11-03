@@ -215,6 +215,15 @@ class LoginTests(unittest.TestCase):
                 os.utime(active, ns=(launched - 1000000000, launched - 1000000000))
                 with self.assertRaises(helper.LoginError):
                     helper.read_devtools_endpoint(fd, process, launched)
+                # A few milliseconds of skew is normal because kernel timestamps
+                # come from a coarse clock; a file this launch just wrote must be
+                # accepted rather than failing sign-in as unsafe_devtools.
+                skew = 50_000_000
+                os.utime(active, ns=(launched - skew, launched - skew))
+                self.assertEqual(
+                    helper.read_devtools_endpoint(fd, process, launched),
+                    f"ws://127.0.0.1:{port}/devtools/browser/fake-process-token",
+                )
                 active.unlink()
                 target = profile / "other"
                 target.write_text(str(port) + "\n/devtools/browser/fake\n")
