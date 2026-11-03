@@ -37,7 +37,10 @@ class BridgeTests(unittest.TestCase):
         detail = caught.exception.detail
         self.assertRegex(detail, r"(ModuleNotFound)?Error")
         self.assertIn("prefix=", detail)
-        self.assertIn("bridge_path_on_sys_path=", detail)
+        self.assertIn("site_packages_on_sys_path=", detail)
+        self.assertIn("running=", detail)
+        # Bounded, so no field can be truncated away unexplained.
+        self.assertLessEqual(len(detail), 300)
         # The module that was actually missing is named, without any message text.
         self.assertIn("missing=", detail)
         self.assertIn("site_packages_on_sys_path=", detail)
@@ -72,6 +75,26 @@ class BridgeTests(unittest.TestCase):
             for key in ("python", "executable", "prefix", "sys_path", "site_dirs",
                         "uid", "cwd", "flags"):
                 self.assertIn(key, report)
+
+    def test_a_venv_built_by_another_python_version_is_still_usable(self):
+        import pathlib
+        import sys
+        import tempfile
+        bridge = load_bridge()
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            (root / "source" / "muse_mcp").mkdir(parents=True)
+            # What a container with a newer Python produces: only the building
+            # interpreter's directory exists on disk.
+            foreign = root / "lib" / "python9.9" / "site-packages"
+            (foreign / "muse_mcp").mkdir(parents=True)
+            (foreign / "checkout.pth").write_text(str(root / "source") + "\n",
+                                                  encoding="utf-8")
+            bridge.ensure_paths(prefix=root)
+            self.assertIn(str(foreign), sys.path)
+            self.assertIn(str(root / "source"), sys.path)
+            sys.path[:] = [p for p in sys.path
+                           if p not in (str(foreign), str(root / "source"))]
 
     def test_venv_site_packages_and_pth_entries_are_restored(self):
         import pathlib

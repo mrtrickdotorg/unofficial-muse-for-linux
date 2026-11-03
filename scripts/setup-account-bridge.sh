@@ -124,12 +124,23 @@ def main():
     frozen = run([str(interpreter), "-I", "-m", "pip", "--isolated", "freeze", "--all"],
                  capture_output=True, text=True).stdout
     (destination / "installed-dependencies.txt").write_text(frozen, encoding="utf-8")
+    # A venv only works with the interpreter version that built it, and a
+    # toolbox or distrobox container has a different Python from the host.
+    environment = ("container" if os.environ.get("container")
+                   or Path("/run/.containerenv").exists() else "host")
+    built_for = "{}.{}".format(*sys.version_info[:2])
     (destination / "installation.json").write_text(json.dumps({
         "source": SOURCE_URL, "commit": SOURCE_COMMIT, "python": str(interpreter),
+        "python_version": built_for, "environment": environment,
         "source_dir": str(source), "authenticated": False,
     }, indent=2) + "\n", encoding="utf-8")
     print(f"Installed external community source: {SOURCE_COMMIT}")
     print(f"Select this Python interpreter in the app: {interpreter}")
+    print(f"Built for Python {built_for} in the {environment} environment.")
+    if environment == "host":
+        print("Run this installer in the same environment you launch the app from: "
+              "a toolbox or distrobox container has its own Python, and a venv built "
+              "outside it cannot import its dependencies inside it.")
     print("No authentication was performed or read. Dependencies remain outside the AppImage.")
 
 
