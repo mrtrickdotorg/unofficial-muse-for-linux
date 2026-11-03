@@ -465,6 +465,7 @@ mod native {
         identity: gtk::Label,
         chip: gtk::Label,
         threads: gtk::ComboBoxText,
+        threads_key: RefCell<String>,
         scope_label: gtk::Label,
         refresh: gtk::Button,
         older: gtk::Button,
@@ -1184,6 +1185,7 @@ mod native {
             identity,
             chip: chip.clone(),
             threads,
+            threads_key: RefCell::new(String::new()),
             scope_label,
             refresh,
             older,
@@ -1785,6 +1787,10 @@ mod native {
             let state = self.state.borrow();
             let connected = state.account.is_some();
             let idle = state.busy.is_none();
+            let background = match state.busy.as_ref() {
+                Some(ticket) => matches!(ticket.operation, Operation::History | Operation::Refresh),
+                None => false,
+            };
             let (conversation_visible, setup_visible) = account_surface_visibility(connected);
             self.pages.set_visible(conversation_visible);
             self.welcome.set_visible(setup_visible);
@@ -1799,7 +1805,7 @@ mod native {
                 self.pages.set_current_page(Some(0));
             }
             // Progress text still matters while an operation runs.
-            self.connection_notice.set_visible(!connected || !idle);
+            self.connection_notice.set_visible(!connected || (!idle && !background));
             let settings_enabled = !connected && idle;
             for widget in [
                 self.python.upcast_ref::<gtk::Widget>(),
@@ -1816,14 +1822,16 @@ mod native {
             self.older
                 .set_sensitive(connected && idle && state.limit < 200);
             self.threads.set_sensitive(connected && idle);
+            // Polling is background work: the composer stays usable, and a
+            // double dispatch is still prevented by `pending_send` in begin_send.
             self.prompt
-                .set_sensitive(connected && idle && state.pending_send.is_none());
+                .set_sensitive(connected && state.pending_send.is_none());
             self.send
-                .set_sensitive(connected && idle && state.pending_send.is_none());
+                .set_sensitive(connected && state.pending_send.is_none());
             self.acknowledge
                 .set_visible(state.pending_send.is_some() && idle);
             self.acknowledge.set_sensitive(connected && idle);
-            self.spinner.set_spinning(!idle);
+            self.spinner.set_spinning(!idle && !background);
             let busy = state
                 .busy
                 .as_ref()
@@ -1854,34 +1862,46 @@ mod native {
             } else {
                 "Not connected"
             });
-            self.threads.remove_all();
-            self.threads.append(Some("main"), "Main conversation");
-            if let Some(account) = &state.account {
-                for thread in &account.threads {
-                    let archived = if thread.archived { " [archived]" } else { "" };
-                    let updated = thread
-                        .updated_at
-                        .as_deref()
-                        .map(|s| format!(" · {s}"))
-                        .unwrap_or_default();
-                    self.threads.append(
-                        Some(&format!("thread:{}", thread.session_id)),
-                        &format!("{}{archived}{updated}", thread.title),
-                    );
+            let threads_key = format!(
+                "{:?}|{:?}|{}",
+                state.scope,
+                state
+                    .account
+                    .as_ref()
+                    .map(|a| (&a.identity_name, a.threads.len())),
+                state.limit
+            );
+            if self.threads_key.borrow().as_str() != threads_key {
+                *self.threads_key.borrow_mut() = threads_key;
+                self.threads.remove_all();
+                self.threads.append(Some("main"), "Main conversation");
+                if let Some(account) = &state.account {
+                    for thread in &account.threads {
+                        let archived = if thread.archived { " [archived]" } else { "" };
+                        let updated = thread
+                            .updated_at
+                            .as_deref()
+                            .map(|s| format!(" · {s}"))
+                            .unwrap_or_default();
+                        self.threads.append(
+                            Some(&format!("thread:{}", thread.session_id)),
+                            &format!("{}{archived}{updated}", thread.title),
+                        );
+                    }
                 }
-            }
-            let selected = state
-                .scope
-                .as_ref()
-                .map(|id| format!("thread:{id}"))
-                .unwrap_or_else(|| "main".into());
-            // A disappearing service thread keeps its exact scope; never silently fall back to main.
-            if !self.threads.set_active_id(Some(&selected)) {
-                self.threads.append(
-                    Some(&selected),
-                    "Selected conversation (not in current service thread list)",
-                );
-                self.threads.set_active_id(Some(&selected));
+                let selected = state
+                    .scope
+                    .as_ref()
+                    .map(|id| format!("thread:{id}"))
+                    .unwrap_or_else(|| "main".into());
+                // A disappearing service thread keeps its exact scope; never silently fall back to main.
+                if !self.threads.set_active_id(Some(&selected)) {
+                    self.threads.append(
+                        Some(&selected),
+                        "Selected conversation (not in current service thread list)",
+                    );
+                    self.threads.set_active_id(Some(&selected));
+                }
             }
             self.scope_label.set_text(&format!(
                 "Conversation scope: {} · latest {} service events",
@@ -1891,6 +1911,10 @@ mod native {
             self.history_notice.set_text(&state.history_notice);
             self.tasks_notice.set_text(&state.tasks_notice);
             self.send_notice.set_text(&state.send_notice);
+            let was_at_bottom = {
+                let adjustment = self.scroll.vadjustment();
+                adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0
+            };
             super::super::clear_chat(&self.history);
             if !state.history.is_empty() {
                 super::super::append_day_divider(&self.history);
@@ -1926,21 +1950,17 @@ mod native {
                     &super::presentation_text(&message.text),
                 );
             }
-            // The newest message sits at the bottom of the transcript, so a
-            // fresh load should show it. Follow only while the reader is
-            // already there: scrolling up into older history must survive the
-            // reply polling that re-renders every couple of seconds.
-            let adjustment = self.scroll.vadjustment();
-            let follows_bottom =
-                adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0;
-            if follows_bottom {
-                let scroll = self.scroll.clone();
-                gtk::glib::timeout_add_local_once(Duration::from_millis(0), move || {
-                    // After allocation: `upper` only accounts for the new rows
-                    // once the widgets have been laid out.
-                    let adjustment = scroll.vadjustment();
-                    adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
-                });
+            // Newest messages are at the bottom. Follow them when the reader
+            // was already there, and repeat after allocation: a fresh row only
+            // enlarges the adjustment once it has been laid out.
+            if was_at_bottom {
+                for delay in [0u64, 60] {
+                    let scroll = self.scroll.clone();
+                    gtk::glib::timeout_add_local_once(Duration::from_millis(delay), move || {
+                        let adjustment = scroll.vadjustment();
+                        adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+                    });
+                }
             }
             super::super::clear_chat(&self.tasks);
             if let Some(tasks) = &state.tasks {
