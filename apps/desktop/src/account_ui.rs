@@ -102,7 +102,7 @@ pub(crate) fn login_error_message(code: &str) -> &'static str {
         "devtools_error" => "The isolated browser connection failed before sign-in completed.",
         "timeout" | "login_timeout" => "Browser sign-in expired before authentication completed.",
         "unsafe_config" | "insecure_config" => {
-            "Choose a private account directory with safe ownership and permissions, without unrelated credentials."
+            "Browser sign-in needs a folder that belongs to you and is private (owner-only, no symlinks). Pick a new empty session folder under Advanced \u{2014} the default already qualifies \u{2014} or make that folder owner-only if it holds nothing else. The Muse CLI folder cannot be used for browser sign-in."
         }
         "cancelled" | "browser_closed" => {
             "Browser sign-in was cancelled or the isolated browser was closed."
@@ -155,8 +155,7 @@ impl<A, H, T> Controller<A, H, T> {
         }
         self.connection_notice = match result {
             Ok(()) => {
-                "Browser sign-in completed. Click Connect to explicitly link this selected session."
-                    .into()
+                "Signed in. Loading your chats, scheduled tasks and run history\u{2026}".into()
             }
             Err(error) => format!("Browser sign-in failed: {error}"),
         };
@@ -332,7 +331,7 @@ impl<A, H, T> Controller<A, H, T> {
             Ok(account) => {
                 self.account = Some(account);
                 self.connection_notice =
-                    "Account linked. Shared cloud history; not official Mac-device registration."
+                    "Account linked. Your chats and scheduled tasks now load from this Muse account."
                         .into();
             }
             Err(error) => self.connection_notice = format!("Connection failed: {error}"),
@@ -522,6 +521,33 @@ mod native {
 
     fn persistent_config_home() -> Option<PathBuf> {
         config_home()
+    }
+
+    /// App-owned folder used by browser sign-in.
+    fn app_account_dir() -> Option<PathBuf> {
+        config_home().map(|path| path.join("unofficial-muse-for-linux/account"))
+    }
+
+    /// The Muse CLI's own folder. It is reserved for the CLI flow: the sign-in
+    /// helper refuses it, so a browser sign-in must never leave it selected.
+    fn cli_session_dir() -> Option<PathBuf> {
+        config_home().map(|path| path.join("muse-cli"))
+    }
+
+    /// Folder a browser sign-in may use. An empty field or the CLI folder both
+    /// fall back to the app's own folder; `None` means no home directory is
+    /// available to derive one from.
+    fn browser_sign_in_dir(
+        current: &str,
+        app_dir: Option<&Path>,
+        cli_dir: Option<&Path>,
+    ) -> Option<String> {
+        let current = current.trim();
+        let cli_dir = cli_dir.map(|path| path.display().to_string());
+        if current.is_empty() || Some(current.to_owned()) == cli_dir {
+            return app_dir.map(|path| path.display().to_string());
+        }
+        Some(current.to_owned())
     }
 
     fn valid_saved_path(value: &str) -> bool {
@@ -896,35 +922,66 @@ mod native {
         welcome_title.add_css_class("welcome-title");
         welcome.append(&welcome_title);
         let welcome_copy = label(
-            "Use your existing personal Muse agent here. Chats and scheduled tasks stay tied to that account; this app does not create a separate developer assistant.",
+            "Sign in to the Muse account you already use. A private browser window opens at muse.ai and only that session is saved, in this app's own folder. Your chats and scheduled tasks then load from that account. Your password is never entered in this app.",
         );
         welcome_copy.add_css_class("welcome-copy");
         welcome.append(&welcome_copy);
-        let open_settings = gtk::Button::with_label("Set up connection");
-        open_settings.add_css_class("suggested-action");
-        open_settings.set_halign(gtk::Align::Start);
-        welcome.append(&open_settings);
+        let consent = gtk::CheckButton::with_label(
+            "Allow this app to read this account's chats, scheduled tasks and run history.",
+        );
+        consent.set_halign(gtk::Align::Start);
+        welcome.append(&consent);
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        actions.add_css_class("toolbar");
+        let login = gtk::Button::with_label("Sign in with Muse");
+        login.add_css_class("suggested-action");
+        login.set_tooltip_text(Some(
+            "Opens muse.ai in a private Chromium-compatible browser window, saves the session in this app's folder, then links the account. Not all installed browsers are supported.",
+        ));
+        let existing = gtk::Button::with_label("Use my existing Muse login");
+        existing.set_tooltip_text(Some(
+            "Links the Muse CLI session already on this computer instead of signing in again.",
+        ));
+        let connect = gtk::Button::with_label("Link account");
+        connect.set_tooltip_text(Some(
+            "Reads the selected session now. Tick the consent box first.",
+        ));
+        let disconnect = gtk::Button::with_label("Disconnect");
+        for button in [&login, &existing, &connect, &disconnect] {
+            actions.append(button);
+        }
+        welcome.append(&actions);
+        let helper = label(
+            "\u{201c}Sign in with Muse\u{201d} is the usual choice: it links the account by itself once you finish signing in. \u{201c}Use my existing Muse login\u{201d} reads the Muse CLI session at ~/.config/muse-cli instead. Only one of the two folders is used at a time; interpreter or folder overrides are under Advanced.",
+        );
+        helper.add_css_class("dim-label");
+        welcome.append(&helper);
+        let disconnect_note = label(
+            "Disconnecting clears only this app's memory: it does not sign you out on other devices, erase saved session files or delete cloud history.",
+        );
+        disconnect_note.add_css_class("dim-label");
+        welcome.append(&disconnect_note);
         root.append(&welcome);
 
-        let settings = gtk::Expander::new(Some("Account connection & sign-in"));
+        let settings = gtk::Expander::new(Some("Advanced: interpreter and session folder"));
         settings.add_css_class("settings-disclosure");
         settings.set_expanded(false);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
         content.add_css_class("settings-content");
-        content.append(&label("Links the existing personal Muse agent selected below. This is a native Linux client, not a website wrapper or developer API account. No password, token or cookie is entered here."));
-        content.append(&label("Python executable (absolute path; install the community muse-mcp package in this interpreter's virtualenv):"));
+        content.append(&label(
+            "Change these only if the defaults do not work. The account bridge needs a Python interpreter with the community muse-mcp package installed; browser sign-in needs Python 3.10+ with only the standard library. No password, token or cookie is entered in this app.",
+        ));
+        content.append(&label("Python executable (absolute path):"));
         let python = gtk::Entry::new();
         python.set_text(&default_python().display().to_string());
         content.append(&python);
-        content.append(&label("Muse session directory:"));
+        content.append(&label(
+            "Session folder for browser sign-in (private to your user; never the Muse CLI folder):",
+        ));
         let config_dir = gtk::Entry::new();
         config_dir.set_text(
-            &config_home()
-                .map(|path| {
-                    path.join("unofficial-muse-for-linux/account")
-                        .display()
-                        .to_string()
-                })
+            &app_account_dir()
+                .map(|path| path.display().to_string())
                 .unwrap_or_default(),
         );
         if let Some((saved_python, saved_config_dir)) = load_saved_connection() {
@@ -933,25 +990,8 @@ mod native {
         }
         content.append(&config_dir);
         content.append(&label(
-            "These two paths are remembered locally for the next launch. Session credentials stay in the selected directory and are never copied into this preference.",
+            "Both paths are remembered locally for the next launch. Session credentials stay in the selected folder and are never copied into this preference.",
         ));
-        let consent = gtk::CheckButton::with_label(
-            "I allow access to this selected Muse session, its account identity, conversations and task history.",
-        );
-        content.append(&consent);
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        actions.add_css_class("toolbar");
-        let existing = gtk::Button::with_label("Use existing local Muse session");
-        let login = gtk::Button::with_label("Sign in with browser…");
-        login.set_tooltip_text(Some("Opens official muse.ai in an isolated Chromium-compatible browser. Not all installed browsers are supported. Writes only the selected app/session directory."));
-        let connect = gtk::Button::with_label("Connect");
-        connect.add_css_class("suggested-action");
-        let disconnect = gtk::Button::with_label("Disconnect");
-        for button in [&existing, &login, &connect, &disconnect] {
-            actions.append(button);
-        }
-        content.append(&actions);
-        content.append(&label("Browser sign-in uses an isolated Chromium-compatible browser; other browsers may not work. Disconnect only clears this app's memory: it does not revoke other devices, erase saved session credentials or delete cloud history."));
         settings.set_child(Some(&content));
         root.append(&settings);
         let identity = label("Not linked");
@@ -1071,26 +1111,21 @@ mod native {
         });
         {
             let u = Rc::clone(&ui);
-            open_settings.connect_clicked(move |_| {
-                u.settings.set_expanded(true);
-                u.settings.grab_focus();
-            });
-        }
-        {
-            let u = Rc::clone(&ui);
             ui.existing.connect_clicked(move |_| {
-                let selected = if let Some(config_home) = config_home() {
-                    u.config_dir
-                        .set_text(&config_home.join("muse-cli").display().to_string());
+                let selected = if let Some(cli_dir) = cli_session_dir() {
+                    u.config_dir.set_text(&cli_dir.display().to_string());
                     true
                 } else {
                     false
                 };
+                let chosen = u.config_dir.text().to_string();
                 u.consent.set_active(false);
                 u.state.borrow_mut().connection_notice = if selected {
-                    "Existing local Muse session selected. Review this path, consent, then click Connect. No account file has been read by this action.".into()
+                    format!(
+                        "Using the Muse CLI session at {chosen}. Tick the consent box, then press Link account. Nothing has been read yet."
+                    )
                 } else {
-                    "Set HOME or XDG_CONFIG_HOME before selecting a local Muse session.".into()
+                    "Set HOME or XDG_CONFIG_HOME before choosing a local Muse session.".into()
                 };
                 u.render();
             });
@@ -1285,6 +1320,24 @@ mod native {
         }
 
         fn sign_in(self: &Rc<Self>) {
+            // The sign-in helper refuses a folder named `muse-cli`, so a browser
+            // sign-in must never reuse the CLI shortcut's folder. Switching the
+            // folder changes the session and therefore voids consent, exactly
+            // like an edited path; the next press of this button starts signing in.
+            let app_dir = app_account_dir();
+            let cli_dir = cli_session_dir();
+            let current = self.config_dir.text().to_string();
+            if let Some(folder) =
+                browser_sign_in_dir(&current, app_dir.as_deref(), cli_dir.as_deref())
+            {
+                if folder != current {
+                    self.config_dir.set_text(&folder);
+                    self.state.borrow_mut().connection_notice =
+                        "Switched to this app's own session folder for browser sign-in. Tick the consent box, then press Sign in with Muse again.".into();
+                    self.render();
+                    return;
+                }
+            }
             let ticket = self
                 .state
                 .borrow_mut()
@@ -1509,6 +1562,9 @@ mod native {
                 return;
             }
             let mut refresh_after = false;
+            // A completed browser sign-in hands straight over to the explicit
+            // link step: same consent, same bridge validation, one less click.
+            let mut link_after_login = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
             // Stop immediately on account verification errors or identity changes,
             // before any old account result is installed or rendered.
@@ -1557,7 +1613,8 @@ mod native {
                     }
                     Reply::Login(result) => {
                         self.login_cancellation.borrow_mut().take();
-                        state.finish_login(ticket, result);
+                        let signed_in = result.is_ok();
+                        link_after_login = signed_in && state.finish_login(ticket, result);
                     }
                     Reply::AccountChanged => {
                         state.account_changed();
@@ -1574,6 +1631,9 @@ mod native {
             self.render();
             if refresh_after {
                 self.read(false, true);
+            }
+            if link_after_login {
+                self.connect_account();
             }
         }
 
@@ -2055,8 +2115,12 @@ print(json.dumps({'ok':True,'data':data}))
             assert!(page.ui.welcome.is_visible());
             assert!(!page.ui.pages.is_visible());
             assert!(!page.ui.settings.is_expanded());
-            button(&page.root, "Set up connection").emit_clicked();
-            assert!(page.ui.settings.is_expanded());
+            // The primary path lives on the card itself, so linking needs no setup step.
+            assert!(has_label(
+                &page.root,
+                "Sign in to the Muse account you already use"
+            ));
+            assert!(page.ui.login.is_sensitive());
             let window = gtk::Window::builder()
                 .default_width(1240)
                 .default_height(900)
@@ -2075,13 +2139,25 @@ print(json.dumps({'ok':True,'data':data}))
                 .unwrap();
             assert_eq!(entries.len(), 3);
             assert!(!entries[2].is_sensitive());
-            button(&page.root, "Connect").emit_clicked();
+            button(&page.root, "Link account").emit_clicked();
             assert!(has_label(&page.root, "Explicit consent is required"));
-            button(&page.root, "Use existing local Muse session").emit_clicked();
+            button(&page.root, "Use my existing Muse login").emit_clicked();
             assert_eq!(
                 entries[1].text().as_str(),
                 config_home().unwrap().join("muse-cli").to_str().unwrap()
             );
+            assert!(!consent.is_active());
+            // The reported bug: the CLI folder stayed selected, then browser sign-in
+            // failed with an opaque message. It must switch back without a browser.
+            button(&page.root, "Sign in with Muse").emit_clicked();
+            assert_eq!(
+                entries[1].text().as_str(),
+                app_account_dir().unwrap().to_str().unwrap()
+            );
+            assert!(has_label(
+                &page.root,
+                "Switched to this app's own session folder"
+            ));
             assert!(!consent.is_active());
             entries[0].set_text("/usr/bin/python3");
             let scratch = std::env::var_os("TMPDIR")
@@ -2092,13 +2168,13 @@ print(json.dumps({'ok':True,'data':data}))
             assert!(!missing_config.exists());
             entries[1].set_text(missing_config.to_str().unwrap());
             consent.set_active(true);
-            button(&page.root, "Connect").emit_clicked();
+            button(&page.root, "Link account").emit_clicked();
             assert!(!entries[0].is_sensitive());
             pump_until(|| has_label(&page.root, "Connection failed:"));
             assert!(chip.text().contains("Not connected"));
             assert!(entries[0].is_sensitive());
             assert!(!entries[2].is_sensitive());
-            button(&page.root, "Connect").emit_clicked();
+            button(&page.root, "Link account").emit_clicked();
             button(&page.root, "Disconnect").emit_clicked();
             assert!(has_label(&page.root, "Disconnected locally"));
             assert!(!consent.is_active());
@@ -2147,6 +2223,27 @@ mod tests {
     }
 
     #[test]
+    fn browser_sign_in_moves_off_the_muse_cli_folder() {
+        let app = Path::new("/home/user/.config/unofficial-muse-for-linux/account");
+        let cli = Path::new("/home/user/.config/muse-cli");
+        // A leftover CLI folder must not be reused, or sign-in fails opaquely.
+        assert_eq!(
+            browser_sign_in_dir("/home/user/.config/muse-cli", Some(app), Some(cli)),
+            Some(app.display().to_string())
+        );
+        assert_eq!(
+            browser_sign_in_dir("  ", Some(app), Some(cli)),
+            Some(app.display().to_string())
+        );
+        // An explicit override is honoured, and no home means no choice.
+        assert_eq!(
+            browser_sign_in_dir("/srv/muse/account", Some(app), Some(cli)),
+            Some("/srv/muse/account".into())
+        );
+        assert_eq!(browser_sign_in_dir("", None, None), None);
+    }
+
+    #[test]
     fn sign_in_requires_consent_and_does_not_auto_connect_or_poll() {
         let mut state = State::default();
         assert!(state.begin_login(false).is_none());
@@ -2155,7 +2252,9 @@ mod tests {
         state.finish_login(&ticket, Ok(()));
         assert!(state.account.is_none());
         assert!(state.begin_read(false, true).is_none());
-        assert!(state.connection_notice.contains("Connect"));
+        // The UI hands off to the explicit link step after a successful sign-in;
+        // the controller itself still never connects on its own.
+        assert!(state.connection_notice.contains("Signed in"));
     }
 
     #[test]
