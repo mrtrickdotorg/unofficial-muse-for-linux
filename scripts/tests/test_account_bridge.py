@@ -129,6 +129,8 @@ class BridgeTests(unittest.TestCase):
             (root / "source" / "muse_mcp").mkdir(parents=True)
             site_dir = root / "lib" / "python3.4" / "site-packages"
             site_dir.mkdir(parents=True)
+            (root / "pyvenv.cfg").write_text("version = 3.4.0\nhome = /usr/bin\n",
+                                             encoding="utf-8")
             (site_dir / "checkout.pth").write_text(str(root / "source") + "\n",
                                                    encoding="utf-8")
             with mock.patch.object(sys, "prefix", str(root)), \
@@ -141,6 +143,31 @@ class BridgeTests(unittest.TestCase):
         # The mismatch must not be truncated away.
         self.assertIn("missing=_cffi_backend", detail)
         self.assertLessEqual(len(detail), 300)
+
+    def test_an_extra_version_directory_is_not_a_mismatch(self):
+        # A venv may carry site-packages for several interpreters (that is how
+        # the bridge survives a container with its own Python); only pyvenv.cfg
+        # says which interpreter built it.
+        import pathlib
+        import sys
+        import tempfile
+        from unittest import mock
+        bridge = load_bridge()
+        running = "{}.{}".format(*sys.version_info[:2])
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            (root / "source" / "muse_mcp").mkdir(parents=True)
+            (root / "pyvenv.cfg").write_text("version = {}\n".format(running),
+                                             encoding="utf-8")
+            other = root / "lib" / "python9.9" / "site-packages"
+            other.mkdir(parents=True)
+            (other / "checkout.pth").write_text(str(root / "source") + "\n",
+                                                encoding="utf-8")
+            with mock.patch.object(sys, "prefix", str(root)), \
+                    mock.patch.object(sys, "executable", str(root / "bin" / "python")):
+                detail = bridge.import_detail(ModuleNotFoundError("x", name="noise"), [])
+        self.assertNotIn("venv_built_for=", detail)
+        self.assertIn("prefix={}".format(root), detail)
 
     def test_venv_site_packages_and_pth_entries_are_restored(self):
         import pathlib

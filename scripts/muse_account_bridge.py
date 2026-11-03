@@ -34,6 +34,22 @@ class BridgeFailure(Exception):
         super().__init__(self.code)
 
 
+def venv_built_for(prefix):
+    """The Python version a venv was created with, from its pyvenv.cfg."""
+    try:
+        text = (Path(prefix) / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key.strip() not in ("version", "version_info"):
+            continue
+        parts = value.strip().split(" ")[0].split(".")
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            return "{}.{}".format(parts[0], parts[1])
+    return None
+
+
 def import_detail(exc, paths=None):
     """Interpreter facts for a failed community import, bounded and text-free.
 
@@ -57,17 +73,12 @@ def import_detail(exc, paths=None):
                          root / "lib64" / version / "site-packages"]
         + sorted(root.glob("lib*/python*/site-packages")))
     # The app can run in another environment than the one that built the venv
-    # (a container has its own Python), so name the version the packages were
-    # installed for: that difference is the whole explanation for this failure.
-    built_for = ""
-    for root in roots:
-        for candidate in sorted(root.glob("lib*/python*/site-packages")):
-            found = candidate.parent.name.removeprefix("python")
-            if found and found != running and provides_checkout(candidate):
-                built_for = "; venv_built_for={}".format(found)
-                break
-        if built_for:
-            break
+    # (a container has its own Python). pyvenv.cfg records the building
+    # interpreter, so only that is evidence of a split: a venv may hold several
+    # version directories and still be perfectly usable.
+    built = venv_built_for(sys.prefix)
+    built_for = ("; venv_built_for={}".format(built)
+                 if built and built != running else "")
     if built_for:
         # A venv built by another interpreter cannot load its compiled wheels
         # (cffi's backend is built per version), so point at the cure instead of
@@ -553,7 +564,10 @@ class Adapter:
             import time
             thread = request.get("thread")
             message = request["message"]
-            baseline = history_rows(self.client.history(thread=thread, limit=200))
+            # Confirming a send only needs the rows around the new message:
+            # each history fetch costs ~1.6-3.2s, so a small window keeps a
+            # send at a couple of round trips instead of five.
+            baseline = history_rows(self.client.history(thread=thread, limit=25))
             baseline_seq = max((r["seq"] for r in baseline), default=0)
             baseline_ids = {r["message_id"] for r in baseline}
             self.send_started = True
@@ -563,8 +577,8 @@ class Adapter:
                 raise BridgeFailure("protocol_error", uncertain=True)
             for attempt in range(self.confirmation_attempts):
                 if attempt:
-                    time.sleep(1)
-                rows = history_rows(self.client.history(thread=thread, limit=200))
+                    time.sleep(0.25)
+                rows = history_rows(self.client.history(thread=thread, limit=25))
                 for row in rows:
                     if (row["seq"] > baseline_seq and row["message_id"] not in baseline_ids
                             and row["role"] == "user" and row["text"] == message):
