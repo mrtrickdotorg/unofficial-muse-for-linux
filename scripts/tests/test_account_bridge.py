@@ -118,6 +118,30 @@ class BridgeTests(unittest.TestCase):
             sys.path[:] = [p for p in sys.path
                            if p not in (str(foreign), str(source))]
 
+    def test_a_version_split_says_how_to_cure_it(self):
+        import pathlib
+        import sys
+        import tempfile
+        from unittest import mock
+        bridge = load_bridge()
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            (root / "source" / "muse_mcp").mkdir(parents=True)
+            site_dir = root / "lib" / "python3.4" / "site-packages"
+            site_dir.mkdir(parents=True)
+            (site_dir / "checkout.pth").write_text(str(root / "source") + "\n",
+                                                   encoding="utf-8")
+            with mock.patch.object(sys, "prefix", str(root)), \
+                    mock.patch.object(sys, "executable", str(root / "bin" / "python")):
+                detail = bridge.import_detail(
+                    ModuleNotFoundError("_cffi_backend", name="_cffi_backend"), [])
+        self.assertIn("venv_built_for=3.4", detail)
+        self.assertIn("rebuild the venv with Python", detail)
+        self.assertIn("setup-account-bridge.sh", detail)
+        # The mismatch must not be truncated away.
+        self.assertIn("missing=_cffi_backend", detail)
+        self.assertLessEqual(len(detail), 300)
+
     def test_venv_site_packages_and_pth_entries_are_restored(self):
         import pathlib
         import sys
