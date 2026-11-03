@@ -13,6 +13,10 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    env:
+      # All test steps need scratch storage; /tmp is intentionally rejected by
+      # persistence tests because its world-writable ancestors are not trusted.
+      TMPDIR: ${{ runner.temp }}
 
     steps:
     - uses: actions/checkout@v4
@@ -31,8 +35,6 @@ jobs:
     - name: Run tests
       run: cargo test --workspace --locked --verbose
     - name: Run native account GUI smoke test
-      env:
-        TMPDIR: ${{ runner.temp }}
       run: xvfb-run -a cargo test -p unofficial-muse-for-linux native_account_page_consent_failure_and_disconnect_signal_smoke --locked -- --ignored --test-threads=1
     - name: Lint
       run: cargo clippy --workspace --all-targets --locked -- -D warnings
