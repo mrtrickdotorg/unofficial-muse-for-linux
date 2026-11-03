@@ -537,7 +537,7 @@ mod native {
     /// Folder a browser sign-in may use. An empty field or the CLI folder both
     /// fall back to the app's own folder; `None` means no home directory is
     /// available to derive one from.
-    fn browser_sign_in_dir(
+    pub(super) fn browser_sign_in_dir(
         current: &str,
         app_dir: Option<&Path>,
         cli_dir: Option<&Path>,
@@ -1327,16 +1327,14 @@ mod native {
             let app_dir = app_account_dir();
             let cli_dir = cli_session_dir();
             let current = self.config_dir.text().to_string();
-            if let Some(folder) =
-                browser_sign_in_dir(&current, app_dir.as_deref(), cli_dir.as_deref())
-            {
-                if folder != current {
-                    self.config_dir.set_text(&folder);
-                    self.state.borrow_mut().connection_notice =
-                        "Switched to this app's own session folder for browser sign-in. Tick the consent box, then press Sign in with Muse again.".into();
-                    self.render();
-                    return;
-                }
+            let switched = browser_sign_in_dir(&current, app_dir.as_deref(), cli_dir.as_deref())
+                .filter(|folder| folder != &current);
+            if let Some(folder) = switched {
+                self.config_dir.set_text(&folder);
+                self.state.borrow_mut().connection_notice =
+                    "Switched to this app's own session folder for browser sign-in. Tick the consent box, then press Sign in with Muse again.".into();
+                self.render();
+                return;
             }
             let ticket = self
                 .state
@@ -2224,23 +2222,23 @@ mod tests {
 
     #[test]
     fn browser_sign_in_moves_off_the_muse_cli_folder() {
-        let app = Path::new("/home/user/.config/unofficial-muse-for-linux/account");
-        let cli = Path::new("/home/user/.config/muse-cli");
+        let app = std::path::Path::new("/home/user/.config/unofficial-muse-for-linux/account");
+        let cli = std::path::Path::new("/home/user/.config/muse-cli");
         // A leftover CLI folder must not be reused, or sign-in fails opaquely.
         assert_eq!(
-            browser_sign_in_dir("/home/user/.config/muse-cli", Some(app), Some(cli)),
+            native::browser_sign_in_dir("/home/user/.config/muse-cli", Some(app), Some(cli)),
             Some(app.display().to_string())
         );
         assert_eq!(
-            browser_sign_in_dir("  ", Some(app), Some(cli)),
+            native::browser_sign_in_dir("  ", Some(app), Some(cli)),
             Some(app.display().to_string())
         );
         // An explicit override is honoured, and no home means no choice.
         assert_eq!(
-            browser_sign_in_dir("/srv/muse/account", Some(app), Some(cli)),
+            native::browser_sign_in_dir("/srv/muse/account", Some(app), Some(cli)),
             Some("/srv/muse/account".into())
         );
-        assert_eq!(browser_sign_in_dir("", None, None), None);
+        assert_eq!(native::browser_sign_in_dir("", None, None), None);
     }
 
     #[test]
