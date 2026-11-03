@@ -224,7 +224,7 @@ class BridgeTests(unittest.TestCase):
                 self.sent = kwargs
                 return {"ok": True, "sent": True}
         client = Client()
-        bridge.Adapter(client, {}, confirmation_attempts=1).dispatch(request)
+        bridge.Adapter(client, {}, confirmation_window=0).dispatch(request)
         self.assertEqual(client.sent["device_id"], "linux-0123")
         for invalid in [None, "", " spaces ", "x/../y", "x" * 129, 3, "ü"]:
             with self.subTest(invalid=invalid), self.assertRaises(bridge.BridgeFailure):
@@ -298,7 +298,7 @@ class BridgeTests(unittest.TestCase):
                 return [{"message_id": "m1", "seq": 1, "role": "user", "text": "hello"}]
             def send(self, **kwargs):
                 return {"ok": True, "sent": True}
-        result = bridge.Adapter(Matching(), {}, confirmation_attempts=1).dispatch({
+        result = bridge.Adapter(Matching(), {}, confirmation_window=0).dispatch({
             "op": "send", "message": "hello",
             "expect_vm_id": "vm-1", "expect_identity_name": "Test User"})
         self.assertTrue(result["confirmed"])
@@ -325,6 +325,28 @@ class BridgeTests(unittest.TestCase):
         bridge.validate_request({"op": "identity", "config_dir": "/unused"})
         with self.assertRaises(bridge.BridgeFailure):
             bridge.validate_request({"op": "identity", "config_dir": "/unused", "limit": 1})
+
+    def test_identity_reads_one_route_instead_of_the_aggregate_status(self):
+        # A preflight must not pay for `sessions.list`, `chat.unread_count` and
+        # `vm.health`: only the identity and the resolved VM are consulted.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            vm_id = "vm-9"
+            def call_json(self, method):
+                calls.append(method)
+                return {"name": "Test User", "access_token": "SECRET"}
+        class Client(FakeClient):
+            def status(self):
+                raise AssertionError("identity must not aggregate status")
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch({"op": "identity"})
+        self.assertEqual(result, {"identity_name": "Test User", "vm_id": "vm-9"})
+        self.assertEqual(calls, ["identity"])
+        self.assertNotIn("SECRET", str(result))
 
     def test_identity_requires_an_authenticated_session_and_a_vm_id(self):
         bridge = load_bridge()
@@ -401,7 +423,7 @@ class BridgeTests(unittest.TestCase):
                 self.sent.append(kwargs)
                 return {"ok": True, "sent": True, "acknowledged": False}
         client = Client()
-        result = bridge.Adapter(client, {}, confirmation_attempts=1).dispatch(
+        result = bridge.Adapter(client, {}, confirmation_window=0).dispatch(
             {"op": "send", "thread": "scope-1", "message": "hello"})
         self.assertEqual(result, {"sent": True, "confirmed": True, "message_id": "new"})
         self.assertEqual(client.sent, [{"message": "hello", "thread": "scope-1", "fire_and_forget": True, "wait_seconds": 0}])
@@ -420,7 +442,7 @@ class BridgeTests(unittest.TestCase):
                 return {"ok": True, "sent": True}
         client = Client()
         with self.assertRaises(bridge.BridgeFailure) as caught:
-            bridge.Adapter(client, {}, confirmation_attempts=1).dispatch({"op": "send", "message": "hello"})
+            bridge.Adapter(client, {}, confirmation_window=0).dispatch({"op": "send", "message": "hello"})
         self.assertEqual(caught.exception.code, "auth_required")
         self.assertTrue(caught.exception.uncertain)
         self.assertEqual(client.sends, 1)
@@ -577,9 +599,31 @@ class BridgeTests(unittest.TestCase):
                     self.sends += 1
                     return {"ok": True, "sent": True, "acknowledged": True}
             client = Client()
-            result = bridge.Adapter(client, {}, confirmation_attempts=1).dispatch({"op": "send", "message": "hello"})
+            result = bridge.Adapter(client, {}, confirmation_window=0).dispatch({"op": "send", "message": "hello"})
             self.assertEqual(result, {"sent": True, "confirmed": False, "message_id": None})
             self.assertEqual(client.sends, 1)
+
+    def test_send_confirmation_waits_by_clock_not_by_read_count(self):
+        # Regression: once confirmation reads got cheap (~0.1s instead of ~1.6s),
+        # a fixed attempt count gave up a second after dispatch and reported an
+        # uncertain delivery while the service was still persisting the prompt.
+        bridge = load_bridge()
+        class Client(FakeClient):
+            def __init__(self):
+                self.reads = 0
+            def history(self, **kwargs):
+                self.reads += 1
+                rows = [{"message_id": "old", "seq": 1, "role": "user", "text": "hi"}]
+                if self.reads >= 6:
+                    rows.append({"message_id": "new", "seq": 2, "role": "user", "text": "hello"})
+                return rows
+            def send(self, **kwargs):
+                return {"ok": True, "sent": True}
+        client = Client()
+        result = bridge.Adapter(client, {}, confirmation_window=5.0).dispatch(
+            {"op": "send", "message": "hello"})
+        self.assertEqual(result, {"sent": True, "confirmed": True, "message_id": "new"})
+        self.assertEqual(client.reads, 6)
 
     def test_send_does_not_dispatch_if_baseline_fails(self):
         bridge = load_bridge()
@@ -632,7 +676,7 @@ class BridgeTests(unittest.TestCase):
                 return {"ok": True, "sent": False}
         client = Client()
         with self.assertRaises(bridge.BridgeFailure) as caught:
-            bridge.Adapter(client, {}, confirmation_attempts=1).dispatch({"op": "send", "message": "hello"})
+            bridge.Adapter(client, {}, confirmation_window=0).dispatch({"op": "send", "message": "hello"})
         self.assertEqual(caught.exception.code, "protocol_error")
         self.assertTrue(caught.exception.uncertain)
         self.assertEqual(client.sends, 1)
