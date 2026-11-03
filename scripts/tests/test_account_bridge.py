@@ -50,6 +50,29 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("detail", bridge.error_response(
             bridge.BridgeFailure("bridge_unavailable"))["error"])
 
+    def test_failed_import_records_what_the_process_saw(self):
+        import json
+        import os
+        import pathlib
+        import tempfile
+        from unittest import mock
+        bridge = load_bridge()
+        missing = ModuleNotFoundError("noise", name="noise")
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                bridge.write_report(missing)
+            target = (pathlib.Path(home) / ".local/state/unofficial-muse-for-linux"
+                      / "bridge-report.json")
+            self.assertTrue(target.is_file())
+            # Paths only: never readable by group or other.
+            self.assertEqual(target.stat().st_mode & 0o077, 0)
+            report = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(report["missing"], "noise")
+            self.assertEqual(report["kind"], "ModuleNotFoundError")
+            for key in ("python", "executable", "prefix", "sys_path", "site_dirs",
+                        "uid", "cwd", "flags"):
+                self.assertIn(key, report)
+
     def test_venv_site_packages_and_pth_entries_are_restored(self):
         import pathlib
         import sys

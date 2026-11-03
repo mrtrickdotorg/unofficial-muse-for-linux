@@ -333,6 +333,49 @@ def fallback_paths(prefix=None, executable=None):
     return paths
 
 
+def write_report(exc):
+    """Record what this process actually sees when the import fails.
+
+    Local-only (0700 directory, 0600 file, paths and module names, never file
+    contents or credentials). The status line cannot carry this much, and the
+    same message kept firing for states that look identical from outside.
+    """
+    import sys
+    try:
+        directory = Path.home() / ".local/state/unofficial-muse-for-linux"
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        version = "python{}.{}".format(*sys.version_info[:2])
+        site_dirs = {}
+        for candidate in (Path(sys.prefix) / "lib" / version / "site-packages",
+                          Path(sys.prefix) / "lib64" / version / "site-packages"):
+            readable = candidate.is_dir()
+            site_dirs[str(candidate)] = {
+                "exists": candidate.exists(),
+                "listable": readable,
+                "entries": sorted(os.listdir(candidate))[:40] if readable else [],
+            }
+        report = {
+            "kind": type(exc).__name__,
+            "missing": getattr(exc, "name", None),
+            "python": sys.version,
+            "executable": sys.executable,
+            "prefix": sys.prefix,
+            "base_prefix": sys.base_prefix,
+            "flags": {"no_site": bool(sys.flags.no_site),
+                      "isolated": bool(sys.flags.isolated)},
+            "uid": os.getuid(),
+            "cwd": os.getcwd(),
+            "sys_path": list(sys.path),
+            "site_dirs": site_dirs,
+        }
+        target = directory / "bridge-report.json"
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+    except Exception:
+        pass
+
+
 def import_client():
     """Return (MuseClient, None) or (None, why the import could not complete)."""
     import sys
@@ -355,7 +398,9 @@ def import_client():
             from muse_mcp.client import MuseClient
             return MuseClient, None
         except (ImportError, OSError) as exc:
+            write_report(exc)
             return None, import_detail(exc, search_path)
+    write_report(first)
     return None, import_detail(first, search_path)
 
 
