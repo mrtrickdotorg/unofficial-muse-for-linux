@@ -39,6 +39,8 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("executable=", detail)
         self.assertIn("prefix=", detail)
         self.assertIn("bridge_path_on_sys_path=", detail)
+        # The module that was actually missing is named, without any message text.
+        self.assertIn("missing=", detail)
         self.assertLessEqual(len(detail), 300)
         # The response carries the detail, but only when there is one.
         self.assertEqual(bridge.error_response(caught.exception)["error"]["detail"], detail)

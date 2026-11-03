@@ -34,15 +34,22 @@ class BridgeFailure(Exception):
         super().__init__(self.code)
 
 
-def import_detail(exc):
-    """Interpreter facts for a failed community import, bounded and text-free."""
+def import_detail(exc, paths=None):
+    """Interpreter facts for a failed community import, bounded and text-free.
+
+    `paths` must be the search path from before any fallback was attempted, so
+    the report describes the state the launcher produced.
+    """
     import sys
+    entries = sys.path if paths is None else paths
     bridge_path = any(
         isinstance(entry, str) and ("account-bridge" in entry or "muse-mcp" in entry)
-        for entry in sys.path
+        for entry in entries
     )
-    return "{}; executable={}; prefix={}; bridge_path_on_sys_path={}".format(
-        type(exc).__name__, sys.executable or "?", sys.prefix or "?", bridge_path)[:300]
+    missing = getattr(exc, "name", None)
+    return "{}; missing={}; executable={}; prefix={}; bridge_path_on_sys_path={}".format(
+        type(exc).__name__, missing or "-", sys.executable or "?", sys.prefix or "?",
+        bridge_path)[:300]
 
 
 def checked(value, expected):
@@ -289,28 +296,30 @@ def community_source_dir(prefix=None, executable=None):
 
 
 def import_client():
-    """Return (MuseClient, None) or (None, the exception that stopped us)."""
+    """Return (MuseClient, None) or (None, why the import could not complete)."""
+    import sys
+    search_path = tuple(sys.path)
     try:
         from muse_mcp.client import MuseClient
         return MuseClient, None
     except (ImportError, OSError) as exc:
-        source = community_source_dir()
-        if source is None:
-            return None, exc
-        import sys
+        first = exc
+    source = community_source_dir()
+    if source is not None:
         if str(source) not in sys.path:
             sys.path.append(str(source))
         try:
             from muse_mcp.client import MuseClient
             return MuseClient, None
-        except (ImportError, OSError) as retry:
-            return None, retry
+        except (ImportError, OSError) as exc:
+            return None, import_detail(exc, search_path)
+    return None, import_detail(first, search_path)
 
 
 def community_client(config):
-    MuseClient, failure = import_client()
+    MuseClient, detail = import_client()
     if MuseClient is None:
-        raise BridgeFailure("bridge_unavailable", detail=import_detail(failure)) from None
+        raise BridgeFailure("bridge_unavailable", detail=detail) from None
     class AwaitedMuseClient(MuseClient):
         def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
             # Keep the Noise connection alive until the server processes the
