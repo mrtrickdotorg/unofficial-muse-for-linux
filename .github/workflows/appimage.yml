@@ -1,0 +1,82 @@
+name: AppImage
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+# Publishing the rolling download needs write access to releases.
+permissions:
+  contents: write
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE: muse-linux-appimage-builder
+  ARTIFACT: dist/unofficial-muse-for-linux-x86_64.AppImage
+  RELEASE_TAG: appimage-latest
+
+jobs:
+  appimage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build pinned builder container
+      run: docker build -f Containerfile.appimage -t "$IMAGE" .
+
+    - name: Restore container cargo cache
+      uses: actions/cache@v4
+      with:
+        path: target/container-cargo
+        key: container-cargo-${{ hashFiles('Cargo.lock') }}
+
+    # build-appimage.sh runs the locked workspace tests before packaging, so the
+    # artifact is gated on the same suite the Rust workflow runs. Inside the
+    # container those tests need a scratch root whose ancestors are not
+    # world-writable: /tmp is rejected, and /workspace is owned by the runner
+    # uid rather than the container's root, so neither can be used.
+    - name: Build AppImage
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          -e CARGO_HOME=/cargo-cache \
+          -e TMPDIR=/root/appimage-scratch \
+          -v "$PWD:/workspace" \
+          -v "$PWD/target/container-cargo:/cargo-cache" \
+          -w /workspace \
+          "$IMAGE" \
+          bash -c 'mkdir -p "$TMPDIR" && ./scripts/build-appimage.sh'
+
+    - name: Verify artifact
+      run: |
+        set -euo pipefail
+        test -x "$ARTIFACT"
+        file "$ARTIFACT"
+        ls -lh "$ARTIFACT"
+
+    - name: Upload workflow artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: unofficial-muse-for-linux-x86_64-AppImage
+        path: dist/unofficial-muse-for-linux-x86_64.AppImage
+        if-no-files-found: error
+        retention-days: 30
+
+    - name: Publish rolling download
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          gh release upload "$RELEASE_TAG" "$ARTIFACT" --clobber
+        else
+          gh release create "$RELEASE_TAG" "$ARTIFACT" \
+            --title "Latest AppImage (built from main)" \
+            --notes "Rolling x86_64 AppImage built from $GITHUB_SHA by the AppImage workflow."
+        fi
