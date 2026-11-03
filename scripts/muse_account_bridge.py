@@ -46,10 +46,13 @@ def import_detail(exc, paths=None):
         isinstance(entry, str) and ("account-bridge" in entry or "muse-mcp" in entry)
         for entry in entries
     )
+    site_packages = any("site-packages" in entry for entry in entries
+                        if isinstance(entry, str))
     missing = getattr(exc, "name", None)
-    return "{}; missing={}; executable={}; prefix={}; bridge_path_on_sys_path={}".format(
+    return ("{}; missing={}; executable={}; prefix={}; bridge_path_on_sys_path={}; "
+            "site_packages_on_sys_path={}").format(
         type(exc).__name__, missing or "-", sys.executable or "?", sys.prefix or "?",
-        bridge_path)[:300]
+        bridge_path, site_packages)[:300]
 
 
 def checked(value, expected):
@@ -276,23 +279,31 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
 
 
-def community_source_dir(prefix=None, executable=None):
-    """Pinned install layout: the community checkout sits beside its venv.
+def fallback_paths(prefix=None, executable=None):
+    """What the pinned install provides when site handling did not run.
 
-    A venv normally exposes that checkout through a `.pth` entry, but a launcher
-    that runs the interpreter without site processing would otherwise report the
-    bridge as unavailable even though the checkout is right there.
+    A venv normally exposes the community checkout through a `.pth` entry and
+    its dependencies through site-packages. A launcher that starts this
+    interpreter without that processing leaves both off `sys.path`, which looks
+    exactly like an uninstalled bridge. Both still exist on disk beside the
+    interpreter, so the bridge can add them itself.
     """
     import sys
     prefix = Path(prefix or sys.prefix)
     executable = Path(executable or sys.executable)
-    candidates = [prefix.parent / "source"]
+    version = "python{}.{}".format(*sys.version_info[:2])
+    roots = [prefix.parent, prefix]
     if len(executable.parents) > 2:
-        candidates.append(executable.parents[2] / "source")
-    for candidate in candidates:
-        if (candidate / "muse_mcp" / "client.py").is_file():
-            return candidate
-    return None
+        roots.append(executable.parents[2])
+    paths = []
+    for root in roots:
+        for candidate in (root / "source",
+                          root / ".venv" / "lib" / version / "site-packages",
+                          root / "lib" / version / "site-packages"):
+            text = str(candidate)
+            if candidate.is_dir() and text not in paths:
+                paths.append(text)
+    return paths
 
 
 def import_client():
@@ -304,10 +315,12 @@ def import_client():
         return MuseClient, None
     except (ImportError, OSError) as exc:
         first = exc
-    source = community_source_dir()
-    if source is not None:
-        if str(source) not in sys.path:
-            sys.path.append(str(source))
+    added = False
+    for path in fallback_paths():
+        if path not in sys.path:
+            sys.path.append(path)
+            added = True
+    if added:
         try:
             from muse_mcp.client import MuseClient
             return MuseClient, None

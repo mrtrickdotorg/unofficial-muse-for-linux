@@ -30,7 +30,7 @@ class BridgeTests(unittest.TestCase):
         from unittest import mock
         bridge = load_bridge()
         with mock.patch.dict(sys.modules, {"muse_mcp": None, "muse_mcp.client": None}), \
-                mock.patch.object(bridge, "community_source_dir", return_value=None):
+                mock.patch.object(bridge, "fallback_paths", return_value=[]):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.community_client({})
         self.assertEqual(caught.exception.code, "bridge_unavailable")
@@ -41,39 +41,38 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("bridge_path_on_sys_path=", detail)
         # The module that was actually missing is named, without any message text.
         self.assertIn("missing=", detail)
+        self.assertIn("site_packages_on_sys_path=", detail)
         self.assertLessEqual(len(detail), 300)
         # The response carries the detail, but only when there is one.
         self.assertEqual(bridge.error_response(caught.exception)["error"]["detail"], detail)
         self.assertNotIn("detail", bridge.error_response(
             bridge.BridgeFailure("bridge_unavailable"))["error"])
 
-    def test_pinned_checkout_is_found_beside_the_venv(self):
+    def test_fallback_paths_cover_the_checkout_and_the_venv_site_packages(self):
         import pathlib
+        import sys
         import tempfile
         bridge = load_bridge()
+        version = "python{}.{}".format(*sys.version_info[:2])
         with tempfile.TemporaryDirectory() as root:
             root = pathlib.Path(root)
-            package = root / "source" / "muse_mcp"
-            package.mkdir(parents=True)
-            (package / "client.py").write_text("class MuseClient: pass\n", encoding="utf-8")
-            # The documented layout: checkout beside the venv that feeds it.
-            self.assertEqual(
-                bridge.community_source_dir(prefix=root / ".venv",
-                                            executable=root / ".venv/bin/python"),
-                root / "source")
-            # Either anchor alone is enough when the other is unexpected.
-            self.assertEqual(
-                bridge.community_source_dir(prefix=pathlib.Path("/usr"),
-                                            executable=root / ".venv/bin/python3"),
-                root / "source")
-            self.assertEqual(
-                bridge.community_source_dir(prefix=root / ".venv",
-                                            executable=pathlib.Path("/usr/bin/python3.12")),
-                root / "source")
+            (root / "source" / "muse_mcp").mkdir(parents=True)
+            site = root / ".venv" / "lib" / version / "site-packages"
+            site.mkdir(parents=True)
+            paths = bridge.fallback_paths(prefix=root / ".venv",
+                                         executable=root / ".venv" / "bin" / "python")
+            # Dependencies live in site-packages; the checkout is beside the venv.
+            self.assertIn(str(root / "source"), paths)
+            self.assertIn(str(site), paths)
+            self.assertLess(paths.index(str(root / "source")),
+                            paths.index(str(site)))
+            # The executable alone locates the same install.
+            self.assertIn(str(root / "source"), bridge.fallback_paths(
+                prefix=pathlib.Path("/usr"), executable=root / ".venv" / "bin" / "python"))
         with tempfile.TemporaryDirectory() as empty:
-            self.assertIsNone(bridge.community_source_dir(
+            self.assertEqual(bridge.fallback_paths(
                 prefix=pathlib.Path(empty) / ".venv",
-                executable=pathlib.Path("/usr/bin/python3.12")))
+                executable=pathlib.Path("/usr/bin/python3.12")), [])
 
     def test_optional_device_is_validated_and_forwarded_once(self):
         bridge = load_bridge()
