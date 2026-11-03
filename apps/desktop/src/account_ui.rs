@@ -1805,7 +1805,8 @@ mod native {
                 self.pages.set_current_page(Some(0));
             }
             // Progress text still matters while an operation runs.
-            self.connection_notice.set_visible(!connected || (!idle && !background));
+            self.connection_notice
+                .set_visible(!connected || (!idle && !background));
             let settings_enabled = !connected && idle;
             for widget in [
                 self.python.upcast_ref::<gtk::Widget>(),
@@ -1958,7 +1959,8 @@ mod native {
                     let scroll = self.scroll.clone();
                     gtk::glib::timeout_add_local_once(Duration::from_millis(delay), move || {
                         let adjustment = scroll.vadjustment();
-                        adjustment.set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
+                        adjustment
+                            .set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
                     });
                 }
             }
