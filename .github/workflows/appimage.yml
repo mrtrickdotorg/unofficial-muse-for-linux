@@ -1,6 +1,6 @@
 name: AppImage
 
-# Every push builds an AppImage — any branch, any tag — so no commit is ever
+# Every push builds an AppImage - any branch, any tag - so no commit is ever
 # left without a build. Only refs/heads/main republishes the rolling release.
 on:
   push:
@@ -13,9 +13,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: appimage-${{ github.ref }}
-  # Never cancel: a superseded push must still finish its own build, otherwise
-  # that commit has no AppImage at all. Runs for one ref simply queue.
+  # Keyed by commit, not just ref: GitHub keeps one running plus one pending run
+  # per group and drops the older pending one, so a ref-level group would still
+  # lose the middle push of a fast burst. With the SHA in the key every commit
+  # gets its own run that nothing can cancel or replace.
+  group: appimage-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: false
 
 env:
