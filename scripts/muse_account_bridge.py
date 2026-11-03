@@ -51,8 +51,11 @@ def import_detail(exc, paths=None):
     if len(Path(sys.executable).parents) > 2:
         roots.append(Path(sys.executable).parents[2])
     installed = bool(missing) and any(
-        (root / lib / version / "site-packages" / missing).exists()
-        for root in roots for lib in ("lib", "lib64"))
+        (site_dir / missing).exists()
+        for root in roots
+        for site_dir in [root / "lib" / version / "site-packages",
+                         root / "lib64" / version / "site-packages"]
+        + sorted(root.glob("lib*/python*/site-packages")))
     # The app can run in another environment than the one that built the venv
     # (a container has its own Python), so name the version the packages were
     # installed for: that difference is the whole explanation for this failure.
@@ -60,7 +63,7 @@ def import_detail(exc, paths=None):
     for root in roots:
         for candidate in sorted(root.glob("lib*/python*/site-packages")):
             found = candidate.parent.name.removeprefix("python")
-            if found and found != running and (candidate / "muse_mcp").exists():
+            if found and found != running and provides_checkout(candidate):
                 built_for = "; venv_built_for={}".format(found)
                 break
         if built_for:
@@ -295,6 +298,32 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
 
 
+def provides_checkout(site_dir):
+    """True when this site-packages exposes the community checkout.
+
+    The installer links the checkout with a `.pth` entry instead of installing
+    a `muse_mcp` package, so a directory holding no `muse_mcp` of its own can
+    still be exactly the one that provides it.
+    """
+    try:
+        if (site_dir / "muse_mcp").exists():
+            return True
+        for entry in sorted(site_dir.glob("*.pth")):
+            try:
+                lines = entry.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith(("#", "import ", "import\t")):
+                    continue
+                if (Path(line) / "muse_mcp").exists():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def ensure_paths(prefix=None, version=None):
     """Restore the venv's site-packages and its `.pth` entries if missing.
 
@@ -315,7 +344,7 @@ def ensure_paths(prefix=None, version=None):
         # dependencies still load; a compiled-only one fails by module name
         # instead of the whole bridge reporting itself missing.
         candidates = [site_dir for site_dir in sorted(prefix.glob("lib*/python*/site-packages"))
-                      if (site_dir / "muse_mcp").exists()]
+                      if provides_checkout(site_dir)]
     for candidate in candidates:
         if candidate.is_dir() and str(candidate) not in sys.path:
             site.addsitedir(str(candidate))
