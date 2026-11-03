@@ -2119,6 +2119,9 @@ print(json.dumps({'ok':True,'data':data}))
                 "Sign in to the Muse account you already use"
             ));
             assert!(page.ui.login.is_sensitive());
+            // Advanced paths stay collapsed until asked for; GTK builds the
+            // expander's child on the first expansion, so open it before counting.
+            page.ui.settings.set_expanded(true);
             let window = gtk::Window::builder()
                 .default_width(1240)
                 .default_height(900)
