@@ -479,7 +479,7 @@ mod native {
     }
 
     enum Reply {
-        Connect(Result<AccountSnapshot, String>),
+        Connect(Result<AccountSnapshot, String>, Option<BridgeConfig>),
         Refresh(
             Result<AccountSnapshot, String>,
             Result<Vec<HistoryMessage>, String>,
@@ -894,25 +894,72 @@ mod native {
     pub(super) fn preferred_saved_python(saved: &str, discovered: &Path) -> String {
         let saved = saved.trim();
         let discovered = discovered.display().to_string();
-        let system_fallback = matches!(
-            saved,
-            "/usr/bin/python3" | "/usr/local/bin/python3" | "/usr/bin/python"
-        );
-        if saved.is_empty() || system_fallback {
+        if saved.is_empty() || is_system_fallback(Path::new(saved)) {
             discovered
         } else {
             saved.to_owned()
         }
     }
 
+    /// A bare system interpreter is the pre-bridge default, not a deliberate
+    /// choice: it has no `muse_mcp`, so the bridge reports itself unavailable.
+    pub(super) fn is_system_fallback(path: &Path) -> bool {
+        matches!(
+            path.to_str(),
+            Some("/usr/bin/python3" | "/usr/local/bin/python3" | "/usr/bin/python")
+        )
+    }
+
+    /// Only a bare system fallback is replaced, so an explicit override still
+    /// wins over a bridge environment that happens to be installed.
+    fn recovery_config(config: &BridgeConfig) -> Option<BridgeConfig> {
+        if !is_system_fallback(&config.python) {
+            return None;
+        }
+        let discovered = default_python();
+        if discovered == config.python || !discovered.is_file() {
+            return None;
+        }
+        Some(BridgeConfig {
+            python: discovered,
+            script: config.script.clone(),
+            config_dir: config.config_dir.clone(),
+        })
+    }
+
+    /// A remembered interpreter can outlive the environment it named. Retrying
+    /// once with the discovered bridge environment turns a dead preference into
+    /// a linked account instead of a refusal the user has to diagnose; the
+    /// adopted interpreter is reported back so the saved preference is repaired.
+    fn connect_with_recovery(
+        config: &BridgeConfig,
+        active: &Arc<AtomicBool>,
+    ) -> (Result<AccountSnapshot, AccountError>, Option<BridgeConfig>) {
+        let first = AccountClient::new(config.clone())
+            .cancellable(active.clone())
+            .connect();
+        if first
+            .as_ref()
+            .is_err_and(|error| error.code == ErrorCode::BridgeUnavailable)
+            && let Some(recovered) = recovery_config(config)
+            && let Ok(snapshot) = AccountClient::new(recovered.clone())
+                .cancellable(active.clone())
+                .connect()
+        {
+            return (Ok(snapshot), Some(recovered));
+        }
+        (first, None)
+    }
+
     /// The community bridge is a separate pinned install that is not bundled in
-    /// the AppImage, so a missing bridge names the command that fixes it rather
-    /// than reporting only that it is unavailable.
-    pub(super) fn connect_error_message(error: &AccountError) -> String {
+    /// the AppImage, so a missing bridge names the paths it tried and the command
+    /// that fixes it rather than reporting only that it is unavailable.
+    pub(super) fn connect_error_message(error: &AccountError, python: &Path) -> String {
         let text = error.to_string();
         if error.code == ErrorCode::BridgeUnavailable {
             return format!(
-                "{text} Install it with ./scripts/setup-account-bridge.sh, then enter the Python interpreter it prints under Advanced: interpreter and session folder."
+                "{text} Tried {}. Install the bridge with ./scripts/setup-account-bridge.sh, then enter the Python interpreter it prints under Advanced: interpreter and session folder.",
+                python.display()
             );
         }
         text
@@ -1348,15 +1395,15 @@ mod native {
             *self.connected_config.borrow_mut() = Some(config.clone());
             let active = Arc::new(AtomicBool::new(true));
             *self.account_active.borrow_mut() = Some(active.clone());
-            let client = AccountClient::new(config).cancellable(active);
+            let client = AccountClient::new(config.clone()).cancellable(active.clone());
             *self.client.borrow_mut() = Some(client.clone());
             self.state.borrow_mut().connection_notice =
                 "Connecting to the explicitly selected Muse session…".into();
             self.launch(ticket, move || {
+                let (result, adopted) = connect_with_recovery(&config, &active);
                 Reply::Connect(
-                    client
-                        .connect()
-                        .map_err(|error| connect_error_message(&error)),
+                    result.map_err(|error| connect_error_message(&error, &config.python)),
+                    adopted,
                 )
             });
         }
@@ -1574,7 +1621,7 @@ mod native {
                     Err(mpsc::TryRecvError::Empty) => return gtk::glib::ControlFlow::Continue,
                     Err(mpsc::TryRecvError::Disconnected) => match ticket.operation {
                         Operation::Connect => {
-                            Reply::Connect(Err("Account worker stopped unexpectedly.".into()))
+                            Reply::Connect(Err("Account worker stopped unexpectedly.".into()), None)
                         }
                         Operation::Login => {
                             Reply::Login(Err("Sign-in worker stopped unexpectedly.".into()))
@@ -1623,15 +1670,28 @@ mod native {
             }
             if matches!(
                 &reply,
-                Reply::Connect(Ok(_)) | Reply::Refresh(Ok(_), Ok(_), Ok(_))
+                Reply::Connect(Ok(_), _) | Reply::Refresh(Ok(_), Ok(_), Ok(_))
             ) {
                 self.host_verified.set(true);
             }
             {
                 let mut state = self.state.borrow_mut();
                 match reply {
-                    Reply::Connect(result) => {
+                    Reply::Connect(result, adopted) => {
                         refresh_after = result.is_ok();
+                        if refresh_after && let Some(adopted) = adopted {
+                            // Repair the stale preference so the next launch and
+                            // every later request use the working interpreter.
+                            self.python.set_text(&adopted.python.display().to_string());
+                            let _ = save_connection(&self.python.text(), &self.config_dir.text());
+                            if let Some(active) = self.account_active.borrow().clone() {
+                                *self.client.borrow_mut() =
+                                    Some(AccountClient::new(adopted.clone()).cancellable(active));
+                            }
+                            *self.connected_config.borrow_mut() = Some(adopted);
+                            state.connection_notice =
+                                "Connected with the installed account bridge environment.".into();
+                        }
                         state.finish_connect(ticket, result);
                         if !refresh_after {
                             self.client.borrow_mut().take();
@@ -2328,15 +2388,35 @@ mod tests {
             code: muse_account::ErrorCode::BridgeUnavailable,
             uncertain: false,
         };
-        let message = native::connect_error_message(&unavailable);
+        let message =
+            native::connect_error_message(&unavailable, std::path::Path::new("/usr/bin/python3"));
         assert!(message.contains("setup-account-bridge.sh"));
         assert!(message.contains("Advanced"));
+        // The message must name the interpreter that was actually tried.
+        assert!(message.contains("/usr/bin/python3"));
         // Other failures stay as they were: no misleading install advice.
         let timeout = muse_account::AccountError {
             code: muse_account::ErrorCode::Timeout,
             uncertain: false,
         };
-        assert!(!native::connect_error_message(&timeout).contains("setup-account-bridge.sh"));
+        assert!(
+            !native::connect_error_message(&timeout, std::path::Path::new("/usr/bin/python3"))
+                .contains("setup-account-bridge.sh")
+        );
+    }
+
+    #[test]
+    fn only_a_bare_system_interpreter_is_substituted() {
+        assert!(native::is_system_fallback(std::path::Path::new(
+            "/usr/bin/python3"
+        )));
+        // A bridge environment or an explicit override is never replaced.
+        assert!(!native::is_system_fallback(std::path::Path::new(
+            "/home/user/.local/share/unofficial-muse-for-linux/account-bridge/.venv/bin/python"
+        )));
+        assert!(!native::is_system_fallback(std::path::Path::new(
+            "/opt/py/bin/python"
+        )));
     }
 
     #[test]
