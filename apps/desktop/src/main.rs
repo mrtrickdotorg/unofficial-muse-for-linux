@@ -232,6 +232,8 @@ fn build_ui(app: &gtk::Application) {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.add_css_class("navigation-rail");
     sidebar.set_size_request(132, -1);
+    // The rail keeps its own width; the split must not stretch it back out.
+    sidebar.set_hexpand(false);
 
     let brand_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     brand_row.add_css_class("brand-row");
