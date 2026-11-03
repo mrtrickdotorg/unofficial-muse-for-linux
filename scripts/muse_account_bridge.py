@@ -68,10 +68,18 @@ def import_detail(exc, paths=None):
                 break
         if built_for:
             break
-    return ("{}; missing={}; installed_in_venv={}; running={}; prefix={}"
-            "{}; site_packages_on_sys_path={}").format(
-        type(exc).__name__, missing or "-", installed, running, sys.prefix or "?",
-        built_for, site_packages)[:300]
+    if built_for:
+        # A venv built by another interpreter cannot load its compiled wheels
+        # (cffi's backend is built per version), so point at the cure instead of
+        # reporting an installation that is in fact complete.
+        origin = (built_for + "; rebuild the venv with Python {} by running "
+                  "setup-account-bridge.sh in this environment").format(running)
+    else:
+        origin = "; prefix={}".format(sys.prefix or "?")
+    return ("{}; missing={}; installed_in_venv={}; running={}{}"
+            "; site_packages_on_sys_path={}").format(
+        type(exc).__name__, missing or "-", installed, running,
+        origin, site_packages)[:300]
 
 
 def checked(value, expected):
