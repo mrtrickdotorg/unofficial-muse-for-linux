@@ -23,6 +23,9 @@ struct Controller<A, H, T> {
     epoch: u64,
     serial: u64,
     busy: Option<Ticket>,
+    /// Reply polls hold no `busy`: waiting for an answer must not block the
+    /// composer, so they get their own slot and at most one runs at a time.
+    polling: Option<Ticket>,
     account: Option<A>,
     history: Vec<H>,
     tasks: Option<T>,
@@ -122,6 +125,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             epoch: 0,
             serial: 0,
             busy: None,
+            polling: None,
             account: None,
             history: Vec::new(),
             tasks: None,
@@ -275,6 +279,7 @@ impl<A, H, T> Controller<A, H, T> {
         }
         self.epoch = self.epoch.wrapping_add(1);
         self.busy = None;
+        self.polling = None;
         self.scope = scope;
         self.history.clear();
         self.limit = 50;
@@ -295,6 +300,28 @@ impl<A, H, T> Controller<A, H, T> {
         } else {
             Operation::History
         })
+    }
+
+    fn begin_poll(&mut self) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.busy.is_some() || self.polling.is_some() {
+            return None;
+        }
+        self.serial = self.serial.wrapping_add(1);
+        let ticket = Ticket {
+            epoch: self.epoch,
+            serial: self.serial,
+            scope: self.scope.clone(),
+            limit: self.limit,
+            operation: Operation::History,
+        };
+        self.polling = Some(ticket.clone());
+        Some(ticket)
+    }
+
+    /// True while `ticket` still owns a slot, whichever kind it is.
+    fn owns(&self, ticket: &Ticket) -> bool {
+        self.busy.as_ref() == Some(ticket) || self.polling.as_ref() == Some(ticket)
     }
 
     fn finish_history(&mut self, ticket: &Ticket, result: Result<Vec<H>, String>) -> bool {
@@ -340,18 +367,26 @@ impl<A, H, T> Controller<A, H, T> {
     }
 
     fn accept(&mut self, ticket: &Ticket) -> bool {
-        if self.busy.as_ref() != Some(ticket)
-            || ticket.epoch != self.epoch
-            || ticket.scope != self.scope
-        {
+        let polled = self.polling.as_ref() == Some(ticket);
+        let busy = self.busy.as_ref() == Some(ticket);
+        if !polled && !busy {
             return false;
         }
-        self.busy = None;
-        true
+        // Release the slot in every case: a poll or read that no longer matches
+        // the scope must not keep polling from restarting.
+        let current = ticket.epoch == self.epoch && ticket.scope == self.scope;
+        if polled {
+            self.polling = None;
+        }
+        if busy {
+            self.busy = None;
+        }
+        current
     }
 
     fn disconnect(&mut self) {
         let had_pending_send = self.pending_send.is_some();
+        self.polling = None;
         let epoch = self.epoch.wrapping_add(1);
         *self = Self::default();
         self.epoch = epoch;
@@ -450,7 +485,6 @@ mod native {
         persistence_warning: RefCell<Option<String>>,
         rendering: Cell<bool>,
         reply_until: Cell<Option<std::time::Instant>>,
-        reply_polls: Cell<u32>,
         root: gtk::Box,
         welcome: gtk::Box,
         pages: gtk::Notebook,
@@ -1171,7 +1205,6 @@ mod native {
             persistence_warning: RefCell::new(None),
             rendering: Cell::new(false),
             reply_until: Cell::new(None),
-            reply_polls: Cell::new(0),
             root: root.clone(),
             welcome: welcome.clone(),
             pages: pages.clone(),
@@ -1549,30 +1582,31 @@ mod native {
             });
         }
 
-        /// History only: the reply poll runs every few seconds, so it skips the
-        /// account re-verification a full refresh performs.
+        /// History only, and never in the `busy` slot: a poll runs in the
+        /// background so the composer stays usable while an answer is awaited.
+        /// Each request holds one connection and returns the moment anything
+        /// newer than the transcript we already show appears.
         fn poll_reply(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 return;
             };
-            let Some(ticket) = self.state.borrow_mut().begin_read(false, false) else {
+            let Some(ticket) = self.state.borrow_mut().begin_poll() else {
                 return;
             };
             let request = ticket.clone();
-            // The first poll shows the prompt that was just confirmed; later ones
-            // hold one connection open and return the moment an answer lands.
-            let waiting = self.reply_polls.get() > 0;
-            self.reply_polls.set(self.reply_polls.get() + 1);
+            let seen = self
+                .state
+                .borrow()
+                .history
+                .last()
+                .map(|row| row.message_id.clone());
             self.launch(ticket, move || {
-                let result = if waiting {
-                    client.watch(
-                        request.scope.as_deref(),
-                        request.limit,
-                        Duration::from_secs(20),
-                    )
-                } else {
-                    client.history(request.scope.as_deref(), request.limit)
-                };
+                let result = client.watch_after(
+                    request.scope.as_deref(),
+                    request.limit,
+                    seen.as_deref(),
+                    Duration::from_secs(45),
+                );
                 Reply::History(result.map_err(|e| e.to_string()))
             });
         }
@@ -1668,7 +1702,7 @@ mod native {
                 let Some(ui) = weak.upgrade() else {
                     return gtk::glib::ControlFlow::Break;
                 };
-                if ui.state.borrow().busy.as_ref() != Some(&ticket) {
+                if !ui.state.borrow().owns(&ticket) {
                     // A disconnected account or different thread must never receive this result.
                     return gtk::glib::ControlFlow::Break;
                 }
@@ -1701,7 +1735,7 @@ mod native {
         }
 
         fn complete(self: &Rc<Self>, ticket: &Ticket, reply: Reply) {
-            if self.state.borrow().busy.as_ref() != Some(ticket) {
+            if !self.state.borrow().owns(ticket) {
                 return;
             }
             let mut refresh_after = false;
@@ -1715,7 +1749,6 @@ mod native {
             if matches!(&reply, Reply::Send(SendOutcome::Confirmed)) {
                 self.reply_until
                     .set(Some(std::time::Instant::now() + Duration::from_secs(90)));
-                self.reply_polls.set(0);
             }
             // Stop immediately on account verification errors or identity changes,
             // before any old account result is installed or rendered.
@@ -2576,6 +2609,21 @@ mod tests {
         let ticket = state.begin_connect(true).unwrap();
         state.finish_connect(&ticket, Ok("account".into()));
         state
+    }
+
+    #[test]
+    fn a_reply_poll_holds_its_own_slot_and_never_blocks_sending() {
+        let mut state = connected();
+        let poll = state.begin_poll().unwrap();
+        // The composer is not gated by a poll, so a send can start behind it.
+        assert!(state.busy.is_none());
+        let send = state.begin_send("hello").unwrap();
+        assert!(matches!(send.operation, Operation::Send));
+        assert!(state.begin_poll().is_none(), "one poll at a time");
+        // The poll resolving must not clear the send that is still running.
+        assert!(state.finish_history(&poll, Ok(Vec::new())));
+        assert!(state.polling.is_none());
+        assert!(state.busy.is_some());
     }
 
     #[test]

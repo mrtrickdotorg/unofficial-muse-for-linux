@@ -215,6 +215,21 @@ impl AccountClient {
         limit: usize,
         timeout: Duration,
     ) -> Result<Vec<HistoryMessage>, AccountError> {
+        self.watch_after(thread, limit, None, timeout)
+    }
+    /// Wait for anything newer than `after`, then return the window.
+    ///
+    /// A caller that already knows the newest message it has seen passes it
+    /// here: the bridge then answers on its first read instead of waiting for
+    /// the *next* change, so nothing that arrived while the request was being
+    /// set up is missed.
+    pub fn watch_after(
+        &self,
+        thread: Option<&str>,
+        limit: usize,
+        after: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Vec<HistoryMessage>, AccountError> {
         validate_thread(thread)?;
         if !(1..=200).contains(&limit) {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
@@ -223,10 +238,19 @@ impl AccountClient {
             .ok()
             .filter(|millis| (1..=60_000).contains(millis))
             .ok_or_else(|| AccountError::new(ErrorCode::InvalidRequest, false))?;
-        self.request(
-            serde_json::json!({"op": "watch", "thread": thread, "limit": limit, "timeout": millis}),
-            false,
-        )
+        let mut request = serde_json::json!({
+            "op": "watch",
+            "thread": thread,
+            "limit": limit,
+            "timeout": millis,
+        });
+        if let Some(after) = after {
+            if after.is_empty() || after.len() > 256 {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+            request["after"] = after.into();
+        }
+        self.request(request, false)
     }
     pub fn tasks(&self) -> Result<TasksSnapshot, AccountError> {
         self.request(serde_json::json!({"op": "tasks"}), false)

@@ -265,6 +265,31 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(dict(bad, config_dir="/unused"))
 
+    def test_watch_after_answers_on_the_first_read_when_already_newer(self):
+        # A caller that knows what it has seen must not wait for the *next*
+        # change: a reply that landed during the reconnect is already newer.
+        import time
+        bridge = load_bridge()
+        rows = [{"message_id": "a", "seq": 1, "role": "user", "text": "hi"},
+                {"message_id": "b", "seq": 2, "role": "assistant", "text": "done"}]
+        class Client(FakeClient):
+            def history(self, **kwargs):
+                return rows
+        started = time.monotonic()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 30000, "after": "a"})
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        self.assertLess(time.monotonic() - started, 1.0)
+        started = time.monotonic()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 300, "after": "b"})
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        for bad in ["", "x" * 257, 3, None]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request({"op": "watch", "limit": 20, "timeout": 10,
+                    "after": bad, "config_dir": "/unused"})
+
     def test_send_verifies_the_expected_session_before_dispatching(self):
         # The preflight rides inside the dispatch request, so it must fail before
         # anything reaches the service when the account changed underneath.
