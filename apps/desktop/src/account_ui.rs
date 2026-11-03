@@ -238,7 +238,7 @@ impl<A, H, T> Controller<A, H, T> {
         match account {
             Ok(account) => {
                 self.account = Some(account);
-                self.connection_notice = "Account linked • shared conversations and tasks • refresh every 30 seconds while idle.".into();
+                self.connection_notice = "Account linked • shared conversations and tasks • refresh every 3 minutes while idle.".into();
             }
             Err(error) => {
                 self.connection_notice = format!(
@@ -1303,7 +1303,7 @@ mod native {
             if awaiting && idle {
                 ui.poll_reply();
                 last_refresh.set(std::time::Instant::now());
-            } else if last_refresh.get().elapsed() >= Duration::from_secs(30) {
+            } else if last_refresh.get().elapsed() >= Duration::from_secs(180) {
                 last_refresh.set(std::time::Instant::now());
                 ui.read(false, true);
             }
@@ -1598,7 +1598,10 @@ mod native {
                 client
             };
             self.launch(ticket, move || {
-                match client.connect() {
+                // Identity only: `connect` also lists every conversation, which
+                // the service can take ~10 seconds to answer, and that delay sat
+                // in front of every send.
+                match client.identity() {
                     Ok(a)
                         if (a.identity_name.as_str(), a.vm_id.as_str())
                             != (identity.0.as_str(), identity.1.as_str()) =>
@@ -1692,6 +1695,7 @@ mod native {
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
+            let send_confirmed = matches!(&reply, Reply::Send(SendOutcome::Confirmed));
             // A dispatched message is answered by the service; poll history
             // quickly for a while so the reply appears in seconds.
             if matches!(&reply, Reply::Send(SendOutcome::Confirmed)) {
@@ -1774,7 +1778,12 @@ mod native {
                 }
             }
             self.render();
-            if refresh_after {
+            if send_confirmed {
+                // A send does not change the conversation chooser, and a full
+                // refresh re-verifies the account and lists every conversation
+                // before the reply poll can start. Ask for the answer now.
+                self.poll_reply();
+            } else if refresh_after {
                 self.read(false, true);
             }
             if link_after_login {

@@ -230,6 +230,41 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(dict(request, device_id=invalid))
 
+    def test_identity_verifies_the_account_without_listing_conversations(self):
+        # A send preflight must not pay for `sessions.list`: the service can take
+        # ten seconds to answer it, and that delay used to sit in front of every
+        # dispatch.
+        bridge = load_bridge()
+        class Client(FakeClient):
+            def threads(self, include_archived=False):
+                raise AssertionError("identity must not list conversations")
+            def history(self, **kwargs):
+                raise AssertionError("identity must not read history")
+        result = bridge.Adapter(Client(), {}).dispatch({"op": "identity"})
+        self.assertEqual(result, {"identity_name": "Test User", "vm_id": "vm-1"})
+        # Only the two projection fields, never a credential-bearing one.
+        self.assertEqual(set(result), {"identity_name", "vm_id"})
+        bridge.validate_request({"op": "identity", "config_dir": "/unused"})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "identity", "config_dir": "/unused", "limit": 1})
+
+    def test_identity_requires_an_authenticated_session_and_a_vm_id(self):
+        bridge = load_bridge()
+        class SignedOut(FakeClient):
+            def status(self):
+                return {"ok": True, "authenticated": False, "vm_id": "vm-1"}
+        class NoVm(FakeClient):
+            def status(self):
+                return {"ok": True, "authenticated": True, "vm_id": ""}
+            def threads(self, include_archived=False):
+                raise AssertionError("a rejected identity must not list conversations")
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.Adapter(SignedOut(), {}).dispatch({"op": "identity"})
+        self.assertEqual(caught.exception.code, "auth_required")
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.Adapter(NoVm(), {}).dispatch({"op": "identity"})
+        self.assertEqual(caught.exception.code, "protocol_error")
+
     def test_history_keeps_latest_message_update_preserves_role_and_scope(self):
         bridge = load_bridge()
         class Client(FakeClient):

@@ -40,6 +40,13 @@ pub struct AccountSnapshot {
     pub vm_id: String,
     pub threads: Vec<Thread>,
 }
+/// Identity only: `AccountSnapshot` also carries every conversation, and the
+/// service can spend seconds answering that list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountIdentity {
+    pub identity_name: String,
+    pub vm_id: String,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Thread {
     pub session_id: String,
@@ -174,6 +181,11 @@ impl AccountClient {
     }
     pub fn connect(&self) -> Result<AccountSnapshot, AccountError> {
         self.request(serde_json::json!({"op": "connect"}), false)
+    }
+    /// Cheap account verification, for a preflight which must not pay for the
+    /// conversation list. `connect` remains the way to load that list.
+    pub fn identity(&self) -> Result<AccountIdentity, AccountError> {
+        self.request(serde_json::json!({"op": "identity"}), false)
     }
     pub fn history(
         &self,
