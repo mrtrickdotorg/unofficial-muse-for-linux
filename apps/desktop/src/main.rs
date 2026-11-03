@@ -220,12 +220,18 @@ fn build_ui(app: &gtk::Application) {
     let session: SharedSession = Rc::new(RefCell::new(AgentSession::new()));
     let agent_busy = Rc::new(Cell::new(false));
 
-    let shell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    // A paned shell makes the rail drag-resizable instead of a fixed 196px
+    // column that eats the chat area on small windows.
+    let shell = gtk::Paned::new(gtk::Orientation::Horizontal);
     shell.add_css_class("app-shell");
+    shell.set_position(200);
+    shell.set_resize_start_child(false);
+    shell.set_shrink_start_child(false);
+    shell.set_wide_handle(false);
 
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.add_css_class("navigation-rail");
-    sidebar.set_size_request(196, -1);
+    sidebar.set_size_request(132, -1);
 
     let brand_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     brand_row.add_css_class("brand-row");
@@ -486,8 +492,8 @@ fn build_ui(app: &gtk::Application) {
 
     stack.add_named(&chat_page, Some("developer"));
     main_column.append(&stack);
-    shell.append(&sidebar);
-    shell.append(&main_column);
+    shell.set_start_child(Some(&sidebar));
+    shell.set_end_child(Some(&main_column));
 
     let api_key_for_set = Rc::clone(&api_key);
     let session_for_set = Rc::clone(&session);
