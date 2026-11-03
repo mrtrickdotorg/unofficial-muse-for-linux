@@ -42,26 +42,33 @@ def import_detail(exc, paths=None):
     """
     import sys
     entries = sys.path if paths is None else paths
-    bridge_path = any(
-        isinstance(entry, str) and ("account-bridge" in entry or "muse-mcp" in entry)
-        for entry in entries
-    )
     site_packages = any("site-packages" in entry for entry in entries
                         if isinstance(entry, str))
     missing = getattr(exc, "name", None)
-    version = "python{}.{}".format(*sys.version_info[:2])
+    running = "{}.{}".format(*sys.version_info[:2])
+    version = "python" + running
     roots = [Path(sys.prefix)] if sys.prefix else []
     if len(Path(sys.executable).parents) > 2:
         roots.append(Path(sys.executable).parents[2])
     installed = bool(missing) and any(
         (root / lib / version / "site-packages" / missing).exists()
         for root in roots for lib in ("lib", "lib64"))
-    # The app already prints the interpreter it invoked, so prefix (which says
-    # whether the venv was honoured) plus the two path facts are enough here.
-    return ("{}; missing={}; installed_in_venv={}; prefix={}; "
-            "bridge_path_on_sys_path={}; site_packages_on_sys_path={}").format(
-        type(exc).__name__, missing or "-", installed, sys.prefix or "?",
-        bridge_path, site_packages)[:300]
+    # The app can run in another environment than the one that built the venv
+    # (a container has its own Python), so name the version the packages were
+    # installed for: that difference is the whole explanation for this failure.
+    built_for = ""
+    for root in roots:
+        for candidate in sorted(root.glob("lib*/python*/site-packages")):
+            found = candidate.parent.name.removeprefix("python")
+            if found and found != running and (candidate / "muse_mcp").exists():
+                built_for = "; venv_built_for={}".format(found)
+                break
+        if built_for:
+            break
+    return ("{}; missing={}; installed_in_venv={}; running={}; prefix={}"
+            "{}; site_packages_on_sys_path={}").format(
+        type(exc).__name__, missing or "-", installed, running, sys.prefix or "?",
+        built_for, site_packages)[:300]
 
 
 def checked(value, expected):
@@ -300,8 +307,16 @@ def ensure_paths(prefix=None, version=None):
     import sys
     prefix = Path(prefix or sys.prefix)
     version = version or "python{}.{}".format(*sys.version_info[:2])
-    for candidate in (prefix / "lib" / version / "site-packages",
-                      prefix / "lib64" / version / "site-packages"):
+    candidates = [prefix / "lib" / version / "site-packages",
+                  prefix / "lib64" / version / "site-packages"]
+    if not any(candidate.is_dir() for candidate in candidates):
+        # The venv was built by another interpreter version, which is what a
+        # container with its own Python produces. Its pure-Python and abi3
+        # dependencies still load; a compiled-only one fails by module name
+        # instead of the whole bridge reporting itself missing.
+        candidates = [site_dir for site_dir in sorted(prefix.glob("lib*/python*/site-packages"))
+                      if (site_dir / "muse_mcp").exists()]
+    for candidate in candidates:
         if candidate.is_dir() and str(candidate) not in sys.path:
             site.addsitedir(str(candidate))
 

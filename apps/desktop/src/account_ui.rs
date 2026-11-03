@@ -958,7 +958,7 @@ mod native {
         let text = error.to_string();
         if error.code == ErrorCode::BridgeUnavailable {
             return format!(
-                "{text} Tried {}. Install the bridge with ./scripts/setup-account-bridge.sh, then enter the Python interpreter it prints under Advanced: interpreter and session folder.",
+                "{text} Tried {}. Install the bridge with ./scripts/setup-account-bridge.sh, run in the same environment you launch this app from (a toolbox or distrobox container has its own Python), then enter the Python interpreter it prints under Advanced: interpreter and session folder.",
                 python.display()
             );
         }
