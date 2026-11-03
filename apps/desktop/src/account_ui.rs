@@ -2387,6 +2387,7 @@ mod tests {
         let unavailable = muse_account::AccountError {
             code: muse_account::ErrorCode::BridgeUnavailable,
             uncertain: false,
+            detail: None,
         };
         let message =
             native::connect_error_message(&unavailable, std::path::Path::new("/usr/bin/python3"));
@@ -2398,6 +2399,7 @@ mod tests {
         let timeout = muse_account::AccountError {
             code: muse_account::ErrorCode::Timeout,
             uncertain: false,
+            detail: None,
         };
         assert!(
             !native::connect_error_message(&timeout, std::path::Path::new("/usr/bin/python3"))

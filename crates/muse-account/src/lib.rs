@@ -102,10 +102,26 @@ pub enum ErrorCode {
 pub struct AccountError {
     pub code: ErrorCode,
     pub uncertain: bool,
+    /// Local-only context, such as the interpreter that could not be started.
+    /// The bridge never sends this, so a returned `bridge_unavailable` keeps it
+    /// empty while a failed spawn fills it: the two causes stay distinguishable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 impl AccountError {
     fn new(code: ErrorCode, uncertain: bool) -> Self {
-        Self { code, uncertain }
+        Self {
+            code,
+            uncertain,
+            detail: None,
+        }
+    }
+    fn with_detail(code: ErrorCode, uncertain: bool, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            uncertain,
+            detail: Some(detail.into()),
+        }
     }
 }
 impl fmt::Display for AccountError {
@@ -125,6 +141,9 @@ impl fmt::Display for AccountError {
         })?;
         if self.uncertain {
             f.write_str(" Delivery is uncertain; do not automatically resend.")?;
+        }
+        if let Some(detail) = &self.detail {
+            f.write_str(&format!(" ({detail})"))?;
         }
         Ok(())
     }
@@ -232,8 +251,19 @@ impl AccountClient {
         {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
-        if !self.config.python.is_file() || !self.config.script.is_file() {
-            return Err(AccountError::new(ErrorCode::BridgeUnavailable, false));
+        if !self.config.python.is_file() {
+            return Err(AccountError::with_detail(
+                ErrorCode::BridgeUnavailable,
+                false,
+                format!("interpreter not found: {}", self.config.python.display()),
+            ));
+        }
+        if !self.config.script.is_file() {
+            return Err(AccountError::with_detail(
+                ErrorCode::BridgeUnavailable,
+                false,
+                format!("bridge script not found: {}", self.config.script.display()),
+            ));
         }
         let config_dir = self
             .config
@@ -356,7 +386,13 @@ fn run_bridge_active(
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-        .map_err(|_| AccountError::new(ErrorCode::BridgeUnavailable, false))?;
+        .map_err(|error| {
+            AccountError::with_detail(
+                ErrorCode::BridgeUnavailable,
+                false,
+                format!("could not start {}: {error}", config.python.display()),
+            )
+        })?;
     let mut guard = ChildGuard(child);
     let io_error = || AccountError::new(ErrorCode::BridgeFailure, sending);
     let stdin = guard.0.stdin.take().ok_or_else(io_error)?;
