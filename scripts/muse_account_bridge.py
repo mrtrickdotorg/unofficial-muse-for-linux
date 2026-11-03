@@ -269,11 +269,48 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
 
 
-def community_client(config):
+def community_source_dir(prefix=None, executable=None):
+    """Pinned install layout: the community checkout sits beside its venv.
+
+    A venv normally exposes that checkout through a `.pth` entry, but a launcher
+    that runs the interpreter without site processing would otherwise report the
+    bridge as unavailable even though the checkout is right there.
+    """
+    import sys
+    prefix = Path(prefix or sys.prefix)
+    executable = Path(executable or sys.executable)
+    candidates = [prefix.parent / "source"]
+    if len(executable.parents) > 2:
+        candidates.append(executable.parents[2] / "source")
+    for candidate in candidates:
+        if (candidate / "muse_mcp" / "client.py").is_file():
+            return candidate
+    return None
+
+
+def import_client():
+    """Return (MuseClient, None) or (None, the exception that stopped us)."""
     try:
         from muse_mcp.client import MuseClient
+        return MuseClient, None
     except (ImportError, OSError) as exc:
-        raise BridgeFailure("bridge_unavailable", detail=import_detail(exc)) from None
+        source = community_source_dir()
+        if source is None:
+            return None, exc
+        import sys
+        if str(source) not in sys.path:
+            sys.path.append(str(source))
+        try:
+            from muse_mcp.client import MuseClient
+            return MuseClient, None
+        except (ImportError, OSError) as retry:
+            return None, retry
+
+
+def community_client(config):
+    MuseClient, failure = import_client()
+    if MuseClient is None:
+        raise BridgeFailure("bridge_unavailable", detail=import_detail(failure)) from None
     class AwaitedMuseClient(MuseClient):
         def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
             # Keep the Noise connection alive until the server processes the
