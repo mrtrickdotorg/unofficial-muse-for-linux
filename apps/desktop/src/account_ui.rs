@@ -407,7 +407,8 @@ mod native {
     use gtk::prelude::*;
     use gtk4 as gtk;
     use muse_account::{
-        AccountClient, AccountSnapshot, BridgeConfig, HistoryMessage, TasksSnapshot,
+        AccountClient, AccountError, AccountSnapshot, BridgeConfig, ErrorCode, HistoryMessage,
+        TasksSnapshot,
     };
     use std::cell::{Cell, RefCell};
     #[cfg(unix)]
@@ -886,6 +887,37 @@ mod native {
         .unwrap_or_else(|| PathBuf::from("/usr/bin/python3"))
     }
 
+    /// A saved interpreter that is only the bare system fallback must not keep
+    /// the bridge unusable after the community environment is installed: the
+    /// system interpreter has no `muse_mcp`, which surfaces as a bare refusal.
+    /// An explicit override always wins.
+    pub(super) fn preferred_saved_python(saved: &str, discovered: &Path) -> String {
+        let saved = saved.trim();
+        let discovered = discovered.display().to_string();
+        let system_fallback = matches!(
+            saved,
+            "/usr/bin/python3" | "/usr/local/bin/python3" | "/usr/bin/python"
+        );
+        if saved.is_empty() || system_fallback {
+            discovered
+        } else {
+            saved.to_owned()
+        }
+    }
+
+    /// The community bridge is a separate pinned install that is not bundled in
+    /// the AppImage, so a missing bridge names the command that fixes it rather
+    /// than reporting only that it is unavailable.
+    pub(super) fn connect_error_message(error: &AccountError) -> String {
+        let text = error.to_string();
+        if error.code == ErrorCode::BridgeUnavailable {
+            return format!(
+                "{text} Install it with ./scripts/setup-account-bridge.sh, then enter the Python interpreter it prints under Advanced: interpreter and session folder."
+            );
+        }
+        text
+    }
+
     fn script_path(name: &str) -> PathBuf {
         let mut roots = Vec::new();
         if let Some(appdir) = std::env::var_os("APPDIR")
@@ -984,7 +1016,7 @@ mod native {
                 .unwrap_or_default(),
         );
         if let Some((saved_python, saved_config_dir)) = load_saved_connection() {
-            python.set_text(&saved_python);
+            python.set_text(&preferred_saved_python(&saved_python, &default_python()));
             config_dir.set_text(&saved_config_dir);
         }
         content.append(&config_dir);
@@ -1321,7 +1353,11 @@ mod native {
             self.state.borrow_mut().connection_notice =
                 "Connecting to the explicitly selected Muse session…".into();
             self.launch(ticket, move || {
-                Reply::Connect(client.connect().map_err(|e| e.to_string()))
+                Reply::Connect(
+                    client
+                        .connect()
+                        .map_err(|error| connect_error_message(&error)),
+                )
             });
         }
 
@@ -2255,6 +2291,52 @@ mod tests {
             Some("/srv/muse/account".into())
         );
         assert_eq!(native::browser_sign_in_dir("", None, None), None);
+    }
+
+    #[test]
+    fn saved_system_interpreter_yields_to_an_installed_bridge_environment() {
+        let bridge = std::path::Path::new(
+            "/home/user/.local/share/unofficial-muse-for-linux/account-bridge/.venv/bin/python",
+        );
+        // A fallback saved before the venv existed must not shadow it forever.
+        assert_eq!(
+            native::preferred_saved_python("/usr/bin/python3", bridge),
+            bridge.display().to_string()
+        );
+        assert_eq!(
+            native::preferred_saved_python("  ", bridge),
+            bridge.display().to_string()
+        );
+        // A deliberate override is kept even when the default environment exists.
+        assert_eq!(
+            native::preferred_saved_python("/opt/py/bin/python", bridge),
+            "/opt/py/bin/python"
+        );
+        // With no bridge installed nothing is rewritten.
+        assert_eq!(
+            native::preferred_saved_python(
+                "/usr/bin/python3",
+                std::path::Path::new("/usr/bin/python3")
+            ),
+            "/usr/bin/python3"
+        );
+    }
+
+    #[test]
+    fn missing_bridge_names_the_setup_command() {
+        let unavailable = muse_account::AccountError {
+            code: muse_account::ErrorCode::BridgeUnavailable,
+            uncertain: false,
+        };
+        let message = native::connect_error_message(&unavailable);
+        assert!(message.contains("setup-account-bridge.sh"));
+        assert!(message.contains("Advanced"));
+        // Other failures stay as they were: no misleading install advice.
+        let timeout = muse_account::AccountError {
+            code: muse_account::ErrorCode::Timeout,
+            uncertain: false,
+        };
+        assert!(!native::connect_error_message(&timeout).contains("setup-account-bridge.sh"));
     }
 
     #[test]
