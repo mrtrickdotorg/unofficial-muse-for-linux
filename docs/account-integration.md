@@ -55,7 +55,7 @@ Explicit sign-in action
     -> app-owned scoped session jar
 ```
 
-No MCP server or listening local service is required. The sidecar allowlist is `connect`, `identity`, `history`, `tasks`, and `send`; it does not expose the community adapter's arbitrary raw-route escape hatch. Internally, task reads are restricted to `tasks.list` and `tasks.runs`. Neither sidecar exposes a general local shell or remote file actions.
+No MCP server or listening local service is required. The sidecar allowlist is `connect`, `identity`, `history`, `watch`, `tasks`, and `send`; it does not expose the community adapter's arbitrary raw-route escape hatch. Internally, task reads are restricted to `tasks.list` and `tasks.runs`. Neither sidecar exposes a general local shell or remote file actions.
 
 Rust receives typed account/history/task data, not cookies or upstream exception text. Account directory paths may be passed to the sidecar; session values are not put in process arguments, logs, error messages, or JSON replies. Treat retrieved agent messages as untrusted text. Sending a prompt is an external action and may instruct the existing agent to use its already configured capabilities; it is not a harmless local echo.
 
