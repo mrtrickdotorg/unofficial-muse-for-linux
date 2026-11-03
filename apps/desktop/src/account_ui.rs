@@ -1745,6 +1745,18 @@ mod native {
             let (conversation_visible, setup_visible) = account_surface_visibility(connected);
             self.pages.set_visible(conversation_visible);
             self.welcome.set_visible(setup_visible);
+            // A linked account needs the conversation chooser, the transcript and
+            // the composer. Everything about linking, the agent identity line and
+            // the history/tasks tab strip only gets in the way once that is done.
+            self.settings.set_visible(!connected);
+            self.identity.set_visible(!connected);
+            self.scope_label.set_visible(!connected);
+            self.pages.set_show_tabs(!connected);
+            if connected {
+                self.pages.set_current_page(Some(0));
+            }
+            // Progress text still matters while an operation runs.
+            self.connection_notice.set_visible(!connected || !idle);
             let settings_enabled = !connected && idle;
             for widget in [
                 self.python.upcast_ref::<gtk::Widget>(),
@@ -1787,7 +1799,6 @@ mod native {
                 busy,
                 persistence_warning,
             ));
-            self.identity.set_visible(connected);
             self.identity.set_text(
                 &state
                     .account
