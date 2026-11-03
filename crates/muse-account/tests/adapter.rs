@@ -343,3 +343,33 @@ print(json.dumps({'ok': True, 'data': {'identity_name': 'User', 'vm_id': 'vm-1',
     assert_eq!(snapshot.vm_id, "vm-1");
     assert_eq!(snapshot.threads[0].session_id, "thread-1");
 }
+
+#[test]
+fn identity_verifies_the_account_without_paying_for_the_conversation_list() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'identity'
+assert request['config_dir'].endswith('/config')
+print(json.dumps({'ok': True, 'data': {'identity_name': 'User', 'vm_id': 'vm-1'}}))
+"#,
+    );
+    let identity = f.client().identity().unwrap();
+    assert_eq!(identity.identity_name, "User");
+    assert_eq!(identity.vm_id, "vm-1");
+}
+
+#[test]
+fn identity_surfaces_a_signed_out_session_as_auth_required() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+assert json.load(sys.stdin)['op'] == 'identity'
+print(json.dumps({'ok': False, 'error': {'code': 'auth_required', 'uncertain': False}}))
+"#,
+    );
+    let error = f.client().identity().unwrap_err();
+    assert_eq!(error.code, muse_account::ErrorCode::AuthRequired);
+    assert!(!error.uncertain);
+}

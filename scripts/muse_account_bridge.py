@@ -290,7 +290,7 @@ def validate_request(request):
     if not isinstance(request, dict):
         raise BridgeFailure("invalid_request")
     op = request.get("op")
-    allowed = {"connect": set(), "history": {"thread", "limit"},
+    allowed = {"connect": set(), "identity": set(), "history": {"thread", "limit"},
                "tasks": set(), "send": {"thread", "message", "device_id"}}
     if not isinstance(op, str) or op not in allowed:
         raise BridgeFailure("invalid_request")
@@ -538,6 +538,20 @@ class Adapter:
                     "archived": bool(row.get("archived", False)),
                     "updated_at": optional_text(row.get("updated_at")),
                 } for row in threads],
+            }
+        if request["op"] == "identity":
+            # The same verification as `connect` minus `sessions.list`, which the
+            # service can take ten seconds to answer. A send preflight only has
+            # to prove the saved session still belongs to the same account.
+            status = checked(self.client.status(), dict)
+            if status.get("authenticated") is not True:
+                raise BridgeFailure("auth_required")
+            if not isinstance(status.get("vm_id"), str) or not status["vm_id"]:
+                raise BridgeFailure("protocol_error")
+            identity = checked(status.get("identity", {}), dict)
+            return {
+                "identity_name": required_text(identity.get("name")),
+                "vm_id": required_text(status["vm_id"]),
             }
         if request["op"] == "history":
             return history_rows(self.client.history(thread=request.get("thread"), limit=request["limit"]))
