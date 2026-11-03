@@ -49,9 +49,18 @@ def import_detail(exc, paths=None):
     site_packages = any("site-packages" in entry for entry in entries
                         if isinstance(entry, str))
     missing = getattr(exc, "name", None)
-    return ("{}; missing={}; executable={}; prefix={}; bridge_path_on_sys_path={}; "
-            "site_packages_on_sys_path={}").format(
-        type(exc).__name__, missing or "-", sys.executable or "?", sys.prefix or "?",
+    version = "python{}.{}".format(*sys.version_info[:2])
+    roots = [Path(sys.prefix)] if sys.prefix else []
+    if len(Path(sys.executable).parents) > 2:
+        roots.append(Path(sys.executable).parents[2])
+    installed = bool(missing) and any(
+        (root / lib / version / "site-packages" / missing).exists()
+        for root in roots for lib in ("lib", "lib64"))
+    # The app already prints the interpreter it invoked, so prefix (which says
+    # whether the venv was honoured) plus the two path facts are enough here.
+    return ("{}; missing={}; installed_in_venv={}; prefix={}; "
+            "bridge_path_on_sys_path={}; site_packages_on_sys_path={}").format(
+        type(exc).__name__, missing or "-", installed, sys.prefix or "?",
         bridge_path, site_packages)[:300]
 
 
@@ -279,6 +288,24 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
 
 
+def ensure_paths(prefix=None, version=None):
+    """Restore the venv's site-packages and its `.pth` entries if missing.
+
+    A launcher can start this interpreter with the venv prefix set while site
+    handling stayed incomplete. `site.addsitedir` then does exactly what the
+    interpreter would have done: add the directory and process its `.pth`, so
+    both the community checkout and its dependencies become importable.
+    """
+    import site
+    import sys
+    prefix = Path(prefix or sys.prefix)
+    version = version or "python{}.{}".format(*sys.version_info[:2])
+    for candidate in (prefix / "lib" / version / "site-packages",
+                      prefix / "lib64" / version / "site-packages"):
+        if candidate.is_dir() and str(candidate) not in sys.path:
+            site.addsitedir(str(candidate))
+
+
 def fallback_paths(prefix=None, executable=None):
     """What the pinned install provides when site handling did not run.
 
@@ -310,6 +337,9 @@ def import_client():
     """Return (MuseClient, None) or (None, why the import could not complete)."""
     import sys
     search_path = tuple(sys.path)
+    # Repair incomplete site handling before the first attempt: a launcher can
+    # set the venv prefix yet leave its site-packages unprocessed.
+    ensure_paths()
     try:
         from muse_mcp.client import MuseClient
         return MuseClient, None

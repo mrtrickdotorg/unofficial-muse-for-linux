@@ -36,17 +36,38 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "bridge_unavailable")
         detail = caught.exception.detail
         self.assertRegex(detail, r"(ModuleNotFound)?Error")
-        self.assertIn("executable=", detail)
         self.assertIn("prefix=", detail)
         self.assertIn("bridge_path_on_sys_path=", detail)
         # The module that was actually missing is named, without any message text.
         self.assertIn("missing=", detail)
         self.assertIn("site_packages_on_sys_path=", detail)
+        # Whether the missing module exists on disk separates a search-path
+        # fault from a genuinely absent dependency.
+        self.assertIn("installed_in_venv=", detail)
         self.assertLessEqual(len(detail), 300)
         # The response carries the detail, but only when there is one.
         self.assertEqual(bridge.error_response(caught.exception)["error"]["detail"], detail)
         self.assertNotIn("detail", bridge.error_response(
             bridge.BridgeFailure("bridge_unavailable"))["error"])
+
+    def test_venv_site_packages_and_pth_entries_are_restored(self):
+        import pathlib
+        import sys
+        import tempfile
+        bridge = load_bridge()
+        version = "python{}.{}".format(*sys.version_info[:2])
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            site = root / "lib" / version / "site-packages"
+            site.mkdir(parents=True)
+            checkout = root / "source"
+            checkout.mkdir()
+            (site / "restore.pth").write_text(str(checkout) + "\n", encoding="utf-8")
+            bridge.ensure_paths(prefix=root, version=version)
+            # The directory itself, and what its .pth points at, are both usable.
+            self.assertIn(str(site), sys.path)
+            self.assertIn(str(checkout), sys.path)
+            sys.path[:] = [p for p in sys.path if p not in (str(site), str(checkout))]
 
     def test_fallback_paths_cover_the_checkout_and_the_venv_site_packages(self):
         import pathlib
