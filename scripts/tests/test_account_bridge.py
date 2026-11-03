@@ -230,6 +230,84 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(dict(request, device_id=invalid))
 
+    def test_watch_returns_on_a_new_message_and_times_out_on_a_quiet_talk(self):
+        # A watch must hold one request instead of making the caller tick a
+        # history poll per two seconds, and it must never hang past its timeout.
+        bridge = load_bridge()
+        first = {"message_id": "a", "seq": 1, "role": "user", "text": "hi"}
+        class Busy(FakeClient):
+            def __init__(self):
+                self.calls = 0
+            def history(self, **kwargs):
+                self.calls += 1
+                rows = [first]
+                if self.calls >= 3:
+                    rows.append({"message_id": "b", "seq": 2, "role": "assistant", "text": "done"})
+                return rows
+        client = Busy()
+        result = bridge.Adapter(client, {}).dispatch({"op": "watch", "limit": 20, "timeout": 5000})
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        self.assertEqual(client.calls, 3)
+        class Quiet(FakeClient):
+            def history(self, **kwargs):
+                return [first]
+        self.assertEqual(
+            [r["message_id"] for r in bridge.Adapter(Quiet(), {}).dispatch(
+                {"op": "watch", "limit": 20, "timeout": 1})],
+            ["a"])
+        for bad in [{"op": "watch", "limit": 0, "timeout": 10},
+                    {"op": "watch", "limit": 20, "timeout": 0},
+                    {"op": "watch", "limit": 20, "timeout": 60001},
+                    {"op": "watch", "limit": 20, "timeout": True},
+                    {"op": "watch", "limit": 20},
+                    {"op": "watch", "limit": 20, "timeout": 10, "after": 3},
+                    {"op": "history", "limit": 20, "timeout": 10}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, config_dir="/unused"))
+
+    def test_send_verifies_the_expected_session_before_dispatching(self):
+        # The preflight rides inside the dispatch request, so it must fail before
+        # anything reaches the service when the account changed underneath.
+        bridge = load_bridge()
+        class Other(FakeClient):
+            def history(self, **kwargs):
+                raise AssertionError("no history read for a changed account")
+            def send(self, **kwargs):
+                raise AssertionError("must not dispatch for another account")
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.Adapter(Other(), {}).dispatch({
+                "op": "send", "message": "hello",
+                "expect_vm_id": "someone-else", "expect_identity_name": "Test User"})
+        self.assertEqual(caught.exception.code, "account_changed")
+        self.assertFalse(caught.exception.uncertain)
+        class Renamed(FakeClient):
+            def send(self, **kwargs):
+                raise AssertionError("must not dispatch for another identity")
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.Adapter(Renamed(), {}).dispatch({
+                "op": "send", "message": "hello",
+                "expect_vm_id": "vm-1", "expect_identity_name": "Other User"})
+        self.assertEqual(caught.exception.code, "account_changed")
+        class Matching(FakeClient):
+            def __init__(self):
+                self.calls = 0
+            def history(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return []
+                return [{"message_id": "m1", "seq": 1, "role": "user", "text": "hello"}]
+            def send(self, **kwargs):
+                return {"ok": True, "sent": True}
+        result = bridge.Adapter(Matching(), {}, confirmation_attempts=1).dispatch({
+            "op": "send", "message": "hello",
+            "expect_vm_id": "vm-1", "expect_identity_name": "Test User"})
+        self.assertTrue(result["confirmed"])
+        for bad in [{"expect_vm_id": ""}, {"expect_vm_id": 3},
+                    {"expect_identity_name": ""}, {"expect_identity_name": "x" * 257}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(
+                    {"op": "send", "message": "hi", "config_dir": "/unused"}, **bad))
+
     def test_identity_verifies_the_account_without_listing_conversations(self):
         # A send preflight must not pay for `sessions.list`: the service can take
         # ten seconds to answer it, and that delay used to sit in front of every

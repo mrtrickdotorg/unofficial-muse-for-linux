@@ -96,6 +96,7 @@ pub struct DispatchReceipt {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     AuthRequired,
+    AccountChanged,
     VmUnavailable,
     Timeout,
     InvalidRequest,
@@ -135,6 +136,9 @@ impl fmt::Display for AccountError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self.code {
             ErrorCode::AuthRequired => "Muse authentication is missing or expired; sign in again.",
+            ErrorCode::AccountChanged => {
+                "The saved Muse session now belongs to a different account; reconnect to continue."
+            }
             ErrorCode::VmUnavailable => "The Muse account VM is unavailable.",
             ErrorCode::Timeout => "The account bridge exceeded its time limit.",
             ErrorCode::InvalidRequest => "The account request or bridge configuration is invalid.",
@@ -201,6 +205,29 @@ impl AccountClient {
             false,
         )
     }
+    /// Wait until the newest message changes, then return the window.
+    ///
+    /// The bridge holds one connection for the wait, so a recheck costs ~0.1s
+    /// instead of a fresh Noise handshake per tick.
+    pub fn watch(
+        &self,
+        thread: Option<&str>,
+        limit: usize,
+        timeout: Duration,
+    ) -> Result<Vec<HistoryMessage>, AccountError> {
+        validate_thread(thread)?;
+        if !(1..=200).contains(&limit) {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let millis = u64::try_from(timeout.as_millis())
+            .ok()
+            .filter(|millis| (1..=60_000).contains(millis))
+            .ok_or_else(|| AccountError::new(ErrorCode::InvalidRequest, false))?;
+        self.request(
+            serde_json::json!({"op": "watch", "thread": thread, "limit": limit, "timeout": millis}),
+            false,
+        )
+    }
     pub fn tasks(&self) -> Result<TasksSnapshot, AccountError> {
         self.request(serde_json::json!({"op": "tasks"}), false)
     }
@@ -211,7 +238,34 @@ impl AccountClient {
         thread: Option<&str>,
         message: &str,
     ) -> Result<DispatchReceipt, AccountError> {
-        self.send_optional_device(thread, message, None)
+        self.send_checked(thread, message, None, None)
+    }
+    /// Dispatch only after proving, in the same request, that the saved session
+    /// is still `vm_id` for `identity_name`. One account check instead of a
+    /// whole `connect`, which also lists every conversation.
+    pub fn send_verified(
+        &self,
+        thread: Option<&str>,
+        message: &str,
+        vm_id: &str,
+        identity_name: &str,
+    ) -> Result<DispatchReceipt, AccountError> {
+        self.send_checked(thread, message, None, Some((vm_id, identity_name)))
+    }
+    pub fn send_from_device_verified(
+        &self,
+        thread: Option<&str>,
+        message: &str,
+        device_id: &str,
+        vm_id: &str,
+        identity_name: &str,
+    ) -> Result<DispatchReceipt, AccountError> {
+        self.send_checked(
+            thread,
+            message,
+            Some(device_id),
+            Some((vm_id, identity_name)),
+        )
     }
     /// Explicit registration attribution; never changes saved account settings.
     pub fn send_from_device(
@@ -228,21 +282,42 @@ impl AccountClient {
         {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
-        self.send_optional_device(thread, message, Some(device_id))
+        self.send_checked(thread, message, Some(device_id), None)
     }
-    fn send_optional_device(
+    fn send_checked(
         &self,
         thread: Option<&str>,
         message: &str,
         device_id: Option<&str>,
+        expect: Option<(&str, &str)>,
     ) -> Result<DispatchReceipt, AccountError> {
         validate_thread(thread)?;
         if message.trim().is_empty() || message.len() > 512 * 1024 {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
+        if let Some(device_id) = device_id
+            && (device_id.is_empty()
+                || device_id.len() > 128
+                || !device_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
         let mut request = serde_json::json!({"op": "send", "thread": thread, "message": message});
         if let Some(device_id) = device_id {
             request["device_id"] = device_id.into();
+        }
+        if let Some((vm_id, identity_name)) = expect {
+            if vm_id.is_empty()
+                || vm_id.len() > 256
+                || identity_name.is_empty()
+                || identity_name.len() > 256
+            {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+            request["expect_vm_id"] = vm_id.into();
+            request["expect_identity_name"] = identity_name.into();
         }
         let receipt: DispatchReceipt = self.request(request, true)?;
         if receipt.confirmed

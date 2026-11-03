@@ -20,7 +20,13 @@ MAX_REQUEST = 1024 * 1024
 MAX_RESPONSE = 4 * 1024 * 1024
 
 
-ERROR_CODES = frozenset({"auth_required", "vm_unavailable", "timeout", "invalid_request",
+# Requests whose upstream calls are cheap only on a reused connection. One
+# handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
+# the operations where the reuse pays for itself.
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks"})
+
+
+ERROR_CODES = frozenset({"auth_required", "account_changed", "vm_unavailable", "timeout", "invalid_request",
     "insecure_config", "bridge_unavailable", "bridge_failure", "protocol_error", "response_too_large"})
 
 
@@ -291,7 +297,10 @@ def validate_request(request):
         raise BridgeFailure("invalid_request")
     op = request.get("op")
     allowed = {"connect": set(), "identity": set(), "history": {"thread", "limit"},
-               "tasks": set(), "send": {"thread", "message", "device_id"}}
+               "watch": {"thread", "limit", "timeout"},
+               "tasks": set(),
+               "send": {"thread", "message", "device_id", "expect_vm_id",
+                        "expect_identity_name"}}
     if not isinstance(op, str) or op not in allowed:
         raise BridgeFailure("invalid_request")
     if set(request) - ({"op", "config_dir"} | allowed[op]):
@@ -303,10 +312,19 @@ def validate_request(request):
     if thread is not None and (not isinstance(thread, str) or not thread.strip()
                                or len(thread) > 4096 or "\x00" in thread):
         raise BridgeFailure("invalid_request")
-    if op == "history":
+    if op in ("history", "watch"):
         limit = request.get("limit")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise BridgeFailure("invalid_request")
+    if op == "watch":
+        timeout = request.get("timeout")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 60000:
+            raise BridgeFailure("invalid_request")
+    if "expect_vm_id" in request or "expect_identity_name" in request:
+        for key in ("expect_vm_id", "expect_identity_name"):
+            value = request.get(key)
+            if not isinstance(value, str) or not value or len(value) > 256 or "\x00" in value:
+                raise BridgeFailure("invalid_request")
     if "device_id" in request:
         device = request["device_id"]
         if not isinstance(device, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device) is None:
@@ -467,11 +485,52 @@ def import_client():
     return None, import_detail(first, search_path)
 
 
+@contextmanager
+def shared_gateway(client, config):
+    """Hold one upstream connection for a whole request, when supported.
+
+    Every gateway call otherwise pays its own Noise handshake: measured at
+    1.5-2.2s, against ~0.1s for a call on an already-open connection, and one
+    request makes up to four calls (a send reads history, dispatches and reads
+    history again to confirm).
+    """
+    scope = getattr(client, "gateway_scope", None)
+    if scope is None:
+        yield
+        return
+    with scope(config):
+        yield
+
+
 def community_client(config):
     MuseClient, detail = import_client()
     if MuseClient is None:
         raise BridgeFailure("bridge_unavailable", detail=detail) from None
     class AwaitedMuseClient(MuseClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._shared_gateway = None
+
+        @contextmanager
+        def gateway_scope(self, config):
+            if self._shared_gateway is not None:
+                yield self._shared_gateway
+                return
+            with super()._gateway(config) as gateway:
+                self._shared_gateway = gateway
+                try:
+                    yield gateway
+                finally:
+                    self._shared_gateway = None
+
+        @contextmanager
+        def _gateway(self, config):
+            if self._shared_gateway is not None:
+                yield self._shared_gateway
+                return
+            with super()._gateway(config) as gateway:
+                yield gateway
+
         def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
             # Keep the Noise connection alive until the server processes the
             # request. Upstream's immediate-close dispatch can drop the write.
@@ -482,7 +541,10 @@ def community_client(config):
                 body["device_id"] = device_id
             if thread is not None:
                 body["session_id"] = thread
-            with self._gateway(config) as gateway:
+            # Dispatch keeps its own connection: reuse is proven for the read
+            # routes, and a message must not hinge on a connection that has
+            # already served several requests.
+            with super()._gateway(config) as gateway:
                 gateway.request("chat.stream", body=body, timeout=30)
             return {"ok": True, "sent": True}
     return AwaitedMuseClient(config_loader=lambda: config)
@@ -501,7 +563,11 @@ def handle_request(request, client_factory=None):
         validate_request(request)
         with secure_config(request["config_dir"]) as config:
             client = (client_factory or community_client)(config)
-            data = Adapter(client, config).dispatch(request)
+            if request["op"] in SHARED_GATEWAY_OPS:
+                with shared_gateway(client, config):
+                    data = Adapter(client, config).dispatch(request)
+            else:
+                data = Adapter(client, config).dispatch(request)
             return {"ok": True, "data": data}
     except Exception as exc:
         return error_response(classify_exception(exc))
@@ -574,10 +640,41 @@ class Adapter:
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
             }
+        if request["op"] == "watch":
+            # Hold the request open on one connection and re-read cheaply: a
+            # fresh history read per tick costs a handshake, which is what made
+            # an answer take seconds to appear.
+            import time
+            timeout = request["timeout"] / 1000.0
+            deadline = time.monotonic() + timeout
+            baseline = None
+            while True:
+                rows = history_rows(self.client.history(thread=request.get("thread"),
+                                                        limit=request["limit"]))
+                newest = (rows[-1]["message_id"], rows[-1]["seq"]) if rows else None
+                if baseline is None:
+                    baseline = newest
+                elif newest != baseline:
+                    return rows
+                if time.monotonic() >= deadline:
+                    return rows
+                time.sleep(0.4)
         if request["op"] == "send":
             import time
             thread = request.get("thread")
             message = request["message"]
+            if "expect_vm_id" in request:
+                # Verify the session in the same request as the dispatch, so a
+                # send pays one account check instead of a whole `connect`,
+                # which also lists every conversation.
+                status = checked(self.client.status(), dict)
+                if status.get("authenticated") is not True:
+                    raise BridgeFailure("auth_required")
+                identity = checked(status.get("identity", {}), dict)
+                if (status.get("vm_id") != request["expect_vm_id"]
+                        or required_text(identity.get("name"))
+                        != request["expect_identity_name"]):
+                    raise BridgeFailure("account_changed")
             # Confirming a send only needs the rows around the new message:
             # each history fetch costs ~1.6-3.2s, so a small window keeps a
             # send at a couple of round trips instead of five.

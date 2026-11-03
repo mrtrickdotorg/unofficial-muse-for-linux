@@ -361,6 +361,56 @@ print(json.dumps({'ok': True, 'data': {'identity_name': 'User', 'vm_id': 'vm-1'}
 }
 
 #[test]
+fn watch_holds_the_request_and_parses_the_window() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'watch' and request['limit'] == 20 and request['timeout'] == 15000
+assert request['thread'] is None
+print(json.dumps({'ok': True, 'data': [{'message_id':'m','seq':2,'role':'assistant',
+    'text':'done','timestamp':None,'status':'complete'}]}))
+"#,
+    );
+    let rows = f
+        .client()
+        .watch(None, 20, std::time::Duration::from_secs(15))
+        .unwrap();
+    assert_eq!(rows[0].message_id, "m");
+    assert_eq!(rows[0].status.as_deref(), Some("complete"));
+    for bad in [
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(61),
+    ] {
+        assert!(f.client().watch(None, 20, bad).is_err());
+    }
+    assert!(
+        f.client()
+            .watch(None, 0, std::time::Duration::from_secs(1))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_changed_account_is_reported_before_dispatch_without_uncertainty() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'send'
+assert request['expect_vm_id'] == 'vm-1' and request['expect_identity_name'] == 'User'
+print(json.dumps({'ok': False, 'error': {'code': 'account_changed', 'uncertain': False}}))
+"#,
+    );
+    let error = f
+        .client()
+        .send_verified(None, "hello", "vm-1", "User")
+        .unwrap_err();
+    assert_eq!(error.code, muse_account::ErrorCode::AccountChanged);
+    assert!(!error.uncertain);
+}
+
+#[test]
 fn identity_surfaces_a_signed_out_session_as_auth_required() {
     let f = Fixture::new(
         r#"

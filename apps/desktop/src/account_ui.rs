@@ -450,6 +450,7 @@ mod native {
         persistence_warning: RefCell<Option<String>>,
         rendering: Cell<bool>,
         reply_until: Cell<Option<std::time::Instant>>,
+        reply_polls: Cell<u32>,
         root: gtk::Box,
         welcome: gtk::Box,
         pages: gtk::Notebook,
@@ -1170,6 +1171,7 @@ mod native {
             persistence_warning: RefCell::new(None),
             rendering: Cell::new(false),
             reply_until: Cell::new(None),
+            reply_polls: Cell::new(0),
             root: root.clone(),
             welcome: welcome.clone(),
             pages: pages.clone(),
@@ -1287,7 +1289,7 @@ mod native {
         }
         let weak = Rc::downgrade(&ui);
         let last_refresh = std::cell::Cell::new(std::time::Instant::now());
-        gtk::glib::timeout_add_local(Duration::from_secs(2), move || {
+        gtk::glib::timeout_add_local(Duration::from_millis(1000), move || {
             let Some(ui) = weak.upgrade() else {
                 return gtk::glib::ControlFlow::Break;
             };
@@ -1557,12 +1559,21 @@ mod native {
                 return;
             };
             let request = ticket.clone();
+            // The first poll shows the prompt that was just confirmed; later ones
+            // hold one connection open and return the moment an answer lands.
+            let waiting = self.reply_polls.get() > 0;
+            self.reply_polls.set(self.reply_polls.get() + 1);
             self.launch(ticket, move || {
-                Reply::History(
-                    client
-                        .history(request.scope.as_deref(), request.limit)
-                        .map_err(|e| e.to_string()),
-                )
+                let result = if waiting {
+                    client.watch(
+                        request.scope.as_deref(),
+                        request.limit,
+                        Duration::from_secs(20),
+                    )
+                } else {
+                    client.history(request.scope.as_deref(), request.limit)
+                };
+                Reply::History(result.map_err(|e| e.to_string()))
             });
         }
 
@@ -1598,29 +1609,29 @@ mod native {
                 client
             };
             self.launch(ticket, move || {
-                // Identity only: `connect` also lists every conversation, which
-                // the service can take ~10 seconds to answer, and that delay sat
-                // in front of every send.
-                match client.identity() {
-                    Ok(a)
-                        if (a.identity_name.as_str(), a.vm_id.as_str())
-                            != (identity.0.as_str(), identity.1.as_str()) =>
-                    {
-                        return Reply::AccountChanged;
-                    }
-                    Err(e) => return Reply::Send(SendOutcome::NotSent(e.to_string())),
-                    _ => {}
-                }
+                // The dispatch verifies the session itself, so one account check
+                // rides along instead of a separate `connect` round trip that
+                // also lists every conversation.
                 let dispatch = match device {
-                    Some(device) if device.active.load(Ordering::SeqCst) => {
-                        client.send_from_device(request.scope.as_deref(), &text, &device.node_id)
-                    }
+                    Some(device) if device.active.load(Ordering::SeqCst) => client
+                        .send_from_device_verified(
+                            request.scope.as_deref(),
+                            &text,
+                            &device.node_id,
+                            &identity.1,
+                            &identity.0,
+                        ),
                     Some(_) => {
                         return Reply::Send(SendOutcome::NotSent(
                             "Local host stopped before dispatch.".into(),
                         ));
                     }
-                    None => client.send(request.scope.as_deref(), &text),
+                    None => client.send_verified(
+                        request.scope.as_deref(),
+                        &text,
+                        &identity.1,
+                        &identity.0,
+                    ),
                 };
                 let result = match dispatch {
                     Ok(receipt) if !receipt.sent => {
@@ -1630,6 +1641,9 @@ mod native {
                     Ok(_) => SendOutcome::Uncertain(
                         "Service dispatch returned without scoped-history confirmation.".into(),
                     ),
+                    Err(error) if error.code == muse_account::ErrorCode::AccountChanged => {
+                        return Reply::AccountChanged;
+                    }
                     Err(error) => {
                         return Reply::SendConnectionError(if error.uncertain {
                             SendOutcome::Uncertain(error.to_string())
@@ -1701,6 +1715,7 @@ mod native {
             if matches!(&reply, Reply::Send(SendOutcome::Confirmed)) {
                 self.reply_until
                     .set(Some(std::time::Instant::now() + Duration::from_secs(90)));
+                self.reply_polls.set(0);
             }
             // Stop immediately on account verification errors or identity changes,
             // before any old account result is installed or rendered.
