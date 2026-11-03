@@ -946,8 +946,7 @@ mod native {
         connect.set_tooltip_text(Some(
             "Reads the selected session now. Tick the consent box first.",
         ));
-        let disconnect = gtk::Button::with_label("Disconnect");
-        for button in [&login, &existing, &connect, &disconnect] {
+        for button in [&login, &existing, &connect] {
             actions.append(button);
         }
         welcome.append(&actions);
@@ -1003,6 +1002,13 @@ mod native {
         let connection_notice = label("");
         connection_notice.set_hexpand(true);
         connection_row.append(&connection_notice);
+        // Kept outside the welcome card: that card is hidden while connected, and
+        // unlinking must stay reachable from a linked account.
+        let disconnect = gtk::Button::with_label("Disconnect");
+        disconnect.set_tooltip_text(Some(
+            "Stops this app from using the session. Other devices and cloud history are unchanged.",
+        ));
+        connection_row.append(&disconnect);
         root.append(&connection_row);
 
         let pages = gtk::Notebook::new();
@@ -2119,6 +2125,13 @@ print(json.dumps({'ok':True,'data':data}))
                 "Sign in to the Muse account you already use"
             ));
             assert!(page.ui.login.is_sensitive());
+            // Regression: Disconnect once lived in the welcome card, which is
+            // hidden while connected, leaving a linked account with no way out.
+            let mut ancestor = page.ui.disconnect.parent();
+            while let Some(widget) = ancestor {
+                assert_ne!(widget, page.ui.welcome.clone().upcast::<gtk::Widget>());
+                ancestor = widget.parent();
+            }
             // Advanced paths stay collapsed until asked for; GTK builds the
             // expander's child on the first expansion, so open it before counting.
             page.ui.settings.set_expanded(true);
