@@ -449,6 +449,7 @@ mod native {
         login_cancellation: RefCell<Option<Arc<Cancellation>>>,
         persistence_warning: RefCell<Option<String>>,
         rendering: Cell<bool>,
+        reply_until: Cell<Option<std::time::Instant>>,
         root: gtk::Box,
         welcome: gtk::Box,
         pages: gtk::Notebook,
@@ -1166,6 +1167,7 @@ mod native {
             login_cancellation: RefCell::new(None),
             persistence_warning: RefCell::new(None),
             rendering: Cell::new(false),
+            reply_until: Cell::new(None),
             root: root.clone(),
             welcome: welcome.clone(),
             pages: pages.clone(),
@@ -1261,6 +1263,8 @@ mod native {
         {
             let u = Rc::clone(&ui);
             ui.send.connect_clicked(move |_| u.send_message());
+            let enter = Rc::clone(&ui);
+            ui.prompt.connect_activate(move |_| enter.send_message());
         }
         {
             let u = Rc::clone(&ui);
@@ -1278,7 +1282,8 @@ mod native {
             });
         }
         let weak = Rc::downgrade(&ui);
-        gtk::glib::timeout_add_local(Duration::from_secs(30), move || {
+        let last_refresh = std::cell::Cell::new(std::time::Instant::now());
+        gtk::glib::timeout_add_local(Duration::from_secs(2), move || {
             let Some(ui) = weak.upgrade() else {
                 return gtk::glib::ControlFlow::Break;
             };
@@ -1286,7 +1291,18 @@ mod native {
             if ui.root.root().is_none() {
                 return gtk::glib::ControlFlow::Break;
             }
-            ui.read(false, true);
+            let idle = ui.state.borrow().busy.is_none();
+            let awaiting = ui
+                .reply_until
+                .get()
+                .is_some_and(|until| std::time::Instant::now() < until);
+            if awaiting && idle {
+                ui.poll_reply();
+                last_refresh.set(std::time::Instant::now());
+            } else if last_refresh.get().elapsed() >= Duration::from_secs(30) {
+                last_refresh.set(std::time::Instant::now());
+                ui.read(false, true);
+            }
             gtk::glib::ControlFlow::Continue
         });
         ui.render();
@@ -1527,6 +1543,25 @@ mod native {
             });
         }
 
+        /// History only: the reply poll runs every few seconds, so it skips the
+        /// account re-verification a full refresh performs.
+        fn poll_reply(self: &Rc<Self>) {
+            let Some(client) = self.client.borrow().clone() else {
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_read(false, false) else {
+                return;
+            };
+            let request = ticket.clone();
+            self.launch(ticket, move || {
+                Reply::History(
+                    client
+                        .history(request.scope.as_deref(), request.limit)
+                        .map_err(|e| e.to_string()),
+                )
+            });
+        }
+
         fn send_message(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
@@ -1653,6 +1688,12 @@ mod native {
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
+            // A dispatched message is answered by the service; poll history
+            // quickly for a while so the reply appears in seconds.
+            if matches!(&reply, Reply::Send(SendOutcome::Confirmed)) {
+                self.reply_until
+                    .set(Some(std::time::Instant::now() + Duration::from_secs(90)));
+            }
             // Stop immediately on account verification errors or identity changes,
             // before any old account result is installed or rendered.
             if matches!(
