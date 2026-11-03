@@ -25,6 +25,25 @@ class FakeClient:
 
 
 class BridgeTests(unittest.TestCase):
+    def test_missing_community_library_reports_interpreter_facts_only(self):
+        import sys
+        from unittest import mock
+        bridge = load_bridge()
+        with mock.patch.dict(sys.modules, {"muse_mcp": None, "muse_mcp.client": None}):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.community_client({})
+        self.assertEqual(caught.exception.code, "bridge_unavailable")
+        detail = caught.exception.detail
+        self.assertRegex(detail, r"(ModuleNotFound)?Error")
+        self.assertIn("executable=", detail)
+        self.assertIn("prefix=", detail)
+        self.assertIn("bridge_path_on_sys_path=", detail)
+        self.assertLessEqual(len(detail), 300)
+        # The response carries the detail, but only when there is one.
+        self.assertEqual(bridge.error_response(caught.exception)["error"]["detail"], detail)
+        self.assertNotIn("detail", bridge.error_response(
+            bridge.BridgeFailure("bridge_unavailable"))["error"])
+
     def test_optional_device_is_validated_and_forwarded_once(self):
         bridge = load_bridge()
         request = {"op": "send", "message": "hello", "config_dir": "/unused", "device_id": "linux-0123"}

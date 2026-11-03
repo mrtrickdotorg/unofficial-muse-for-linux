@@ -25,10 +25,24 @@ ERROR_CODES = frozenset({"auth_required", "vm_unavailable", "timeout", "invalid_
 
 
 class BridgeFailure(Exception):
-    def __init__(self, code, uncertain=False):
+    def __init__(self, code, uncertain=False, detail=None):
         self.code = code if code in ERROR_CODES else "bridge_failure"
         self.uncertain = bool(uncertain)
+        # Self-authored context only, bounded: never child output or an exception
+        # message, so a credential can never reach the app's status line.
+        self.detail = str(detail)[:300] if detail else None
         super().__init__(self.code)
+
+
+def import_detail(exc):
+    """Interpreter facts for a failed community import, bounded and text-free."""
+    import sys
+    bridge_path = any(
+        isinstance(entry, str) and ("account-bridge" in entry or "muse-mcp" in entry)
+        for entry in sys.path
+    )
+    return "{}; executable={}; prefix={}; bridge_path_on_sys_path={}".format(
+        type(exc).__name__, sys.executable or "?", sys.prefix or "?", bridge_path)[:300]
 
 
 def checked(value, expected):
@@ -258,8 +272,8 @@ def validate_request(request):
 def community_client(config):
     try:
         from muse_mcp.client import MuseClient
-    except (ImportError, OSError):
-        raise BridgeFailure("bridge_unavailable") from None
+    except (ImportError, OSError) as exc:
+        raise BridgeFailure("bridge_unavailable", detail=import_detail(exc)) from None
     class AwaitedMuseClient(MuseClient):
         def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
             # Keep the Noise connection alive until the server processes the
@@ -278,7 +292,11 @@ def community_client(config):
 
 
 def error_response(error):
-    return {"ok": False, "error": {"code": error.code, "uncertain": error.uncertain}}
+    response = {"ok": False, "error": {"code": error.code, "uncertain": error.uncertain}}
+    detail = getattr(error, "detail", None)
+    if detail:
+        response["error"]["detail"] = detail
+    return response
 
 
 def handle_request(request, client_factory=None):
