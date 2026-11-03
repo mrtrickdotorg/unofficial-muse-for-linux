@@ -297,7 +297,7 @@ def validate_request(request):
         raise BridgeFailure("invalid_request")
     op = request.get("op")
     allowed = {"connect": set(), "identity": set(), "history": {"thread", "limit"},
-               "watch": {"thread", "limit", "timeout"},
+               "watch": {"thread", "limit", "timeout", "after"},
                "tasks": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
@@ -320,6 +320,10 @@ def validate_request(request):
         timeout = request.get("timeout")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 60000:
             raise BridgeFailure("invalid_request")
+        if "after" in request:
+            after = request["after"]
+            if not isinstance(after, str) or not 1 <= len(after) <= 256:
+                raise BridgeFailure("invalid_request")
     if "expect_vm_id" in request or "expect_identity_name" in request:
         for key in ("expect_vm_id", "expect_identity_name"):
             value = request.get(key)
@@ -676,12 +680,19 @@ class Adapter:
             import time
             timeout = request["timeout"] / 1000.0
             deadline = time.monotonic() + timeout
+            # A caller that already knows the newest message it has seen sends
+            # it as `after`: the first read then answers at once when anything
+            # newer is already there, so nothing that arrived while the request
+            # was being set up is skipped.
+            after = request.get("after")
             baseline = None
             while True:
                 rows = history_rows(self.client.history(thread=request.get("thread"),
                                                         limit=request["limit"]))
                 newest = (rows[-1]["message_id"], rows[-1]["seq"]) if rows else None
                 if baseline is None:
+                    if after is not None and (newest is None or newest[0] != after):
+                        return rows
                     baseline = newest
                 elif newest != baseline:
                     return rows
