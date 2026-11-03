@@ -29,7 +29,8 @@ class BridgeTests(unittest.TestCase):
         import sys
         from unittest import mock
         bridge = load_bridge()
-        with mock.patch.dict(sys.modules, {"muse_mcp": None, "muse_mcp.client": None}):
+        with mock.patch.dict(sys.modules, {"muse_mcp": None, "muse_mcp.client": None}), \
+                mock.patch.object(bridge, "community_source_dir", return_value=None):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.community_client({})
         self.assertEqual(caught.exception.code, "bridge_unavailable")
@@ -43,6 +44,34 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(bridge.error_response(caught.exception)["error"]["detail"], detail)
         self.assertNotIn("detail", bridge.error_response(
             bridge.BridgeFailure("bridge_unavailable"))["error"])
+
+    def test_pinned_checkout_is_found_beside_the_venv(self):
+        import pathlib
+        import tempfile
+        bridge = load_bridge()
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            package = root / "source" / "muse_mcp"
+            package.mkdir(parents=True)
+            (package / "client.py").write_text("class MuseClient: pass\n", encoding="utf-8")
+            # The documented layout: checkout beside the venv that feeds it.
+            self.assertEqual(
+                bridge.community_source_dir(prefix=root / ".venv",
+                                            executable=root / ".venv/bin/python"),
+                root / "source")
+            # Either anchor alone is enough when the other is unexpected.
+            self.assertEqual(
+                bridge.community_source_dir(prefix=pathlib.Path("/usr"),
+                                            executable=root / ".venv/bin/python3"),
+                root / "source")
+            self.assertEqual(
+                bridge.community_source_dir(prefix=root / ".venv",
+                                            executable=pathlib.Path("/usr/bin/python3.12")),
+                root / "source")
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertIsNone(bridge.community_source_dir(
+                prefix=pathlib.Path(empty) / ".venv",
+                executable=pathlib.Path("/usr/bin/python3.12")))
 
     def test_optional_device_is_validated_and_forwarded_once(self):
         bridge = load_bridge()
