@@ -96,6 +96,28 @@ class BridgeTests(unittest.TestCase):
             sys.path[:] = [p for p in sys.path
                            if p not in (str(foreign), str(root / "source"))]
 
+    def test_a_pth_linked_checkout_counts_as_the_source(self):
+        # What the installer really produces: no muse_mcp inside site-packages,
+        # only a `.pth` naming the checkout.
+        import pathlib
+        import sys
+        import tempfile
+        bridge = load_bridge()
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root)
+            source = root / "source"
+            (source / "muse_mcp").mkdir(parents=True)
+            foreign = root / "lib" / "python9.9" / "site-packages"
+            foreign.mkdir(parents=True)
+            (foreign / "checkout.pth").write_text(str(source) + "\n",
+                                                  encoding="utf-8")
+            self.assertTrue(bridge.provides_checkout(foreign))
+            bridge.ensure_paths(prefix=root)
+            self.assertIn(str(foreign), sys.path)
+            self.assertIn(str(source), sys.path)
+            sys.path[:] = [p for p in sys.path
+                           if p not in (str(foreign), str(source))]
+
     def test_venv_site_packages_and_pth_entries_are_restored(self):
         import pathlib
         import sys
