@@ -541,13 +541,47 @@ def community_client(config):
                 body["device_id"] = device_id
             if thread is not None:
                 body["session_id"] = thread
-            # Dispatch keeps its own connection: reuse is proven for the read
-            # routes, and a message must not hinge on a connection that has
-            # already served several requests.
-            with super()._gateway(config) as gateway:
+            # The dispatch rides the connection this request already holds: it
+            # served only this send (the identity check, then the baseline
+            # read), so the write is not exposed to unrelated traffic, and the
+            # whole send pays one handshake instead of two.
+            with self._gateway(config) as gateway:
                 gateway.request("chat.stream", body=body, timeout=30)
             return {"ok": True, "sent": True}
     return AwaitedMuseClient(config_loader=lambda: config)
+
+
+def status_facts(client):
+    """Account facts from the aggregate `status` route, for older clients."""
+    status = checked(client.status(), dict)
+    if status.get("authenticated") is not True:
+        raise BridgeFailure("auth_required")
+    if not isinstance(status.get("vm_id"), str) or not status["vm_id"]:
+        raise BridgeFailure("protocol_error")
+    identity = checked(status.get("identity", {}), dict)
+    return {"identity_name": required_text(identity.get("name")),
+            "vm_id": status["vm_id"]}
+
+
+def session_facts(client, config):
+    """Prove the saved session still belongs to one account, cheaply.
+
+    `status` runs `sessions.list`, `chat.unread_count`, `identity` and
+    `vm.health`; measured, `sessions.list` alone can take ten seconds. A send
+    preflight needs only the identity and the VM its connection resolved, so it
+    asks for exactly that on the connection the request already holds.
+    """
+    gateway = getattr(client, "_gateway", None)
+    if gateway is None:
+        return status_facts(client)
+    with gateway(config) as connection:
+        identity = connection.call_json("identity")
+        vm_id = getattr(connection, "vm_id", None)
+    if not isinstance(identity, dict):
+        raise BridgeFailure("protocol_error")
+    if not isinstance(vm_id, str) or not vm_id:
+        raise BridgeFailure("protocol_error")
+    return {"identity_name": required_text(identity.get("name")), "vm_id": vm_id}
 
 
 def error_response(error):
@@ -574,10 +608,14 @@ def handle_request(request, client_factory=None):
 
 
 class Adapter:
-    def __init__(self, client, config, confirmation_attempts=3):
+    def __init__(self, client, config, confirmation_window=8.0):
         self.client = client
         self.config = config
-        self.confirmation_attempts = confirmation_attempts
+        # Wall clock, not a read count. Reads are cheap on a held connection
+        # (~0.1s), so a fixed attempt count gave up ~1s after dispatch and
+        # reported an uncertain delivery while the service was still persisting
+        # the prompt.
+        self.confirmation_window = confirmation_window
 
     def dispatch(self, request):
         self.send_started = False
@@ -609,16 +647,7 @@ class Adapter:
             # The same verification as `connect` minus `sessions.list`, which the
             # service can take ten seconds to answer. A send preflight only has
             # to prove the saved session still belongs to the same account.
-            status = checked(self.client.status(), dict)
-            if status.get("authenticated") is not True:
-                raise BridgeFailure("auth_required")
-            if not isinstance(status.get("vm_id"), str) or not status["vm_id"]:
-                raise BridgeFailure("protocol_error")
-            identity = checked(status.get("identity", {}), dict)
-            return {
-                "identity_name": required_text(identity.get("name")),
-                "vm_id": required_text(status["vm_id"]),
-            }
+            return session_facts(self.client, self.config)
         if request["op"] == "history":
             return history_rows(self.client.history(thread=request.get("thread"), limit=request["limit"]))
         if request["op"] == "tasks":
@@ -667,17 +696,13 @@ class Adapter:
                 # Verify the session in the same request as the dispatch, so a
                 # send pays one account check instead of a whole `connect`,
                 # which also lists every conversation.
-                status = checked(self.client.status(), dict)
-                if status.get("authenticated") is not True:
-                    raise BridgeFailure("auth_required")
-                identity = checked(status.get("identity", {}), dict)
-                if (status.get("vm_id") != request["expect_vm_id"]
-                        or required_text(identity.get("name"))
+                facts = session_facts(self.client, self.config)
+                if (facts["vm_id"] != request["expect_vm_id"]
+                        or facts["identity_name"]
                         != request["expect_identity_name"]):
                     raise BridgeFailure("account_changed")
-            # Confirming a send only needs the rows around the new message:
-            # each history fetch costs ~1.6-3.2s, so a small window keeps a
-            # send at a couple of round trips instead of five.
+            # Confirming a send only needs the rows around the new message, and
+            # on a held connection a read costs ~0.1s.
             baseline = history_rows(self.client.history(thread=thread, limit=25))
             baseline_seq = max((r["seq"] for r in baseline), default=0)
             baseline_ids = {r["message_id"] for r in baseline}
@@ -686,14 +711,16 @@ class Adapter:
             result = checked(self.client.send(message=message, thread=thread, fire_and_forget=True, wait_seconds=0, **device), dict)
             if result.get("sent") is not True:
                 raise BridgeFailure("protocol_error", uncertain=True)
-            for attempt in range(self.confirmation_attempts):
-                if attempt:
-                    time.sleep(0.25)
+            deadline = time.monotonic() + self.confirmation_window
+            while True:
                 rows = history_rows(self.client.history(thread=thread, limit=25))
                 for row in rows:
                     if (row["seq"] > baseline_seq and row["message_id"] not in baseline_ids
                             and row["role"] == "user" and row["text"] == message):
                         return {"sent": True, "confirmed": True, "message_id": row["message_id"]}
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
             return {"sent": bool(result.get("sent")), "confirmed": False, "message_id": None}
         raise BridgeFailure("invalid_request")
 
