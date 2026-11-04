@@ -147,6 +147,18 @@ the live stream reports a working status, and a finished status opens no watch. 
 still shows the partial reply, so the draft starts where the window did rather than where the answer did.
 Interjection remains open.
 
+*Reattach proven live (2026-11-04).* Two probes drove a real run through the bridge. A history read 22 s into the
+run returned exactly the shape the window keys on — `72826 assistant status=None`, 50 characters written — so a
+window opening at that moment sees a reply still being produced. A listen *started fresh* at +24 s (nothing
+carried over from before) returned 200 events: 196 `delta.text_append` carrying 3,959 characters, plus
+`agent.status: is responding` and `task.status: running`. A window that attaches mid-run is therefore told work is
+in progress and gets text, which is what makes the draft appear without the window that sent the message. The
+fragments are forward-only from the attach point, not a replay: at +13 s of a second run the transcript row read
+`'1. Ur'` while the first fragment was `' city of classical Greece'` (seq 80694, range to 80889), so the draft
+continues from where the window attached instead of restating what the transcript already shows. Cancelling that
+run closed the row at `interrupted` with 5,852 characters, and the cancel answer's id (`24011a78…`) again
+differed from the send's (`64bda101…`), which is the interrupted reply rather than the prompt.
+
 *Recon (live, 2026-11-04).* `chat.subscribe` answers for a personal session and delivers
 `agent.status` (`activity_code`/`activity_text`, `session_id`, `is_thread`), `task.status`
 (`status: completed`, `active_subagent_count`, `task_id`), `approvals.snapshot` and
