@@ -313,6 +313,35 @@ impl Controller {
         self.cards[index].deciding = true;
         Ok(())
     }
+    /// Each terminal code names a different problem and a different next step;
+    /// one sentence for every closure sent the user to the wrong fix.
+    fn closed_notice(code: &str) -> String {
+        let text = match code {
+            "auth_required" => {
+                "Your Muse session expired during the local-host session. Sign in again, then grant folders and start the host."
+            }
+            "link_forbidden" => {
+                "The service refused device linking for this account, so this Linux machine was not registered. Nothing was granted."
+            }
+            "link_rejected" => {
+                "The service rejected the host registration. Nothing was paired; the account and folder grants are unchanged."
+            }
+            "transport_timeout" => {
+                "The host connection timed out before registration. Check the connection, then start the host again."
+            }
+            "stopped" => "Local host stopped. Folder grants for this session ended.",
+            "" => {
+                "Host connection closed. Review your account, then grant folders and start again."
+            }
+            other => {
+                return format!(
+                    "Host connection closed ({other}). Review your account, then grant folders and start again."
+                );
+            }
+        };
+        text.to_string()
+    }
+
     fn poll(&mut self) {
         // Bounded drains keep GTK responsive even under a hostile event stream.
         for _ in 0..16 {
@@ -321,10 +350,20 @@ impl Controller {
                 Some(Ok(HostEvent::Registered)) => self.registered(self.epoch),
                 Some(Ok(HostEvent::Connecting)) => {}
                 Some(Ok(HostEvent::Invoke(invocation))) => self.invoke(invocation),
-                Some(Ok(HostEvent::Closed { .. }))
-                | Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                Some(Ok(HostEvent::Closed { code })) => {
+                    let message = Self::closed_notice(&code);
                     self.stop();
-                    self.notice="Host connection closed. Review your account, then grant folders and start again.".into();
+                    // The code is the only explanation of a closure, so keep it
+                    // in the activity log after `stop` has reset the session.
+                    self.push_log(format!("{} host closed \u{00b7} {code}", now_hms()));
+                    self.notice = message;
+                    break;
+                }
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    self.stop();
+                    self.notice =
+                        "The host worker stopped without reporting a reason. Review your account, then grant folders and start again."
+                            .into();
                     break;
                 }
                 _ => break,
@@ -1265,6 +1304,21 @@ for line in sys.stdin:
             "stop must reset prior session entries"
         );
         assert!(host.log.iter().any(|e| e.contains("grants revoked")));
+    }
+    #[test]
+    fn closed_codes_name_the_actual_cause() {
+        // A rejected link is not an expired session; one sentence for every
+        // closure sent the user to the wrong fix.
+        assert!(Controller::closed_notice("auth_required").contains("Sign in again"));
+        assert!(Controller::closed_notice("link_forbidden").contains("refused device linking"));
+        assert!(
+            Controller::closed_notice("link_rejected").contains("rejected the host registration")
+        );
+        assert!(Controller::closed_notice("transport_timeout").contains("timed out"));
+        assert!(Controller::closed_notice("stopped").contains("grants for this session ended"));
+        assert!(Controller::closed_notice("").contains("Host connection closed"));
+        assert!(Controller::closed_notice("mystery_code").contains("mystery_code"));
+        assert!(!Controller::closed_notice("link_rejected").contains("Sign in again"));
     }
     #[test]
     fn activity_log_records_expiry_and_caps_oldest() {
