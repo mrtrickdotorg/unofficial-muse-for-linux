@@ -300,6 +300,7 @@ def validate_request(request):
                "watch": {"thread", "limit", "timeout", "after"},
                "activity": {"timeout"},
                "cancel": set(),
+               "approvals": set(),
                "tasks": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
@@ -633,6 +634,121 @@ def activity_rows(client, config, timeout_ms):
     return {"events": rows}
 
 
+def cookie_header(config):
+    """The jar as a Cookie header, for a service that wants text not a path.
+
+    `secure_config` sealed an HttpOnly-compatible copy at this descriptor, so the
+    jar is read from memory here and nothing is written back to disk.
+    """
+    path = config.get("cookies_file")
+    if not isinstance(path, str) or not path:
+        raise BridgeFailure("invalid_request")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as file:
+            text = file.read(MAX_REQUEST)
+    except OSError:
+        raise BridgeFailure("auth_required") from None
+    pairs = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) == 7 and fields[5] and fields[6]:
+            pairs.append("{}={}".format(fields[5], fields[6]))
+    if not pairs:
+        raise BridgeFailure("auth_required")
+    return "; ".join(pairs)
+
+
+def sentinel_gateway_class(pinned):
+    """A gateway to the sentinel service, which is the only one with approvals.
+
+    `muse_mcp.client`, which this bridge otherwise imports, always addresses the
+    daemon service, so `egress.approvals` dies there with a frame mismatch.
+    `muse.py` routes by the route's declared service, but its reader parses every
+    frame as a `ServiceResponse`; a sentinel notification is not one, and the
+    protobuf decode aborts the whole read. Only the reader is replaced here: the
+    parent request loop already ignores frames whose `stream_id` was not the one
+    it sent, so an empty frame is skipped rather than fatal.
+    """
+
+    class SentinelGateway(pinned.Gateway):
+        def _read_frame(self):
+            with self._recv_lock:
+                data, _flags = self.ws.recv()
+                point = bytes(self.noise.decrypt(bytes(data)))
+            transport = pinned.NoiseTransportFrame()
+            transport.ParseFromString(point)
+            response = pinned.ServiceResponse()
+            response.ParseFromString(transport.payload)
+            frame = pinned.ServiceFrame()
+            try:
+                frame.ParseFromString(response.payload)
+            except Exception:  # noqa: BLE001 - a notification is not a frame
+                return pinned.ServiceFrame()
+            return frame
+
+    return SentinelGateway
+
+
+def sentinel_gateway(config):
+    """Open one sentinel connection for a single read."""
+    import sys
+
+    for path in fallback_paths():
+        if path not in sys.path:
+            sys.path.append(path)
+    try:
+        import muse as pinned
+    except (ImportError, OSError) as exc:
+        raise BridgeFailure("bridge_unavailable", detail=import_detail(exc, sys.path)) from None
+    gateway = sentinel_gateway_class(pinned)
+    return gateway(cookies=cookie_header(config), vm_id=config.get("vm_id"))
+
+
+def approval_rows(payload):
+    """Project pending approvals, keeping the service's own vocabulary.
+
+    The Mac five-outcome words (`allow_once` ... `deny`) are the service's, so
+    they travel unchanged instead of being translated into a parallel dialect.
+    Only what a person needs in order to decide is kept: what is asking, for
+    what, and every detail row the request published about itself.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    pending = payload.get("pending_approvals")
+    if not isinstance(pending, list):
+        raise BridgeFailure("protocol_error")
+    rows = []
+    for item in pending:
+        if not isinstance(item, dict):
+            raise BridgeFailure("protocol_error")
+        display = item.get("display") if isinstance(item.get("display"), dict) else {}
+        details = []
+        for row in display.get("detail_rows") or []:
+            if not isinstance(row, dict):
+                continue
+            label = optional_text(row.get("label") or row.get("name"))
+            value = optional_text(row.get("value") or row.get("text"))
+            if label and value:
+                details.append({"label": label[:80], "value": value[:400]})
+        approval_id = item.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id.strip():
+            # An approval with no id cannot be decided safely or at all.
+            raise BridgeFailure("protocol_error")
+        rows.append({
+            "approval_id": approval_id,
+            "kind": optional_text(item.get("kind") or item.get("action")),
+            "decision": optional_text(item.get("decision")),
+            "always_scope": optional_text(item.get("always_scope")),
+            "attention_mode": optional_text(item.get("attention_mode")),
+            "title": optional_text(display.get("title")) or "",
+            "summary": optional_text(display.get("summary")) or "",
+            "details": details,
+        })
+    return {"pending": rows}
+
+
 def updated_at_text(session):
     millis = session.get("updated_at_ms")
     if isinstance(millis, (int, float)) and not isinstance(millis, bool):
@@ -749,6 +865,16 @@ class Adapter:
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
             }
+        if request["op"] == "approvals":
+            # Read-only, and deliberately on its own connection: listing what the
+            # agent is asking for must never decide it, and the sentinel service
+            # is not the daemon connection the rest of this adapter shares.
+            gateway = sentinel_gateway(self.config)
+            try:
+                payload = gateway.call_json("egress.approvals", timeout=20)
+            finally:
+                gateway.close()
+            return approval_rows(payload)
         if request["op"] == "activity":
             return activity_rows(self.client, self.config, request["timeout"])
         if request["op"] == "cancel":

@@ -216,6 +216,22 @@ must not be presented as reliable. `egress.approval.decide` is `POST /approvals/
 the same service — a write that must go through an explicit user decision and P2's policy model, never a
 convenience retry and never from a background refresh.
 
+*Read path fixed and verified (2026-11-04).* The bridge now opens the sentinel service itself, through
+`sentinel_gateway`: it imports the pinned `muse.py` gateway, which routes `egress.approvals` to service 1, and
+replaces **only** the frame reader so a notification payload becomes an empty `ServiceFrame`. The parent request
+loop already ignores frames whose `stream_id` is not the one it sent, so no request logic is duplicated and the
+fix cannot drift from the pinned implementation. The new read-only `approvals` operation projects
+`pending_approvals` into `approval_id`, `kind`, `decision`, `always_scope`, `attention_mode`, `title`, `summary`
+and `detail_rows` (label/value pairs), keeping the service's own five-outcome vocabulary instead of inventing a
+parallel one; `recent_approvals` is deliberately not exposed, and a row with no id fails closed as
+`protocol_error` because it could not be decided safely. Live: `{"op": "approvals"}` answered `ok: true` in 4 s
+with `pending: 0` — the first clean sentinel read through our own code, where the earlier attempts died with
+`DecodeError`. An empty list is the present state, not proof that the route reports rows when they exist; the
+projection's shape still rests on the earlier 7-pending snapshot. Suite: 90 tests, including the
+notification-frame regression, the sentinel-route/close test and the fail-closed id test. Deciding
+(`POST /approvals/{approval_id}/decide`) remains unimplemented and must arrive with an explicit per-approval UI
+decision, never a convenience retry and never from a background refresh.
+
 ### P3 — Reach the capabilities we already have (M)
 
 *Gap:* we run screenshot, portal input, a browser extension, CalDAV/IMAP and a local reminder store —

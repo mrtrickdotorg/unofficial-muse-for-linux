@@ -755,6 +755,100 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("SECRET", str(response))
 
 
+class ApprovalTests(unittest.TestCase):
+    def test_approvals_are_projected_in_the_service_vocabulary_only(self):
+        bridge = load_bridge()
+        payload = {
+            "pending_approvals": [{
+                "approval_id": "a-1", "decision": "allow_always",
+                "always_scope": "destination_domain", "attention_mode": "blocking",
+                "access_token": "SECRET",
+                "display": {"title": "Connect to example.com", "summary": "Outbound HTTPS",
+                            "detail_rows": [{"label": "Host", "value": "example.com"},
+                                            {"label": "Path", "value": "/x", "raw": "SECRET"}]}}],
+            "recent_approvals": [{"approval_id": "old", "decision": "allow_always"}],
+        }
+        self.assertEqual(bridge.approval_rows(payload), {"pending": [{
+            "approval_id": "a-1", "kind": None, "decision": "allow_always",
+            "always_scope": "destination_domain", "attention_mode": "blocking",
+            "title": "Connect to example.com", "summary": "Outbound HTTPS",
+            "details": [{"label": "Host", "value": "example.com"},
+                        {"label": "Path", "value": "/x"}]}]})
+        self.assertNotIn("SECRET", str(bridge.approval_rows(payload)))
+
+    def test_an_approval_without_an_id_fails_closed(self):
+        bridge = load_bridge()
+        for payload in ({}, {"pending_approvals": [{"decision": "allow_once"}]},
+                        {"pending_approvals": "nope"}):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.approval_rows(payload)
+            self.assertEqual(caught.exception.code, "protocol_error")
+
+    def test_the_approvals_route_asks_the_sentinel_service_and_closes_it(self):
+        bridge = load_bridge()
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["method"] = method
+                seen["timeout"] = kwargs.get("timeout")
+                return {"pending_approvals": []}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch({"op": "approvals"})
+        self.assertEqual(result, {"pending": []})
+        self.assertEqual(seen["method"], "egress.approvals")
+        self.assertEqual(seen["timeout"], 20)
+        self.assertTrue(seen["closed"])
+
+    def test_a_sentinel_notification_is_skipped_instead_of_aborting_the_read(self):
+        # The defect this guards: the pinned reader parses every frame as a
+        # ServiceResponse, so a notification frame raised DecodeError and the
+        # whole approvals read died.
+        bridge = load_bridge()
+        import sys
+        import threading
+        import types
+        from unittest.mock import patch
+
+        class ServiceFrame:
+            def __init__(self):
+                self.stream_id = 0
+
+            def ParseFromString(self, data):
+                raise ValueError("DecodeError: not a ServiceFrame")
+
+        class Message:
+            def __init__(self):
+                self.payload = b""
+
+            def ParseFromString(self, data):
+                self.payload = data
+
+        class Gateway:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self._recv_lock = threading.Lock()
+                self.noise = types.SimpleNamespace(decrypt=lambda data: data)
+                self.ws = types.SimpleNamespace(recv=lambda: (b"ciphertext", 0))
+
+        module = types.ModuleType("muse")
+        module.NoiseTransportFrame = Message
+        module.ServiceResponse = Message
+        module.ServiceFrame = ServiceFrame
+        module.Gateway = Gateway
+        with patch.dict(sys.modules, {"muse": module}), \
+                patch.object(bridge, "cookie_header", return_value="a=b"):
+            gateway = bridge.sentinel_gateway({"cookies_file": "/dev/null"})
+            frame = gateway._read_frame()
+        self.assertIsInstance(frame, ServiceFrame)
+        self.assertEqual(frame.stream_id, 0)
+
+
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
         bridge = load_bridge()
