@@ -379,21 +379,20 @@ impl<A, H, T> Controller<A, H, T> {
         true
     }
 
-    /// A live status line only ever repeats what an event said. An empty read
-    /// clears it rather than leaving a stale "Is working" on screen after the
-    /// work has finished.
     /// Clears the live line once the transcript shows the turn has finished.
     fn note_turn_finished(&mut self) {
         self.live_status.clear();
     }
 
+    /// A live status line only ever repeats a status an event reported. An empty
+    /// read, or one that carried only settled states, leaves nothing on screen
+    /// rather than reporting a finished state as present work.
     fn apply_live(&mut self, result: Result<Vec<muse_account::LiveEvent>, String>) {
         self.live_status = match result {
             Ok(events) => events
                 .iter()
                 .rev()
-                .find_map(|event| event.status.clone().or_else(|| event.text.clone()))
-                .map(|text| format!("Agent \u{b7} {text}"))
+                .find_map(progress_text)
                 .unwrap_or_default(),
             Err(error) => format!("Live status unavailable: {error}"),
         };
