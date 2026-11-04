@@ -46,8 +46,11 @@ permission to *try* it, never proof that a personal session is entitled to it.
 ## Route availability
 
 Reconnaissance result, recorded so later phases start from facts rather than guesses. "Table" means the
-route is declared in the pinned client; "live" means an authenticated probe has actually answered —
-currently only `identity`, `chat.history`, `sessions.list`, `tasks.list` and `tasks.runs` are live.
+route is declared in the pinned client; "live" means an authenticated probe has actually answered.
+Live today: `identity`, `chat.history`, `sessions.list`, `tasks.list`, `tasks.runs`, `activity.list`
+(`days=3`), `skills.list` (68 skills) and `subagents.list` (`active=0 recent=20`). `connectors.list`
+answers **500 `internal_error`** — a service-side failure, so P7 is blocked on that bug rather than on
+our entitlement; retry it before building a connector UI.
 
 | Phase | Routes in the table | First live probe |
 |---|---|---|
