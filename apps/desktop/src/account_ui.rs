@@ -2140,6 +2140,7 @@ mod native {
                     Operation::History => " · loading scoped history…",
                     Operation::Send => " · dispatching once…",
                     Operation::Login => " · browser sign-in in progress…",
+                    Operation::Cancel => " \u{b7} stopping the run\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
