@@ -64,7 +64,7 @@ fn account_surface_visibility(connected: bool) -> (bool, bool) {
 /// work in progress, so a completed assistant message ends it: leaving "Is
 /// working" (or "Needs approval") on screen afterwards is a lie about the
 /// present, not a stale cache.
-fn history_closes_turn(rows: &[HistoryMessage]) -> bool {
+fn history_closes_turn(rows: &[muse_account::HistoryMessage]) -> bool {
     rows.last()
         .is_some_and(|row| row.role == "assistant" && row.status.as_deref() == Some("completed"))
 }
