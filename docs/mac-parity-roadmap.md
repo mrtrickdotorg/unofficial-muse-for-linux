@@ -104,6 +104,18 @@ threads; persist in-flight state so a restart does not lose the thread.
 *Gate:* an answer appears incrementally; interjecting during work is accepted; cancel stops the work
 and is verified through history; restarting the app reattaches to the same run.
 
+*Recon (live, 2026-11-04).* `chat.subscribe` answers for a personal session and delivers
+`agent.status` (`activity_code`/`activity_text`, `session_id`, `is_thread`), `task.status`
+(`status: completed`, `active_subagent_count`, `task_id`), `approvals.snapshot` and
+`model_lock.updated`, each with a monotonically increasing `seq`. The pinned CLI records in its own
+comments that **threaded replies never arrive as live events**, that live chat events use `delta.*`
+shapes rather than `message.*`, and that only history carries the `reply_to` discriminator. So the
+design is fixed rather than guessed: reply text stays on `chat.history` polling (exactly what `watch`
+already does) and the live stream feeds **status, deltas and approvals**. Consequence for honesty:
+incremental *text* cannot be claimed as token-by-token until a `delta.*` event is actually observed
+during a run, and the status surface must not be derived from wall-clock guesses while `chat.subscribe`
+is available.
+
 ### P2 — The approval and policy engine (L)
 
 *Gap:* the Mac app has five outcomes per request (Allow once / this task / this site / always / deny),
@@ -121,6 +133,12 @@ do to my machine" without secrets.
 
 *Why here:* every later capability inherits this. Building computer use or connectors first means
 rebuilding their consent paths afterwards.
+
+*Recon (live).* `approvals.snapshot` already delivers `pending_approvals` and `recent_approvals` rows
+carrying `approval_id`, `decision` (`allow_always` observed), `always_scope` (`destination_domain`),
+`attention_mode` and `display.detail_rows`. That is the Mac five-outcome model's own vocabulary, so our
+policy store should mirror those field names instead of inventing parallel ones, and the deciding route
+is `egress.approval.decide`. Local broker approvals remain ours; only the *shape* is borrowed.
 
 ### P3 — Reach the capabilities we already have (M)
 
