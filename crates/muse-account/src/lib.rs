@@ -436,13 +436,34 @@ impl AccountClient {
             .host
             .clone()
             .unwrap_or_else(|| host_socket(&self.config.config_dir));
-        let stream = match UnixStream::connect(&socket) {
-            Ok(stream) => stream,
-            Err(_) => match self.start_host().and_then(|()| wait_for_socket(&socket)) {
-                Some(stream) => stream,
-                None => return Ok(None),
-            },
-        };
+        if let Ok(stream) = UnixStream::connect(&socket) {
+            match self.exchange_on(stream, request, sending) {
+                Ok(line) => return Ok(Some(line)),
+                // A socket left behind by a host that has just exited: a read is
+                // idempotent and can be retried on a fresh host, a send cannot
+                // be replayed because it may already have been written.
+                Err(_) if !sending => return self.start_and_exchange(&socket, request),
+                Err(error) => return Err(error),
+            }
+        }
+        self.start_and_exchange(&socket, request)
+    }
+    fn start_and_exchange(
+        &self,
+        socket: &Path,
+        request: &[u8],
+    ) -> Result<Option<Vec<u8>>, AccountError> {
+        match self.start_host().and_then(|()| wait_for_socket(socket)) {
+            Some(stream) => self.exchange_on(stream, request, false).map(Some),
+            None => Ok(None),
+        }
+    }
+    fn exchange_on(
+        &self,
+        stream: UnixStream,
+        request: &[u8],
+        sending: bool,
+    ) -> Result<Vec<u8>, AccountError> {
         let fail = |code: ErrorCode| AccountError::new(code, sending);
         let started = Instant::now();
         stream
@@ -466,7 +487,13 @@ impl AccountClient {
             .write_all(request)
             .and_then(|()| writer.write_all(b"\n"))
             .and_then(|()| writer.flush())
-            .map_err(|_| fail(ErrorCode::BridgeFailure))?;
+            .map_err(|error| {
+                AccountError::with_detail(
+                    ErrorCode::BridgeFailure,
+                    sending,
+                    format!("host write: {error}"),
+                )
+            })?;
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();
         loop {
@@ -481,10 +508,16 @@ impl AccountClient {
                 return Err(fail(ErrorCode::Timeout));
             }
             match reader.read_until(b'\n', &mut line) {
-                Ok(0) => return Err(fail(ErrorCode::BridgeFailure)),
+                Ok(0) => {
+                    return Err(AccountError::with_detail(
+                        ErrorCode::BridgeFailure,
+                        sending,
+                        "host closed the connection".to_owned(),
+                    ));
+                }
                 Ok(_) if line.last() == Some(&b'\n') => {
                     line.pop();
-                    return Ok(Some(line));
+                    return Ok(line);
                 }
                 Ok(_) => {
                     if line.len() > MAX_RESPONSE {
@@ -498,7 +531,13 @@ impl AccountClient {
                             | std::io::ErrorKind::TimedOut
                             | std::io::ErrorKind::Interrupted
                     ) => {}
-                Err(_) => return Err(fail(ErrorCode::BridgeFailure)),
+                Err(error) => {
+                    return Err(AccountError::with_detail(
+                        ErrorCode::BridgeFailure,
+                        sending,
+                        format!("host read: {error}"),
+                    ));
+                }
             }
         }
     }
@@ -528,6 +567,14 @@ impl AccountClient {
         }
         let mut command = Command::new(&self.config.python);
         bridge_environment(&mut command);
+        // SAFETY: prctl is async-signal-safe and only gives the child a
+        // parent-death signal of its own; nothing here touches parent state.
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
         command
             .arg("-I")
             .arg(&script)
@@ -607,7 +654,9 @@ fn bridge_environment(command: &mut Command) {
 
 fn wait_for_socket(path: &Path) -> Option<UnixStream> {
     let started = Instant::now();
-    while started.elapsed() < Duration::from_secs(3) {
+    // First launch imports the bridge and opens two connections; give the
+    // process a moment to bind before deciding it is absent.
+    while started.elapsed() < Duration::from_secs(5) {
         if let Ok(stream) = UnixStream::connect(path) {
             return Some(stream);
         }

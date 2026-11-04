@@ -301,16 +301,10 @@ def main(argv=None):
                 return
             stop.wait(1.0)
 
-    def watch_stdin():
-        try:
-            while sys.stdin.buffer.read(4096):
-                pass
-        except Exception:
-            pass
-        stop.set()
-
+    # No stdin watcher: the launcher gives the host /dev/null, which would look
+    # like an immediate EOF. The parent-death signal and this ppid check are the
+    # lifetime contract; the idle timeout is the backstop.
     threading.Thread(target=watch_parent, daemon=True).start()
-    threading.Thread(target=watch_stdin, daemon=True).start()
     host = Host(config_dir)
     try:
         serve(host, path, stop, idle_seconds=args.idle_seconds or None)
