@@ -38,6 +38,9 @@ struct Controller<A, H, T> {
     history_detail: String,
     tasks_notice: String,
     send_notice: String,
+    /// Live agent status, as reported by the service. Empty means nothing was
+    /// reported; it is never filled in from a timer or a guess.
+    live_status: String,
     pending_send: Option<PendingSend>,
 }
 
@@ -141,6 +144,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             history_detail: String::new(),
             tasks_notice: "No scheduled-task history requested.".into(),
             send_notice: String::new(),
+            live_status: String::new(),
             pending_send: None,
         }
     }
@@ -337,6 +341,21 @@ impl<A, H, T> Controller<A, H, T> {
         }
         self.apply_history(result);
         true
+    }
+
+    /// A live status line only ever repeats what an event said. An empty read
+    /// clears it rather than leaving a stale "Is working" on screen after the
+    /// work has finished.
+    fn apply_live(&mut self, result: Result<Vec<muse_account::LiveEvent>, String>) {
+        self.live_status = match result {
+            Ok(events) => events
+                .iter()
+                .rev()
+                .find_map(|event| event.status.clone().or_else(|| event.text.clone()))
+                .map(|text| format!("Agent \u{b7} {text}"))
+                .unwrap_or_default(),
+            Err(error) => format!("Live status unavailable: {error}"),
+        };
     }
 
     fn apply_history(&mut self, result: Result<Vec<H>, String>) {
@@ -540,6 +559,7 @@ mod native {
         prompt: gtk::Entry,
         send: gtk::Button,
         spinner: gtk::Spinner,
+        live_notice: gtk::Label,
     }
 
     enum Reply {
@@ -550,6 +570,7 @@ mod native {
             Result<TasksSnapshot, String>,
         ),
         History(Result<Vec<HistoryMessage>, String>),
+        Live(Result<Vec<muse_account::LiveEvent>, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -1172,6 +1193,10 @@ mod native {
         chat.append(&toolbar);
         let scope_label = label("No conversation selected until account connection.");
         chat.append(&scope_label);
+        let live_notice = label("");
+        live_notice.add_css_class("chat-status");
+        live_notice.set_visible(false);
+        chat.append(&live_notice);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
@@ -1252,6 +1277,7 @@ mod native {
             threads,
             threads_key: RefCell::new(String::new()),
             scope_label,
+            live_notice,
             refresh,
             older,
             history,
@@ -1655,6 +1681,25 @@ mod native {
             });
         }
 
+        /// One bounded live read feeding the status line. Never the reply: the
+        /// service does not deliver threaded replies as live events, so the
+        /// transcript keeps polling history while this reports progress.
+        fn poll_live(self: &Rc<Self>) {
+            let Some(client) = self.client.borrow().clone() else {
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_poll() else {
+                return;
+            };
+            self.launch(ticket, move || {
+                let result = client.activity(Duration::from_secs(4));
+                match result {
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    other => Reply::Live(other.map(|live| live.events).map_err(|e| e.to_string())),
+                }
+            });
+        }
+
         fn send_message(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
@@ -1732,6 +1777,18 @@ mod native {
                 };
                 Reply::Send(result)
             });
+            // Status is about work in progress, so ask shortly after the
+            // dispatch and once more while the answer is being produced. Each
+            // attempt is bounded, and a busy slot simply skips it.
+            for delay in [2_000u64, 8_000] {
+                let weak = Rc::downgrade(self);
+                gtk::glib::timeout_add_local(Duration::from_millis(delay), move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.poll_live();
+                    }
+                    gtk::glib::ControlFlow::Break
+                });
+            }
         }
 
         fn launch(self: &Rc<Self>, ticket: Ticket, work: impl FnOnce() -> Reply + Send + 'static) {
@@ -1845,6 +1902,9 @@ mod native {
                     }
                     Reply::History(result) => {
                         state.finish_history(ticket, result);
+                    }
+                    Reply::Live(result) => {
+                        state.apply_live(result);
                     }
                     Reply::Send(result) | Reply::SendConnectionError(result) => {
                         let confirmed = matches!(&result, SendOutcome::Confirmed);
@@ -2022,6 +2082,8 @@ mod native {
             self.history_notice.set_text(&state.history_notice);
             self.history_notice
                 .set_visible(!state.history_notice.is_empty());
+            self.live_notice.set_text(&state.live_status);
+            self.live_notice.set_visible(!state.live_status.is_empty());
             self.tasks_notice.set_text(&state.tasks_notice);
             self.send_notice.set_text(&state.send_notice);
             self.send_notice.set_visible(!state.send_notice.is_empty());
