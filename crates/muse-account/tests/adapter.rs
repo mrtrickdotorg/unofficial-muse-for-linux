@@ -58,6 +58,32 @@ print(json.dumps({'ok':True,'data':[{'message_id':'msg', 'seq':9, 'role':'assist
 }
 
 #[test]
+fn activity_reads_live_status_without_claiming_the_reply() {
+    use std::time::Duration;
+    let f = Fixture::new(
+        r#"
+import json, sys
+r = json.load(sys.stdin)
+assert r['op'] == 'activity' and r['timeout'] == 8000
+print(json.dumps({'ok': True, 'data': {'events': [
+    {'event': 'agent.status', 'seq': 5, 'status': 'Is working', 'session_id': 's1'},
+    {'event': 'task.status', 'seq': 6, 'status': 'completed'}]}}))
+"#,
+    );
+    let live = f.client().activity(Duration::from_secs(8)).unwrap();
+    assert_eq!(live.events.len(), 2);
+    assert_eq!(live.events[0].event, "agent.status");
+    assert_eq!(live.events[0].status.as_deref(), Some("Is working"));
+    assert_eq!(live.events[0].session_id.as_deref(), Some("s1"));
+    assert_eq!(live.events[1].seq, Some(6));
+    assert!(live.events[1].text.is_none());
+    // A status read is bounded: no zero-length and no minute-long listens.
+    assert!(f.client().activity(Duration::ZERO).is_err());
+    assert!(f.client().activity(Duration::from_secs(31)).is_err());
+    assert!(f.client().activity(Duration::from_millis(30_001)).is_err());
+}
+
+#[test]
 fn cancelled_device_lease_never_dispatches_and_interrupts_inflight_bridge() {
     use std::{
         sync::{
