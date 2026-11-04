@@ -2728,6 +2728,21 @@ mod tests {
     }
 
     #[test]
+    fn an_in_flight_reply_is_not_finished() {
+        // Observed live: while a turn produces, history carries the assistant row
+        // with no status at all (seq 72546), and only later a terminal one.
+        for status in ["", "running", "streaming", "online"] {
+            assert!(
+                !reply_finished(status),
+                "{status:?} must not count as finished"
+            );
+        }
+        for status in ["completed", "Interrupted", "cancelled", "failed"] {
+            assert!(reply_finished(status), "{status:?} must count as finished");
+        }
+    }
+
+    #[test]
     fn only_a_finished_reply_closes_the_turn() {
         // `interrupted` is what a cancelled run ends as, observed live: the
         // reply stopped mid-list and never completed.

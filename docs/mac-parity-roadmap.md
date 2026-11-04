@@ -115,6 +115,17 @@ against the live service with nothing running it answered `{"cancelled": false, 
 the service states whether anything was actually stopped, so the window reports that answer ("nothing
 was running to stop") rather than treating a press as a stop.
 
+*Mid-run shape (live, 2026-11-04).* While a turn produces, history already carries the assistant row with
+**no status**: seq `72546`, role `assistant`, status absent, text "1. In August". A terminal status
+(`completed` / `interrupted` / `failed` / `cancelled`) replaces it later. So "in flight" is exactly
+`role == assistant && status not terminal`, and treating an absent status as finished would be wrong in the
+opposite direction — the window's finish-check now pins both directions. Two probes then sent a second
+message mid-turn: the service accepted it (`sent: true`), but in both the first reply had already reached a
+terminal status when the second landed, so **steering a live turn stays unproven**, and one acceptance came
+back `confirmed: false` — accepted but unconfirmed inside the 8 s window, which the window reports as
+uncertain rather than as delivered. Incremental rendering is unproven for the same reason: the partial row
+existed, but its text did not change across the reads taken.
+
 *Gate item closed (live, 2026-11-04).* A prompt asking for 120 numbered lines was dispatched and
 confirmed (`message_id 1f7a5d61…`), then `chat.cancel` was sent 4 s later and answered
 `{"cancelled": true, "message_id": "2c84f68b…"}`. History then showed the reply at `interrupted` with
