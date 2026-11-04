@@ -31,6 +31,10 @@ class FakeBridge:
         self.clients = 0
         self.thread_calls = 0
         self.fail_threads_next = False
+        self.history_calls = 0
+        self.fail_history_next = False
+        self.fail_send_next = False
+        self.sends = []
         self.session_dirs = []
         self._contextmanager = contextmanager
         self.bridge = load("account_bridge_for_host", "muse_account_bridge.py")
@@ -61,7 +65,23 @@ class FakeBridge:
                         "identity": {"name": "Test User"}}
 
             def history(self, thread=None, limit=20):
-                return fake.rows
+                fake.history_calls += 1
+                if fake.fail_history_next:
+                    fake.fail_history_next = False
+                    raise RuntimeError("SECRET")
+                rows = list(fake.rows)
+                if fake.sends:
+                    rows.append({"message_id": "new", "seq": 2, "role": "user",
+                                 "text": "hello"})
+                return rows
+
+            def send(self, message, thread=None, fire_and_forget=True,
+                     wait_seconds=0, device_id=None):
+                fake.sends.append({"message": message, "thread": thread})
+                if fake.fail_send_next:
+                    fake.fail_send_next = False
+                    raise RuntimeError("SECRET")
+                return {"ok": True, "sent": True}
 
             def threads(self, include_archived=False):
                 fake.thread_calls += 1
@@ -104,6 +124,27 @@ class HostTests(unittest.TestCase):
         host.handle_line(json.dumps({"op": "history", "limit": 20}).encode())
         host.handle_line(json.dumps({"op": "watch", "limit": 20, "timeout": 1}).encode())
         self.assertEqual(fake.clients, 2)
+
+    def test_a_pre_dispatch_failure_reconnects_and_dispatches_exactly_once(self):
+        # A held connection that has gone stale must not cost the message: the
+        # baseline read fails before anything is dispatched, so one retry on a
+        # fresh connection is safe and still sends a single time.
+        _, host, fake, _jar, _ = self.host()
+        fake.fail_history_next = True
+        reply = host.handle_line(json.dumps({"op": "send", "message": "hello"}).encode())
+        self.assertTrue(reply["ok"], reply)
+        self.assertTrue(reply["data"]["confirmed"])
+        self.assertEqual(len(fake.sends), 1, "one dispatch, not two")
+        self.assertEqual(fake.clients, 2, "the stale connection was replaced")
+
+    def test_an_uncertain_failure_is_never_retried(self):
+        _, host, fake, _jar, _ = self.host()
+        fake.fail_send_next = True
+        reply = host.handle_line(json.dumps({"op": "send", "message": "hello"}).encode())
+        self.assertFalse(reply["ok"])
+        self.assertTrue(reply["error"]["uncertain"])
+        self.assertEqual(len(fake.sends), 1)
+        self.assertNotIn("SECRET", str(reply))
 
     def test_the_snapshot_shares_the_control_connection_and_a_failure_drops_it(self):
         _, host, fake, _jar, _ = self.host()

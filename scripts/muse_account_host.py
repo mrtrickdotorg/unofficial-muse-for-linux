@@ -121,19 +121,34 @@ class Connection:
     def dispatch(self, request):
         with self.lock:
             try:
-                with self.bridge.secure_config(self.config_dir) as config:
-                    digest = cookie_digest(config.get("cookies_file"))
-                    if self.client is None or digest != self.digest:
-                        self.close()
-                        self._open(config, digest)
-                    return self.bridge.Adapter(self.client, config).dispatch(request)
+                return self._dispatch(request)
             except Exception as exc:
                 error = self.bridge.classify_exception(exc)
-                # A transport or session failure poisons the held connection;
-                # a refused request (invalid, changed account) does not.
-                if error.code in RETRY_CODES:
-                    self.close()
-                raise error from None
+                if error.code not in RETRY_CODES:
+                    raise error from None
+                # The held connection is no longer trustworthy.
+                self.close()
+                if error.uncertain:
+                    # The service may already have run it: never replay.
+                    raise error from None
+                # Nothing reached the service (the bridge clears `uncertain`
+                # until it dispatches), so reconnecting and asking once more is
+                # safe even for a send.
+                try:
+                    return self._dispatch(request)
+                except Exception as retry_exc:
+                    retry_error = self.bridge.classify_exception(retry_exc)
+                    if retry_error.code in RETRY_CODES:
+                        self.close()
+                    raise retry_error from None
+
+    def _dispatch(self, request):
+        with self.bridge.secure_config(self.config_dir) as config:
+            digest = cookie_digest(config.get("cookies_file"))
+            if self.client is None or digest != self.digest:
+                self.close()
+                self._open(config, digest)
+            return self.bridge.Adapter(self.client, config).dispatch(request)
 
     def _open(self, config, digest):
         client = self.bridge.community_client(config)
