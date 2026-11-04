@@ -146,21 +146,20 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(fake.sends), 1)
         self.assertNotIn("SECRET", str(reply))
 
-    def test_the_snapshot_shares_the_control_connection_and_a_failure_drops_it(self):
+    def test_the_snapshot_shares_the_control_connection_and_recovers_from_a_failure(self):
         _, host, fake, _jar, _ = self.host()
         host.handle_line(b'{"op": "connect"}')
         reply = host.handle_line(b'{"op": "connect"}')
         self.assertTrue(reply["ok"], reply)
         self.assertEqual(fake.clients, 1)
         self.assertEqual(len(reply["data"]["threads"]), 1)
+        # A failure before anything was dispatched is retried on a fresh
+        # connection, so the user sees an answer rather than an error.
         fake.fail_threads_next = True
         reply = host.handle_line(b'{"op": "connect"}')
-        self.assertFalse(reply["ok"])
-        self.assertEqual(reply["error"]["code"], "bridge_failure")
-        self.assertNotIn("SECRET", str(reply))
-        # The failed connection was dropped, so the next request opens a fresh one.
-        host.handle_line(b'{"op": "history", "limit": 5}')
+        self.assertTrue(reply["ok"], reply)
         self.assertEqual(fake.clients, 2)
+        self.assertNotIn("SECRET", str(reply))
 
     def test_a_changed_cookie_jar_replaces_the_held_connection(self):
         _, host, fake, jar, _ = self.host()
