@@ -34,10 +34,11 @@ handshake), typed errors with the no-echo rule, private-only session storage, th
 - **Fresh sign-in — proven live.** An isolated-browser sign-in completed against the real service; the
   read-only probe then returned `connected=true threads=4 history_messages=20 schedules=32 runs=25`.
   Expiry and revocation now have their own state in the UI instead of a silent failure.
-- **Live registration — the last open gate.** A live connector check reached the gateway with the
-  bounded receiver installed, but the service has never answered a `link.register`, so no agent has
-  invoked a Linux command. Socket creation is still not registration, and this machine is not
-  paired until an acknowledgement arrives.
+- **Live registration — proven live.** Pressing Start in the packaged app produced a real
+  registration acknowledgement (`Registered with Muse`) for a granted scratch folder, and the device
+  now keeps one persisted identity instead of a new one per start. **Still unproven:** an actual agent
+  invocation. The session activity log stayed empty after registration, so no cloud agent has yet
+  dispatched a Linux command and no result has round-tripped.
 
 Everything below therefore begins with **route reconnaissance**, not with a UI. The pinned community
 client carries a static route table (`muse_mcp.client.ROUTES`, 258 entries); a route existing there is
@@ -87,9 +88,9 @@ gateway for its version/capabilities once and fail with a specific drift error; 
 *Gate:* packaged app performs a fresh interactive sign-in, survives expiry and revocation with clear
 states, and reports live registration for a scratch folder. Every later phase cites this evidence.
 
-*Done:* fresh sign-in, the expired-session state, and one persisted device identity per installation
-(`local-host-node-id`, owner-only, staged-then-renamed) instead of a new random node id per start.
-*Open:* the registration acknowledgement itself.
+*Done:* fresh sign-in, the expired-session state, one persisted device identity per installation
+(`local-host-node-id`, owner-only, staged-then-renamed), and live registration of a scratch folder.
+*Open:* the first real agent invocation through that registration, which P3's gate depends on.
 
 ### P1 — The live conversation (M)
 

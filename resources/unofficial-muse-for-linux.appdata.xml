@@ -8,7 +8,7 @@
   <description>
     <p>An independent native GTK4 companion prototype for the user's existing Muse personal agent, not affiliated with or supported by Meta.</p>
     <p>Native shared chat/history and read-only scheduled-task/run lists use an explicitly selected external community adapter and the user's own session. This unsupported internal protocol can change; the external Python environment and protocol assets are not bundled.</p>
-    <p>Local folder browsing and text preview remain session-only and read-only. Account linkage is not Mac-style device registration or local-tool dispatch. Fresh browser sign-in, native Wayland, file writes, and desktop connectors require further validation or implementation.</p>
+    <p>Local folder browsing and text preview in the Files view remain session-only and read-only. The Local host page separately registers this Linux machine with the account and lets the agent reach folders you explicitly grant, one approval per file creation, with no overwrite, delete, shell or computer control. Fresh browser sign-in and device registration have been verified; an actual agent invocation, native Wayland, a broader local-tool surface and desktop connectors remain unvalidated.</p>
   </description>
   <launchable type="desktop-id">unofficial-muse-for-linux.desktop</launchable>
   <url type="homepage">https://github.com/kyth-os/unofficial-muse-for-linux</url>

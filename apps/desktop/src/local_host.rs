@@ -40,6 +40,14 @@ fn now_hms() -> String {
 /// on every start registers a *new* device with the account, so the agent can
 /// never attribute work to this machine and a pairing never survives a restart.
 const NODE_ID_FILE: &str = "local-host-node-id";
+/// Registered device label. The identity is stable, so the label must not
+/// imply a per-session device.
+const DEVICE_LABEL: &str = "Linux";
+/// Local-host copy. The identity is one persisted id per installation; this
+/// text previously claimed a random per-session device and a screenshot showed
+/// it contradicting the registration notice, so it is named and guarded.
+const IDENTITY_COPY: &str = "The device identity is created once per installation, stored owner-only beside your account config, and reused after restart, so Muse attributes chats to this same machine. Chats are attributed to this Linux host only while it is registered. Stop, account disconnect/error/change, or window close revokes all grants and approvals. No automatic restart or persistent broad grants; existing Muse settings are never changed.";
+const REGISTERED_NOTICE: &str = "Registered with Muse. This device keeps one identity across restarts. Stop revokes folders and pending approvals.";
 fn node_id_is_valid(value: &str) -> bool {
     value.len() == 38
         && value.starts_with("linux-")
@@ -235,7 +243,7 @@ impl Controller {
             script,
             config_dir: config.config_dir,
             node_id: node_id.clone(),
-            display_name: "Linux (session-only)".into(),
+            display_name: DEVICE_LABEL.into(),
             commands: self.broker.manifest()["commands_v2"].clone(),
         })
         .map_err(|_| "Host configuration rejected.")?;
@@ -540,8 +548,7 @@ impl Controller {
     fn registered(&mut self, epoch: u64) {
         if epoch == self.epoch && self.phase == Phase::Connecting {
             self.phase = Phase::Registered;
-            self.notice =
-                "Registered for this session. Stop revokes folders and pending approvals.".into();
+            self.notice = REGISTERED_NOTICE.into();
             if let Some(identity) = &self.identity {
                 identity.active.store(true, Ordering::SeqCst);
             }
@@ -651,7 +658,7 @@ mod native {
         root.add_css_class("page-content");
         root.append(&label("Local host · your existing Muse agent on Linux"));
         root.append(&label("Separate from account connection and the read-only Local files browser. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. Each CREATE NEW text-file operation requires your local Allow once approval of its exact destination and full content. No overwrite, delete, shell or computer control."));
-        root.append(&label("Identity is cryptographically random and session-only. Chats are attributed to this Linux host only after registration. Stop, account disconnect/error/change, or window close revokes all grants and approvals. No automatic restart or persistent broad grants; existing Muse settings are never changed."));
+        root.append(&label(IDENTITY_COPY));
         let consent = gtk::CheckButton::with_label(
             "I explicitly enable this local host and allow granted filenames and text to reach Muse.",
         );
@@ -1048,6 +1055,17 @@ for line in sys.stdin:
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn local_host_copy_does_not_claim_a_session_only_identity() {
+        for copy in [IDENTITY_COPY, REGISTERED_NOTICE, DEVICE_LABEL] {
+            let lowered = copy.to_ascii_lowercase();
+            assert!(!lowered.contains("session-only"), "{copy}");
+            assert!(!lowered.contains("session identity"), "{copy}");
+            assert!(!lowered.contains("cryptographically random"), "{copy}");
+        }
+        assert!(IDENTITY_COPY.contains("once per installation"));
+        assert!(REGISTERED_NOTICE.starts_with("Registered with Muse."));
     }
     #[test]
     fn one_installation_keeps_one_device_identity() {
