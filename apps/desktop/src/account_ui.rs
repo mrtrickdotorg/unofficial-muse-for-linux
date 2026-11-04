@@ -66,21 +66,35 @@ fn account_surface_visibility(connected: bool) -> (bool, bool) {
 /// working" (or "Needs approval") on screen afterwards is a lie about the
 /// present, not a stale cache.
 fn history_closes_turn(rows: &[muse_account::HistoryMessage]) -> bool {
-    rows.last()
-        .is_some_and(|row| row.role == "assistant" && row.status.as_deref() == Some("completed"))
+    rows.last().is_some_and(|row| {
+        row.role == "assistant" && row.status.as_deref().is_some_and(reply_finished)
+    })
+}
+
+/// Statuses the service uses to close a reply. `interrupted` is how a cancelled
+/// run ends (observed live: `chat.cancel` left the reply at `interrupted`), so it
+/// has to count as finished or a stopped turn would look permanently in progress.
+fn reply_finished(status: &str) -> bool {
+    const FINISHED: [&str; 4] = ["completed", "interrupted", "cancelled", "failed"];
+    let status = status.trim();
+    FINISHED
+        .iter()
+        .any(|word| status.eq_ignore_ascii_case(word))
 }
 
 /// True when a status describes presence or a finished task rather than work in
 /// progress. Painting "completed" would report an end state as something the
 /// agent is doing, which the transcript already states correctly.
 fn settled_status(status: &str) -> bool {
-    const SETTLED: [&str; 6] = [
+    const SETTLED: [&str; 8] = [
         "online",
         "offline",
         "idle",
         "completed",
         "cancelled",
         "done",
+        "interrupted",
+        "failed",
     ];
     let status = status.trim();
     status.is_empty() || SETTLED.iter().any(|word| status.eq_ignore_ascii_case(word))
@@ -2714,7 +2728,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_completed_reply_closes_the_turn() {
+    fn only_a_finished_reply_closes_the_turn() {
+        // `interrupted` is what a cancelled run ends as, observed live: the
+        // reply stopped mid-list and never completed.
+        assert!(history_closes_turn(&[row(
+            "assistant",
+            Some("interrupted")
+        )]));
+        assert!(history_closes_turn(&[row("assistant", Some("failed"))]));
         assert!(history_closes_turn(&[row("assistant", Some("completed"))]));
         assert!(!history_closes_turn(&[row("assistant", None)]));
         assert!(!history_closes_turn(&[row("assistant", Some("running"))]));
@@ -2747,6 +2768,7 @@ mod tests {
             event("model_lock.updated", None, None),
             event("agent.status", Some("online"), None),
             event("task.status", Some("completed"), None),
+            event("task.status", Some("interrupted"), None),
             event("approvals.snapshot", None, None),
         ]));
         assert!(state.live_status.is_empty());
