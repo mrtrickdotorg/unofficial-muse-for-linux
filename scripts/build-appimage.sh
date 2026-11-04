@@ -50,6 +50,7 @@ install -m 644 "$ROOT/resources/unofficial-muse-for-linux.appdata.xml" "$APPDIR/
 install -m 644 "$ROOT/scripts/muse_account_bridge.py" "$ACCOUNT_DIR/muse_account_bridge.py"
 install -m 644 "$ROOT/scripts/muse_account_login.py" "$ACCOUNT_DIR/muse_account_login.py"
 install -m 644 "$ROOT/scripts/muse_local_host.py" "$ACCOUNT_DIR/muse_local_host.py"
+install -m 644 "$ROOT/scripts/muse_account_host.py" "$ACCOUNT_DIR/muse_account_host.py"
 
 shopt -s nullglob
 for previous in "$ROOT"/target/*.AppImage; do
