@@ -31,12 +31,43 @@ handshake), typed errors with the no-echo rule, private-only session storage, th
 
 ## Current blockers
 
-Both headline claims are still unproven, and both block acceptance of everything downstream:
+- **Fresh sign-in — proven live.** An isolated-browser sign-in completed against the real service; the
+  read-only probe then returned `connected=true threads=4 history_messages=20 schedules=32 runs=25`.
+  Expiry and revocation now have their own state in the UI instead of a silent failure.
+- **Live registration — the last open gate.** A live connector check reached the gateway with the
+  bounded receiver installed, but the service has never answered a `link.register`, so no agent has
+  invoked a Linux command. Socket creation is still not registration, and this machine is not
+  paired until an acknowledgement arrives.
 
-- **Fresh sign-in.** The last saved session returned HTTP 401. Isolated-browser sign-in works offline
-  but has never completed against the real service. Every live verification below waits on this.
-- **Live registration.** The local host has never had a real `POST /link-control` success, so no agent
-  has ever invoked a Linux command. Socket creation is not registration.
+Everything below therefore begins with **route reconnaissance**, not with a UI. The pinned community
+client carries a static route table (`muse_mcp.client.ROUTES`, 258 entries); a route existing there is
+permission to *try* it, never proof that a personal session is entitled to it.
+
+## Route availability
+
+Reconnaissance result, recorded so later phases start from facts rather than guesses. "Table" means the
+route is declared in the pinned client; "live" means an authenticated probe has actually answered —
+currently only `identity`, `chat.history`, `sessions.list`, `tasks.list` and `tasks.runs` are live.
+
+| Phase | Routes in the table | First live probe |
+|---|---|---|
+| P1 conversation | `chat.stream`, `chat.stream_events`, `chat.subscribe`, `chat.cancel`, `chat.poke`, `chat.history_window`, `chat.sxs.select`, `chat.search`, `chat.mark_seen`, `chat.delete_turn`, `chat.unread_count`, `activity.list/get/subscribe`, `subagents.list/status`, `sessions.get` | `activity.list` (GET), then `chat.history_window` on a known thread |
+| P2 approvals | `egress.permissions.*`, `egress.approvals`, `egress.approval.decide`, `egress.approval.history`, `permissions.settings*` | `egress.permissions`, `permissions.settings` (GET only) |
+| P3 local reach | none needed — manifest and broker are ours | n/a |
+| P4 schedules | `tasks.list/runs/delete/subscribe`, `pin.update`, `pin.reminder_confirm` | `tasks.subscribe` once create/cancel exist |
+| P5 artifacts | `artifacts.list/fetch_url/share/remove/pin/subscribe`, `fs.list/read/stat/search/library/export/subscribe/write/rename/delete`, `spaces.*` | `artifacts.list` (GET) |
+| P6 memory | `memory.get/search/consolidate/reindex`, `goals.*` | `memory.search` |
+| P7 connectors | `connectors.list/get/accounts/permissions/*`, `custom_connectors.*`, `channels.*`, `skills.list/disconnect/set_disabled` | `connectors.list`, `skills.list` |
+| P8 browser | `browser_task.get/present/takeover/release/stop/close/heartbeat`, `browser_stream.attach`, `browser_activity.snapshot` | `browser_task.get` on an idle task |
+| P9 shell | `node.register`, `node.list`, `nodes.sync`, `node.heartbeat`, `node.unpair`, `nodes.invoke_ack/result`, `client.register_capabilities` | `node.list` |
+
+Two earlier assumptions are corrected by the table: **model choice does exist** (`model.get`/`model.set`),
+and **desktop voice may be reachable** (`voice.dictation?sample_rate_hz=`, `voice.available_voices`,
+`voice.start_call`). Neither is proven for a personal session, and voice must not be claimed before an
+authenticated answer exists.
+
+The local-host registration path is separate: `/link-control` is a headerless control stream, not one of
+these 258 HTTP routes. `node.register` is the *other* device path and must not be conflated with it.
 
 ## Priority order
 
@@ -52,6 +83,10 @@ gateway for its version/capabilities once and fail with a specific drift error; 
 
 *Gate:* packaged app performs a fresh interactive sign-in, survives expiry and revocation with clear
 states, and reports live registration for a scratch folder. Every later phase cites this evidence.
+
+*Done:* fresh sign-in, the expired-session state, and one persisted device identity per installation
+(`local-host-node-id`, owner-only, staged-then-renamed) instead of a new random node id per start.
+*Open:* the registration acknowledgement itself.
 
 ### P1 — The live conversation (M)
 

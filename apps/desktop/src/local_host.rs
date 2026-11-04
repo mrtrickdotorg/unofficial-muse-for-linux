@@ -36,6 +36,60 @@ fn now_hms() -> String {
         secs % 60
     )
 }
+/// One device identity per installation, not one per start. A fresh random id
+/// on every start registers a *new* device with the account, so the agent can
+/// never attribute work to this machine and a pairing never survives a restart.
+const NODE_ID_FILE: &str = "local-host-node-id";
+fn node_id_is_valid(value: &str) -> bool {
+    value.len() == 38
+        && value.starts_with("linux-")
+        && value[6..]
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+fn random_node_id() -> Option<String> {
+    let mut nonce = [0u8; 16];
+    // SAFETY: the writable buffer is valid for its supplied length.
+    if unsafe { libc::getrandom(nonce.as_mut_ptr().cast(), nonce.len(), 0) } != nonce.len() as isize
+    {
+        return None;
+    }
+    Some(format!(
+        "linux-{}",
+        nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
+/// Reads the installation's node id, minting and persisting one on first use.
+/// A corrupt leftover is replaced rather than handed to the service as an id.
+fn persisted_node_id(directory: &std::path::Path) -> Result<String, &'static str> {
+    let path = directory.join(NODE_ID_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let existing = existing.trim();
+        if node_id_is_valid(existing) {
+            return Ok(existing.to_owned());
+        }
+    }
+    let node_id = random_node_id().ok_or("Could not generate a secure device identity.")?;
+    // Stage then rename: an interrupted start must not leave a truncated id that
+    // a later start would treat as corrupt and silently replace with a new device.
+    let staged = directory.join(format!(".{NODE_ID_FILE}.{}", std::process::id()));
+    let written = {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&staged)
+            .and_then(|mut file| file.write_all(node_id.as_bytes()))
+    };
+    if written.is_err() || std::fs::rename(&staged, &path).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return Err("Could not save the local host identity.");
+    }
+    Ok(node_id)
+}
 /// Remote-controlled command names are allow-listed so a hostile command
 /// string (paths, content) can never reach the log.
 fn safe_command(raw: &str) -> &str {
@@ -174,17 +228,7 @@ impl Controller {
             return Err("Connect the account, consent and grant a folder before starting.");
         }
         let config = config.ok_or("Connect your Muse account first.")?;
-        let mut nonce = [0u8; 16];
-        // SAFETY: the writable buffer is valid for its supplied length.
-        if unsafe { libc::getrandom(nonce.as_mut_ptr().cast(), nonce.len(), 0) }
-            != nonce.len() as isize
-        {
-            return Err("Could not generate a secure session identity.");
-        }
-        let node_id = format!(
-            "linux-{}",
-            nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        );
+        let node_id = persisted_node_id(&config.config_dir)?;
         let script = config.script.with_file_name("muse_local_host.py");
         let session = HostSession::spawn(HostConfig {
             python: config.python,
@@ -1005,6 +1049,30 @@ for line in sys.stdin:
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    #[test]
+    fn one_installation_keeps_one_device_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let f = Fixture::new("files.create_text", "x", 1000);
+        let first = persisted_node_id(&f.0).unwrap();
+        assert!(node_id_is_valid(&first), "{first}");
+        assert_eq!(persisted_node_id(&f.0).unwrap(), first);
+        let mode = fs::metadata(f.0.join(NODE_ID_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // A corrupt leftover is replaced instead of being sent as this device.
+        fs::write(f.0.join(NODE_ID_FILE), "linux-not-hex").unwrap();
+        let repaired = persisted_node_id(&f.0).unwrap();
+        assert!(node_id_is_valid(&repaired));
+        assert_ne!(repaired, "linux-not-hex");
+        assert_eq!(persisted_node_id(&f.0).unwrap(), repaired);
+        // No half-written staging file survives a normal mint.
+        assert!(
+            !f.0.join(format!(".{NODE_ID_FILE}.{}", std::process::id()))
+                .exists()
+        );
+    }
     fn pump(host: &mut Controller, predicate: impl Fn(&Controller) -> bool) {
         let until = Instant::now() + Duration::from_secs(5);
         while !predicate(host) {
@@ -1028,6 +1096,13 @@ for line in sys.stdin:
             device.node_id,
             fs::read_to_string(f.0.join("identity")).unwrap()
         );
+        // The registered id is the persisted installation id, so a restart
+        // registers the same device instead of a brand-new one.
+        assert_eq!(
+            fs::read_to_string(f.0.join(NODE_ID_FILE)).unwrap().trim(),
+            device.node_id
+        );
+        assert!(node_id_is_valid(&device.node_id));
         let card = &host.cards[0];
         assert_eq!(card.root, f.0);
         assert_eq!(card.request.content, "exact full content\n");
