@@ -22,6 +22,37 @@ cargo run -p unofficial-muse-for-linux
 
 CI installs the same pinned external runtime for tests and retains formatting, locked workspace build/test, explicit native GUI smoke tests, and warning-denying Clippy checks. Unit tests do not establish live browser sign-in, service compatibility, packaged GUI behavior, or actual device registration.
 
+## Driving the real GTK window locally
+
+CI runs the display-dependent GUI tests under `xvfb-run`. A workstation without
+GTK4 development packages can use the user-level toolbox prefix instead, which
+needs no root and installs nothing:
+
+```sh
+. "$HOME/.local/share/muse-toolbox/env.sh"   # GTK4 pkg-config, linker, TMPDIR
+cargo build -p unofficial-muse-for-linux --locked
+```
+
+The `#[ignore]`d tests then drive the real widgets in-process: they construct the
+same `AccountPage` CI smokes, click and type through the widget API, and assert on
+what the widgets say. That needs a display but no compositor, accessibility bus or
+input-injection tool, and an existing Xwayland session supplies one:
+
+```sh
+TMPDIR="$HOME/.cache/muse-tmp" cargo test -p unofficial-muse-for-linux \
+  native_account_page_consent_failure_and_disconnect_signal_smoke \
+  --locked -- --ignored --test-threads=1
+```
+
+This is the supported way to reproduce UI behaviour locally: assertions run
+against real GTK widgets rather than a model of them. It does not produce pixels.
+The pinned `gsk4` exposes no `Snapshot` wrapper, so rendering a window to a file
+would need raw FFI, and the host has no capture tool (`spectacle`, `import`,
+`grim`) — visual review still means looking at the packaged AppImage or adding one
+of those tools. A Broadway session is not a substitute: `broadwayd` binds an
+abstract socket the GTK client does not look for, and the browser side is a canvas
+with no widgets to address.
+
 ## Optional runtime account dependency
 
 The native account path additionally requires an external source checkout and per-user Python 3.10+ environment. Install as a regular user, outside the AppImage/container:
