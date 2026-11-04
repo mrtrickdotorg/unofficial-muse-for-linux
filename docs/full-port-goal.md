@@ -1,6 +1,6 @@
 # Goal-ready plan: full-feature Linux port of Muse for Mac
 
-**Plan status:** account-linked second batch, updated October 17, 2026 (America/Detroit). This is the target contract, not a claim of full parity or verified fresh sign-in.
+**Plan status:** account-linked second batch, updated October 17, 2026 (America/Detroit). This is the target contract, not a claim of full parity or verified fresh sign-in. The current priority ordering lives in [the Mac parity roadmap](mac-parity-roadmap.md), which supersedes the phase sequence below while keeping this acceptance contract.
 
 ## Copy-ready goal
 
