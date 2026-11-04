@@ -47,7 +47,11 @@ const DEVICE_LABEL: &str = "Linux";
 /// text previously claimed a random per-session device and a screenshot showed
 /// it contradicting the registration notice, so it is named and guarded.
 const IDENTITY_COPY: &str = "The device identity is created once per installation, stored owner-only beside your account config, and reused after restart, so Muse attributes chats to this same machine. Chats are attributed to this Linux host only while it is registered. Stop, account disconnect/error/change, or window close revokes all grants and approvals. No automatic restart or persistent broad grants; existing Muse settings are never changed.";
-const REGISTERED_NOTICE: &str = "Registered with Muse. This device keeps one identity across restarts. Stop revokes folders and pending approvals.";
+/// Shown after the page's own "Registered with Muse" prefix, so it must not
+/// repeat that phrase; doing so rendered "Registered with Muse · Registered
+/// with Muse. …" on screen.
+const REGISTERED_NOTICE: &str =
+    "This device keeps one identity across restarts. Stop revokes folders and pending approvals.";
 fn node_id_is_valid(value: &str) -> bool {
     value.len() == 38
         && value.starts_with("linux-")
@@ -1065,7 +1069,11 @@ for line in sys.stdin:
             assert!(!lowered.contains("cryptographically random"), "{copy}");
         }
         assert!(IDENTITY_COPY.contains("once per installation"));
-        assert!(REGISTERED_NOTICE.starts_with("Registered with Muse."));
+        assert!(
+            !REGISTERED_NOTICE.starts_with("Registered with Muse"),
+            "the page already renders that phrase: {REGISTERED_NOTICE}"
+        );
+        assert!(REGISTERED_NOTICE.contains("one identity across restarts"));
     }
     #[test]
     fn one_installation_keeps_one_device_identity() {
