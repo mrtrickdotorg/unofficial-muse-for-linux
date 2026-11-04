@@ -227,10 +227,17 @@ parallel one; `recent_approvals` is deliberately not exposed, and a row with no 
 `protocol_error` because it could not be decided safely. Live: `{"op": "approvals"}` answered `ok: true` in 4 s
 with `pending: 0` — the first clean sentinel read through our own code, where the earlier attempts died with
 `DecodeError`. An empty list is the present state, not proof that the route reports rows when they exist; the
-projection's shape still rests on the earlier 7-pending snapshot. Suite: 90 tests, including the
-notification-frame regression, the sentinel-route/close test and the fail-closed id test. Deciding
-(`POST /approvals/{approval_id}/decide`) remains unimplemented and must arrive with an explicit per-approval UI
-decision, never a convenience retry and never from a background refresh.
+projection's shape still rests on the earlier 7-pending snapshot. Suite: 92 tests, including the
+notification-frame regression, the sentinel-route/close tests and the fail-closed id test.
+
+*Deciding is now implemented at the bridge.* `decide` takes an `approval_id` and one of the five published
+outcome words (`allow_once`, `allow_task`, `allow_site`, `allow_always`, `deny`), refuses every other value
+before any request is made, and sends exactly one `POST /approvals/{approval_id}/decide` on its own sentinel
+connection. The answer reports that the service **accepted** the decision, plus the service's own word for it —
+never that the approved action ran, because a 2xx is not an effect — and a decision is never retried. What is
+still missing is the human half: the window surfaces neither the pending list nor a press, so nothing in the app
+can decide yet. That wiring has to be an explicit per-approval press showing the request's own detail rows,
+never a background refresh and never a default-allow.
 
 ### P3 — Reach the capabilities we already have (M)
 

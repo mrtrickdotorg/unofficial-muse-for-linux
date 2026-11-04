@@ -805,6 +805,47 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(seen["timeout"], 20)
         self.assertTrue(seen["closed"])
 
+    def test_a_decision_asks_the_sentinel_route_and_claims_acceptance_only(self):
+        bridge = load_bridge()
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["method"] = method
+                seen.update(kwargs)
+                return {"decision": "allow_once", "access_token": "SECRET"}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch(
+                {"op": "decide", "approval_id": "a-1", "decision": "allow_once"})
+        self.assertEqual(seen["method"], "egress.approval.decide")
+        self.assertEqual(seen["path_params"], {"approval_id": "a-1"})
+        self.assertEqual(seen["body"], {"decision": "allow_once"})
+        self.assertTrue(seen["closed"])
+        # Accepted is not "the action ran": the request and the service's word are
+        # reported, and a 2xx never becomes a claim about the effect.
+        self.assertEqual(result, {"approval_id": "a-1", "requested": "allow_once",
+                                  "accepted": True, "decision": "allow_once"})
+        self.assertNotIn("SECRET", str(result))
+
+    def test_only_the_five_published_outcomes_are_accepted(self):
+        bridge = load_bridge()
+        for decision in bridge.DECISIONS:
+            bridge.validate_request({"op": "decide", "config_dir": "/tmp",
+                                     "approval_id": "a-1", "decision": decision})
+        for decision in ("allow", "deny_all", "", None, 1):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.validate_request({"op": "decide", "config_dir": "/tmp",
+                                         "approval_id": "a-1", "decision": decision})
+            self.assertEqual(caught.exception.code, "invalid_request")
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "decide", "config_dir": "/tmp",
+                                     "decision": "deny"})
+
     def test_a_sentinel_notification_is_skipped_instead_of_aborting_the_read(self):
         # The defect this guards: the pinned reader parses every frame as a
         # ServiceResponse, so a notification frame raised DecodeError and the
