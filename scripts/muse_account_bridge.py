@@ -588,6 +588,48 @@ def session_facts(client, config):
     return {"identity_name": required_text(identity.get("name")), "vm_id": vm_id}
 
 
+def updated_at_text(session):
+    millis = session.get("updated_at_ms")
+    if isinstance(millis, (int, float)) and not isinstance(millis, bool):
+        import time
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(millis / 1000.0))
+    return optional_text(session.get("updated_at"))
+
+
+def session_rows(client, config):
+    """Project the conversation list from `sessions.list` itself.
+
+    `status()` also runs `chat.unread_count` and `vm.health`, and a failing
+    `vm.health` leaves a held connection answering the *next* request with a
+    gateway error. The snapshot only needs the identity and this list, so it
+    asks for exactly those and reads the route that answers in ~0.1s.
+    """
+    gateway_scope = getattr(client, "_gateway", None)
+    if gateway_scope is None:
+        return [{
+            "session_id": required_text(row.get("session_id")),
+            "title": required_text(row.get("title")),
+            "archived": bool(row.get("archived", False)),
+            "updated_at": optional_text(row.get("updated_at")),
+        } for row in object_rows(client.threads(include_archived=True))]
+    with gateway_scope(config) as gateway:
+        data = gateway.call_json("sessions.list")
+    sessions = data.get("sessions", []) if isinstance(data, dict) else None
+    if not isinstance(sessions, list):
+        raise BridgeFailure("protocol_error")
+    rows = []
+    for session in sessions:
+        if not isinstance(session, dict):
+            raise BridgeFailure("protocol_error")
+        rows.append({
+            "session_id": required_text(session.get("session_id")),
+            "title": required_text(session.get("title")),
+            "archived": bool(session.get("archived", False)),
+            "updated_at": updated_at_text(session),
+        })
+    return rows
+
+
 def error_response(error):
     response = {"ok": False, "error": {"code": error.code, "uncertain": error.uncertain}}
     detail = getattr(error, "detail", None)
@@ -630,22 +672,11 @@ class Adapter:
 
     def _dispatch(self, request):
         if request["op"] == "connect":
-            status = checked(self.client.status(), dict)
-            if status.get("authenticated") is not True:
-                raise BridgeFailure("auth_required")
-            if not isinstance(status.get("vm_id"), str) or not status["vm_id"]:
-                raise BridgeFailure("protocol_error")
-            threads = object_rows(self.client.threads(include_archived=True))
-            identity = checked(status.get("identity", {}), dict)
+            facts = session_facts(self.client, self.config)
             return {
-                "identity_name": required_text(identity.get("name")),
-                "vm_id": required_text(status.get("vm_id")),
-                "threads": [{
-                    "session_id": required_text(row.get("session_id")),
-                    "title": required_text(row.get("title")),
-                    "archived": bool(row.get("archived", False)),
-                    "updated_at": optional_text(row.get("updated_at")),
-                } for row in threads],
+                "identity_name": facts["identity_name"],
+                "vm_id": facts["vm_id"],
+                "threads": session_rows(self.client, self.config),
             }
         if request["op"] == "identity":
             # The same verification as `connect` minus `sessions.list`, which the

@@ -29,6 +29,8 @@ class FakeBridge:
         self.rows = rows
         self.cookies_file = cookies_file
         self.clients = 0
+        self.thread_calls = 0
+        self.fail_threads_next = False
         self.session_dirs = []
         self._contextmanager = contextmanager
         self.bridge = load("account_bridge_for_host", "muse_account_bridge.py")
@@ -60,6 +62,14 @@ class FakeBridge:
 
             def history(self, thread=None, limit=20):
                 return fake.rows
+
+            def threads(self, include_archived=False):
+                fake.thread_calls += 1
+                if fake.fail_threads_next:
+                    fake.fail_threads_next = False
+                    raise RuntimeError("SECRET")
+                return [{"session_id": "thread-1", "title": "Example",
+                         "archived": False, "updated_at": "2026-10-17T00:00:00Z"}]
 
             @fake._contextmanager
             def gateway_scope(self, config):
@@ -93,6 +103,22 @@ class HostTests(unittest.TestCase):
         _, host, fake, _jar, _ = self.host()
         host.handle_line(json.dumps({"op": "history", "limit": 20}).encode())
         host.handle_line(json.dumps({"op": "watch", "limit": 20, "timeout": 1}).encode())
+        self.assertEqual(fake.clients, 2)
+
+    def test_the_snapshot_shares_the_control_connection_and_a_failure_drops_it(self):
+        _, host, fake, _jar, _ = self.host()
+        host.handle_line(b'{"op": "connect"}')
+        reply = host.handle_line(b'{"op": "connect"}')
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(fake.clients, 1)
+        self.assertEqual(len(reply["data"]["threads"]), 1)
+        fake.fail_threads_next = True
+        reply = host.handle_line(b'{"op": "connect"}')
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"]["code"], "bridge_failure")
+        self.assertNotIn("SECRET", str(reply))
+        # The failed connection was dropped, so the next request opens a fresh one.
+        host.handle_line(b'{"op": "history", "limit": 5}')
         self.assertEqual(fake.clients, 2)
 
     def test_a_changed_cookie_jar_replaces_the_held_connection(self):
@@ -184,7 +210,9 @@ class HostTests(unittest.TestCase):
         stop.set()
         thread.join(10)
 
-    def test_the_host_exits_when_its_parent_closes_stdin(self):
+    def test_the_host_survives_a_null_stdin_and_removes_its_socket_on_sigterm(self):
+        # The launcher gives the host /dev/null for stdin, so stdin EOF must not
+        # mean "stop": the session lease, not an empty pipe, owns the lifetime.
         module = load("account_host_exit", "muse_account_host.py")
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR") or pathlib.Path.home()) as tmp:
             root = pathlib.Path(tmp)
@@ -196,7 +224,7 @@ class HostTests(unittest.TestCase):
             process = subprocess.Popen(
                 [sys.executable, "-I", str(ROOT / "muse_account_host.py"),
                  "--config-dir", str(config), "--idle-seconds", "60"],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, env=environ)
             try:
                 for _ in range(250):
@@ -204,7 +232,9 @@ class HostTests(unittest.TestCase):
                         break
                     time.sleep(0.02)
                 self.assertTrue(path.exists(), "the host never created its socket")
-                process.stdin.close()
+                time.sleep(0.3)
+                self.assertIsNone(process.poll(), "a null stdin must not stop the host")
+                process.terminate()
                 self.assertEqual(process.wait(timeout=15), 0)
                 self.assertFalse(path.exists())
             finally:
