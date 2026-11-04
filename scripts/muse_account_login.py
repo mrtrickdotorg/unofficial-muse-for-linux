@@ -628,9 +628,16 @@ def login_in_directory(request, browser, directory):
             time.sleep(min(0.25, remaining(deadline)))
     finally:
         try:
-            if client is not None:
-                client.close()
+            # Stop the browser first. Closing the client can raise once the
+            # browser's socket is gone, and a raised close used to skip the
+            # browser kill and the profile removal with it — the path a second
+            # cancellation walks. Cleanup may not be lost because a step failed.
             stop_browser(process)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
             if created:
                 shutil.rmtree(profile_name, dir_fd=directory)
         finally:
