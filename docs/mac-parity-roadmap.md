@@ -113,9 +113,16 @@ and is verified through history; restarting the app reattaches to the same run.
 calls it, so the bridge reaches the route directly instead of waiting for a library method. Probed
 against the live service with nothing running it answered `{"cancelled": false, "message_id": null}` —
 the service states whether anything was actually stopped, so the window reports that answer ("nothing
-was running to stop") rather than treating a press as a stop. This moves the gate but does not close
-it: "cancel stops the work and is verified through history" needs a run that is genuinely in flight,
-and interjection plus reattach-after-restart remain open.
+was running to stop") rather than treating a press as a stop.
+
+*Gate item closed (live, 2026-11-04).* A prompt asking for 120 numbered lines was dispatched and
+confirmed (`message_id 1f7a5d61…`), then `chat.cancel` was sent 4 s later and answered
+`{"cancelled": true, "message_id": "2c84f68b…"}`. History then showed the reply at `interrupted` with
+one item written ("1. One is the loneliest number…") and nothing further for 95 s — the run stopped
+and the transcript says so. Two facts worth keeping: the id in the cancel answer is *not* the prompt's
+id, so it identifies the interrupted reply rather than the request, and a cancelled turn closes as
+`interrupted`, not `completed` — a finish-check that knew only `completed` would report a stopped turn
+as permanently in progress. Interjection and reattach-after-restart remain open.
 
 *Recon (live, 2026-11-04).* `chat.subscribe` answers for a personal session and delivers
 `agent.status` (`activity_code`/`activity_text`, `session_id`, `is_thread`), `task.status`
