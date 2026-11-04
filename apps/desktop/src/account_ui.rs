@@ -33,6 +33,9 @@ struct Controller<A, H, T> {
     limit: usize,
     connection_notice: String,
     history_notice: String,
+    /// Background detail (counts, bounded-window wording) shown as a tooltip so
+    /// the strip above the composer stays quiet.
+    history_detail: String,
     tasks_notice: String,
     send_notice: String,
     pending_send: Option<PendingSend>,
@@ -134,7 +137,8 @@ impl<A, H, T> Default for Controller<A, H, T> {
             connection_notice:
                 "Ready when you are. Set up the connection above to load chats and reminders."
                     .into(),
-            history_notice: "No shared history requested.".into(),
+            history_notice: String::new(),
+            history_detail: String::new(),
             tasks_notice: "No scheduled-task history requested.".into(),
             send_notice: String::new(),
             pending_send: None,
@@ -176,7 +180,7 @@ impl<A, H, T> Controller<A, H, T> {
             scope: self.scope.clone(),
             text: text.into(),
         });
-        self.send_notice = "Sending once to your existing Muse agent. This can cause external actions; no automatic retry.".into();
+        self.send_notice.clear();
         Some(ticket)
     }
 
@@ -204,8 +208,10 @@ impl<A, H, T> Controller<A, H, T> {
         }
         match outcome {
             SendOutcome::Confirmed => {
+                // The reply landing in the transcript is the confirmation; a
+                // sentence about it is one more line over the message box.
                 self.pending_send = None;
-                self.send_notice = "Prompt persistence confirmed in this conversation. This does not mean the agent's work is complete.".into();
+                self.send_notice.clear();
             }
             SendOutcome::NotSent(error) => {
                 self.pending_send = None;
@@ -225,7 +231,7 @@ impl<A, H, T> Controller<A, H, T> {
     fn acknowledge_send(&mut self) {
         if self.busy.is_none() && self.pending_send.is_some() {
             self.pending_send = None;
-            self.send_notice = "You acknowledged the uncertain dispatch after checking its original shared conversation. No resend was performed.".into();
+            self.send_notice.clear();
         }
     }
 
@@ -283,7 +289,8 @@ impl<A, H, T> Controller<A, H, T> {
         self.scope = scope;
         self.history.clear();
         self.limit = 50;
-        self.history_notice = "Selected conversation. History has not loaded yet.".into();
+        self.history_detail = "Selected conversation. History has not loaded yet.".into();
+        self.history_notice.clear();
         true
     }
 
@@ -335,11 +342,12 @@ impl<A, H, T> Controller<A, H, T> {
     fn apply_history(&mut self, result: Result<Vec<H>, String>) {
         match result {
             Ok(history) => {
-                self.history_notice = format!(
-                    "{} messages returned from the latest {} service events (bounded window, not a full export).",
+                self.history_detail = format!(
+                    "{} messages from the latest {} service events (bounded window, not a full export).",
                     history.len(),
                     self.limit
                 );
+                self.history_notice.clear();
                 self.history = history;
             }
             Err(error) => {
@@ -1155,7 +1163,6 @@ mod native {
         let history_notice = label("");
         history_notice.add_css_class("chat-status");
         chat.append(&history_notice);
-        chat.append(&label("Send talks to your existing Muse agent and may trigger external actions. No local files are automatically uploaded. Review the selected conversation and message before pressing Send."));
         let send_notice = label("");
         send_notice.add_css_class("chat-status");
         chat.append(&send_notice);
@@ -1170,6 +1177,9 @@ mod native {
         prompt.set_placeholder_text(Some("Message your existing Muse agent…"));
         let send = gtk::Button::with_label("Send to Muse");
         send.add_css_class("suggested-action");
+        send.set_tooltip_text(Some(
+            "Sends once to your existing Muse agent and may trigger external actions. No local files are uploaded automatically, and a send is never repeated without you.",
+        ));
         composer.append(&prompt);
         composer.append(&send);
         chat.append(&composer);
@@ -1966,9 +1976,15 @@ mod native {
                 state.scope.as_deref().unwrap_or("Main conversation"),
                 state.limit
             ));
+            // Standing explanations belong in tooltips. The strip above the
+            // composer only speaks when something needs attention.
+            self.scroll.set_tooltip_text(Some(&state.history_detail));
             self.history_notice.set_text(&state.history_notice);
+            self.history_notice
+                .set_visible(!state.history_notice.is_empty());
             self.tasks_notice.set_text(&state.tasks_notice);
             self.send_notice.set_text(&state.send_notice);
+            self.send_notice.set_visible(!state.send_notice.is_empty());
             let was_at_bottom = {
                 let adjustment = self.scroll.vadjustment();
                 adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0
@@ -2065,10 +2081,8 @@ mod native {
                     self.tasks.append(&item);
                 }
             }
-            if connected
-                && self.settings.is_expanded()
-                && state.history_notice.starts_with("No shared")
-            {
+            // Nothing needs attention, so the setup panel gets out of the way.
+            if connected && self.settings.is_expanded() && state.history_notice.is_empty() {
                 self.settings.set_expanded(false);
             }
             self.rendering.set(false);
@@ -2443,7 +2457,7 @@ print(json.dumps({'ok':True,'data':data}))
             gtk::glib::timeout_add_local_once(Duration::from_millis(200), move || probe.set(true));
             pump_until(|| ticked.get());
             assert!(has_label(&page.root, "Disconnected locally"));
-            assert!(has_label(&page.root, "No shared history requested"));
+            assert!(!has_label(&page.root, "No shared history requested"));
             window.close();
         }
     }
@@ -2667,7 +2681,8 @@ mod tests {
         state.finish_send(&first, SendOutcome::Confirmed);
         assert!(state.pending_send.is_none());
         assert!(state.busy.is_none());
-        assert!(state.send_notice.contains("does not mean"));
+        // A confirmed send leaves no standing text above the composer.
+        assert!(state.send_notice.is_empty());
         let second = state.begin_send("explicit second attempt").unwrap();
         state.finish_send(
             &second,
