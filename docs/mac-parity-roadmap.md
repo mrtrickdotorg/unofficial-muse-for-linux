@@ -121,6 +121,12 @@ incremental *text* cannot be claimed as token-by-token until a `delta.*` event i
 during a run, and the status surface must not be derived from wall-clock guesses while `chat.subscribe`
 is available.
 
+*Verified through the product path.* The shipped `activity` operation, invoked as the bridge's own
+JSON request, returned `model_lock.updated`, `agent.status` (`status: "Needs approval"`),
+`task.status` (`completed`) and `approvals.snapshot` in one 6 s listen, and a 31 s listen was rejected
+with `invalid_request` before any network use. The chat status line is still unobserved in a running
+build, which is a display question rather than a transport one.
+
 ### P2 — The approval and policy engine (L)
 
 *Gap:* the Mac app has five outcomes per request (Allow once / this task / this site / always / deny),
@@ -144,6 +150,15 @@ carrying `approval_id`, `decision` (`allow_always` observed), `always_scope` (`d
 `attention_mode` and `display.detail_rows`. That is the Mac five-outcome model's own vocabulary, so our
 policy store should mirror those field names instead of inventing parallel ones, and the deciding route
 is `egress.approval.decide`. Local broker approvals remain ours; only the *shape* is borrowed.
+
+*Deciding is blocked, reading is not.* A live `approvals.snapshot` carried **7 pending approvals**, each
+an egress `CONNECT` request with `Host` / `Grants` / `Method` / `Path` / `Policy` detail rows, while
+`recent_approvals` showed `allow_always`. So the agent can be observed waiting for approval. It cannot
+be answered from here yet: `egress.approvals` (service `sentinel`) fails with
+`DecodeError: Error parsing message with type 'hatch.noise.ServiceResponse': Wire format was corrupt`,
+because those routes belong to the Sentinel service rather than the chat service. P2's five outcomes
+must therefore be built on a route this client can actually reach; until then the honest UI is "the
+agent is waiting for approval", never a local Allow button that cannot deliver a decision.
 
 ### P3 — Reach the capabilities we already have (M)
 
