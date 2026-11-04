@@ -9,6 +9,8 @@ enum Operation {
     Send,
     Login,
     Cancel,
+    Approvals,
+    Decide,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +56,14 @@ struct Controller<A, H, T> {
     /// middle of a run attaches to it instead of sitting idle.
     watching_run: bool,
     pending_send: Option<PendingSend>,
+    /// Pending approvals exactly as the service last reported them. Empty means
+    /// the last read found none; it never means the agent wants nothing.
+    approvals: Vec<muse_account::Approval>,
+    /// What the last read or decision reported, in the service's own terms.
+    approval_notice: String,
+    /// The request whose decision is in flight, so its card stops accepting a
+    /// second press while the first is unanswered.
+    deciding: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +237,9 @@ impl<A, H, T> Default for Controller<A, H, T> {
             live_delta_seq: 0,
             watching_run: false,
             pending_send: None,
+            approvals: Vec::new(),
+            approval_notice: String::new(),
+            deciding: None,
         }
     }
 }
@@ -414,6 +427,23 @@ impl<A, H, T> Controller<A, H, T> {
         Some(ticket)
     }
 
+    /// Take the busy slot for a read of the pending approvals. Listing is not
+    /// deciding, but it shares the exclusive slot so a decision cannot race the
+    /// list it was read from.
+    fn begin_approvals(&mut self) -> Option<Ticket> {
+        self.account.as_ref()?;
+        self.issue(Operation::Approvals)
+    }
+
+    /// Take the busy slot for one decision, remembering which request it answers
+    /// so no second answer can leave while the first is unanswered.
+    fn begin_decide(&mut self, approval_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::Decide)?;
+        self.deciding = Some(approval_id.to_owned());
+        Some(ticket)
+    }
+
     fn begin_poll(&mut self) -> Option<Ticket> {
         self.account.as_ref()?;
         if self.busy.is_some() || self.polling.is_some() {
@@ -450,6 +480,69 @@ impl<A, H, T> Controller<A, H, T> {
         }
         self.send_notice = notice;
         true
+    }
+
+    fn finish_approvals(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::PendingApprovals, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        match result {
+            Ok(snapshot) => {
+                self.approvals = snapshot.pending;
+                self.approval_notice = if self.approvals.is_empty() {
+                    "The service reports no approvals are waiting.".into()
+                } else {
+                    String::new()
+                };
+            }
+            Err(error) => self.approval_notice = format!("Could not read approvals: {error}"),
+        }
+        true
+    }
+
+    /// Record a decision's answer. True only when the service took it, which is
+    /// what lets the request leave the list; `accepted` still says nothing about
+    /// whether the approved action then worked.
+    fn finish_decide(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::DecisionAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.deciding = None;
+        match result {
+            Ok(answer) => {
+                let word = answer
+                    .decision
+                    .as_deref()
+                    .unwrap_or(answer.requested.as_str())
+                    .to_owned();
+                self.approvals
+                    .retain(|approval| approval.approval_id != answer.approval_id);
+                self.approval_notice = if answer.accepted {
+                    format!(
+                        "The service accepted the decision ({word}). Check again to confirm what is still waiting."
+                    )
+                } else {
+                    format!(
+                        "The service did not accept the decision ({word}). The request is still waiting."
+                    )
+                };
+                answer.accepted
+            }
+            Err(error) => {
+                self.approval_notice = format!(
+                    "Decision failed: {error}. The request may still be waiting; read the list again instead of pressing twice."
+                );
+                false
+            }
+        }
     }
 
     /// Attach this window to a reply that is being produced. Returns true only
@@ -738,6 +831,12 @@ mod native {
         spinner: gtk::Spinner,
         live_notice: gtk::Label,
         draft: gtk::Label,
+        /// Pending approval cards, one per request the service reported.
+        approvals_box: gtk::Box,
+        approval_notice: gtk::Label,
+        approvals_refresh: gtk::Button,
+        /// Weak handle so a card built during render can call back into the page.
+        self_weak: RefCell<std::rc::Weak<Ui>>,
         /// A watch is bounded: an absent status on an old row must not leave a
         /// background listen running for the rest of the session.
         watch_until: std::cell::Cell<Option<std::time::Instant>>,
@@ -756,6 +855,8 @@ mod native {
         History(Result<Vec<HistoryMessage>, String>),
         Live(Result<Vec<muse_account::LiveEvent>, String>),
         Cancel(Result<muse_account::CancelAnswer, String>),
+        Approvals(Result<muse_account::PendingApprovals, String>),
+        Decide(Result<muse_account::DecisionAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -1374,7 +1475,12 @@ mod native {
         let older = gtk::Button::with_label("Load older (+50, max 200)");
         toolbar.append(&threads);
         toolbar.append(&refresh);
+        let approvals_refresh = gtk::Button::with_label("Check approvals");
+        approvals_refresh.set_tooltip_text(Some(
+            "Reads what the agent is currently asking to do. Reading never approves anything; only Allow or Deny does, one request at a time.",
+        ));
         toolbar.append(&older);
+        toolbar.append(&approvals_refresh);
         chat.append(&toolbar);
         let scope_label = label("No conversation selected until account connection.");
         chat.append(&scope_label);
@@ -1389,6 +1495,13 @@ mod native {
             "Reply text as the service streams it. The finished reply replaces it in the transcript.",
         ));
         chat.append(&draft);
+        let approvals_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        approvals_box.set_visible(false);
+        chat.append(&approvals_box);
+        let approval_notice = label("");
+        approval_notice.add_css_class("chat-status");
+        approval_notice.set_visible(false);
+        chat.append(&approval_notice);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
@@ -1476,6 +1589,10 @@ mod native {
             scope_label,
             live_notice,
             draft,
+            approvals_box,
+            approval_notice,
+            approvals_refresh,
+            self_weak: RefCell::new(std::rc::Weak::new()),
             watch_until: std::cell::Cell::new(None),
             live_turn: std::cell::Cell::new(true),
             refresh,
@@ -1579,6 +1696,12 @@ mod native {
                 u.consent.set_active(false);
             });
         }
+        {
+            let u = Rc::clone(&ui);
+            ui.approvals_refresh
+                .connect_clicked(move |_| u.check_approvals());
+        }
+        *ui.self_weak.borrow_mut() = Rc::downgrade(&ui);
         let weak = Rc::downgrade(&ui);
         let last_refresh = std::cell::Cell::new(std::time::Instant::now());
         gtk::glib::timeout_add_local(Duration::from_millis(1000), move || {
@@ -1905,6 +2028,47 @@ mod native {
         /// service does not deliver threaded replies as live events, so the
         /// transcript keeps polling history while this reports progress.
         /// Ask the service to stop the run in flight.
+        /// Read the pending approvals. Explicit: the service is asked when the
+        /// reader presses, and the answer is the service's, never a guess.
+        fn check_approvals(self: &Rc<Self>) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().approval_notice =
+                    "Not connected. Connect your Muse session before reading approvals.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_approvals() else {
+                return;
+            };
+            self.launch(ticket, move || match client.approvals() {
+                Ok(snapshot) => Reply::Approvals(Ok(snapshot)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::Approvals(Err(error.to_string())),
+            });
+        }
+
+        /// Send exactly the decision the reader pressed, once.
+        fn decide(self: &Rc<Self>, approval_id: String, decision: muse_account::Decision) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().approval_notice =
+                    "Not connected. Connect your Muse session before deciding an approval.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_decide(&approval_id) else {
+                return;
+            };
+            self.launch(ticket, move || {
+                match client.decide(&approval_id, decision) {
+                    Ok(answer) => Reply::Decide(Ok(answer)),
+                    Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    Err(error) => Reply::Decide(Err(error.to_string())),
+                }
+            });
+        }
+
         fn cancel_run(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
@@ -2070,6 +2234,12 @@ mod native {
                         Operation::Cancel => {
                             Reply::Cancel(Err("Stop worker stopped unexpectedly.".into()))
                         }
+                        Operation::Approvals => {
+                            Reply::Approvals(Err("Approvals worker stopped unexpectedly.".into()))
+                        }
+                        Operation::Decide => {
+                            Reply::Decide(Err("Decision worker stopped unexpectedly.".into()))
+                        }
                     },
                 };
                 ui.complete(&ticket, reply);
@@ -2087,6 +2257,7 @@ mod native {
             // A completed browser sign-in hands straight over to the explicit
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
+            let mut reread_approvals = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
             let auth_expired = matches!(&reply, Reply::AuthExpired);
             let send_confirmed = matches!(&reply, Reply::Send(SendOutcome::Confirmed));
@@ -2179,6 +2350,18 @@ mod native {
                             poll_after_cancel = true;
                         }
                     }
+                    Reply::Approvals(result) => {
+                        // Nothing here decides anything: a list is a report, and
+                        // an empty one is not consent.
+                        state.finish_approvals(ticket, result);
+                    }
+                    Reply::Decide(result) => {
+                        // Ask the service what is still waiting rather than
+                        // trusting our own copy after a write.
+                        if state.finish_decide(ticket, result) {
+                            reread_approvals = true;
+                        }
+                    }
                     Reply::Send(result) | Reply::SendConnectionError(result) => {
                         let confirmed = matches!(&result, SendOutcome::Confirmed);
                         state.finish_send(ticket, result);
@@ -2237,6 +2420,9 @@ mod native {
             }
             if link_after_login {
                 self.connect_account();
+            }
+            if reread_approvals {
+                self.check_approvals();
             }
         }
 
@@ -2304,6 +2490,8 @@ mod native {
                     Operation::Send => " · dispatching once…",
                     Operation::Login => " · browser sign-in in progress…",
                     Operation::Cancel => " \u{b7} stopping the run\u{2026}",
+                    Operation::Approvals => " \u{b7} reading pending approvals\u{2026}",
+                    Operation::Decide => " \u{b7} sending your decision\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -2383,6 +2571,75 @@ mod native {
             // transcript carries the finished reply.
             self.draft.set_text(&state.live_draft);
             self.draft.set_visible(!state.live_draft.is_empty());
+            self.approvals_box.set_visible(!state.approvals.is_empty());
+            self.approval_notice.set_text(&state.approval_notice);
+            self.approval_notice
+                .set_visible(!state.approval_notice.is_empty());
+            self.approvals_refresh.set_sensitive(connected && idle);
+            super::super::clear_chat(&self.approvals_box);
+            for approval in &state.approvals {
+                let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                card.add_css_class("welcome-card");
+                let heading = label(if approval.title.trim().is_empty() {
+                    "The agent is asking for approval"
+                } else {
+                    approval.title.trim()
+                });
+                heading.add_css_class("assistant-name");
+                card.append(&heading);
+                if !approval.summary.trim().is_empty() {
+                    card.append(&label(approval.summary.trim()));
+                }
+                let mut evidence = String::new();
+                for (name, value) in [
+                    ("Kind", approval.kind.as_deref()),
+                    ("Offered", approval.decision.as_deref()),
+                    ("Remembered as", approval.always_scope.as_deref()),
+                ] {
+                    if let Some(value) = value.filter(|text| !text.trim().is_empty()) {
+                        evidence.push_str(&format!("{name}: {value}\n"));
+                    }
+                }
+                // The request's own detail rows, verbatim: they are what the
+                // decision is about, and summarising them would hide the action.
+                for detail in &approval.details {
+                    evidence.push_str(&format!("{}: {}\n", detail.label, detail.value));
+                }
+                if !evidence.is_empty() {
+                    let facts = label(evidence.trim_end());
+                    facts.add_css_class("dim-label");
+                    card.append(&facts);
+                }
+                let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                buttons.add_css_class("toolbar");
+                let deciding = state.deciding.is_some();
+                let add = |text: &str, decision: muse_account::Decision, suggested: bool| {
+                    let button = gtk::Button::with_label(text);
+                    if suggested {
+                        button.add_css_class("suggested-action");
+                    }
+                    // One press, one decision: nothing is ever re-sent by a timer,
+                    // and every card stops accepting presses while one is in flight.
+                    button.set_sensitive(!deciding);
+                    let weak = self.self_weak.borrow().clone();
+                    let id = approval.approval_id.clone();
+                    button.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.decide(id.clone(), decision);
+                        }
+                    });
+                    buttons.append(&button);
+                };
+                add("Allow once", muse_account::Decision::AllowOnce, true);
+                if approval.always_scope.is_some() {
+                    // Only offered when the service published a scope to remember,
+                    // so "always" cannot mean a scope this app invented.
+                    add("Allow always", muse_account::Decision::AllowAlways, false);
+                }
+                add("Deny", muse_account::Decision::Deny, false);
+                card.append(&buttons);
+                self.approvals_box.append(&card);
+            }
             self.tasks_notice.set_text(&state.tasks_notice);
             self.send_notice.set_text(&state.send_notice);
             self.send_notice.set_visible(!state.send_notice.is_empty());
@@ -3003,6 +3260,81 @@ mod tests {
             status: status.map(str::to_owned),
             session_id: None,
         }
+    }
+
+    fn approval(id: &str, scope: Option<&str>) -> muse_account::Approval {
+        muse_account::Approval {
+            approval_id: id.into(),
+            kind: Some("egress".into()),
+            decision: Some("allow_once".into()),
+            always_scope: scope.map(str::to_owned),
+            attention_mode: None,
+            title: "Connect to example.test".into(),
+            summary: "The agent wants to reach the network.".into(),
+            details: vec![muse_account::ApprovalDetail {
+                label: "Host".into(),
+                value: "example.test:443".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_decision_leaves_the_list_only_after_the_service_accepts_it() {
+        let mut state: State = Controller {
+            approvals: vec![approval("a-1", None), approval("a-2", Some("task"))],
+            ..Controller::default()
+        };
+        let ticket = state.issue(Operation::Approvals).expect("ticket");
+        assert!(state.finish_approvals(
+            &ticket,
+            Ok(muse_account::PendingApprovals {
+                pending: vec![approval("a-1", None)],
+            })
+        ));
+        assert_eq!(state.approvals.len(), 1);
+        state.deciding = Some("a-1".into());
+        let ticket = state.issue(Operation::Decide).expect("ticket");
+        assert!(state.finish_decide(
+            &ticket,
+            Ok(muse_account::DecisionAnswer {
+                approval_id: "a-1".into(),
+                requested: "allow_once".into(),
+                accepted: true,
+                decision: Some("allow_once".into()),
+            })
+        ));
+        assert!(state.approvals.is_empty());
+        assert!(state.deciding.is_none());
+        // The service accepting a decision is not the action succeeding.
+        assert!(state.approval_notice.contains("accepted"));
+        assert!(!state.approval_notice.contains("allowed"));
+    }
+
+    #[test]
+    fn an_unanswered_decision_keeps_the_request_on_screen() {
+        let mut state: State = Controller {
+            approvals: vec![approval("a-1", None)],
+            deciding: Some("a-1".into()),
+            ..Controller::default()
+        };
+        let ticket = state.issue(Operation::Decide).expect("ticket");
+        assert!(!state.finish_decide(&ticket, Err("timeout".into())));
+        assert_eq!(state.approvals.len(), 1);
+        assert!(state.deciding.is_none());
+        // The wording has to steer a reader to re-read, not to press twice.
+        assert!(state.approval_notice.contains("instead of pressing twice"));
+    }
+
+    #[test]
+    fn an_empty_read_reports_itself_rather_than_claiming_consent() {
+        let mut state: State = Controller {
+            approvals: vec![approval("a-1", None)],
+            ..Controller::default()
+        };
+        let ticket = state.issue(Operation::Approvals).expect("ticket");
+        state.finish_approvals(&ticket, Ok(muse_account::PendingApprovals::default()));
+        assert!(state.approvals.is_empty());
+        assert!(state.approval_notice.contains("no approvals are waiting"));
     }
 
     #[test]

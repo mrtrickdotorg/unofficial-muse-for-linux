@@ -126,6 +126,83 @@ pub struct DispatchReceipt {
     pub confirmed: bool,
     pub message_id: Option<String>,
 }
+/// One label/value pair the service attached to an approval request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalDetail {
+    pub label: String,
+    pub value: String,
+}
+/// A pending approval, as the sentinel service describes it.
+///
+/// `decision`, `always_scope` and `attention_mode` keep the service's own words:
+/// the window shows them rather than inventing a friendlier category, and
+/// `details` is the request's own evidence for what the agent wants to do.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    pub approval_id: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub always_scope: Option<String>,
+    #[serde(default)]
+    pub attention_mode: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub details: Vec<ApprovalDetail>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingApprovals {
+    #[serde(default)]
+    pub pending: Vec<Approval>,
+}
+/// The five outcomes the service publishes. Nothing else is ever sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    AllowOnce,
+    AllowTask,
+    AllowSite,
+    AllowAlways,
+    Deny,
+}
+impl Decision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AllowOnce => "allow_once",
+            Self::AllowTask => "allow_task",
+            Self::AllowSite => "allow_site",
+            Self::AllowAlways => "allow_always",
+            Self::Deny => "deny",
+        }
+    }
+    /// Every outcome, for a window that must offer the service's own set and
+    /// not a subset it chose to guess at.
+    pub fn all() -> [Self; 5] {
+        [
+            Self::AllowOnce,
+            Self::AllowTask,
+            Self::AllowSite,
+            Self::AllowAlways,
+            Self::Deny,
+        ]
+    }
+}
+/// What the service said about a decision it took.
+///
+/// `accepted` means the service accepted the decision; it does not mean the
+/// approved action then succeeded, so callers must not report an effect.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionAnswer {
+    pub approval_id: String,
+    pub requested: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub decision: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -323,6 +400,32 @@ impl AccountClient {
     /// record, so UI must not treat the call itself as a successful stop.
     pub fn cancel(&self) -> Result<CancelAnswer, AccountError> {
         self.request(serde_json::json!({"op": "cancel"}), false)
+    }
+    /// List what the agent is asking to do. Read-only: listing never decides.
+    pub fn approvals(&self) -> Result<PendingApprovals, AccountError> {
+        self.request(serde_json::json!({"op": "approvals"}), false)
+    }
+    /// Decide exactly one approval, once.
+    ///
+    /// The bridge accepts only the five published outcomes and makes a single
+    /// request, so one press maps to one write. Nothing retries here: a decision
+    /// whose answer was lost is re-read, never repeated.
+    pub fn decide(
+        &self,
+        approval_id: &str,
+        decision: Decision,
+    ) -> Result<DecisionAnswer, AccountError> {
+        if approval_id.is_empty() || approval_id.len() > 256 || approval_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({
+                "op": "decide",
+                "approval_id": approval_id,
+                "decision": decision.as_str(),
+            }),
+            false,
+        )
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.
