@@ -34,11 +34,13 @@ handshake), typed errors with the no-echo rule, private-only session storage, th
 - **Fresh sign-in — proven live.** An isolated-browser sign-in completed against the real service; the
   read-only probe then returned `connected=true threads=4 history_messages=20 schedules=32 runs=25`.
   Expiry and revocation now have their own state in the UI instead of a silent failure.
-- **Live registration — proven live.** Pressing Start in the packaged app produced a real
-  registration acknowledgement (`Registered with Muse`) for a granted scratch folder, and the device
-  now keeps one persisted identity instead of a new one per start. **Still unproven:** an actual agent
-  invocation. The session activity log stayed empty after registration, so no cloud agent has yet
-  dispatched a Linux command and no result has round-tripped.
+- **Live registration and first invocation — proven live.** Pressing Start produced a real
+  registration acknowledgement (`Registered with Muse`) for a granted scratch folder. `node.list` then
+  showed exactly one Linux node, id `linux-f818441e5fe79c3fd56ad17a5d64a6ce` (the value persisted on
+  disk), `name='Linux'`, `platform=linux`, `device_family=homehub`, `online=True`, advertising
+  `files.create_text`, `files.read_text` and `files.search`. Asking the agent to read
+  `read-me.txt` in the granted folder returned its contents, so an agent-to-Linux read round-tripped.
+  Neither headline claim is open any more.
 
 Everything below therefore begins with **route reconnaissance**, not with a UI. The pinned community
 client carries a static route table (`muse_mcp.client.ROUTES`, 258 entries); a route existing there is
@@ -88,9 +90,11 @@ gateway for its version/capabilities once and fail with a specific drift error; 
 *Gate:* packaged app performs a fresh interactive sign-in, survives expiry and revocation with clear
 states, and reports live registration for a scratch folder. Every later phase cites this evidence.
 
-*Done:* fresh sign-in, the expired-session state, one persisted device identity per installation
-(`local-host-node-id`, owner-only, staged-then-renamed), and live registration of a scratch folder.
-*Open:* the first real agent invocation through that registration, which P3's gate depends on.
+*Gate met:* fresh sign-in; expiry and revocation as explicit states; one persisted device identity per
+installation (`local-host-node-id`, owner-only, staged-then-renamed); live registration of a scratch
+folder; and a real agent-to-Linux `files.read_text` whose contents came back in the reply. P1 is
+unblocked. Carried forward: an approval-gated *create* has still never been exercised by the real
+agent (only by tests), and revocation mid-invocation is unproven against the live service.
 
 ### P1 — The live conversation (M)
 
