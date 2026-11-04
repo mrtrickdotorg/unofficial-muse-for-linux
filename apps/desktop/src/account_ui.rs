@@ -48,6 +48,11 @@ struct Controller<A, H, T> {
     /// Highest delta `seq` already applied, so an overlapping poll cannot append
     /// the same fragment twice.
     live_delta_seq: u64,
+    /// A reply is being produced and this window is listening to it. Set from
+    /// the transcript (a reply row with no terminal status) or from the live
+    /// stream, and cleared when the turn closes, so a window that opens in the
+    /// middle of a run attaches to it instead of sitting idle.
+    watching_run: bool,
     pending_send: Option<PendingSend>,
 }
 
@@ -79,6 +84,18 @@ fn history_closes_turn(rows: &[muse_account::HistoryMessage]) -> bool {
     rows.last().is_some_and(|row| {
         row.role == "assistant" && row.status.as_deref().is_some_and(reply_finished)
     })
+}
+
+/// True when the newest row is a reply still being produced.
+///
+/// The service leaves `status` absent while it is producing and sets a terminal
+/// one when it finishes (observed live: the in-flight row at `72546` had no
+/// status, the cancelled reply at `72488` ended `interrupted`). That absent
+/// status is what tells a window which did not send the message that there is
+/// still work to attach to.
+fn reply_in_flight(rows: &[muse_account::HistoryMessage]) -> bool {
+    rows.last()
+        .is_some_and(|row| row.role == "assistant" && row.status.is_none())
 }
 
 /// Statuses the service uses to close a reply. `interrupted` is how a cancelled
@@ -208,6 +225,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             live_status: String::new(),
             live_draft: String::new(),
             live_delta_seq: 0,
+            watching_run: false,
             pending_send: None,
         }
     }
@@ -434,8 +452,19 @@ impl<A, H, T> Controller<A, H, T> {
         true
     }
 
+    /// Attach this window to a reply that is being produced. Returns true only
+    /// the first time, so repeated reads cannot restart the bounded watch.
+    fn begin_watch(&mut self) -> bool {
+        if self.watching_run {
+            return false;
+        }
+        self.watching_run = true;
+        true
+    }
+
     /// Clears the live line once the transcript shows the turn has finished.
     fn note_turn_finished(&mut self) {
+        self.watching_run = false;
         self.live_status.clear();
         // The transcript now carries the answer; keeping a draft beside it would
         // present the same reply twice, one of them possibly truncated.
@@ -489,6 +518,12 @@ impl<A, H, T> Controller<A, H, T> {
         match &result {
             Ok(events) => {
                 self.append_deltas(events);
+                // A working status is live evidence of a run, and evidence is
+                // enough to keep listening -- including for a run this window
+                // never sent.
+                if events.iter().any(|event| progress_text(event).is_some()) {
+                    self.watching_run = true;
+                }
                 self.live_status = events
                     .iter()
                     .rev()
@@ -703,6 +738,12 @@ mod native {
         spinner: gtk::Spinner,
         live_notice: gtk::Label,
         draft: gtk::Label,
+        /// A watch is bounded: an absent status on an old row must not leave a
+        /// background listen running for the rest of the session.
+        watch_until: std::cell::Cell<Option<std::time::Instant>>,
+        /// Alternates the live listen and the history poll during a watch, so
+        /// neither starves the other.
+        live_turn: std::cell::Cell<bool>,
     }
 
     enum Reply {
@@ -1435,6 +1476,8 @@ mod native {
             scope_label,
             live_notice,
             draft,
+            watch_until: std::cell::Cell::new(None),
+            live_turn: std::cell::Cell::new(true),
             refresh,
             older,
             history,
@@ -1546,14 +1589,31 @@ mod native {
             if ui.root.root().is_none() {
                 return gtk::glib::ControlFlow::Break;
             }
+            let now = std::time::Instant::now();
             let idle = ui.state.borrow().busy.is_none();
-            let awaiting = ui
-                .reply_until
-                .get()
-                .is_some_and(|until| std::time::Instant::now() < until);
-            if awaiting && idle {
+            let watching = ui.state.borrow().watching_run;
+            if watching && ui.watch_until.get().map_or(true, |until| now >= until) {
+                // The watch is bounded: a stale in-flight row must not leave a
+                // background listen running for the rest of the session.
+                ui.state.borrow_mut().watching_run = false;
+                ui.render();
+            }
+            let watching = ui.state.borrow().watching_run;
+            let awaiting = ui.reply_until.get().is_some_and(|until| now < until);
+            if watching && idle {
+                // Alternate the two bounded reads: twenty status listens must not
+                // starve the history poll that decides when the turn is over.
+                let live_next = !ui.live_turn.get();
+                ui.live_turn.set(live_next);
+                if live_next {
+                    ui.poll_live();
+                } else {
+                    ui.poll_reply();
+                }
+                last_refresh.set(now);
+            } else if awaiting && idle {
                 ui.poll_reply();
-                last_refresh.set(std::time::Instant::now());
+                last_refresh.set(now);
             } else if last_refresh.get().elapsed() >= Duration::from_secs(180) {
                 last_refresh.set(std::time::Instant::now());
                 ui.read(false, true);
@@ -2023,6 +2083,7 @@ mod native {
             }
             let mut refresh_after = false;
             let mut poll_after_cancel = false;
+            let mut watch_after = false;
             // A completed browser sign-in hands straight over to the explicit
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
@@ -2081,14 +2142,22 @@ mod native {
                         }
                     }
                     Reply::Refresh(account, history, tasks) => {
+                        let closed = matches!(&history, Ok(rows) if history_closes_turn(rows));
+                        let in_flight = matches!(&history, Ok(rows) if reply_in_flight(rows));
                         state.finish_refresh(ticket, account, history, tasks);
+                        if closed {
+                            state.note_turn_finished();
+                        }
+                        watch_after = in_flight && state.begin_watch();
                     }
                     Reply::History(result) => {
                         let closed = matches!(&result, Ok(rows) if history_closes_turn(rows));
+                        let in_flight = matches!(&result, Ok(rows) if reply_in_flight(rows));
                         state.finish_history(ticket, result);
                         if closed {
                             state.note_turn_finished();
                         }
+                        watch_after = in_flight && state.begin_watch();
                     }
                     Reply::Live(result) => {
                         state.apply_live(result);
@@ -2113,6 +2182,11 @@ mod native {
                     Reply::Send(result) | Reply::SendConnectionError(result) => {
                         let confirmed = matches!(&result, SendOutcome::Confirmed);
                         state.finish_send(ticket, result);
+                        if confirmed && state.begin_watch() {
+                            // The reply we just asked for is a run to watch, same
+                            // as one that was already going when we opened.
+                            watch_after = true;
+                        }
                         if confirmed {
                             self.prompt.set_text("");
                         }
@@ -2140,6 +2214,14 @@ mod native {
                 }
             }
             self.render();
+            if watch_after {
+                // Bound the watch, then attach: one live listen reports the
+                // status and the first fragments, and the timer keeps both the
+                // listen and the history poll going until the turn closes.
+                self.watch_until
+                    .set(Some(std::time::Instant::now() + Duration::from_secs(600)));
+                self.poll_live();
+            }
             if send_confirmed {
                 // A send does not change the conversation chooser, and a full
                 // refresh re-verifies the account and lists every conversation
@@ -2869,6 +2951,48 @@ mod tests {
             row("assistant", Some("completed")),
             row("user", None)
         ]));
+    }
+
+    #[test]
+    fn a_reply_still_being_produced_is_worth_watching() {
+        // The in-flight row of a real run carried no status at all.
+        assert!(reply_in_flight(&[row("assistant", None)]));
+        assert!(reply_in_flight(&[
+            row("user", None),
+            row("assistant", None)
+        ]));
+        for status in ["completed", "interrupted", "cancelled", "failed"] {
+            assert!(
+                !reply_in_flight(&[row("assistant", Some(status))]),
+                "{status:?} is a finished reply"
+            );
+        }
+        // A prompt with no reply yet, or nothing at all, is not a run to attach to.
+        assert!(!reply_in_flight(&[row("user", None)]));
+        assert!(!reply_in_flight(&[]));
+    }
+
+    #[test]
+    fn a_window_that_lost_the_turn_attaches_to_it_once() {
+        let mut state: State = Controller::default();
+        assert!(!state.watching_run);
+        assert!(state.begin_watch());
+        assert!(state.watching_run);
+        // Later reads must not restart the watch, or its bound is never reached.
+        assert!(!state.begin_watch());
+        // A finished turn ends it.
+        state.note_turn_finished();
+        assert!(!state.watching_run);
+    }
+
+    #[test]
+    fn a_reported_working_status_opens_the_watch_and_a_settled_one_does_not() {
+        let mut working: State = Controller::default();
+        working.apply_live(Ok(vec![event("agent.status", Some("is responding"), None)]));
+        assert!(working.watching_run);
+        let mut settled: State = Controller::default();
+        settled.apply_live(Ok(vec![event("task.status", Some("completed"), None)]));
+        assert!(!settled.watching_run);
     }
 
     fn event(name: &str, status: Option<&str>, text: Option<&str>) -> muse_account::LiveEvent {

@@ -139,7 +139,13 @@ one item written ("1. One is the loneliest number…") and nothing further for 9
 and the transcript says so. Two facts worth keeping: the id in the cancel answer is *not* the prompt's
 id, so it identifies the interrupted reply rather than the request, and a cancelled turn closes as
 `interrupted`, not `completed` — a finish-check that knew only `completed` would report a stopped turn
-as permanently in progress. Interjection and reattach-after-restart remain open.
+as permanently in progress. Reattach-after-restart is now evidence-driven rather than remembered. A reply row with no terminal status means
+the service is still producing, so a window that opens mid-run opens a bounded watch (ten minutes) and listens
+on `activity` in alternation with the history poll, streaming fragments into the draft and closing the watch
+when the turn ends. Nothing is persisted locally, so a stale row cannot invent a run: the strip only speaks when
+the live stream reports a working status, and a finished status opens no watch. The cost is that the transcript
+still shows the partial reply, so the draft starts where the window did rather than where the answer did.
+Interjection remains open.
 
 *Recon (live, 2026-11-04).* `chat.subscribe` answers for a personal session and delivers
 `agent.status` (`activity_code`/`activity_text`, `session_id`, `is_thread`), `task.status`
