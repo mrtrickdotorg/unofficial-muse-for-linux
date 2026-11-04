@@ -73,6 +73,17 @@ pub struct TasksSnapshot {
     pub schedules: Vec<Schedule>,
     pub runs: Vec<TaskRun>,
 }
+/// What the service answered to a cancel request.
+///
+/// `cancelled` is the service's word, not ours: a press with nothing running
+/// comes back false, and the caller must say so instead of reporting a stop
+/// that did not happen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelAnswer {
+    pub cancelled: bool,
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
 /// Bounded live listen: what the agent is doing right now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveStatus {
@@ -305,6 +316,13 @@ impl AccountClient {
             serde_json::json!({"op": "activity", "timeout": millis}),
             false,
         )
+    }
+    /// Ask the service to stop the run it currently has in flight.
+    ///
+    /// The answer says whether anything was stopped; it is not an intent
+    /// record, so UI must not treat the call itself as a successful stop.
+    pub fn cancel(&self) -> Result<CancelAnswer, AccountError> {
+        self.request(serde_json::json!({"op": "cancel"}), false)
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.

@@ -109,6 +109,14 @@ threads; persist in-flight state so a restart does not lose the thread.
 *Gate:* an answer appears incrementally; interjecting during work is accepted; cancel stops the work
 and is verified through history; restarting the app reattaches to the same run.
 
+*Cancel (2026-11-04).* `chat.cancel` is `POST /chat/cancel` with `noiseOnly`, and the pinned CLI never
+calls it, so the bridge reaches the route directly instead of waiting for a library method. Probed
+against the live service with nothing running it answered `{"cancelled": false, "message_id": null}` —
+the service states whether anything was actually stopped, so the window reports that answer ("nothing
+was running to stop") rather than treating a press as a stop. This moves the gate but does not close
+it: "cancel stops the work and is verified through history" needs a run that is genuinely in flight,
+and interjection plus reattach-after-restart remain open.
+
 *Recon (live, 2026-11-04).* `chat.subscribe` answers for a personal session and delivers
 `agent.status` (`activity_code`/`activity_text`, `session_id`, `is_thread`), `task.status`
 (`status: completed`, `active_subagent_count`, `task_id`), `approvals.snapshot` and
