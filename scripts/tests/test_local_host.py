@@ -208,6 +208,44 @@ class LifecycleTests(unittest.TestCase):
             with self.subTest(request=str(request)[:100]), self.assertRaises(host.Failure):
                 host.validate_start(request)
 
+    def test_bounded_receiver_installs_on_a_slotted_socket_class(self):
+        # curl_cffi's WebSocket declares __slots__, so assigning `recv` on the
+        # instance raises "attribute 'recv' is read-only". The first live host
+        # start died as transport_error at exactly that line, while this suite's
+        # plain fake socket accepted the assignment and stayed green.
+        host = module()
+        from unittest.mock import patch
+
+        class Socket:
+            __slots__ = ("closed",)
+
+            def __init__(self):
+                self.closed = False
+
+            def recv(self):
+                return b"legacy"
+
+            def recv_fragment(self):
+                return b"", None
+
+        class Gateway:
+            def __init__(self):
+                self.ws = Socket()
+
+            def close(self):
+                pass
+
+        seen = []
+        with patch.object(host, "bounded_recv", lambda ws: seen.append(ws) or b"bounded"):
+            gateway = Gateway()
+            host.install_bounded_receiver(gateway)
+            self.assertEqual(gateway.ws.recv(), b"bounded")
+            # The class-level function still receives the real socket.
+            self.assertIs(seen[0], gateway.ws)
+        # A socket that cannot offer fragments still fails closed.
+        with self.assertRaises(host.Failure):
+            host.install_bounded_receiver(type("G", (), {"ws": object()})())
+
     def test_gateway_cleanup_is_once_only_even_when_context_and_stopper_close(self):
         host = module()
         class Socket:

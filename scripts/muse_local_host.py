@@ -445,9 +445,30 @@ def bounded_recv(websocket):
 
 
 def install_bounded_receiver(gateway):
-    if not callable(getattr(gateway.ws, "recv_fragment", None)):
+    websocket = gateway.ws
+    if not callable(getattr(websocket, "recv_fragment", None)):
         raise Failure("bridge_unavailable")
-    gateway.ws.recv = lambda: bounded_recv(gateway.ws)
+    # curl_cffi's WebSocket uses __slots__, so assigning `recv` on the instance
+    # raises "'WebSocket' object attribute 'recv' is read-only" — every live
+    # start died as transport_error at exactly this line. Patch the class, which
+    # is writable, and whose function still receives the real socket. One process
+    # serves exactly one control stream, so the patch never reaches another link.
+    socket_type = type(websocket)
+
+    def bounded(self, *args, **kwargs):
+        return bounded_recv(self)
+
+    if callable(vars(socket_type).get("recv")):
+        try:
+            socket_type.recv = bounded
+        except (AttributeError, TypeError):
+            raise Failure("bridge_unavailable") from None
+    else:
+        # No class-level recv (plain fakes, unusual clients): wrap the instance.
+        try:
+            websocket.recv = lambda *a, **k: bounded_recv(websocket)
+        except (AttributeError, TypeError):
+            raise Failure("bridge_unavailable") from None
     original_close = gateway.close
     closing = threading.Lock()
     def close_once():
@@ -455,7 +476,11 @@ def install_bounded_receiver(gateway):
         # native libcurl closes concurrently, and never wait for a stuck close.
         if closing.acquire(blocking=False):
             original_close()
-    gateway.close = close_once
+    try:
+        gateway.close = close_once
+    except (AttributeError, TypeError):
+        # A slotted gateway keeps its own close; closing twice is still safe.
+        pass
 
 
 def main():
