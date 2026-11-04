@@ -301,6 +301,7 @@ def validate_request(request):
                "activity": {"timeout"},
                "cancel": set(),
                "approvals": set(),
+               "decide": {"approval_id", "decision"},
                "tasks": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
@@ -339,6 +340,15 @@ def validate_request(request):
     if "device_id" in request:
         device = request["device_id"]
         if not isinstance(device, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", device) is None:
+            raise BridgeFailure("invalid_request")
+    if op == "decide":
+        approval_id = request.get("approval_id")
+        if (not isinstance(approval_id, str) or not 1 <= len(approval_id) <= 256
+                or "\x00" in approval_id):
+            raise BridgeFailure("invalid_request")
+        # Refuse an outcome the service never published rather than guessing a
+        # mapping: a decision is a write, and a wrong word is not recoverable.
+        if request.get("decision") not in DECISIONS:
             raise BridgeFailure("invalid_request")
     if op == "send":
         message = request.get("message")
@@ -749,6 +759,26 @@ def approval_rows(payload):
     return {"pending": rows}
 
 
+DECISIONS = ("allow_once", "allow_task", "allow_site", "allow_always", "deny")
+
+
+def decision_answer(approval_id, decision, answer):
+    """What came back from a decision, without overstating it.
+
+    A 2xx means the service accepted the decision; it does not mean the approved
+    action then succeeded, so nothing here claims an effect. The service's own
+    word for the outcome travels unchanged when it supplies one.
+    """
+    if not isinstance(answer, dict):
+        raise BridgeFailure("protocol_error")
+    return {
+        "approval_id": approval_id,
+        "requested": decision,
+        "accepted": True,
+        "decision": optional_text(answer.get("decision")),
+    }
+
+
 def updated_at_text(session):
     millis = session.get("updated_at_ms")
     if isinstance(millis, (int, float)) and not isinstance(millis, bool):
@@ -875,6 +905,20 @@ class Adapter:
             finally:
                 gateway.close()
             return approval_rows(payload)
+        if request["op"] == "decide":
+            # A write on the sentinel service: one decision, one connection, and
+            # never retried here. The caller shows the request and presses once.
+            gateway = sentinel_gateway(self.config)
+            try:
+                answer = gateway.call_json(
+                    "egress.approval.decide",
+                    path_params={"approval_id": request["approval_id"]},
+                    body={"decision": request["decision"]},
+                    timeout=20,
+                )
+            finally:
+                gateway.close()
+            return decision_answer(request["approval_id"], request["decision"], answer)
         if request["op"] == "activity":
             return activity_rows(self.client, self.config, request["timeout"])
         if request["op"] == "cancel":
