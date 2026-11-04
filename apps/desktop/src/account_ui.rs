@@ -69,6 +69,33 @@ fn history_closes_turn(rows: &[muse_account::HistoryMessage]) -> bool {
         .is_some_and(|row| row.role == "assistant" && row.status.as_deref() == Some("completed"))
 }
 
+/// True when a status describes presence or a finished task rather than work in
+/// progress. Painting "completed" would report an end state as something the
+/// agent is doing, which the transcript already states correctly.
+fn settled_status(status: &str) -> bool {
+    const SETTLED: [&str; 6] = [
+        "online",
+        "offline",
+        "idle",
+        "completed",
+        "cancelled",
+        "done",
+    ];
+    let status = status.trim();
+    status.is_empty() || SETTLED.iter().any(|word| status.eq_ignore_ascii_case(word))
+}
+
+/// The line to show for one live event, if any. Only a reported status counts:
+/// `delta.*` payloads carry reply text, and mirroring that above the transcript
+/// would present a second, less accurate copy of the answer.
+fn progress_text(event: &muse_account::LiveEvent) -> Option<String> {
+    let status = event.status.as_deref()?;
+    if settled_status(status) {
+        return None;
+    }
+    Some(format!("Agent · {}", status.trim()))
+}
+
 fn presentation_text(text: &str) -> String {
     const WIDGET_MARKER: &str = "[[hatch_widget.";
     const WIDGET_FALLBACK: &str =
@@ -2612,6 +2639,52 @@ mod tests {
             row("assistant", Some("completed")),
             row("user", None)
         ]));
+    }
+
+    fn event(name: &str, status: Option<&str>, text: Option<&str>) -> muse_account::LiveEvent {
+        muse_account::LiveEvent {
+            event: name.into(),
+            seq: Some(1),
+            text: text.map(str::to_owned),
+            status: status.map(str::to_owned),
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn settled_states_are_not_painted_as_progress() {
+        // Captured from a real send: the newest statuses were presence and a
+        // completed task, and the strip read "Agent · completed".
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![
+            event("model_lock.updated", None, None),
+            event("agent.status", Some("online"), None),
+            event("task.status", Some("completed"), None),
+            event("approvals.snapshot", None, None),
+        ]));
+        assert!(state.live_status.is_empty());
+    }
+
+    #[test]
+    fn a_wait_for_the_user_is_painted() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![event(
+            "agent.status",
+            Some("Needs approval"),
+            None,
+        )]));
+        assert_eq!(state.live_status, "Agent · Needs approval");
+    }
+
+    #[test]
+    fn reply_text_is_never_mirrored_into_the_status_line() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![event(
+            "delta.text",
+            None,
+            Some("2:55 PM in London right now (GMT)"),
+        )]));
+        assert!(state.live_status.is_empty());
     }
 
     #[test]
