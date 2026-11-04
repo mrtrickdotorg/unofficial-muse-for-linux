@@ -235,9 +235,18 @@ outcome words (`allow_once`, `allow_task`, `allow_site`, `allow_always`, `deny`)
 before any request is made, and sends exactly one `POST /approvals/{approval_id}/decide` on its own sentinel
 connection. The answer reports that the service **accepted** the decision, plus the service's own word for it —
 never that the approved action ran, because a 2xx is not an effect — and a decision is never retried. What is
-still missing is the human half: the window surfaces neither the pending list nor a press, so nothing in the app
-can decide yet. That wiring has to be an explicit per-approval press showing the request's own detail rows,
-never a background refresh and never a default-allow.
+human half is now wired too. *Check approvals* reads the pending list on demand — reading is never consent, so
+an empty answer says "the service reports no approvals are waiting" and changes nothing. Each request becomes a
+card carrying the service's own title, summary, kind, offered outcome, remembered scope and every detail row
+verbatim; summarising those rows would hide the action being approved. The card offers **Allow once** and
+**Deny**, plus **Allow always** only when the service published an `always_scope`, so "always" can never mean a
+scope this app invented. One press takes the exclusive slot, disables every card, sends one `decide`, and then
+re-reads the list: a decision only leaves the card after the service accepts it, and the notice reports the
+service's word ("accepted the decision (deny)") rather than claiming the action ran. A failed decision keeps the
+request on screen and says to re-read instead of pressing twice. Window tests cover the leave-on-accept rule,
+the keep-on-failure rule, the accepted-is-not-allowed wording, and the empty-read notice. No live decision has
+been pressed: no approval was pending at the time, and pressing one is an irreversible write for the person
+whose account it is.
 
 ### P3 — Reach the capabilities we already have (M)
 
