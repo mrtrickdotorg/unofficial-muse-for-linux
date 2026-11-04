@@ -1592,7 +1592,7 @@ mod native {
             let now = std::time::Instant::now();
             let idle = ui.state.borrow().busy.is_none();
             let watching = ui.state.borrow().watching_run;
-            if watching && ui.watch_until.get().map_or(true, |until| now >= until) {
+            if watching && ui.watch_until.get().is_none_or(|until| now >= until) {
                 // The watch is bounded: a stale in-flight row must not leave a
                 // background listen running for the rest of the session.
                 ui.state.borrow_mut().watching_run = false;
