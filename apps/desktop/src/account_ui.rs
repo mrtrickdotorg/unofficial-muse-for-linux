@@ -42,6 +42,12 @@ struct Controller<A, H, T> {
     /// Live agent status, as reported by the service. Empty means nothing was
     /// reported; it is never filled in from a timer or a guess.
     live_status: String,
+    /// Reply text received as `delta.text_append` events, shown while the service
+    /// is still producing and dropped once the transcript carries the reply.
+    live_draft: String,
+    /// Highest delta `seq` already applied, so an overlapping poll cannot append
+    /// the same fragment twice.
+    live_delta_seq: u64,
     pending_send: Option<PendingSend>,
 }
 
@@ -60,6 +66,10 @@ enum SendOutcome {
 fn account_surface_visibility(connected: bool) -> (bool, bool) {
     (connected, !connected)
 }
+
+/// The live event that carries reply text as it is produced. Fragments are raw
+/// chunks ("anti", "-Sullan", " government"), so they are joined verbatim.
+const DELTA_EVENT: &str = "delta.text_append";
 
 /// True when the newest service event closes the turn. The status line describes
 /// work in progress, so a completed assistant message ends it: leaving "Is
@@ -196,6 +206,8 @@ impl<A, H, T> Default for Controller<A, H, T> {
             tasks_notice: "No scheduled-task history requested.".into(),
             send_notice: String::new(),
             live_status: String::new(),
+            live_draft: String::new(),
+            live_delta_seq: 0,
             pending_send: None,
         }
     }
@@ -425,20 +437,66 @@ impl<A, H, T> Controller<A, H, T> {
     /// Clears the live line once the transcript shows the turn has finished.
     fn note_turn_finished(&mut self) {
         self.live_status.clear();
+        // The transcript now carries the answer; keeping a draft beside it would
+        // present the same reply twice, one of them possibly truncated.
+        self.live_draft.clear();
+        self.live_delta_seq = 0;
+    }
+
+    /// Accumulate streamed reply fragments.
+    ///
+    /// A repeated listen returns overlapping records, so anything at or below the
+    /// last applied `seq` is skipped rather than appended twice; an event with no
+    /// `seq` cannot be de-duplicated and is ignored on purpose.
+    fn append_deltas(&mut self, events: &[muse_account::LiveEvent]) {
+        let mut fresh: Vec<(u64, &str)> = Vec::new();
+        for event in events {
+            if event.event != DELTA_EVENT {
+                continue;
+            }
+            let (Some(seq), Some(text)) = (event.seq, event.text.as_deref()) else {
+                continue;
+            };
+            if seq > self.live_delta_seq {
+                fresh.push((seq, text));
+            }
+        }
+        fresh.sort_by_key(|(seq, _)| *seq);
+        for (seq, text) in fresh {
+            if seq <= self.live_delta_seq {
+                continue;
+            }
+            self.live_delta_seq = seq;
+            self.live_draft.push_str(text);
+        }
+        // A draft is a convenience, not an archive: bound it so a runaway stream
+        // cannot grow the window without limit.
+        const MAX_DRAFT_CHARS: usize = 20_000;
+        let chars = self.live_draft.chars().count();
+        if chars > MAX_DRAFT_CHARS {
+            self.live_draft = self
+                .live_draft
+                .chars()
+                .skip(chars - MAX_DRAFT_CHARS)
+                .collect();
+        }
     }
 
     /// A live status line only ever repeats a status an event reported. An empty
     /// read, or one that carried only settled states, leaves nothing on screen
     /// rather than reporting a finished state as present work.
     fn apply_live(&mut self, result: Result<Vec<muse_account::LiveEvent>, String>) {
-        self.live_status = match result {
-            Ok(events) => events
-                .iter()
-                .rev()
-                .find_map(progress_text)
-                .unwrap_or_default(),
-            Err(error) => format!("Live status unavailable: {error}"),
-        };
+        match &result {
+            Ok(events) => {
+                self.append_deltas(events);
+                self.live_status = events
+                    .iter()
+                    .rev()
+                    .find_map(progress_text)
+                    .unwrap_or_default();
+            }
+            Err(error) => self.live_status = format!("Live status unavailable: {error}"),
+        }
     }
 
     fn apply_history(&mut self, result: Result<Vec<H>, String>) {
@@ -644,6 +702,7 @@ mod native {
         cancel: gtk::Button,
         spinner: gtk::Spinner,
         live_notice: gtk::Label,
+        draft: gtk::Label,
     }
 
     enum Reply {
@@ -1282,6 +1341,13 @@ mod native {
         live_notice.add_css_class("chat-status");
         live_notice.set_visible(false);
         chat.append(&live_notice);
+        let draft = label("");
+        draft.add_css_class("chat-status");
+        draft.set_visible(false);
+        draft.set_tooltip_text(Some(
+            "Reply text as the service streams it. The finished reply replaces it in the transcript.",
+        ));
+        chat.append(&draft);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
@@ -1368,6 +1434,7 @@ mod native {
             threads_key: RefCell::new(String::new()),
             scope_label,
             live_notice,
+            draft,
             refresh,
             older,
             history,
@@ -2230,6 +2297,10 @@ mod native {
                 .set_visible(!state.history_notice.is_empty());
             self.live_notice.set_text(&state.live_status);
             self.live_notice.set_visible(!state.live_status.is_empty());
+            // Streamed fragments, shown as they arrive and dropped the moment the
+            // transcript carries the finished reply.
+            self.draft.set_text(&state.live_draft);
+            self.draft.set_visible(!state.live_draft.is_empty());
             self.tasks_notice.set_text(&state.tasks_notice);
             self.send_notice.set_text(&state.send_notice);
             self.send_notice.set_visible(!state.send_notice.is_empty());
@@ -2725,6 +2796,42 @@ mod tests {
             timestamp: None,
             status: status.map(str::to_owned),
         }
+    }
+
+    fn delta(seq: u64, text: &str) -> muse_account::LiveEvent {
+        muse_account::LiveEvent {
+            event: DELTA_EVENT.into(),
+            seq: Some(seq),
+            text: Some(text.into()),
+            status: None,
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn streamed_fragments_are_joined_and_never_applied_twice() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![
+            delta(10, "anti"),
+            delta(11, "-Sullan"),
+            delta(12, " government"),
+        ]));
+        assert_eq!(state.live_draft, "anti-Sullan government");
+        // A repeated listen returns overlapping records, so `seq` has to de-dupe
+        // them; a fragment without a seq cannot be de-duped and is ignored.
+        state.apply_live(Ok(vec![delta(11, "-Sullan"), delta(13, " and alliance")]));
+        assert_eq!(state.live_draft, "anti-Sullan government and alliance");
+        state.note_turn_finished();
+        assert!(state.live_draft.is_empty());
+        assert_eq!(state.live_delta_seq, 0);
+    }
+
+    #[test]
+    fn a_draft_is_never_mistaken_for_a_status() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![delta(1, "2:55 PM in London")]));
+        assert!(state.live_status.is_empty());
+        assert_eq!(state.live_draft, "2:55 PM in London");
     }
 
     #[test]

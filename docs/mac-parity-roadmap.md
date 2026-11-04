@@ -123,8 +123,14 @@ opposite direction — the window's finish-check now pins both directions. Two p
 message mid-turn: the service accepted it (`sent: true`), but in both the first reply had already reached a
 terminal status when the second landed, so **steering a live turn stays unproven**, and one acceptance came
 back `confirmed: false` — accepted but unconfirmed inside the 8 s window, which the window reports as
-uncertain rather than as delivered. Incremental rendering is unproven for the same reason: the partial row
-existed, but its text did not change across the reads taken.
+uncertain rather than as delivered. History does not stream either: the partial row sat at 12 characters and its
+text did not change across ~50 s of reads, then jumped to the full 21,340 characters at completion. The
+incremental channel is the **live stream**: a 20 s listen during a run returned `delta.text_append` events
+carrying raw fragments (`"anti"`, `"-Sullan"`, `" government"`) with monotonic `seq`, alongside
+`agent.status: is responding` and `task.status: running`. So an answer can appear incrementally, but only by
+joining deltas — and repeated listens overlap, so de-duplication by `seq` is mandatory. That is what the
+window's live draft does: join new fragments, never apply one twice, and drop the draft the moment the
+transcript carries the finished reply.
 
 *Gate item closed (live, 2026-11-04).* A prompt asking for 120 numbered lines was dispatched and
 confirmed (`message_id 1f7a5d61…`), then `chat.cancel` was sent 4 s later and answered
