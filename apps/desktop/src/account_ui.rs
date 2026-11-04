@@ -60,6 +60,15 @@ fn account_surface_visibility(connected: bool) -> (bool, bool) {
     (connected, !connected)
 }
 
+/// True when the newest service event closes the turn. The status line describes
+/// work in progress, so a completed assistant message ends it: leaving "Is
+/// working" (or "Needs approval") on screen afterwards is a lie about the
+/// present, not a stale cache.
+fn history_closes_turn(rows: &[HistoryMessage]) -> bool {
+    rows.last()
+        .is_some_and(|row| row.role == "assistant" && row.status.as_deref() == Some("completed"))
+}
+
 fn presentation_text(text: &str) -> String {
     const WIDGET_MARKER: &str = "[[hatch_widget.";
     const WIDGET_FALLBACK: &str =
@@ -346,6 +355,11 @@ impl<A, H, T> Controller<A, H, T> {
     /// A live status line only ever repeats what an event said. An empty read
     /// clears it rather than leaving a stale "Is working" on screen after the
     /// work has finished.
+    /// Clears the live line once the transcript shows the turn has finished.
+    fn note_turn_finished(&mut self) {
+        self.live_status.clear();
+    }
+
     fn apply_live(&mut self, result: Result<Vec<muse_account::LiveEvent>, String>) {
         self.live_status = match result {
             Ok(events) => events
@@ -1901,7 +1915,11 @@ mod native {
                         state.finish_refresh(ticket, account, history, tasks);
                     }
                     Reply::History(result) => {
+                        let closed = matches!(&result, Ok(rows) if history_closes_turn(rows));
                         state.finish_history(ticket, result);
+                        if closed {
+                            state.note_turn_finished();
+                        }
                     }
                     Reply::Live(result) => {
                         state.apply_live(result);
@@ -2569,6 +2587,53 @@ print(json.dumps({'ok':True,'data':data}))
 mod tests {
     use super::*;
     type State = Controller<String, String, String>;
+
+    fn row(role: &str, status: Option<&str>) -> muse_account::HistoryMessage {
+        muse_account::HistoryMessage {
+            message_id: "m".into(),
+            seq: 1,
+            role: role.into(),
+            text: String::new(),
+            timestamp: None,
+            status: status.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn only_a_completed_reply_closes_the_turn() {
+        assert!(history_closes_turn(&[row("assistant", Some("completed"))]));
+        assert!(!history_closes_turn(&[row("assistant", None)]));
+        assert!(!history_closes_turn(&[row("assistant", Some("running"))]));
+        assert!(!history_closes_turn(&[row("user", None)]));
+        assert!(!history_closes_turn(&[]));
+        // The newest row decides: once a new user message follows the finished
+        // reply, the next turn is under way and the line may speak again.
+        assert!(!history_closes_turn(&[
+            row("assistant", Some("completed")),
+            row("user", None)
+        ]));
+    }
+
+    #[test]
+    fn finishing_a_turn_clears_a_stale_status_line() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![muse_account::LiveEvent {
+            event: "agent.status".into(),
+            seq: Some(1),
+            text: None,
+            status: Some("Is working".into()),
+            session_id: None,
+        }]));
+        assert_eq!(state.live_status, "Agent \u{b7} Is working");
+        state.note_turn_finished();
+        assert!(state.live_status.is_empty());
+        // A failed read is a statement about the tool, not about the agent, and
+        // it must not survive as if it were live status either.
+        state.apply_live(Err("timeout".into()));
+        assert!(state.live_status.starts_with("Live status unavailable"));
+        state.note_turn_finished();
+        assert!(state.live_status.is_empty());
+    }
 
     #[test]
     fn disconnected_account_shows_setup_and_hides_empty_conversation_surface() {
