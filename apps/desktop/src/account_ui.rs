@@ -64,6 +64,9 @@ struct Controller<A, H, T> {
     /// The request whose decision is in flight, so its card stops accepting a
     /// second press while the first is unanswered.
     deciding: Option<String>,
+    /// The live status text that already caused a read of the pending list, so
+    /// the same status cannot trigger a second one.
+    approvals_sought: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,6 +243,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             approvals: Vec::new(),
             approval_notice: String::new(),
             deciding: None,
+            approvals_sought: String::new(),
         }
     }
 }
@@ -545,6 +549,23 @@ impl<A, H, T> Controller<A, H, T> {
         }
     }
 
+    /// True the first time a live status says the agent is waiting for an
+    /// approval. Keyed to that exact status text, so the alternating live reads
+    /// cannot turn an unanswered request into a poll loop.
+    fn claim_approval_read(&mut self) -> bool {
+        if !self.live_status.to_ascii_lowercase().contains("approval") {
+            // The agent stopped asking. Forgetting the key means a later request
+            // phrased the same way is a new episode, not a repeat of this one.
+            self.approvals_sought.clear();
+            return false;
+        }
+        if self.approvals_sought == self.live_status {
+            return false;
+        }
+        self.approvals_sought = self.live_status.clone();
+        true
+    }
+
     /// Attach this window to a reply that is being produced. Returns true only
     /// the first time, so repeated reads cannot restart the bounded watch.
     fn begin_watch(&mut self) -> bool {
@@ -559,6 +580,7 @@ impl<A, H, T> Controller<A, H, T> {
     fn note_turn_finished(&mut self) {
         self.watching_run = false;
         self.live_status.clear();
+        self.approvals_sought.clear();
         // The transcript now carries the answer; keeping a draft beside it would
         // present the same reply twice, one of them possibly truncated.
         self.live_draft.clear();
@@ -2258,6 +2280,7 @@ mod native {
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
             let mut reread_approvals = false;
+            let mut approvals_after = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
             let auth_expired = matches!(&reply, Reply::AuthExpired);
             let send_confirmed = matches!(&reply, Reply::Send(SendOutcome::Confirmed));
@@ -2332,6 +2355,10 @@ mod native {
                     }
                     Reply::Live(result) => {
                         state.apply_live(result);
+                        // A status saying the agent is waiting is the one moment
+                        // the list is worth reading unsolicited; the claim keeps
+                        // that to once per status, never a standing poll.
+                        approvals_after = state.claim_approval_read();
                     }
                     Reply::Cancel(result) => {
                         // The service's answer decides the wording: pressing
@@ -2422,6 +2449,9 @@ mod native {
                 self.connect_account();
             }
             if reread_approvals {
+                self.check_approvals();
+            }
+            if approvals_after {
                 self.check_approvals();
             }
         }
@@ -3260,6 +3290,37 @@ mod tests {
             status: status.map(str::to_owned),
             session_id: None,
         }
+    }
+
+    #[test]
+    fn a_status_asking_for_approval_reads_the_list_once() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![event(
+            "agent.status",
+            Some("Needs approval"),
+            None,
+        )]));
+        assert!(state.claim_approval_read());
+        // The same status arriving again is not a new request.
+        assert!(!state.claim_approval_read());
+        state.apply_live(Ok(vec![event("agent.status", Some("Is working"), None)]));
+        assert!(!state.claim_approval_read());
+        // Asking again after working is a new request, not a repeat.
+        state.apply_live(Ok(vec![event(
+            "agent.status",
+            Some("Needs approval"),
+            None,
+        )]));
+        assert!(state.claim_approval_read());
+    }
+
+    #[test]
+    fn ordinary_progress_never_reads_approvals() {
+        let mut state: State = Controller::default();
+        state.apply_live(Ok(vec![event("agent.status", Some("Is working"), None)]));
+        assert!(!state.claim_approval_read());
+        state.note_turn_finished();
+        assert!(!state.claim_approval_read());
     }
 
     fn approval(id: &str, scope: Option<&str>) -> muse_account::Approval {
