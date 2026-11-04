@@ -8,6 +8,7 @@ enum Operation {
     History,
     Send,
     Login,
+    Cancel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,6 +350,26 @@ impl<A, H, T> Controller<A, H, T> {
         })
     }
 
+    /// Take the busy slot for a stop request. A stop is a write the user asked
+    /// for, so it gets the same exclusive slot as a send: two racing stops would
+    /// make the service's answer ambiguous.
+    fn begin_cancel(&mut self) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.busy.is_some() {
+            return None;
+        }
+        self.serial = self.serial.wrapping_add(1);
+        let ticket = Ticket {
+            epoch: self.epoch,
+            serial: self.serial,
+            scope: self.scope.clone(),
+            limit: self.limit,
+            operation: Operation::Cancel,
+        };
+        self.busy = Some(ticket.clone());
+        Some(ticket)
+    }
+
     fn begin_poll(&mut self) -> Option<Ticket> {
         self.account.as_ref()?;
         if self.busy.is_some() || self.polling.is_some() {
@@ -376,6 +397,14 @@ impl<A, H, T> Controller<A, H, T> {
             return false;
         }
         self.apply_history(result);
+        true
+    }
+
+    fn finish_cancel(&mut self, ticket: &Ticket, notice: String) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.send_notice = notice;
         true
     }
 
@@ -598,6 +627,7 @@ mod native {
         acknowledge: gtk::Button,
         prompt: gtk::Entry,
         send: gtk::Button,
+        cancel: gtk::Button,
         spinner: gtk::Spinner,
         live_notice: gtk::Label,
     }
@@ -611,6 +641,7 @@ mod native {
         ),
         History(Result<Vec<HistoryMessage>, String>),
         Live(Result<Vec<muse_account::LiveEvent>, String>),
+        Cancel(Result<muse_account::CancelAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -1260,12 +1291,17 @@ mod native {
         let prompt = gtk::Entry::new();
         prompt.set_hexpand(true);
         prompt.set_placeholder_text(Some("Message your existing Muse agent…"));
+        let stop = gtk::Button::with_label("Stop agent");
+        stop.set_tooltip_text(Some(
+            "Asks the service to stop the run it has in flight. The service answers whether anything was actually stopped, and this window reports that answer instead of assuming it.",
+        ));
         let send = gtk::Button::with_label("Send to Muse");
         send.add_css_class("suggested-action");
         send.set_tooltip_text(Some(
             "Sends once to your existing Muse agent and may trigger external actions. No local files are uploaded automatically, and a send is never repeated without you.",
         ));
         composer.append(&prompt);
+        composer.append(&stop);
         composer.append(&send);
         chat.append(&composer);
         pages.append_page(&chat, Some(&gtk::Label::new(Some("Shared chat history"))));
@@ -1329,6 +1365,7 @@ mod native {
             acknowledge,
             prompt,
             send,
+            cancel: stop.clone(),
             spinner,
         });
         {
@@ -1397,6 +1434,8 @@ mod native {
         }
         {
             let u = Rc::clone(&ui);
+            let stopper = Rc::clone(&ui);
+            ui.cancel.connect_clicked(move |_| stopper.cancel_run());
             ui.send.connect_clicked(move |_| u.send_message());
             let enter = Rc::clone(&ui);
             ui.prompt.connect_activate(move |_| enter.send_message());
@@ -1724,6 +1763,25 @@ mod native {
         /// One bounded live read feeding the status line. Never the reply: the
         /// service does not deliver threaded replies as live events, so the
         /// transcript keeps polling history while this reports progress.
+        /// Ask the service to stop the run in flight.
+        fn cancel_run(self: &Rc<Self>) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().send_notice =
+                    "Not connected. Connect your Muse session before stopping a run.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_cancel() else {
+                return;
+            };
+            self.launch(ticket, move || match client.cancel() {
+                Ok(answer) => Reply::Cancel(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::Cancel(Err(error.to_string())),
+            });
+        }
+
         fn poll_live(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 return;
@@ -1868,6 +1926,9 @@ mod native {
                         Operation::History => {
                             Reply::History(Err("History worker stopped unexpectedly.".into()))
                         }
+                        Operation::Cancel => {
+                            Reply::Cancel(Err("Stop worker stopped unexpectedly.".into()))
+                        }
                     },
                 };
                 ui.complete(&ticket, reply);
@@ -1880,6 +1941,7 @@ mod native {
                 return;
             }
             let mut refresh_after = false;
+            let mut poll_after_cancel = false;
             // A completed browser sign-in hands straight over to the explicit
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
@@ -1950,6 +2012,23 @@ mod native {
                     Reply::Live(result) => {
                         state.apply_live(result);
                     }
+                    Reply::Cancel(result) => {
+                        // The service's answer decides the wording: pressing
+                        // stop is a request, never proof that work stopped.
+                        let stopped = matches!(&result, Ok(answer) if answer.cancelled);
+                        let notice = match &result {
+                            Ok(answer) if answer.cancelled => {
+                                "The service reports it stopped the current run.".to_string()
+                            }
+                            Ok(_) => "The service reports nothing was running to stop.".to_string(),
+                            Err(error) => format!(
+                                "Stop request failed: {error}. The run may still be in progress."
+                            ),
+                        };
+                        if state.finish_cancel(ticket, notice) && stopped {
+                            poll_after_cancel = true;
+                        }
+                    }
                     Reply::Send(result) | Reply::SendConnectionError(result) => {
                         let confirmed = matches!(&result, SendOutcome::Confirmed);
                         state.finish_send(ticket, result);
@@ -1987,6 +2066,11 @@ mod native {
                 self.poll_reply();
             } else if refresh_after {
                 self.read(false, true);
+            }
+            if poll_after_cancel {
+                // A stop changes what the transcript will say next, so ask for
+                // it rather than waiting for the idle refresh.
+                self.poll_reply();
             }
             if link_after_login {
                 self.connect_account();
@@ -2034,6 +2118,9 @@ mod native {
             self.older
                 .set_sensitive(connected && idle && state.limit < 200);
             self.threads.set_sensitive(connected && idle);
+            // A stop press only needs a connection; whether anything was
+            // actually stopped is the service's answer, not this button's.
+            self.cancel.set_sensitive(connected && state.busy.is_none());
             // Polling is background work: the composer stays usable, and a
             // double dispatch is still prevented by `pending_send` in begin_send.
             self.prompt

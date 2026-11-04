@@ -84,6 +84,35 @@ print(json.dumps({'ok': True, 'data': {'events': [
 }
 
 #[test]
+fn cancel_reports_the_service_answer_instead_of_assuming_a_stop() {
+    let idle = Fixture::new(
+        r#"
+import json, sys
+r = json.load(sys.stdin)
+assert r['op'] == 'cancel'
+assert 'message' not in r and 'thread' not in r
+print(json.dumps({'ok': True, 'data': {'cancelled': False, 'message_id': None}}))
+"#,
+    );
+    let answer = idle.client().cancel().unwrap();
+    assert!(!answer.cancelled, "nothing was running, so nothing stopped");
+    assert!(answer.message_id.is_none());
+
+    let running = Fixture::new(
+        r#"
+import json, sys
+r = json.load(sys.stdin)
+assert r['op'] == 'cancel'
+print(json.dumps({'ok': True, 'data': {'cancelled': True, 'message_id': 'm-1',
+                                        'access_token': 'SECRET'}}))
+"#,
+    );
+    let stopped = running.client().cancel().unwrap();
+    assert!(stopped.cancelled);
+    assert_eq!(stopped.message_id.as_deref(), Some("m-1"));
+}
+
+#[test]
 fn cancelled_device_lease_never_dispatches_and_interrupts_inflight_bridge() {
     use std::{
         sync::{

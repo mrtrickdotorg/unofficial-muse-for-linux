@@ -755,6 +755,48 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("SECRET", str(response))
 
 
+class CancelTests(unittest.TestCase):
+    def _dispatch(self, answer):
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, *args, **kwargs):
+                seen["method"] = method
+                seen["args"] = args
+                return answer
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        return bridge, bridge.Adapter(Client(), {}).dispatch({"op": "cancel"}), seen
+
+    def test_cancel_passes_the_service_answer_through_without_extra_fields(self):
+        _, result, seen = self._dispatch(
+            {"cancelled": True, "message_id": "m-1", "access_token": "SECRET"})
+        self.assertEqual(seen["method"], "chat.cancel")
+        self.assertEqual(seen["args"], ())
+        self.assertEqual(result, {"cancelled": True, "message_id": "m-1"})
+        self.assertNotIn("SECRET", str(result))
+
+    def test_a_silent_or_malformed_answer_is_never_reported_as_a_stop(self):
+        for answer in ({"ok": True}, {"cancelled": "true"}, {}):
+            _, result, _ = self._dispatch(answer)
+            self.assertFalse(result["cancelled"], answer)
+            self.assertIsNone(result["message_id"])
+
+    def test_cancel_rejects_fields_it_does_not_use(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "cancel", "config_dir": "/tmp"})
+        for bad in ({"op": "cancel", "config_dir": "/tmp", "message": "hi"},
+                    {"op": "cancel", "config_dir": "relative"}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+
 class ActivityTests(unittest.TestCase):
     def test_activity_is_a_bounded_listen_with_an_allowlisted_projection(self):
         bridge = load_bridge()

@@ -299,6 +299,7 @@ def validate_request(request):
     allowed = {"connect": set(), "identity": set(), "history": {"thread", "limit"},
                "watch": {"thread", "limit", "timeout", "after"},
                "activity": {"timeout"},
+               "cancel": set(),
                "tasks": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
@@ -750,6 +751,18 @@ class Adapter:
             }
         if request["op"] == "activity":
             return activity_rows(self.client, self.config, request["timeout"])
+        if request["op"] == "cancel":
+            # The service answers whether anything was actually stopped. A press
+            # is a request, never proof, so `cancelled` travels as data and the
+            # caller has to report what came back.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json("chat.cancel")
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {
+                "cancelled": answer.get("cancelled") is True,
+                "message_id": optional_text(answer.get("message_id")),
+            }
         if request["op"] == "watch":
             # Hold the request open on one connection and re-read cheaply: a
             # fresh history read per tick costs a handshake, which is what made
