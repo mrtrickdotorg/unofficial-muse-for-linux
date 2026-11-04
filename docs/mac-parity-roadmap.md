@@ -236,7 +236,10 @@ before any request is made, and sends exactly one `POST /approvals/{approval_id}
 connection. The answer reports that the service **accepted** the decision, plus the service's own word for it —
 never that the approved action ran, because a 2xx is not an effect — and a decision is never retried. What is
 human half is now wired too. *Check approvals* reads the pending list on demand — reading is never consent, so
-an empty answer says "the service reports no approvals are waiting" and changes nothing. Each request becomes a
+an empty answer says "the service reports no approvals are waiting" and changes nothing. The list is also read
+once when the status line first reports the agent is waiting (`Needs approval`), keyed to that exact status text,
+so the alternating live reads cannot turn an unanswered request into a poll loop and a status that merely
+describes work never fetches a list. Each request becomes a
 card carrying the service's own title, summary, kind, offered outcome, remembered scope and every detail row
 verbatim; summarising those rows would hide the action being approved. The card offers **Allow once** and
 **Deny**, plus **Allow always** only when the service published an `always_scope`, so "always" can never mean a
