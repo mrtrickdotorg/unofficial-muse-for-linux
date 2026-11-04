@@ -151,14 +151,20 @@ carrying `approval_id`, `decision` (`allow_always` observed), `always_scope` (`d
 policy store should mirror those field names instead of inventing parallel ones, and the deciding route
 is `egress.approval.decide`. Local broker approvals remain ours; only the *shape* is borrowed.
 
-*Deciding is blocked, reading is not.* A live `approvals.snapshot` carried **7 pending approvals**, each
-an egress `CONNECT` request with `Host` / `Grants` / `Method` / `Path` / `Policy` detail rows, while
-`recent_approvals` showed `allow_always`. So the agent can be observed waiting for approval. It cannot
-be answered from here yet: `egress.approvals` (service `sentinel`) fails with
-`DecodeError: Error parsing message with type 'hatch.noise.ServiceResponse': Wire format was corrupt`,
-because those routes belong to the Sentinel service rather than the chat service. P2's five outcomes
-must therefore be built on a route this client can actually reach; until then the honest UI is "the
-agent is waiting for approval", never a local Allow button that cannot deliver a decision.
+*Reading is reachable; deciding is a separate, unauthorised step.* A live `approvals.snapshot` carried
+**7 pending approvals**, each an egress `CONNECT` request with `Host` / `Grants` / `Method` / `Path` /
+`Policy` detail rows, while `recent_approvals` showed `allow_always`. The routes are bound to the
+**sentinel** service, and the two gateways in the pinned source differ exactly there:
+`muse_mcp/client.py`, which this bridge imports, has no service selection at all, so
+`egress.approvals` fails with `DecodeError … 'hatch.noise.ServiceResponse'`; `muse.py`'s gateway routes
+by `SERVICE_IDS = {"daemon": 0, "sentinel": 1, "vault": 2, "authd": 3}` and answered `egress.approvals`
+read-only against the same saved session — **once**, then raised the identical `DecodeError` on a repeat.
+The cause is in the reader, not the route: `_read_frame` parses every frame as `ServiceResponse`, so a
+sentinel notification frame aborts the read. P2's prerequisite is therefore frame-type discrimination on
+the sentinel connection, not another route probe; until that exists the read path is intermittent and
+must not be presented as reliable. `egress.approval.decide` is `POST /approvals/{approval_id}/decide` on
+the same service — a write that must go through an explicit user decision and P2's policy model, never a
+convenience retry and never from a background refresh.
 
 ### P3 — Reach the capabilities we already have (M)
 
