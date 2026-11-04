@@ -405,6 +405,24 @@ impl<A, H, T> Controller<A, H, T> {
         }
     }
 
+    /// The service rejected the saved session. Expiry and revocation look the
+    /// same from here, and neither can be fixed by retrying: drop the stale
+    /// account data so no old chats are presented as current, stop background
+    /// work, and put the sign-in control back in reach.
+    fn session_expired(&mut self) {
+        let had_pending_send = self.pending_send.is_some();
+        self.polling = None;
+        let epoch = self.epoch.wrapping_add(1);
+        *self = Self::default();
+        self.epoch = epoch;
+        self.connection_notice =
+            "Your Muse session expired. Sign in again to reload your chats and scheduled tasks. Nothing was sent and no history was changed."
+                .into();
+        if had_pending_send {
+            self.send_notice = "A dispatched message may still execute remotely. It was not cancelled or retried. Reconnect and check its original conversation.".into();
+        }
+    }
+
     fn account_changed(&mut self) {
         self.disconnect();
         self.connection_notice = "The selected local Muse session changed account identity or agent. All displayed account data was cleared. Review the session and explicitly reconnect.".into();
@@ -536,6 +554,8 @@ mod native {
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
         AccountChanged,
+        /// The saved session was rejected by the service: expired or revoked.
+        AuthExpired,
     }
 
     fn label(text: &str) -> gtk::Label {
@@ -1543,7 +1563,14 @@ mod native {
             };
             let request = ticket.clone();
             self.launch(ticket, move || {
-                let account = client.connect().map_err(|e| e.to_string());
+                let account = match client.connect() {
+                    Ok(account) => Ok(account),
+                    // A rejected session is a state change, not a failed read.
+                    Err(error) if error.code == ErrorCode::AuthRequired => {
+                        return Reply::AuthExpired;
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
                 match &account {
                     Ok(a)
                         if (a.identity_name.as_str(), a.vm_id.as_str())
@@ -1584,9 +1611,12 @@ mod native {
                     Reply::Refresh(account, history, tasks)
                 } else {
                     Reply::History(
-                        client
-                            .history(request.scope.as_deref(), request.limit)
-                            .map_err(|e| e.to_string()),
+                        match client.history(request.scope.as_deref(), request.limit) {
+                            Err(error) if error.code == ErrorCode::AuthRequired => {
+                                return Reply::AuthExpired;
+                            }
+                            other => other.map_err(|e| e.to_string()),
+                        },
                     )
                 }
             });
@@ -1617,7 +1647,11 @@ mod native {
                     seen.as_deref(),
                     Duration::from_secs(45),
                 );
-                Reply::History(result.map_err(|e| e.to_string()))
+                // A long watch is where an expired session usually surfaces.
+                match result {
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    other => Reply::History(other.map_err(|e| e.to_string())),
+                }
             });
         }
 
@@ -1753,6 +1787,7 @@ mod native {
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
+            let auth_expired = matches!(&reply, Reply::AuthExpired);
             let send_confirmed = matches!(&reply, Reply::Send(SendOutcome::Confirmed));
             // A dispatched message is answered by the service; poll history
             // quickly for a while so the reply appears in seconds.
@@ -1765,6 +1800,7 @@ mod native {
             if matches!(
                 &reply,
                 Reply::AccountChanged
+                    | Reply::AuthExpired
                     | Reply::Refresh(Err(_), _, _)
                     | Reply::Refresh(_, Err(_), _)
                     | Reply::Refresh(_, _, Err(_))
@@ -1823,8 +1859,12 @@ mod native {
                         let signed_in = result.is_ok();
                         link_after_login = signed_in && state.finish_login(ticket, result);
                     }
-                    Reply::AccountChanged => {
-                        state.account_changed();
+                    Reply::AccountChanged | Reply::AuthExpired => {
+                        if auth_expired {
+                            state.session_expired();
+                        } else {
+                            state.account_changed();
+                        }
                         if let Some(active) = self.account_active.borrow_mut().take() {
                             active.store(false, Ordering::SeqCst);
                         }
@@ -2660,6 +2700,30 @@ mod tests {
         assert_eq!(state.busy.as_ref(), Some(&new_main));
         state.finish_history(&new_main, Ok(vec!["fresh".into()]));
         assert_eq!(state.history, vec!["fresh"]);
+    }
+
+    #[test]
+    fn expired_session_drops_account_data_and_points_at_sign_in() {
+        let mut state = connected();
+        state.history.push("previous history".into());
+        let ticket = state.begin_read(false, true).unwrap();
+        state.session_expired();
+        assert!(state.account.is_none());
+        assert!(state.history.is_empty());
+        assert!(state.busy.is_none());
+        assert!(state.connection_notice.contains("Sign in again"));
+        // The in-flight read can never reinstall stale data after the reset.
+        assert!(!state.finish_history(&ticket, Ok(vec!["stale".into()])));
+        assert!(state.history.is_empty());
+    }
+
+    #[test]
+    fn expired_session_keeps_the_uncertain_dispatch_warning() {
+        let mut state = connected();
+        state.begin_send("private message").unwrap();
+        state.session_expired();
+        assert!(state.pending_send.is_none());
+        assert!(state.send_notice.contains("not cancelled or retried"));
     }
 
     #[test]
