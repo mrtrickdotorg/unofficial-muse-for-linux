@@ -4,9 +4,12 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fmt,
-    io::{Read, Write},
-    os::{fd::AsRawFd, unix::process::CommandExt},
-    path::PathBuf,
+    io::{BufRead, BufReader, Read, Write},
+    os::{
+        fd::AsRawFd,
+        unix::{net::UnixStream, process::CommandExt},
+    },
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc,
@@ -32,6 +35,8 @@ pub struct BridgeConfig {
 pub struct AccountClient {
     config: BridgeConfig,
     active: Option<Arc<AtomicBool>>,
+    /// Overrides the derived host socket (tests and embedding).
+    host: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +178,7 @@ impl AccountClient {
         Self {
             config,
             active: None,
+            host: None,
         }
     }
     /// Bound this clone's subprocesses to a session lease. False cancels locally;
@@ -181,6 +187,16 @@ impl AccountClient {
         Self {
             config: self.config.clone(),
             active: Some(active),
+            host: self.host.clone(),
+        }
+    }
+    /// Point this client at a specific host socket instead of the derived one.
+    #[doc(hidden)]
+    pub fn use_host_socket(&self, path: PathBuf) -> Self {
+        Self {
+            config: self.config.clone(),
+            active: self.active.clone(),
+            host: Some(path),
         }
     }
     pub fn connect(&self) -> Result<AccountSnapshot, AccountError> {
@@ -362,20 +378,6 @@ impl AccountClient {
         {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
-        if !self.config.python.is_file() {
-            return Err(AccountError::with_detail(
-                ErrorCode::BridgeUnavailable,
-                false,
-                format!("interpreter not found: {}", self.config.python.display()),
-            ));
-        }
-        if !self.config.script.is_file() {
-            return Err(AccountError::with_detail(
-                ErrorCode::BridgeUnavailable,
-                false,
-                format!("bridge script not found: {}", self.config.script.display()),
-            ));
-        }
         let config_dir = self
             .config
             .config_dir
@@ -387,13 +389,24 @@ impl AccountClient {
         if bytes.len() > MAX_REQUEST {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
-        let output = run_bridge_active(
-            &self.config,
-            &bytes,
-            DEADLINE,
-            sending,
-            self.active.as_deref(),
-        )?;
+        // A live host answers in ~0.1s on a connection it already holds. When
+        // there is none (or it cannot start), the one-shot bridge below is
+        // unchanged: a missing host must never block an account operation.
+        let output = match self.host_exchange(&bytes, sending)? {
+            Some(output) => output,
+            None => {
+                // Only the one-shot path needs the interpreter and script; a
+                // host that is already running answers without either.
+                self.require_bridge()?;
+                run_bridge_active(
+                    &self.config,
+                    &bytes,
+                    DEADLINE,
+                    sending,
+                    self.active.as_deref(),
+                )?
+            }
+        };
         let envelope: Envelope<T> = serde_json::from_slice(&output)
             .map_err(|_| AccountError::new(ErrorCode::ProtocolError, sending))?;
         if envelope.ok {
@@ -409,6 +422,198 @@ impl AccountClient {
                 .unwrap_or_else(|| AccountError::new(ErrorCode::ProtocolError, sending)))
         }
     }
+    /// One request line to the host, one reply line back.
+    ///
+    /// `Ok(None)` means no host is available, so the caller keeps its original
+    /// one-shot path. A failure after the request was written is an error, never
+    /// a retry: the host may already have dispatched it.
+    fn host_exchange(
+        &self,
+        request: &[u8],
+        sending: bool,
+    ) -> Result<Option<Vec<u8>>, AccountError> {
+        let socket = self
+            .host
+            .clone()
+            .unwrap_or_else(|| host_socket(&self.config.config_dir));
+        let stream = match UnixStream::connect(&socket) {
+            Ok(stream) => stream,
+            Err(_) => match self.start_host().and_then(|()| wait_for_socket(&socket)) {
+                Some(stream) => stream,
+                None => return Ok(None),
+            },
+        };
+        let fail = |code: ErrorCode| AccountError::new(code, sending);
+        let started = Instant::now();
+        stream
+            .set_write_timeout(Some(DEADLINE))
+            .map_err(|_| fail(ErrorCode::BridgeFailure))?;
+        // Short reads so a cancelled lease is noticed during a long wait.
+        stream
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .map_err(|_| fail(ErrorCode::BridgeFailure))?;
+        let mut writer = stream
+            .try_clone()
+            .map_err(|_| fail(ErrorCode::BridgeFailure))?;
+        if self
+            .active
+            .as_deref()
+            .is_some_and(|active| !active.load(Ordering::SeqCst))
+        {
+            return Err(fail(ErrorCode::BridgeFailure));
+        }
+        writer
+            .write_all(request)
+            .and_then(|()| writer.write_all(b"\n"))
+            .and_then(|()| writer.flush())
+            .map_err(|_| fail(ErrorCode::BridgeFailure))?;
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        loop {
+            if self
+                .active
+                .as_deref()
+                .is_some_and(|active| !active.load(Ordering::SeqCst))
+            {
+                return Err(fail(ErrorCode::BridgeFailure));
+            }
+            if started.elapsed() >= DEADLINE {
+                return Err(fail(ErrorCode::Timeout));
+            }
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => return Err(fail(ErrorCode::BridgeFailure)),
+                Ok(_) if line.last() == Some(&b'\n') => {
+                    line.pop();
+                    return Ok(Some(line));
+                }
+                Ok(_) => {
+                    if line.len() > MAX_RESPONSE {
+                        return Err(fail(ErrorCode::ResponseTooLarge));
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(fail(ErrorCode::BridgeFailure)),
+            }
+        }
+    }
+    fn require_bridge(&self) -> Result<(), AccountError> {
+        if !self.config.python.is_file() {
+            return Err(AccountError::with_detail(
+                ErrorCode::BridgeUnavailable,
+                false,
+                format!("interpreter not found: {}", self.config.python.display()),
+            ));
+        }
+        if !self.config.script.is_file() {
+            return Err(AccountError::with_detail(
+                ErrorCode::BridgeUnavailable,
+                false,
+                format!("bridge script not found: {}", self.config.script.display()),
+            ));
+        }
+        Ok(())
+    }
+    fn start_host(&self) -> Option<()> {
+        // The host lives beside the bridge script; a stale install has none and
+        // falls back instead of failing.
+        let script = self.config.script.with_file_name("muse_account_host.py");
+        if !script.is_file() {
+            return None;
+        }
+        let mut command = Command::new(&self.config.python);
+        bridge_environment(&mut command);
+        command
+            .arg("-I")
+            .arg(&script)
+            .arg("--config-dir")
+            .arg(&self.config.config_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .ok()?;
+        // Dropped, never killed: the host exits when it is orphaned or idle.
+        Some(())
+    }
+}
+
+/// FNV-1a 64. The Python host derives its socket name the same way, so this
+/// function is a cross-language contract rather than an internal detail.
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut value: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        value ^= u64::from(*byte);
+        value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    value
+}
+
+pub fn host_socket(config_dir: &Path) -> PathBuf {
+    let name = format!(
+        "account-{:016x}.sock",
+        fnv1a64(config_dir.as_os_str().as_encoded_bytes())
+    );
+    let root = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var_os("XDG_CACHE_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            None => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"),
+        },
+    };
+    root.join("unofficial-muse-for-linux").join(name)
+}
+
+fn bridge_environment(command: &mut Command) {
+    const KEYS: [&str; 21] = [
+        "HOME",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ];
+    command.env_clear();
+    for key in KEYS {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("MUSE_MCP_ENABLE_RAW", "0")
+        .env("PYTHONDONTWRITEBYTECODE", "1");
+}
+
+fn wait_for_socket(path: &Path) -> Option<UnixStream> {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        if let Ok(stream) = UnixStream::connect(path) {
+            return Some(stream);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    None
 }
 
 fn validate_thread(thread: Option<&str>) -> Result<(), AccountError> {
@@ -459,37 +664,8 @@ fn run_bridge_active(
         return Err(AccountError::new(ErrorCode::InvalidRequest, false));
     }
     let mut command = Command::new(&config.python);
-    command.env_clear();
-    for key in [
-        "HOME",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_RUNTIME_DIR",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "REQUESTS_CA_BUNDLE",
-        "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-    ] {
-        if let Some(value) = std::env::var_os(key) {
-            command.env(key, value);
-        }
-    }
+    bridge_environment(&mut command);
     let child = command
-        .env("MUSE_MCP_ENABLE_RAW", "0")
-        .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg("-I")
         .arg(&config.script)
         .stdin(Stdio::piped())
