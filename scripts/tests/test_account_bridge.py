@@ -755,5 +755,54 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("SECRET", str(response))
 
 
+class ActivityTests(unittest.TestCase):
+    def test_activity_is_a_bounded_listen_with_an_allowlisted_projection(self):
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def subscribe_json(self, method, **kwargs):
+                seen["method"] = method
+                seen.update(kwargs)
+                return [
+                    {"event": "agent.status", "seq": 5,
+                     "payload": {"activity_code": "working",
+                                 "activity_text": "Is working",
+                                 "session_id": "s1", "access_token": "SECRET"}},
+                    {"event": "task.status", "seq": 6, "payload": {"status": "completed"}},
+                    {"type": "event"},
+                    "not a dict",
+                ]
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch({"op": "activity", "timeout": 8000})
+        self.assertEqual(seen["method"], "chat.subscribe")
+        self.assertEqual(seen["overall_timeout"], 8)
+        self.assertLessEqual(seen["idle_timeout"], 6)
+        self.assertEqual(result, {"events": [
+            {"event": "agent.status", "seq": 5, "text": None,
+             "status": "Is working", "session_id": "s1"},
+            {"event": "task.status", "seq": 6, "text": None,
+             "status": "completed", "session_id": None},
+        ]})
+        # Only the allowlisted fields: a live payload may carry far more.
+        self.assertNotIn("SECRET", str(result))
+        self.assertNotIn("working", str(result["events"][1]))
+
+    def test_activity_cannot_become_a_long_poll_or_smuggle_parameters(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "activity", "config_dir": "/unused", "timeout": 30000})
+        for bad in [{"op": "activity", "config_dir": "/unused"},
+                    {"op": "activity", "config_dir": "/unused", "timeout": 30001},
+                    {"op": "activity", "config_dir": "/unused", "timeout": 0},
+                    {"op": "activity", "config_dir": "/unused", "timeout": True},
+                    {"op": "activity", "config_dir": "/unused", "timeout": 1000,
+                     "thread": "t"}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+
 if __name__ == "__main__":
     unittest.main()

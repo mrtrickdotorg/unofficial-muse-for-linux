@@ -298,6 +298,7 @@ def validate_request(request):
     op = request.get("op")
     allowed = {"connect": set(), "identity": set(), "history": {"thread", "limit"},
                "watch": {"thread", "limit", "timeout", "after"},
+               "activity": {"timeout"},
                "tasks": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
@@ -316,9 +317,13 @@ def validate_request(request):
         limit = request.get("limit")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise BridgeFailure("invalid_request")
-    if op == "watch":
+    if op in ("watch", "activity"):
         timeout = request.get("timeout")
         if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 60000:
+            raise BridgeFailure("invalid_request")
+        # A status read is a bounded listen, not a long-poll: keep it short so
+        # the shared control connection cannot be pinned for a whole minute.
+        if op == "activity" and timeout > 30000:
             raise BridgeFailure("invalid_request")
         if "after" in request:
             after = request["after"]
@@ -588,6 +593,45 @@ def session_facts(client, config):
     return {"identity_name": required_text(identity.get("name")), "vm_id": vm_id}
 
 
+def activity_rows(client, config, timeout_ms):
+    """Bounded live-status read: what the agent is doing, not what it said.
+
+    The pinned CLI records that threaded replies never arrive as live events
+    and that live chat events use `delta.*` shapes, so a status surface listens
+    here while the transcript keeps polling history. Only whitelisted fields
+    leave this function: a live payload can carry more than a status line, and
+    an allowlist is the difference between showing progress and echoing chat.
+    """
+    gateway = getattr(client, "_gateway", None)
+    if gateway is None:
+        raise BridgeFailure("bridge_unavailable")
+    seconds = timeout_ms / 1000.0
+    with gateway(config) as connection:
+        records = connection.subscribe_json(
+            "chat.subscribe", body={"capabilities": {}},
+            max_records=200, idle_timeout=min(6.0, seconds), overall_timeout=seconds)
+    rows = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        event = record.get("event")
+        if not isinstance(event, str) or not 1 <= len(event) <= 64:
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        text = payload.get("display_text") or payload.get("text") or payload.get("content")
+        seq = record.get("seq")
+        rows.append({
+            "event": event,
+            "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+            "text": text[:200] if isinstance(text, str) else None,
+            "status": optional_text(payload.get("status") or payload.get("activity_text")),
+            "session_id": optional_text(payload.get("session_id")),
+        })
+        if len(rows) >= 200:
+            break
+    return {"events": rows}
+
+
 def updated_at_text(session):
     millis = session.get("updated_at_ms")
     if isinstance(millis, (int, float)) and not isinstance(millis, bool):
@@ -704,6 +748,8 @@ class Adapter:
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
             }
+        if request["op"] == "activity":
+            return activity_rows(self.client, self.config, request["timeout"])
         if request["op"] == "watch":
             # Hold the request open on one connection and re-read cheaply: a
             # fresh history read per tick costs a handshake, which is what made

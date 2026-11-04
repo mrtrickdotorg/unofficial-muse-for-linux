@@ -73,6 +73,25 @@ pub struct TasksSnapshot {
     pub schedules: Vec<Schedule>,
     pub runs: Vec<TaskRun>,
 }
+/// Bounded live listen: what the agent is doing right now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveStatus {
+    pub events: Vec<LiveEvent>,
+}
+/// One live event, allowlisted by the bridge. Threaded replies never arrive
+/// here, so `text` is a progress fragment, never the answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveEvent {
+    pub event: String,
+    #[serde(default)]
+    pub seq: Option<u64>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Schedule {
     pub id: String,
@@ -270,6 +289,22 @@ impl AccountClient {
     }
     pub fn tasks(&self) -> Result<TasksSnapshot, AccountError> {
         self.request(serde_json::json!({"op": "tasks"}), false)
+    }
+    /// Listen briefly for live agent/task status.
+    ///
+    /// Not a reply read: the pinned client records that threaded replies never
+    /// arrive as live events, so the transcript keeps polling `history` and this
+    /// feeds only the status line. Bounded to 30 s so a status read cannot hold
+    /// the shared control connection for a whole minute.
+    pub fn activity(&self, timeout: Duration) -> Result<LiveStatus, AccountError> {
+        let millis = u64::try_from(timeout.as_millis())
+            .ok()
+            .filter(|millis| (1..=30_000).contains(millis))
+            .ok_or_else(|| AccountError::new(ErrorCode::InvalidRequest, false))?;
+        self.request(
+            serde_json::json!({"op": "activity", "timeout": millis}),
+            false,
+        )
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.
