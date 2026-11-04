@@ -2,6 +2,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 mod account_login;
 mod account_ui;
+mod build_identity;
 mod calendar_ui;
 pub mod computer_control;
 mod computer_control_ui;
@@ -108,6 +109,7 @@ button.suggested-action:hover { background-color: #3478dc; }
 button.destructive-action { color: #ffb4ab; background-color: #3a2226; border-color: #5c2f35; }
 button.destructive-action:hover { background-color: #4a2b30; }
 .dim-label { color: #aeb5c2; }
+.build-identity { color: #7f8796; font-size: 11px; padding: 10px 6px 2px; }
 notebook header { background-color: #111318; border-bottom: 1px solid #292d37; }
 notebook tab { color: #aeb5c2; background-color: transparent; border-radius: 10px; padding: 8px 12px; }
 notebook tab:checked { color: #edf0f5; background-color: #222630; }
@@ -319,6 +321,14 @@ fn build_ui(app: &gtk::Application) {
     let nav_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     nav_spacer.set_vexpand(true);
     sidebar.append(&nav_spacer);
+
+    // Lower-left build identity: a stale AppImage is otherwise impossible to
+    // tell apart from the build that fixed the thing being reported.
+    let build_label = gtk::Label::new(Some(&build_identity::label()));
+    build_label.add_css_class("build-identity");
+    build_label.set_halign(gtk::Align::Start);
+    build_label.set_tooltip_text(Some("Version and when this build was produced (UTC)"));
+    sidebar.append(&build_label);
 
     let main_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_column.add_css_class("main-column");
