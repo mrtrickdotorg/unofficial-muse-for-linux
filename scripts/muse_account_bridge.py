@@ -689,12 +689,20 @@ def sentinel_gateway_class(pinned):
                 point = bytes(self.noise.decrypt(bytes(data)))
             transport = pinned.NoiseTransportFrame()
             transport.ParseFromString(point)
-            response = pinned.ServiceResponse()
-            response.ParseFromString(transport.payload)
-            frame = pinned.ServiceFrame()
+            # A sentinel notification is neither a `ServiceResponse` nor a
+            # `ServiceFrame`. It can fail at the outer parse (its payload is not
+            # a ServiceResponse at all) or at the inner one, so both are guarded:
+            # guarding only the inner parse left every read that raced a
+            # notification dying with `Wire format was corrupt`. Neither failure
+            # is a reply to our request, and the parent loop already ignores
+            # frames whose `stream_id` was not the one it sent, so an empty frame
+            # is skipped instead of being fatal.
             try:
+                response = pinned.ServiceResponse()
+                response.ParseFromString(transport.payload)
+                frame = pinned.ServiceFrame()
                 frame.ParseFromString(response.payload)
-            except Exception:  # noqa: BLE001 - a notification is not a frame
+            except Exception:  # noqa: BLE001 - a notification is not a reply
                 return pinned.ServiceFrame()
             return frame
 

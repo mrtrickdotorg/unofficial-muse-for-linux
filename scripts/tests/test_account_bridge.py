@@ -889,6 +889,58 @@ class ApprovalTests(unittest.TestCase):
         self.assertIsInstance(frame, ServiceFrame)
         self.assertEqual(frame.stream_id, 0)
 
+    def test_a_notification_that_is_not_a_response_is_also_skipped(self):
+        # The other half of the same defect: a notification whose payload is not
+        # a ServiceResponse fails the *outer* parse, before any frame exists.
+        # Guarding only the inner parse still killed the read with `Wire format
+        # was corrupt`, which is what live `egress.permissions`,
+        # `egress.approval.history` and `egress.approvals` reads kept hitting.
+        bridge = load_bridge()
+        import sys
+        import threading
+        import types
+        from unittest.mock import patch
+
+        class ServiceFrame:
+            def __init__(self):
+                self.stream_id = 0
+
+            def ParseFromString(self, data):
+                raise AssertionError("the inner parse must not be reached")
+
+        class Response:
+            def __init__(self):
+                self.payload = b""
+
+            def ParseFromString(self, data):
+                raise ValueError("DecodeError: Wire format was corrupt")
+
+        class Transport:
+            def __init__(self):
+                self.payload = b"\x00\x01not-a-protobuf"
+
+            def ParseFromString(self, data):
+                pass
+
+        class Gateway:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self._recv_lock = threading.Lock()
+                self.noise = types.SimpleNamespace(decrypt=lambda data: data)
+                self.ws = types.SimpleNamespace(recv=lambda: (b"ciphertext", 0))
+
+        module = types.ModuleType("muse")
+        module.NoiseTransportFrame = Transport
+        module.ServiceResponse = Response
+        module.ServiceFrame = ServiceFrame
+        module.Gateway = Gateway
+        with patch.dict(sys.modules, {"muse": module}), \
+                patch.object(bridge, "cookie_header", return_value="a=b"):
+            gateway = bridge.sentinel_gateway({"cookies_file": "/dev/null"})
+            frame = gateway._read_frame()
+        self.assertIsInstance(frame, ServiceFrame)
+        self.assertEqual(frame.stream_id, 0)
+
 
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
