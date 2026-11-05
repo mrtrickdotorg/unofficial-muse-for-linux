@@ -887,7 +887,8 @@ class ApprovalTests(unittest.TestCase):
             gateway = bridge.sentinel_gateway({"cookies_file": "/dev/null"})
             frame = gateway._read_frame()
         self.assertIsInstance(frame, ServiceFrame)
-        self.assertEqual(frame.stream_id, 0)
+        self.assertEqual(frame.stream_id, bridge.SKIPPED_FRAME_STREAM)
+        self.assertNotEqual(frame.stream_id, 0, "a skipped frame must never match a reply")
 
     def test_a_notification_that_is_not_a_response_is_also_skipped(self):
         # The other half of the same defect: a notification whose payload is not
@@ -939,7 +940,8 @@ class ApprovalTests(unittest.TestCase):
             gateway = bridge.sentinel_gateway({"cookies_file": "/dev/null"})
             frame = gateway._read_frame()
         self.assertIsInstance(frame, ServiceFrame)
-        self.assertEqual(frame.stream_id, 0)
+        self.assertEqual(frame.stream_id, bridge.SKIPPED_FRAME_STREAM)
+        self.assertNotEqual(frame.stream_id, 0, "a skipped frame must never match a reply")
 
 
 class CancelTests(unittest.TestCase):

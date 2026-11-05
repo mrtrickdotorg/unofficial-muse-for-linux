@@ -670,6 +670,21 @@ def cookie_header(config):
     return "; ".join(pairs)
 
 
+# A skipped notification must never be accepted as a reply. The parent loop
+# matches on `stream_id`, and a fresh gateway's requests start at 0, so an
+# unmarked empty frame was indistinguishable from a reply carrying no body and
+# surfaced as `{}` — which `approval_rows` could only report as a failure, and
+# that a caller could misread as "nothing is pending".
+SKIPPED_FRAME_STREAM = (1 << 63) - 1
+
+
+def skipped_frame(pinned):
+    """An empty frame whose stream id no request can own."""
+    frame = pinned.ServiceFrame()
+    frame.stream_id = SKIPPED_FRAME_STREAM
+    return frame
+
+
 def sentinel_gateway_class(pinned):
     """A gateway to the sentinel service, which is the only one with approvals.
 
@@ -703,7 +718,7 @@ def sentinel_gateway_class(pinned):
                 frame = pinned.ServiceFrame()
                 frame.ParseFromString(response.payload)
             except Exception:  # noqa: BLE001 - a notification is not a reply
-                return pinned.ServiceFrame()
+                return skipped_frame(pinned)
             return frame
 
     return SentinelGateway
