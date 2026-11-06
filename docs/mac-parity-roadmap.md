@@ -51,7 +51,11 @@ permission to *try* it, never proof that a personal session is entitled to it.
 Reconnaissance result, recorded so later phases start from facts rather than guesses. "Table" means the
 route is declared in the pinned client; "live" means an authenticated probe has actually answered.
 Live today: `identity`, `chat.history`, `sessions.list`, `tasks.list`, `tasks.runs`, `activity.list`
-(`days=3`), `skills.list` (68 skills) and `subagents.list` (`active=0 recent=20`). `connectors.list`
+(`days=3`), `skills.list` (68 skills), `subagents.list` (`active=0 recent=20`), `artifacts.list`
+(76 artifacts, 50 per page), `spaces.list`, `goals.list`, `model.get` (`auto/auto`) and
+`voice.available_voices`. `memory.get` and `fs.list` answer only with a JSON body (`memory_uri`, and a
+relative path respectively); `browser_task.get` answered `browser task not found`, which is an idle
+task rather than a missing route. `connectors.list`
 answers **500 `internal_error`** — a service-side failure, so P7 is blocked on that bug rather than on
 our entitlement; retry it before building a connector UI.
 
@@ -308,13 +312,21 @@ whose account it is.
 
 ### P3 — Reach the capabilities we already have (M)
 
-*Gap:* we run screenshot, portal input, a browser extension, CalDAV/IMAP and a local reminder store —
-but the registered manifest exposes only `files.search`, `files.read_text`, `files.create_text`. The
-agent cannot reach any of it. Edits, rename, move, delete-to-Trash and overwrite do not exist at all.
+*Gap (2026-11-06):* the registered manifest now advertises six file commands. `files.edit`,
+`files.rename` and `files.delete` exist behind approvals with read-back verification — an edit is
+approved as the complete resulting text and refuses a file that changed since the request, a rename
+uses `RENAME_NOREPLACE`, and a delete is a Trash move that never unlinks. Still unreachable: screen
+capture, input/app control and notification send (capabilities we run locally that the agent cannot
+ask for), cross-root `files.move`, overwrite, and per-root `read`/`read+interact` modes.
 
-*Work:* expand the manifest behind P2's policy — `files.edit/rename/move/delete` (Trash, never
-unlink), screen-capture read, input/app control, notification send; per-root `read`/`read+interact`
-instead of grant-or-nothing; read-back verification after every mutation.
+*Work:* expose screen capture and the RemoteDesktop input path through the manifest; decide the
+notification channel; per-root modes instead of grant-or-nothing.
+
+*Screen capture is blocked by the result channel, not by the portal.* A decoded application frame is
+capped at 256 KiB and a result is JSON, so a PNG cannot travel to the agent; the desktop's own capture
+path returns a GTK-side `Screenshot` for display. Pointer/keyboard actions are small JSON and stay
+feasible. Do not ship a capture command that returns a path the agent cannot read as an image: that
+would report a capability the agent cannot use.
 
 *Gate:* the real agent reads a granted file, then edits and moves one only after approval, with intent
 and outcome both in the Activity log; revoke stops it mid-task; denied operations change nothing.
@@ -340,6 +352,16 @@ duplicating, can be stopped, and leaves an audit trail.
 
 *Gap:* the Mac client has Library (saved artifacts), System Files (the VM filesystem) and Upcoming.
 We have none — no list, no preview, no download, no share gate. Distinct from local Files.
+
+*Library listing is reachable and now projected (live, 2026-11-06).* `artifacts.list` answered with
+`total_count: 76`, a 50-edge page and `page_info.has_next_page: true`. Each edge is `{cursor, node}`;
+the node carries `artifact_ref` (`file:workspace/your_files/…`), `display_name`, `type`, `format`,
+`status`, `placement`, `updated_at_ms`, `is_pinned`, `open_target.path` and a `capabilities` block —
+observed rows report `can_open`/`can_pin`/`can_delete`/`can_rename` true and `can_share: false`. The
+bridge op keeps those fields plus `has_more` and drops the cursor: a pagination token is not
+something this client needs to hold, and every unlisted node field stays upstream. No preview,
+open, download or share exists yet, and sharing stays the service's own `false` rather than a
+switch this client could flip.
 
 *Work:* probe workspace/artifact routes; list and preview the supported types (PDF, DOCX, TXT, MD,
 XLSX, CSV, PNG/JPEG/GIF/WebP), open-in-app, upload, download; sharing off until explicitly approved per

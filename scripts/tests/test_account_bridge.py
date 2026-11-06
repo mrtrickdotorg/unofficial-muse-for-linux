@@ -432,6 +432,65 @@ class BridgeTests(unittest.TestCase):
             "timezone": "UTC", "next_run_at_utc": 123}], "runs": [{"run_id": "run-1", "job_id": "job-1",
             "status": "success", "result_summary": "Done", "error_text": None, "scheduled_for_utc": 120}]})
 
+    def test_artifacts_reads_one_route_and_projects_only_actionable_fields(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append(method)
+                return {"total_count": 2, "edges": [
+                    {"cursor": "SECRET-CURSOR", "node": {"artifact_ref": "file:workspace/a.docx",
+                        "display_name": "a.docx", "type": "document", "format": "docx",
+                        "status": "ready", "placement": "library", "updated_at_ms": 5,
+                        "is_pinned": False, "open_target": {"kind": "file", "path": "/workspace/a.docx"},
+                        "capabilities": {"can_open": True, "can_share": False}, "raw": "SECRET"}},
+                    {"node": {"artifact_ref": "file:workspace/b.pdf", "display_name": "b.pdf",
+                        "type": "document", "format": "pdf", "status": "ready",
+                        "placement": "library", "updated_at_ms": 7, "is_pinned": True,
+                        "open_target": {"kind": "file", "path": "/workspace/b.pdf"},
+                        "capabilities": {"can_open": True, "can_share": True}}},
+                ], "page_info": {"has_next_page": True, "start_cursor": "SECRET-CURSOR"}}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch({"op": "artifacts"})
+        self.assertEqual(calls, ["artifacts.list"])
+        self.assertEqual(result["total_count"], 2)
+        self.assertTrue(result["has_more"])
+        self.assertEqual(set(result["artifacts"][0]), set(bridge.ARTIFACT_FIELDS))
+        self.assertEqual(result["artifacts"][1]["pinned"], True)
+        self.assertEqual(result["artifacts"][1]["can_share"], True)
+        self.assertEqual(result["artifacts"][0]["path"], "/workspace/a.docx")
+        # The cursor and every unlisted node field stay in the bridge.
+        self.assertNotIn("SECRET", str(result))
+        bridge.validate_request({"op": "artifacts", "config_dir": "/unused"})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "artifacts", "config_dir": "/unused", "limit": 1})
+
+    def test_artifacts_fails_closed_on_an_unidentified_row(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                return {"total_count": 1, "edges": [{"node": {"display_name": "unnamed.docx"}}]}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.Adapter(Client(), {}).dispatch({"op": "artifacts"})
+        self.assertEqual(caught.exception.code, "protocol_error")
+        # A rejected row must not become an empty page: an unnamed artifact is
+        # missing, not absent from the Library.
+        for malformed in [None, [], {"total_count": True, "edges": []},
+                          {"total_count": 0, "edges": "nope"},
+                          {"total_count": 1, "edges": [{"cursor": "c"}]}]:
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.artifact_rows(malformed)
+            self.assertEqual(caught.exception.code, "protocol_error")
+
     def test_send_confirms_only_new_exact_user_prompt_in_same_scope(self):
         bridge = load_bridge()
         class Client(FakeClient):

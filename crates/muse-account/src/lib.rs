@@ -120,6 +120,43 @@ pub struct TaskRun {
     pub error_text: Option<String>,
     pub scheduled_for_utc: Option<i64>,
 }
+/// One Library artifact, as the bridge projected it.
+///
+/// `artifact_ref` is the service's own reference (what a later open, share or
+/// delete would quote) and `path` is the workspace path it resolves to.
+/// `can_open`/`can_share` stay the service's answers: this client never decides
+/// on its own what may be shared or removed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactSummary {
+    pub artifact_ref: String,
+    pub title: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub placement: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub updated_at_ms: Option<i64>,
+    pub pinned: bool,
+    pub can_open: bool,
+    pub can_share: bool,
+}
+/// One page of the Library listing.
+///
+/// `has_more` is the service's pagination answer; the cursor itself stays in the
+/// bridge, so holding a page cannot leak a token into the window or the log.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactList {
+    pub total_count: u64,
+    pub has_more: bool,
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactSummary>,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatchReceipt {
     pub sent: bool,
@@ -377,6 +414,14 @@ impl AccountClient {
     }
     pub fn tasks(&self) -> Result<TasksSnapshot, AccountError> {
         self.request(serde_json::json!({"op": "tasks"}), false)
+    }
+    /// List the account's Library, read-only.
+    ///
+    /// Listing is never consent: nothing here opens, shares, renames or deletes,
+    /// and the bridge projects one page into narrow rows so no cursor or raw
+    /// node payload reaches the window.
+    pub fn artifacts(&self) -> Result<ArtifactList, AccountError> {
+        self.request(serde_json::json!({"op": "artifacts"}), false)
     }
     /// Listen briefly for live agent/task status.
     ///
