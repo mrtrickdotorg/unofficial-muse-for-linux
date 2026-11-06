@@ -365,6 +365,11 @@ something this client needs to hold, and every unlisted node field stays upstrea
 open, download or share exists yet, and sharing stays the service's own `false` rather than a
 switch this client could flip.
 
+The Library page reads exactly that: one explicit press, one read, pinned-first so a chosen pin is
+not buried by recency, and a notice that repeats the service's total beside the page size instead of
+implying 50 is everything. It has no open, preview, download, rename, pin or share action, and it
+cannot start a read without a connected account.
+
 *Work:* probe workspace/artifact routes; list and preview the supported types (PDF, DOCX, TXT, MD,
 XLSX, CSV, PNG/JPEG/GIF/WebP), open-in-app, upload, download; sharing off until explicitly approved per
 artifact; Upcoming as a merged view of schedules and pending approvals.

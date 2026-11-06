@@ -8,6 +8,7 @@ pub mod computer_control;
 mod computer_control_ui;
 mod desktop_ui;
 mod files_write_ui;
+mod library_ui;
 mod local_host;
 mod mail_ui;
 mod tasks_ui;
@@ -271,6 +272,12 @@ fn build_ui(app: &gtk::Application) {
         "Local reminders and tasks",
     );
     sidebar.append(&tasks_nav);
+    let library_nav = nav_button(
+        "folder-documents-symbolic",
+        "Library",
+        "Saved artifacts for the connected account (read-only)",
+    );
+    sidebar.append(&library_nav);
 
     let connections_heading = gtk::Label::new(Some("CONNECTIONS"));
     connections_heading.add_css_class("nav-section-label");
@@ -374,6 +381,9 @@ fn build_ui(app: &gtk::Application) {
     stack.add_named(&computer_control_page.root, Some("computer-control"));
     let tasks_page: tasks_ui::TasksPage = tasks_ui::build();
     stack.add_named(&tasks_page.root, Some("tasks"));
+    let library_page: library_ui::LibraryPage =
+        library_ui::build(account_page.host_context.clone());
+    stack.add_named(&library_page.root, Some("library"));
     let cancel_login = Rc::clone(&account_page.cancel_login);
     let stop_host = host_page.shutdown.clone();
     let stop_calendar = calendar_page.shutdown.clone();
@@ -935,6 +945,7 @@ fn build_ui(app: &gtk::Application) {
         let desktop = desktop_nav.clone();
         let computer_control = computer_control_nav.clone();
         let tasks = tasks_nav.clone();
+        let library = library_nav.clone();
         let developer = developer_nav.clone();
         button.connect_clicked(move |_| {
             select_page(
@@ -949,6 +960,7 @@ fn build_ui(app: &gtk::Application) {
                     (&desktop, "desktop"),
                     (&computer_control, "computer-control"),
                     (&tasks, "tasks"),
+                    (&library, "library"),
                     (&developer, "developer"),
                 ],
                 page,
@@ -966,6 +978,7 @@ fn build_ui(app: &gtk::Application) {
     let desktop_for_open_files = desktop_nav.clone();
     let computer_control_for_open_files = computer_control_nav.clone();
     let tasks_for_open_files = tasks_nav.clone();
+    let library_for_open_files = library_nav.clone();
     let developer_for_open_files = developer_nav.clone();
     open_files.connect_clicked(move |_| {
         select_page(
@@ -980,6 +993,7 @@ fn build_ui(app: &gtk::Application) {
                 (&desktop_for_open_files, "desktop"),
                 (&computer_control_for_open_files, "computer-control"),
                 (&tasks_for_open_files, "tasks"),
+                (&library_for_open_files, "library"),
                 (&developer_for_open_files, "developer"),
             ],
             "files",
@@ -996,6 +1010,7 @@ fn build_ui(app: &gtk::Application) {
     let desktop_for_settings = desktop_nav.clone();
     let computer_control_for_settings = computer_control_nav.clone();
     let tasks_for_settings = tasks_nav.clone();
+    let library_for_settings = library_nav.clone();
     let developer_for_settings = developer_nav.clone();
     let setup_for_settings = account_page.settings.clone();
     settings_button.connect_clicked(move |_| {
@@ -1011,6 +1026,7 @@ fn build_ui(app: &gtk::Application) {
                 (&desktop_for_settings, "desktop"),
                 (&computer_control_for_settings, "computer-control"),
                 (&tasks_for_settings, "tasks"),
+                (&library_for_settings, "library"),
                 (&developer_for_settings, "developer"),
             ],
             "chats",
@@ -1066,6 +1082,7 @@ fn select_page(
         "desktop" => "Desktop",
         "computer-control" => "Computer Control",
         "tasks" => "Reminders",
+        "library" => "Library",
         "developer" => "Developer API",
         _ => "Unknown page",
     });
