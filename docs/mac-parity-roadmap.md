@@ -370,17 +370,22 @@ not buried by recency, and a notice that repeats the service's total beside the 
 implying 50 is everything. It has no open, preview, download, rename, pin or share action, and it
 cannot start a read without a connected account.
 
-*`artifacts.fetch_url` answers, but it yields no URL (live, 2026-11-06).* The route takes a
-`project_dir` query parameter and rejects every form except a **strict subdirectory** of
-`workspace/your_files` (`project_dir must be under workspace/your_files or
-workspace/goals/<goal>/files`), so an artifact sitting directly in `workspace/your_files` — most of the
-first page — cannot be addressed at all. Where the parameter is accepted (it answered for
-`workspace/your_files/preparing-for-baby-booklet`) the reply is `{"url": null, "last_updated":
-null}`, identical on a repeat call: there is nothing to fetch. A preview was therefore not wired.
-The route names directories rather than artifacts, returns no URL for the directories it does
-accept, and the first page holds docx/pdf/html/md/space rows — no image for which a renderer would
-even apply. This is a service-side block rather than a missing client feature, so the page stays a
-list.
+*`artifacts.fetch_url` answers, but no kind of artifact yields a URL (live, 2026-11-06).* The
+route takes a `project_dir` query parameter and validates only its **shape**: a
+`workspace/your_files/<subdir>` or a `workspace/goals/<goal>/files/<subdir>` is accepted, while
+`workspace/your_files`, a goal's `workspace/goals/<slug>/files`, an empty value, `"."`, an absolute
+path, and a `space` row's storage (`workspace/space_data/<slug>`, `workspace/ts-spaces/<slug>`) are
+all refused with `project_dir must be under workspace/your_files or workspace/goals/<goal>/files`.
+Every accepted shape answers `{"url": null, "last_updated": null}`, and it does so for a
+subdirectory that does not exist at all (`workspace/goals/kin-calendar-discovery-strategy/files/probe-subdir`
+answered `url: null`), so the null is not "this directory is empty" — nothing is resolved after the
+path check. The route therefore cannot serve anything the Library page could render: an artifact
+directly in `workspace/your_files` or directly in a goal's `files/` (where the first page's 44 goal
+rows and its `your_files` rows live) has no accepted form, a `space` row's only handle is
+`open_target {kind: space, slug}`, and the page's formats are docx/pdf/html/md/space, none of which
+a URL-less reply makes previewable. A preview was not wired. A space does advertise
+`can_download_html: true`, which names a separate export route rather than this one; that route is
+unprobed. This is a service-side block, not a missing client feature, so the page stays a list.
 
 *Work:* probe workspace/artifact routes; list and preview the supported types (PDF, DOCX, TXT, MD,
 XLSX, CSV, PNG/JPEG/GIF/WebP), open-in-app, upload, download; sharing off until explicitly approved per
