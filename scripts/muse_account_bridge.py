@@ -691,35 +691,68 @@ def sentinel_gateway_class(pinned):
     `muse_mcp.client`, which this bridge otherwise imports, always addresses the
     daemon service, so `egress.approvals` dies there with a frame mismatch.
     `muse.py` routes by the route's declared service, but its reader parses every
-    frame as a `ServiceResponse`; a sentinel notification is not one, and the
-    protobuf decode aborts the whole read. Only the reader is replaced here: the
-    parent request loop already ignores frames whose `stream_id` was not the one
-    it sent, so an empty frame is skipped rather than fatal.
+    frame as a `ServiceResponse`. Two different things on that wire are not one:
+    a notification, which is not a reply at all, and a chunk of a reply too
+    large for a single Noise frame. Only the reader is replaced here: it
+    reassembles chunks before parsing, and skips whatever still is not a reply,
+    because the parent request loop already ignores frames whose `stream_id` was
+    not the one it sent.
     """
 
     class SentinelGateway(pinned.Gateway):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # A live `egress.permissions` body is ~496 KB, so the sentinel service
+            # splits one reply across Noise transport chunks sharing a
+            # `chunk_id`. Parsing a mid-frame chunk as a whole `ServiceResponse`
+            # raises `Wire format was corrupt`; the old guard skipped it, the
+            # assembled body lost the bytes in between, and the damage surfaced
+            # far away as `non-JSON response` out of `call_json`.
+            self._chunk_parts = {}  # chunk_id -> {chunk_index: payload}
+
+        def _complete_payload(self, transport):
+            """The frame's payload, once every chunk of it has arrived."""
+            payload = bytes(transport.payload)
+            total = getattr(transport, "total_chunks", 1)
+            total = total if isinstance(total, int) and total > 1 else 1
+            if total == 1:
+                return payload
+            chunk_id = getattr(transport, "chunk_id", 0)
+            index = getattr(transport, "chunk_index", 0)
+            index = index if isinstance(index, int) and index >= 0 else 0
+            parts = self._chunk_parts.setdefault(chunk_id, {})
+            parts[index] = payload
+            if len(parts) < total:
+                return None
+            del self._chunk_parts[chunk_id]
+            # Arrival order is not guaranteed; `chunk_index` is.
+            return b"".join(parts[i] for i in sorted(parts))
+
         def _read_frame(self):
-            with self._recv_lock:
-                data, _flags = self.ws.recv()
-                point = bytes(self.noise.decrypt(bytes(data)))
-            transport = pinned.NoiseTransportFrame()
-            transport.ParseFromString(point)
-            # A sentinel notification is neither a `ServiceResponse` nor a
-            # `ServiceFrame`. It can fail at the outer parse (its payload is not
-            # a ServiceResponse at all) or at the inner one, so both are guarded:
-            # guarding only the inner parse left every read that raced a
-            # notification dying with `Wire format was corrupt`. Neither failure
-            # is a reply to our request, and the parent loop already ignores
-            # frames whose `stream_id` was not the one it sent, so an empty frame
-            # is skipped instead of being fatal.
-            try:
-                response = pinned.ServiceResponse()
-                response.ParseFromString(transport.payload)
-                frame = pinned.ServiceFrame()
-                frame.ParseFromString(response.payload)
-            except Exception:  # noqa: BLE001 - a notification is not a reply
-                return skipped_frame(pinned)
-            return frame
+            # A chunk that only completes a frame is not a frame, so keep reading
+            # instead of handing the parent loop something it would discard.
+            while True:
+                with self._recv_lock:
+                    data, _flags = self.ws.recv()
+                    point = bytes(self.noise.decrypt(bytes(data)))
+                transport = pinned.NoiseTransportFrame()
+                transport.ParseFromString(point)
+                payload = self._complete_payload(transport)
+                if payload is None:
+                    continue
+                # A notification is neither a `ServiceResponse` nor a
+                # `ServiceFrame`. It can fail at the outer parse or at the inner
+                # one, so both are guarded; neither failure is a reply to our
+                # request, and the parent loop ignores stream ids it did not
+                # send, so an empty frame is skipped instead of being fatal.
+                try:
+                    response = pinned.ServiceResponse()
+                    response.ParseFromString(payload)
+                    frame = pinned.ServiceFrame()
+                    frame.ParseFromString(response.payload)
+                except Exception:  # noqa: BLE001 - a notification is not a reply
+                    return skipped_frame(pinned)
+                return frame
 
     return SentinelGateway
 
