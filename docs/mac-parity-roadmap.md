@@ -256,6 +256,35 @@ with `pending: 0` — the first clean sentinel read through our own code, where 
 projection's shape still rests on the earlier 7-pending snapshot. Suite: 92 tests, including the
 notification-frame regression, the sentinel-route/close tests and the fail-closed id test.
 
+*Large replies arrive in Noise chunks, not notifications (live, 2026-11-06).* The P2 read path's remaining
+failure — `egress.permissions` answering with what `call_json` reported as `non-JSON response`, its quoted text
+starting `{"ok":true,"result":{"hitl_debug_tools_enabled":…` — is a transport-frame bug, and it corrects the
+diagnosis above. That body was never a notification problem. A live trace showed one reply arriving as **eleven**
+wire frames, and the ones the reader could not parse were pieces of *one* `ServiceResponse` split across
+`NoiseTransportFrame` chunks sharing a `chunk_id`: `egress.permissions` sent groups of three and four ~65,489-byte
+chunks beside single-frame messages, `egress.approvals` sent two. The pinned `_read_frame` parses every frame as a
+whole `ServiceResponse`, so a mid-frame chunk raised `Wire format was corrupt`; the sentinel guard then skipped it
+as though it were a notification, which dropped exactly the bytes between chunk boundaries. The damage surfaced
+late — `json.loads` failed ~450 bytes into the following chunk, so the error quoted a perfectly valid-looking
+prefix and pointed at the payload instead of the reader. Reassembling by `chunk_index` before parsing yields
+`egress.permissions` **496,150** bytes where the old reader assembled 145,814, and `egress.approvals` 80,620
+against 73,654; both parse. Live after the fix: `egress.permissions` ok (`auto_allow` 5 flags, 130 connectors),
+`egress.approvals` ok (10 recent), and `egress.approval.history` answers **50 items** where it previously
+answered `{}`. Suite: 96 tests, three of them new — reassembly, index-not-arrival ordering, and two chunk groups
+that must not mix.
+
+*Allowed sites and revocation are reachable; not yet exposed.* The listing surface is `GET /permissions/active`
+(`egress.permissions.active`): 50 `items` carrying `permission_id`, `kind` (`transient_network_grant`), `lifetime`,
+`mode`, `policy_subject`, `expires_at_ms` and **`revocable: true`**, with `display.summary_title` for the row. The
+durable "this site was allowed always" record is `egress.approval.history`'s `always_allow_registrable_domain`,
+beside `host`, `port`, `decision` and `always_scope` — that is where the school domains in the history came from.
+Revocation is `POST /permissions/revoke` (`egress.permissions.revoke`), with per-connector reset at
+`DELETE /permissions/connectors/{connector}` and settings at `PATCH /permissions/settings`. None of these are wired
+into the bridge or the window yet, and they should not be until P2's policy model exists: revocation is a write,
+so it inherits `decide`'s posture — one explicit press, no background call, no retry, and the service's answer
+reported rather than assumed. The permissions payload is ~496 KB, so any listing must project narrowly; the window
+must never hold the raw body.
+
 *Deciding is now implemented at the bridge.* `decide` takes an `approval_id` and one of the five published
 outcome words (`allow_once`, `allow_task`, `allow_site`, `allow_always`, `deny`), refuses every other value
 before any request is made, and sends exactly one `POST /approvals/{approval_id}/decide` on its own sentinel

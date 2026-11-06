@@ -943,6 +943,84 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(frame.stream_id, bridge.SKIPPED_FRAME_STREAM)
         self.assertNotEqual(frame.stream_id, 0, "a skipped frame must never match a reply")
 
+    def _chunked_gateway(self, bridge, frames):
+        """A SentinelGateway over scripted Noise frames: (id, index, total, bytes)."""
+        import sys
+        import threading
+        import types
+        from unittest.mock import patch
+
+        script = list(frames)
+
+        class ServiceFrame:
+            def __init__(self):
+                self.stream_id = 0
+
+            def ParseFromString(self, data):
+                # Only the reassembled frame is a frame at all.
+                if data != b"body":
+                    raise AssertionError("a chunk must never be parsed on its own")
+                self.stream_id = 7
+
+        class Response:
+            def __init__(self):
+                self.payload = b""
+
+            def ParseFromString(self, data):
+                if data != b"Hbody":
+                    raise ValueError("DecodeError: Wire format was corrupt")
+                self.payload = b"body"
+
+        class Transport:
+            def __init__(self):
+                self.payload = b""
+                self.chunk_id = 0
+                self.chunk_index = 0
+                self.total_chunks = 1
+
+            def ParseFromString(self, data):
+                chunk_id, index, total, payload = script.pop(0)
+                self.chunk_id, self.chunk_index, self.total_chunks = chunk_id, index, total
+                self.payload = payload
+
+        class Gateway:
+            def __init__(self, **kwargs):
+                self._recv_lock = threading.Lock()
+                self.noise = types.SimpleNamespace(decrypt=lambda data: data)
+                self.ws = types.SimpleNamespace(recv=lambda: (b"ciphertext", 0))
+
+        module = types.ModuleType("muse")
+        module.NoiseTransportFrame = Transport
+        module.ServiceResponse = Response
+        module.ServiceFrame = ServiceFrame
+        module.Gateway = Gateway
+        with patch.dict(sys.modules, {"muse": module}), \
+                patch.object(bridge, "cookie_header", return_value="a=b"):
+            return bridge.sentinel_gateway({"cookies_file": "/dev/null"})
+
+    def test_a_reply_split_across_transport_chunks_is_reassembled(self):
+        # Live `egress.permissions` is ~496 KB, so the sentinel service splits one
+        # reply across Noise chunks sharing a chunk_id. Each chunk alone fails the
+        # `ServiceResponse` parse, so the reader skipped it and the body lost the
+        # bytes in between — which `call_json` reported as `non-JSON response`.
+        bridge = load_bridge()
+        gateway = self._chunked_gateway(bridge, [(11, 0, 2, b"Hbo"), (11, 1, 2, b"dy")])
+        self.assertEqual(gateway._read_frame().stream_id, 7)
+
+    def test_chunks_are_joined_by_index_not_by_arrival(self):
+        bridge = load_bridge()
+        gateway = self._chunked_gateway(bridge, [(12, 1, 2, b"dy"), (12, 0, 2, b"Hbo")])
+        self.assertEqual(gateway._read_frame().stream_id, 7)
+
+    def test_two_chunk_groups_never_mix(self):
+        # Two large replies can be chunked at the same time; the first frame to
+        # complete is the one that returns, whichever group it belongs to.
+        bridge = load_bridge()
+        gateway = self._chunked_gateway(bridge, [
+            (21, 0, 2, b"Hbo"), (22, 0, 2, b"Hbo"), (22, 1, 2, b"dy"), (21, 1, 2, b"dy")])
+        self.assertEqual(gateway._read_frame().stream_id, 7)
+        self.assertEqual(gateway._read_frame().stream_id, 7)
+
 
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
