@@ -19,7 +19,9 @@ struct Card {
 }
 enum Completed {
     Grant(Result<(), &'static str>),
-    Operation(Decision, PathBuf, String, Instant, String),
+    // Boxed: an approval card carries a full proposal, and the grant variant must
+    // not carry that weight through every channel send.
+    Operation(Box<Decision>, PathBuf, String, Instant, String),
 }
 /// Session activity log capacity: oldest entries are dropped first.
 const MAX_LOG: usize = 64;
@@ -106,7 +108,8 @@ fn persisted_node_id(directory: &std::path::Path) -> Result<String, &'static str
 /// string (paths, content) can never reach the log.
 fn safe_command(raw: &str) -> &str {
     match raw {
-        "files.search" | "files.read_text" | "files.create_text" => raw,
+        "files.search" | "files.read_text" | "files.create_text" | "files.edit"
+        | "files.rename" | "files.delete" => raw,
         _ => "unknown-command",
     }
 }
@@ -326,7 +329,7 @@ impl Controller {
         if self
             .work(move || {
                 let decision = run_invocation(&broker, invocation, deadline);
-                Completed::Operation(decision, root, grant_id, deadline, command)
+                Completed::Operation(Box::new(decision), root, grant_id, deadline, command)
             })
             .is_err()
         {
@@ -355,11 +358,11 @@ impl Controller {
         ));
         self.work(move || {
             Completed::Operation(
-                Decision::Reply(if allow {
+                Box::new(Decision::Reply(if allow {
                     broker.approve(&id)
                 } else {
                     broker.deny(&id)
-                }),
+                })),
                 PathBuf::new(),
                 String::new(),
                 Instant::now(),
@@ -442,7 +445,7 @@ impl Controller {
                 Completed::Operation(decision, root, grant_id, deadline, command)
                     if self.phase == Phase::Registered =>
                 {
-                    match decision {
+                    match *decision {
                         Decision::Reply(reply) => {
                             if !command.is_empty() {
                                 self.cmds.entry(reply.id.clone()).or_insert(command);
@@ -661,7 +664,7 @@ mod native {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
         root.append(&label("Local host · your existing Muse agent on Linux"));
-        root.append(&label("Separate from account connection and the read-only Local files browser. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. Each CREATE NEW text-file operation requires your local Allow once approval of its exact destination and full content. No overwrite, delete, shell or computer control."));
+        root.append(&label("Separate from account connection and the read-only Local files browser. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. Every write requires your local Allow once approval of the exact path and, where text changes, the complete resulting content: create a new file, edit one exact occurrence, rename, or move a file to the Trash. Nothing is overwritten, permanently deleted, or run as a shell command."));
         root.append(&label(IDENTITY_COPY));
         let consent = gtk::CheckButton::with_label(
             "I explicitly enable this local host and allow granted filenames and text to reach Muse.",
@@ -685,7 +688,7 @@ mod native {
         grants.add_css_class("dim-label");
         root.append(&grants);
         let approvals_heading =
-            label("Pending create approvals · review the entire immutable content before allowing");
+            label("Pending file approvals · review the exact path and content before allowing");
         approvals_heading.add_css_class("section-heading");
         root.append(&approvals_heading);
         let cards = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -909,13 +912,41 @@ mod native {
                     icon.add_css_class("approval-icon");
                     icon.set_valign(gtk::Align::Start);
                     title_row.append(&icon);
-                    let heading = label(&format!(
-                        "CREATE NEW text file (no overwrite)\nGrant: {}\nFolder: {}\nRelative destination: {}\nFull destination: {}",
-                        card.grant_id,
-                        card.root.display(),
-                        card.request.path,
-                        card.root.join(&card.request.path).display()
-                    ));
+                    let heading_text = match card.request.operation.as_str() {
+                        "files.rename" => {
+                            let target = card.request.target_path.clone().unwrap_or_default();
+                            format!(
+                                "RENAME file (no overwrite)\nGrant: {}\nFolder: {}\nRelative source: {}\nRelative destination: {}\nFull destination: {}",
+                                card.grant_id,
+                                card.root.display(),
+                                card.request.path,
+                                target,
+                                card.root.join(&target).display()
+                            )
+                        }
+                        "files.delete" => format!(
+                            "MOVE TO TRASH (recoverable)\nGrant: {}\nFolder: {}\nRelative path: {}\nFull path: {}\nNothing is deleted permanently.",
+                            card.grant_id,
+                            card.root.display(),
+                            card.request.path,
+                            card.root.join(&card.request.path).display()
+                        ),
+                        "files.edit" => format!(
+                            "EDIT text file\nGrant: {}\nFolder: {}\nRelative path: {}\nFull path: {}\nThe exact resulting content is below.",
+                            card.grant_id,
+                            card.root.display(),
+                            card.request.path,
+                            card.root.join(&card.request.path).display()
+                        ),
+                        _ => format!(
+                            "CREATE NEW text file (no overwrite)\nGrant: {}\nFolder: {}\nRelative destination: {}\nFull destination: {}",
+                            card.grant_id,
+                            card.root.display(),
+                            card.request.path,
+                            card.root.join(&card.request.path).display()
+                        ),
+                    };
+                    let heading = label(&heading_text);
                     heading.add_css_class("approval-heading");
                     heading.set_hexpand(true);
                     title_row.append(&heading);
@@ -934,14 +965,18 @@ mod native {
                     scroll.set_child(Some(&content));
                     // Expandable detail box (Mac pattern); expanded by default so
                     // the entire immutable content stays reviewable. Read-only.
-                    let details = gtk::Expander::new(Some(&format!(
-                        "Full immutable content · {} characters",
-                        card.request.content.chars().count()
-                    )));
-                    details.add_css_class("approval-details");
-                    details.set_expanded(true);
-                    details.set_child(Some(&scroll));
-                    body.append(&details);
+                    // A rename or a Trash move changes no text, so there is no
+                    // content to expand; only text operations carry a body.
+                    if !card.request.content.is_empty() {
+                        let details = gtk::Expander::new(Some(&format!(
+                            "Full immutable content · {} characters",
+                            card.request.content.chars().count()
+                        )));
+                        details.add_css_class("approval-details");
+                        details.set_expanded(true);
+                        details.set_child(Some(&scroll));
+                        body.append(&details);
+                    }
                     let countdown = label("");
                     countdown.add_css_class("approval-countdown");
                     body.append(&countdown);
@@ -1320,8 +1355,10 @@ for line in sys.stdin:
             let stale = ApprovalRequest {
                 approval_id: "stale".into(),
                 invocation_id: "one".into(),
+                operation: "files.create_text".into(),
                 title: "stale".into(),
                 path: "new.txt".into(),
+                target_path: None,
                 content: "never".into(),
                 expires_in_seconds: 60,
             };
@@ -1329,7 +1366,7 @@ for line in sys.stdin:
                 .try_send(Completion {
                     epoch,
                     value: Completed::Operation(
-                        Decision::Approval(stale),
+                        Box::new(Decision::Approval(stale)),
                         f.0.clone(),
                         "old".into(),
                         Instant::now() + Duration::from_secs(60),
