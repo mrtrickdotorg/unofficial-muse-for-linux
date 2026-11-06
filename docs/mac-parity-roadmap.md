@@ -357,7 +357,9 @@ We have none — no list, no preview, no download, no share gate. Distinct from 
 `total_count: 76`, a 50-edge page and `page_info.has_next_page: true`. Each edge is `{cursor, node}`;
 the node carries `artifact_ref` (`file:workspace/your_files/…`), `display_name`, `type`, `format`,
 `status`, `placement`, `updated_at_ms`, `is_pinned`, `open_target.path` and a `capabilities` block —
-observed rows report `can_open`/`can_pin`/`can_delete`/`can_rename` true and `can_share: false`. The
+the rows first inspected reported `can_open`/`can_pin`/`can_delete`/`can_rename` true and
+`can_share: false`, but a full first page (50 rows) carries `can_share: true` on one row, so sharing
+is a per-artifact answer and not a global switch. The
 bridge op keeps those fields plus `has_more` and drops the cursor: a pagination token is not
 something this client needs to hold, and every unlisted node field stays upstream. No preview,
 open, download or share exists yet, and sharing stays the service's own `false` rather than a
