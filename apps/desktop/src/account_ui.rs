@@ -29,6 +29,11 @@ struct Controller<A, H, T> {
     /// Reply polls hold no `busy`: waiting for an answer must not block the
     /// composer, so they get their own slot and at most one runs at a time.
     polling: Option<Ticket>,
+    /// A dispatch owns its own slot. The shared slot is held by reads and
+    /// refreshes, so sharing it refused the composer whenever a background read
+    /// happened to be running — which mid-turn is most of the time. Interjecting
+    /// is the Mac behaviour; two unresolved dispatches at once are not.
+    sending: Option<Ticket>,
     account: Option<A>,
     history: Vec<H>,
     tasks: Option<T>,
@@ -223,6 +228,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             serial: 0,
             busy: None,
             polling: None,
+            sending: None,
             account: None,
             history: Vec::new(),
             tasks: None,
@@ -292,8 +298,10 @@ impl<A, H, T> Controller<A, H, T> {
         if self.account.is_none() {
             return "Not connected. Connect your Muse session before sending.";
         }
-        if self.busy.is_some() {
-            return "A request is already running. Wait for it to finish before sending.";
+        // In flight is not the same story as uncertain: nothing is unresolved yet,
+        // the receipt simply has not arrived.
+        if self.sending.is_some() && self.pending_send.is_some() {
+            return "The previous message is still being dispatched. Wait for its receipt before sending.";
         }
         if self.pending_send.is_some() {
             return "A previous send is uncertain. Check its original shared history, then allow another send.";
@@ -301,7 +309,7 @@ impl<A, H, T> Controller<A, H, T> {
         if text.trim().is_empty() {
             return "Enter a message before sending.";
         }
-        "Send is not ready. Wait for the current request to finish, then try again."
+        "The previous message is still being dispatched. Wait for its receipt before sending."
     }
 
     fn finish_send(&mut self, ticket: &Ticket, outcome: SendOutcome) -> bool {
@@ -331,7 +339,7 @@ impl<A, H, T> Controller<A, H, T> {
     }
 
     fn acknowledge_send(&mut self) {
-        if self.busy.is_none() && self.pending_send.is_some() {
+        if self.busy.is_none() && self.sending.is_none() && self.pending_send.is_some() {
             self.pending_send = None;
             self.send_notice.clear();
         }
@@ -376,12 +384,11 @@ impl<A, H, T> Controller<A, H, T> {
     fn select_thread(&mut self, scope: Option<String>) -> bool {
         if self.account.is_none()
             || self.scope == scope
-            || self.busy.as_ref().is_some_and(|t| {
-                matches!(
-                    t.operation,
-                    Operation::Send | Operation::Login | Operation::Connect
-                )
-            })
+            || self.sending.is_some()
+            || self
+                .busy
+                .as_ref()
+                .is_some_and(|t| matches!(t.operation, Operation::Login | Operation::Connect))
         {
             return false;
         }
@@ -687,7 +694,8 @@ impl<A, H, T> Controller<A, H, T> {
     fn accept(&mut self, ticket: &Ticket) -> bool {
         let polled = self.polling.as_ref() == Some(ticket);
         let busy = self.busy.as_ref() == Some(ticket);
-        if !polled && !busy {
+        let sending = self.sending.as_ref() == Some(ticket);
+        if !polled && !busy && !sending {
             return false;
         }
         // Release the slot in every case: a poll or read that no longer matches
@@ -698,6 +706,9 @@ impl<A, H, T> Controller<A, H, T> {
         }
         if busy {
             self.busy = None;
+        }
+        if sending {
+            self.sending = None;
         }
         current
     }
@@ -750,8 +761,18 @@ impl<A, H, T> Controller<A, H, T> {
         self.issue(Operation::Connect)
     }
 
+    /// The slot an operation must own. A dispatch takes `sending` so that a read
+    /// or a refresh in flight cannot refuse the composer.
+    fn slot_mut(&mut self, operation: Operation) -> &mut Option<Ticket> {
+        if operation == Operation::Send {
+            &mut self.sending
+        } else {
+            &mut self.busy
+        }
+    }
+
     fn issue(&mut self, operation: Operation) -> Option<Ticket> {
-        if self.busy.is_some() {
+        if self.slot_mut(operation).is_some() {
             return None;
         }
         self.serial = self.serial.wrapping_add(1);
@@ -762,7 +783,7 @@ impl<A, H, T> Controller<A, H, T> {
             limit: self.limit,
             operation,
         };
-        self.busy = Some(ticket.clone());
+        *self.slot_mut(operation) = Some(ticket.clone());
         Some(ticket)
     }
 }
@@ -3625,7 +3646,14 @@ mod tests {
         // The poll resolving must not clear the send that is still running.
         assert!(state.finish_history(&poll, Ok(Vec::new())));
         assert!(state.polling.is_none());
-        assert!(state.busy.is_some());
+        assert!(
+            state.busy.is_none(),
+            "a dispatch must not occupy the read slot"
+        );
+        assert!(
+            state.sending.is_some(),
+            "the poll resolving must not clear the send that is still running"
+        );
     }
 
     #[test]
@@ -3770,8 +3798,27 @@ mod tests {
         let mut ready = connected();
         assert!(ready.begin_send("   ").is_none());
         assert!(ready.describe_send_block("   ").contains("Enter"));
-        let _busy = ready.begin_send("first").unwrap();
-        assert!(ready.describe_send_block("second").contains("already"));
+        let first = ready.begin_send("first").unwrap();
+        // Two unresolved dispatches at once are still refused: the receipt of
+        // the first decides whether the second would duplicate it.
+        assert!(ready.begin_send("second").is_none());
+        assert!(
+            ready
+                .describe_send_block("second")
+                .contains("still being dispatched")
+        );
+        ready.finish_send(&first, SendOutcome::Confirmed);
+        // Interjection: a background read holding the shared slot must not refuse
+        // the composer, which is what "a request is already running" did mid-turn.
+        let read = ready.begin_read(false, false).unwrap();
+        assert!(ready.busy.is_some(), "the read must own the shared slot");
+        let interjection = ready
+            .begin_send("steer it")
+            .expect("a running read must not block a send");
+        assert_eq!(interjection.operation, Operation::Send);
+        assert!(ready.finish_send(&interjection, SendOutcome::Confirmed));
+        assert!(ready.finish_history(&read, Ok(vec![])));
+        let _busy = ready.begin_send("after").unwrap();
         ready.finish_send(&_busy, SendOutcome::Uncertain("deadline exceeded".into()));
         assert!(
             ready

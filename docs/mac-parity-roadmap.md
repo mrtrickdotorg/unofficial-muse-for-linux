@@ -145,7 +145,13 @@ on `activity` in alternation with the history poll, streaming fragments into the
 when the turn ends. Nothing is persisted locally, so a stale row cannot invent a run: the strip only speaks when
 the live stream reports a working status, and a finished status opens no watch. The cost is that the transcript
 still shows the partial reply, so the draft starts where the window did rather than where the answer did.
-Interjection remains open.
+*Interjection (2026-11-06).* The composer no longer shares the read slot: a dispatch owns `sending`, so a
+background refresh — or the turn the agent is still producing — cannot refuse the next message with "a request is
+already running". That refusal was never about the running turn; it was `issue()` rejecting any operation while a
+read held the one `busy` slot. One unresolved dispatch at a time is still enforced (two in flight could duplicate an
+uncertain send), an uncertain receipt still blocks until acknowledged, and switching conversations still refuses
+while a dispatch is unresolved. Proven by unit test: a send issued while a history read holds `busy` now returns a
+ticket. The live half of the gate is the service's answer, not the composer's, so it is recorded separately below.
 
 *Reattach proven live (2026-11-04).* Two probes drove a real run through the bridge. A history read 22 s into the
 run returned exactly the shape the window keys on — `72826 assistant status=None`, 50 characters written — so a
