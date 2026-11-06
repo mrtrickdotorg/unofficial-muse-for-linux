@@ -180,6 +180,51 @@ print(json.dumps({'ok':True,'data':{'schedules':[{'id':'job-1','title':'Daily','
 }
 
 #[test]
+fn artifacts_parses_one_projected_library_page() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'artifacts'
+assert request['config_dir'].endswith('/config')
+assert 'limit' not in request
+print(json.dumps({'ok': True, 'data': {'total_count': 76, 'has_more': True, 'artifacts': [
+  {'artifact_ref': 'file:workspace/your_files/a.docx', 'title': 'a.docx', 'kind': 'document',
+   'format': 'docx', 'status': 'ready', 'placement': 'library',
+   'path': '/workspace/your_files/a.docx', 'updated_at_ms': 1793915135823,
+   'pinned': False, 'can_open': True, 'can_share': False}]}}))
+"#,
+    );
+    let page = f.client().artifacts().unwrap();
+    assert_eq!(page.total_count, 76);
+    assert!(page.has_more);
+    assert_eq!(page.artifacts.len(), 1);
+    let row = &page.artifacts[0];
+    assert_eq!(row.artifact_ref, "file:workspace/your_files/a.docx");
+    assert_eq!(row.title, "a.docx");
+    assert_eq!(row.format.as_deref(), Some("docx"));
+    assert_eq!(row.path.as_deref(), Some("/workspace/your_files/a.docx"));
+    assert_eq!(row.updated_at_ms, Some(1_793_915_135_823));
+    assert!(!row.pinned);
+    assert!(row.can_open);
+    assert!(!row.can_share, "sharing stays the service's answer");
+}
+
+#[test]
+fn an_unidentified_library_row_is_a_protocol_error_not_an_empty_list() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+assert json.load(sys.stdin)['op'] == 'artifacts'
+print(json.dumps({'ok': False, 'error': {'code': 'protocol_error', 'uncertain': False}}))
+"#,
+    );
+    let error = f.client().artifacts().unwrap_err();
+    assert_eq!(error.code, muse_account::ErrorCode::ProtocolError);
+    assert!(!error.uncertain);
+}
+
+#[test]
 fn send_does_not_treat_dispatched_as_confirmed_or_retry() {
     let f = Fixture::new(
         r#"

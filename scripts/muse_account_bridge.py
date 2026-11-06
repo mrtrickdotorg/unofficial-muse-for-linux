@@ -303,6 +303,7 @@ def validate_request(request):
                "approvals": set(),
                "decide": {"approval_id", "decision"},
                "tasks": set(),
+               "artifacts": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
     if not isinstance(op, str) or op not in allowed:
@@ -772,6 +773,59 @@ def sentinel_gateway(config):
     return gateway(cookies=cookie_header(config), vm_id=config.get("vm_id"))
 
 
+ARTIFACT_FIELDS = ("artifact_ref", "title", "kind", "format", "status", "placement",
+                   "path", "updated_at_ms", "pinned", "can_open", "can_share")
+
+
+def artifact_rows(payload):
+    """Project the Library listing into what a Linux client can act on.
+
+    `artifacts.list` answers 50 edges per page with opaque cursors, so only the
+    fields a list and a viewer need travel: the reference the service itself
+    uses, the name a person sees, and the capability flags that say what the
+    service would allow. The cursor stays in the bridge. A row without a
+    reference or a name fails closed: an unnamed artifact can be neither shown
+    nor opened, and silently dropping it would understate the Library.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    total = payload.get("total_count")
+    edges = payload.get("edges")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        raise BridgeFailure("protocol_error")
+    if not isinstance(edges, list) or len(edges) > 200:
+        raise BridgeFailure("protocol_error")
+    rows = []
+    for edge in edges:
+        node = edge.get("node") if isinstance(edge, dict) else None
+        if not isinstance(node, dict):
+            raise BridgeFailure("protocol_error")
+        reference = required_text(node.get("artifact_ref"))
+        name = required_text(node.get("display_name"))
+        if not reference or not name:
+            raise BridgeFailure("protocol_error")
+        target = node.get("open_target") if isinstance(node.get("open_target"), dict) else {}
+        capabilities = node.get("capabilities") if isinstance(node.get("capabilities"), dict) else {}
+        updated = node.get("updated_at_ms")
+        rows.append({
+            "artifact_ref": reference,
+            "title": name,
+            "kind": optional_text(node.get("type")),
+            "format": optional_text(node.get("format")),
+            "status": optional_text(node.get("status")),
+            "placement": optional_text(node.get("placement")),
+            "path": optional_text(target.get("path")),
+            "updated_at_ms": updated if isinstance(updated, int)
+            and not isinstance(updated, bool) else None,
+            "pinned": node.get("is_pinned") is True,
+            "can_open": capabilities.get("can_open") is True,
+            "can_share": capabilities.get("can_share") is True,
+        })
+    page = payload.get("page_info") if isinstance(payload.get("page_info"), dict) else {}
+    return {"total_count": total, "has_more": page.get("has_next_page") is True,
+            "artifacts": rows}
+
+
 def approval_rows(payload):
     """Project pending approvals, keeping the service's own vocabulary.
 
@@ -951,6 +1005,13 @@ class Adapter:
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
             }
+        if request["op"] == "artifacts":
+            # One read of the Library listing. Listing is never consent: nothing
+            # here opens, shares or deletes, and the projection keeps the cursor
+            # and the raw node shape inside the bridge.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json("artifacts.list", timeout=20)
+            return artifact_rows(payload)
         if request["op"] == "approvals":
             # Read-only, and deliberately on its own connection: listing what the
             # agent is asking for must never decide it, and the sentinel service
