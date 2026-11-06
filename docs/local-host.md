@@ -5,9 +5,9 @@ This is a capability slice toward Muse-for-Mac parity, not a claim of full parit
 ## Implemented backend boundary
 
 - A persistent, explicitly started account-gateway control connection opens `POST /link-control`, advertises a narrow command manifest and accepts typed invocations. Registration requires an HTTP success **and** the matching positive registration acknowledgement. Socket creation is not registration.
-- The transport executes no local commands. A separate Rust permission broker implements `files.search`, `files.read_text` and `files.create_text`.
+- The transport executes no local commands. A separate Rust permission broker implements `files.search`, `files.read_text`, `files.create_text`, `files.edit`, `files.rename` and `files.delete` (to the desktop Trash).
 - A local folder grant explicitly authorizes disclosure of its relative filenames and bounded UTF-8 contents to Muse. Account sign-in and the app's separate local file-browser grants do not implicitly grant the remote agent access.
-- Creation always requires a new, detail-specific approval of the exact immutable relative destination and complete contents. It creates a **new** file only: no overwrite, parent-directory creation, edit, rename, move, delete or Trash operation.
+- Every write requires a new, detail-specific approval: creation of a **new** file with its complete contents; an edit that replaces exactly one occurrence and is approved as the complete resulting text; a rename approved as source and destination; and a delete approved as a move to the Trash. There is no overwrite, no parent-directory creation, no permanent unlink and no shell. An edit whose file changed after the request is refused rather than applied.
 - There is no shell, arbitrary executable, browser automation, screen capture, input injection, app control, provider connector or Linux background-task runner in this slice.
 
 ## Privacy and filesystem authority
@@ -19,6 +19,8 @@ The service sees opaque grant IDs and generic folder labels in the registered co
 Reads reject special files, invalid UTF-8 and files above 64 KiB. Search returns regular-file basename substring matches, with at most 100 results, 10,000 scanned entries and 64 levels. Search is currently case-sensitive; symlink/special-file/error encounters fail closed rather than returning a misleading partial result. Empty queries match all regular filenames within the same bounds.
 
 Approved creation stages an owner-only anonymous `O_TMPFILE`, verifies the complete bytes and publishes with a no-replace link. Unsupported kernel/filesystem operations fail closed; there is no less-safe fallback. Existing files and symlinks are never replaced. Failed/denied/expired/revoked proposals do not publish a new file.
+
+An approved edit stages the resulting text the same way, preserves the original permission bits, re-checks that the name still resolves to the reviewed inode, renames atomically over it and reads the result back. An approved rename uses `renameat2(RENAME_NOREPLACE)` and verifies the moved inode. An approved delete moves the file into `$XDG_DATA_HOME/Trash` with a `[Trash Info]` record, never unlinks it, and fails `trash_failed` rather than falling back to destruction.
 
 Invocation IDs cannot be replayed; immutable pending approvals expire against a monotonic deadline, capped at 120 seconds and bounded by the remote request's remaining budget. Revocation invalidates pending work and suppresses in-flight results. The UI/transport must stop result delivery before revoking grants, since an already returned result cannot be recalled. Disconnect and window close must stop the host, not merely hide its UI state.
 
