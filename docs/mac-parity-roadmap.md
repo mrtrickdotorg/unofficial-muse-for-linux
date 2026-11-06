@@ -106,8 +106,9 @@ one prompt and poll a 45 s watch window. No streaming, no plan/steps, no cancel,
 transcript; expose plan/step progress and agent status; cancel and resume; side chats as scoped
 threads; persist in-flight state so a restart does not lose the thread.
 
-*Gate:* an answer appears incrementally; interjecting during work is accepted; cancel stops the work
-and is verified through history; restarting the app reattaches to the same run.
+*Gate:* an answer appears incrementally; interjecting during work is accepted (accepted, not steering —
+see below); cancel stops the work and is verified through history; restarting the app reattaches to the
+same run.
 
 *Cancel (2026-11-04).* `chat.cancel` is `POST /chat/cancel` with `noiseOnly`, and the pinned CLI never
 calls it, so the bridge reaches the route directly instead of waiting for a library method. Probed
@@ -121,7 +122,8 @@ was running to stop") rather than treating a press as a stop.
 `role == assistant && status not terminal`, and treating an absent status as finished would be wrong in the
 opposite direction — the window's finish-check now pins both directions. Two probes then sent a second
 message mid-turn: the service accepted it (`sent: true`), but in both the first reply had already reached a
-terminal status when the second landed, so **steering a live turn stays unproven**, and one acceptance came
+terminal status when the second landed, so **steering a live turn stays unproven** at that point (it is settled
+below, and not in the Mac app's favour), and one acceptance came
 back `confirmed: false` — accepted but unconfirmed inside the 8 s window, which the window reports as
 uncertain rather than as delivered. History does not stream either: the partial row sat at 12 characters and its
 text did not change across ~50 s of reads, then jumped to the full 21,340 characters at completion. The
@@ -152,6 +154,24 @@ read held the one `busy` slot. One unresolved dispatch at a time is still enforc
 uncertain send), an uncertain receipt still blocks until acknowledged, and switching conversations still refuses
 while a dispatch is unresolved. Proven by unit test: a send issued while a history read holds `busy` now returns a
 ticket. The live half of the gate is the service's answer, not the composer's, so it is recorded separately below.
+
+*Interjection does not steer (live, 2026-11-06).* The gate item is settled, and the answer is not the one
+the Mac app advertises. The decisive run asked for the numbers 1–1200 spelled out; at 12.6 s the live stream
+had emitted 194 `delta.text_append` fragments (5,776 characters) and stood at item **262 of 1200**, so the turn
+was demonstrably mid-generation with most of its output still unwritten. The interjection — "STOP. Abandon the
+number list right now … reply with only the word ORCHID" — was accepted at that moment (`sent: true`) and its
+receipt came back `confirmed: false`: persisted, but not visible in history inside the 8 s confirmation window,
+which is the uncertain case the window already reports as uncertain rather than as delivered. The running reply
+did not change course. The stream continued through item 861 at 32 s and 1137 at 41.6 s, and history closed it
+`completed` at 33,917 characters, ending "1200. one thousand two hundred". The interjection was answered
+separately afterwards: a new assistant row of six characters, "ORCHID", `completed`, with its own user row
+between the two. An earlier run shows the same shape from the other side — a 300-item list interjected at item
+281 still finished at 300, with the ORCHID answer arriving as a later turn. So the service accepts a message
+during work and processes it *after* the turn in flight; it does not redirect that turn, and the reply that
+finishes is the one the earlier instruction asked for. The window's behaviour is therefore honest as built
+(accept the message, show it in the transcript) but must never promise a redirect, and the composer being open
+is not evidence that the agent saw the message. Steering, in the sense the Mac app implies, is a model-side
+capability this service does not expose; the interjection is a queue, and the UI should say so if it labels one.
 
 *Reattach proven live (2026-11-04).* Two probes drove a real run through the bridge. A history read 22 s into the
 run returned exactly the shape the window keys on — `72826 assistant status=None`, 50 characters written — so a
