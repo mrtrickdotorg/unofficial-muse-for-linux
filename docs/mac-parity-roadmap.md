@@ -370,6 +370,18 @@ not buried by recency, and a notice that repeats the service's total beside the 
 implying 50 is everything. It has no open, preview, download, rename, pin or share action, and it
 cannot start a read without a connected account.
 
+*`artifacts.fetch_url` answers, but it yields no URL (live, 2026-11-06).* The route takes a
+`project_dir` query parameter and rejects every form except a **strict subdirectory** of
+`workspace/your_files` (`project_dir must be under workspace/your_files or
+workspace/goals/<goal>/files`), so an artifact sitting directly in `workspace/your_files` — most of the
+first page — cannot be addressed at all. Where the parameter is accepted (it answered for
+`workspace/your_files/preparing-for-baby-booklet`) the reply is `{"url": null, "last_updated":
+null}`, identical on a repeat call: there is nothing to fetch. A preview was therefore not wired.
+The route names directories rather than artifacts, returns no URL for the directories it does
+accept, and the first page holds docx/pdf/html/md/space rows — no image for which a renderer would
+even apply. This is a service-side block rather than a missing client feature, so the page stays a
+list.
+
 *Work:* probe workspace/artifact routes; list and preview the supported types (PDF, DOCX, TXT, MD,
 XLSX, CSV, PNG/JPEG/GIF/WebP), open-in-app, upload, download; sharing off until explicitly approved per
 artifact; Upcoming as a merged view of schedules and pending approvals.
