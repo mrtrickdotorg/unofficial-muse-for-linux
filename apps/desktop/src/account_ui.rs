@@ -1614,6 +1614,7 @@ mod native {
         actions.add_css_class("toolbar");
         let login = gtk::Button::with_label("Sign in with Muse");
         login.add_css_class("suggested-action");
+        login.add_css_class("primary-action");
         login.set_tooltip_text(Some(
             "Opens muse.ai in a private Chromium-compatible browser window, saves the session in this app's folder, then links the account. Not all installed browsers are supported.",
         ));
@@ -1692,7 +1693,15 @@ mod native {
 
         let pages = gtk::Notebook::new();
         pages.set_vexpand(true);
-        let chat = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // The transcript and composer live in a centered ~768px column, like
+        // the Mac/Windows client: full-width lines on a wide window are the
+        // readability problem, not a feature.
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        column.set_halign(gtk::Align::Center);
+        column.set_size_request(768, -1);
+        column.set_vexpand(true);
+        column.append(&column);
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         toolbar.add_css_class("toolbar");
         let threads = gtk::ComboBoxText::new();
@@ -1713,34 +1722,34 @@ mod native {
             "Reads the grants the service says are still in force — what an earlier Allow always left behind. Reading never revokes anything; only a grant's own Revoke button does, one grant at a time.",
         ));
         toolbar.append(&grants_refresh);
-        chat.append(&toolbar);
+        column.append(&toolbar);
         let scope_label = label("No conversation selected until account connection.");
-        chat.append(&scope_label);
+        column.append(&scope_label);
         let live_notice = label("");
         live_notice.add_css_class("chat-status");
         live_notice.set_visible(false);
-        chat.append(&live_notice);
+        column.append(&live_notice);
         let draft = label("");
         draft.add_css_class("chat-status");
         draft.set_visible(false);
         draft.set_tooltip_text(Some(
             "Reply text as the service streams it. The finished reply replaces it in the transcript.",
         ));
-        chat.append(&draft);
+        column.append(&draft);
         let approvals_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
         approvals_box.set_visible(false);
-        chat.append(&approvals_box);
+        column.append(&approvals_box);
         let approval_notice = label("");
         approval_notice.add_css_class("chat-status");
         approval_notice.set_visible(false);
-        chat.append(&approval_notice);
+        column.append(&approval_notice);
         let grants_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
         grants_box.set_visible(false);
-        chat.append(&grants_box);
+        column.append(&grants_box);
         let grant_notice = label("");
         grant_notice.add_css_class("chat-status");
         grant_notice.set_visible(false);
-        chat.append(&grant_notice);
+        column.append(&grant_notice);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
@@ -1748,17 +1757,17 @@ mod native {
             .min_content_height(160)
             .build();
         scroll.set_child(Some(&history));
-        chat.append(&scroll);
+        column.append(&scroll);
         let history_notice = label("");
         history_notice.add_css_class("chat-status");
-        chat.append(&history_notice);
+        column.append(&history_notice);
         let send_notice = label("");
         send_notice.add_css_class("chat-status");
-        chat.append(&send_notice);
+        column.append(&send_notice);
         let acknowledge = gtk::Button::with_label(
             "I've checked the original shared history — allow another send",
         );
-        chat.append(&acknowledge);
+        column.append(&acknowledge);
         let composer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         composer.add_css_class("composer");
         let prompt = gtk::Entry::new();
@@ -1770,27 +1779,33 @@ mod native {
         ));
         let send = gtk::Button::with_label("Send to Muse");
         send.add_css_class("suggested-action");
+        send.add_css_class("primary-action");
         send.set_tooltip_text(Some(
             "Sends once to your existing Muse agent and may trigger external actions. No local files are uploaded automatically, and a send is never repeated without you.",
         ));
         composer.append(&prompt);
         composer.append(&stop);
         composer.append(&send);
-        chat.append(&composer);
+        column.append(&composer);
         pages.append_page(&chat, Some(&gtk::Label::new(Some("Shared chat history"))));
 
-        let task_page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        task_page.append(&label("Shared schedules & recent runs · read-only"));
-        task_page.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. Use Refresh shared data or wait for the idle 30-second refresh."));
+        let task_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let task_column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        task_column.set_halign(gtk::Align::Center);
+        task_column.set_size_request(768, -1);
+        task_column.set_vexpand(true);
+        task_column.append(&task_column);
+        task_column.append(&label("Shared schedules & recent runs · read-only"));
+        task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. Use Refresh shared data or wait for the idle 30-second refresh."));
         let tasks_notice = label("");
-        task_page.append(&tasks_notice);
+        task_column.append(&tasks_notice);
         let tasks = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let tasks_scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
             .vexpand(true)
             .build();
         tasks_scroll.set_child(Some(&tasks));
-        task_page.append(&tasks_scroll);
+        task_column.append(&tasks_scroll);
         pages.append_page(
             &task_page,
             Some(&gtk::Label::new(Some("Scheduled tasks & runs"))),
@@ -3084,29 +3099,15 @@ mod native {
                     "assistant" => super::super::ChatRole::Assistant,
                     _ => super::super::ChatRole::Notice,
                 };
-                let metadata = format!(
-                    "{} · seq {}{}{}",
-                    message.role,
-                    message.seq,
-                    message
-                        .timestamp
-                        .as_deref()
-                        .map(|s| format!(" · {s}"))
-                        .unwrap_or_default(),
-                    message
-                        .status
-                        .as_deref()
-                        .map(|s| format!(" · {s}"))
-                        .unwrap_or_default()
-                );
-                let details = label(&metadata);
-                details.add_css_class("dim-label");
-                details.add_css_class("message-meta");
-                self.history.append(&details);
-                super::super::append_chat(
+                // No per-message telemetry line: role is visible from the
+                // bubble's side, and seq/status are service bookkeeping, not
+                // something a reader should have to look at 200 times. The
+                // bubble shows the message's own time when it has one.
+                super::super::append_chat_stamped(
                     &self.history,
                     role,
                     &super::presentation_text(&message.text),
+                    message.timestamp.as_deref().and_then(short_stamp),
                 );
             }
             // Newest messages are at the bottom. Follow them when the reader
@@ -3196,6 +3197,20 @@ mod native {
         }
     }
 
+    /// The HH:MM out of a service timestamp for a bubble stamp. Anything that
+    /// is not recognisably a timestamp yields None — an absent stamp is honest,
+    /// a mangled one is noise.
+    fn short_stamp(timestamp: &str) -> Option<String> {
+        let bytes = timestamp.as_bytes();
+        if bytes.len() >= 16 && bytes.get(10) == Some(&b'T') {
+            return Some(timestamp[11..16].to_string());
+        }
+        if !timestamp.is_empty() && timestamp.len() <= 8 && !timestamp.contains(' ') {
+            return Some(timestamp.to_string());
+        }
+        None
+    }
+
     fn utc_time(timestamp: Option<i64>) -> String {
         timestamp
             .map(|value| {
@@ -3210,6 +3225,17 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn short_stamp_extracts_hh_mm_and_refuses_noise() {
+            assert_eq!(
+                short_stamp("2026-11-09T15:49:12Z").as_deref(),
+                Some("15:49")
+            );
+            assert_eq!(short_stamp("15:49").as_deref(), Some("15:49"));
+            assert_eq!(short_stamp(""), None);
+            assert_eq!(short_stamp("yesterday afternoon"), None);
+            assert_eq!(short_stamp("2026-11-09 15:49:12"), None);
+        }
 
         fn descendants(root: &gtk::Widget) -> Vec<gtk::Widget> {
             let mut result = vec![root.clone()];
