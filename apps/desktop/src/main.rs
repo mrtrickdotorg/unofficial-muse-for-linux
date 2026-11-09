@@ -83,14 +83,14 @@ scrolledwindow viewport { background-color: transparent; }
 .status-chip { color: #a7a7b1; background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 5px 11px; font-size: 12px; }
 .page-content { padding: 22px 28px; }
 .page-heading { font-size: 21px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
-.page-subtitle { color: #a7a7b1; }
+.page-subtitle { color: #b3b3bc; }
 .chat-column { }
 .chat-scroll { background: transparent; }
 .assistant-identity { padding: 0 0 6px; }
 .assistant-avatar { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 20px; min-width: 40px; min-height: 40px; font-weight: 700; }
 .message-avatar { background-color: #26262d; color: #d7d7de; border-radius: 16px; min-width: 32px; min-height: 32px; font-weight: 700; margin-top: 2px; }
 .assistant-name { font-weight: 600; }
-.message-meta { color: #6f6f7a; font-size: smaller; padding: 2px 6px; }
+.message-meta { color: #8e8e99; font-size: 12px; padding: 2px 6px; }
 .day-divider { color: #6f6f7a; font-size: smaller; padding: 8px 0 2px; }
 .section-heading { font-weight: 600; font-size: 14px; color: #f4f4f6; padding-top: 8px; }
 .title-2 { font-weight: 600; font-size: 14px; color: #f4f4f6; }
@@ -100,24 +100,27 @@ scrolledwindow viewport { background-color: transparent; }
 .welcome-copy { color: #c9c9d1; }
 .settings-content { padding: 10px 2px 4px; }
 .toolbar { }
-.chat-bubble { padding: 11px 15px; border-radius: 16px; font-size: 14px; }
+.toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action) { background-color: transparent; background-image: none; border-color: transparent; box-shadow: none; }
+.toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action):hover { background-color: rgba(255, 255, 255, 0.06); }
+.toolbar combobox button { background-color: transparent; background-image: none; border-color: transparent; box-shadow: none; }
+.chat-bubble { padding: 11px 15px; border-radius: 16px; font-size: 15px; }
 .chat-bubble.user { background-color: #26262d; color: #f4f4f6; }
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
-.chat-status { color: #a7a7b1; padding: 2px 6px; }
+.chat-status { color: #b3b3bc; padding: 2px 6px; }
 .composer { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 24px; padding: 7px 7px 7px 14px; }
 .composer:focus-within { border-color: rgba(255, 255, 255, 0.28); }
-.composer entry { background: transparent; border: 0; box-shadow: none; }
+.composer entry { background: transparent; border: 0; box-shadow: none; font-size: 15px; }
 .composer button.suggested-action { border-radius: 19px; padding: 7px 16px; font-weight: 600; }
 entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px; padding: 7px 11px; }
 entry:focus, searchentry:focus, textview:focus { border-color: rgba(255, 255, 255, 0.28); }
 button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px; padding: 7px 13px; box-shadow: none; }
 button:hover { background-color: #26262e; }
-button.suggested-action { color: #101014; background-color: #f4f4f6; border-color: transparent; }
-button.suggested-action:hover { background-color: #ffffff; }
+button.suggested-action, button.primary-action { color: #101014; background-color: #f4f4f6; background-image: none; border-color: transparent; }
+button.suggested-action:hover, button.primary-action:hover { background-color: #ffffff; background-image: none; }
 button.destructive-action { color: #ffb4ab; background-color: #332024; border-color: rgba(255, 180, 171, 0.25); }
 button.destructive-action:hover { background-color: #42262a; }
-.dim-label { color: #a7a7b1; }
+.dim-label { color: #b3b3bc; }
 .build-identity { color: #6f6f7a; font-size: 11px; padding: 10px 6px 2px; }
 notebook header { background-color: #0d0d10; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
 notebook tab { color: #a7a7b1; background-color: transparent; border-radius: 8px; padding: 7px 12px; }
@@ -408,14 +411,14 @@ fn build_ui(app: &gtk::Application) {
     let chat_page = gtk::Box::new(gtk::Orientation::Vertical, 14);
     chat_page.add_css_class("page-content");
 
-    // Mac-style centered reading column: conversation content clamps to ~640px
-    // so bubbles keep messenger rhythm on wide windows instead of stretching
-    // edge to edge. Setup stays full width above it.
+    // Mac-style centered reading column: conversation content clamps to
+    // ~768px so bubbles keep messenger rhythm on wide windows instead of
+    // stretching edge to edge. Setup stays full width above it.
     let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 10);
     chat_column.add_css_class("chat-column");
     chat_column.set_halign(gtk::Align::Center);
     chat_column.set_vexpand(true);
-    chat_column.set_size_request(640, -1);
+    chat_column.set_size_request(768, -1);
 
     let assistant_identity = gtk::Box::new(gtk::Orientation::Vertical, 5);
     assistant_identity.set_halign(gtk::Align::Center);
@@ -1119,6 +1122,14 @@ fn current_timestamp() -> String {
 }
 
 fn append_chat(container: &gtk::Box, role: ChatRole, message: &str) {
+    append_chat_stamped(container, role, message, Some(current_timestamp()));
+}
+
+/// `stamp` is the time shown under the bubble. Callers rendering stored
+/// history pass the message's own time (or None when the service supplied
+/// none) — never the render time, which would stamp a whole refreshed
+/// transcript with the current minute.
+fn append_chat_stamped(container: &gtk::Box, role: ChatRole, message: &str, stamp: Option<String>) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_hexpand(true);
     row.set_margin_start(12);
@@ -1131,6 +1142,15 @@ fn append_chat(container: &gtk::Box, role: ChatRole, message: &str) {
         avatar.add_css_class("message-avatar");
         avatar.set_valign(gtk::Align::Start);
         row.append(&avatar);
+    }
+    if role == ChatRole::User {
+        // bubble_alignment() says End, but halign alone cannot move a
+        // natural-width child inside a horizontal box: the row packs from
+        // the start. An expanding spacer is what actually right-aligns the
+        // user's bubble, as every messenger client does.
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        row.append(&spacer);
     }
 
     let bubble = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -1150,14 +1170,16 @@ fn append_chat(container: &gtk::Box, role: ChatRole, message: &str) {
     label.set_selectable(true);
     label.set_max_width_chars(88);
     bubble.append(&label);
-    let stamp = gtk::Label::new(Some(&current_timestamp()));
-    stamp.set_xalign(0.0);
-    stamp.set_halign(match bubble_alignment(role) {
-        BubbleAlignment::Start => gtk::Align::Start,
-        BubbleAlignment::End => gtk::Align::End,
-    });
-    stamp.add_css_class("message-meta");
-    bubble.append(&stamp);
+    if let Some(stamp_text) = stamp {
+        let stamp = gtk::Label::new(Some(&stamp_text));
+        stamp.set_xalign(0.0);
+        stamp.set_halign(match bubble_alignment(role) {
+            BubbleAlignment::Start => gtk::Align::Start,
+            BubbleAlignment::End => gtk::Align::End,
+        });
+        stamp.add_css_class("message-meta");
+        bubble.append(&stamp);
+    }
     row.append(&bubble);
     container.append(&row);
 }
