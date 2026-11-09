@@ -1701,7 +1701,7 @@ mod native {
         column.set_halign(gtk::Align::Center);
         column.set_size_request(768, -1);
         column.set_vexpand(true);
-        column.append(&column);
+        chat.append(&column);
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         toolbar.add_css_class("toolbar");
         let threads = gtk::ComboBoxText::new();
@@ -1794,7 +1794,7 @@ mod native {
         task_column.set_halign(gtk::Align::Center);
         task_column.set_size_request(768, -1);
         task_column.set_vexpand(true);
-        task_column.append(&task_column);
+        task_page.append(&task_column);
         task_column.append(&label("Shared schedules & recent runs · read-only"));
         task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. Use Refresh shared data or wait for the idle 30-second refresh."));
         let tasks_notice = label("");
@@ -3275,6 +3275,36 @@ mod native {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn native_account_page_builds_and_presents() {
+            // Regression gate for the Nov 9 centered-column patch, which
+            // appended each column box to ITSELF (chat column and schedules
+            // column). A self-parented widget makes GTK's ancestor walk
+            // loop forever on the next append, so the app hung during
+            // startup and never presented a window. Building the page and
+            // presenting it is the whole assertion: on the broken code
+            // this test never returns from build().
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let chip = gtk::Label::new(Some("Not linked"));
+            let page = build(&chip);
+            let window = gtk::Window::builder()
+                .title("Account page smoke")
+                .default_width(1100)
+                .default_height(700)
+                .build();
+            window.set_child(Some(&page.root));
+            window.present();
+            let ctx = gtk::glib::MainContext::default();
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(750) {
+                while ctx.iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(window.is_visible());
         }
 
         #[test]
