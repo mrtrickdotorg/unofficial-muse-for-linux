@@ -3060,8 +3060,7 @@ mod native {
                             .unwrap_or_default();
                         let row = gtk::ListBoxRow::new();
                         row.set_widget_name(&format!("thread:{}", thread.session_id));
-                        let row_label =
-                            label(&format!("{}{archived}{updated}", thread.title));
+                        let row_label = label(&format!("{}{archived}{updated}", thread.title));
                         row_label.add_css_class("panel-item-label");
                         row.set_child(Some(&row_label));
                         if state.scope.as_deref() == Some(thread.session_id.as_str()) {
@@ -3077,9 +3076,8 @@ mod native {
                 {
                     let row = gtk::ListBoxRow::new();
                     row.set_widget_name(&format!("thread:{scope}"));
-                    let row_label = label(
-                        "Selected conversation (not in current service thread list)",
-                    );
+                    let row_label =
+                        label("Selected conversation (not in current service thread list)");
                     row_label.add_css_class("panel-item-label");
                     row.set_child(Some(&row_label));
                     selected_row = Some(row.clone());

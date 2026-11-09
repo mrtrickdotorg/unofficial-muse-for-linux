@@ -270,18 +270,10 @@ fn build_ui(app: &gtk::Application) {
     let rail = gtk::Box::new(gtk::Orientation::Vertical, 4);
     rail.add_css_class("icon-rail");
     rail.set_size_request(56, -1);
-    let chats_nav = nav_button(
-        "chat-symbolic",
-        "Chat",
-        "Main chat and your side chats",
-    );
+    let chats_nav = nav_button("chat-symbolic", "Chat", "Main chat and your side chats");
     chats_nav.add_css_class("active");
     rail.append(&chats_nav);
-    let search_button = nav_button(
-        "system-search-symbolic",
-        "Search",
-        "Search your chats",
-    );
+    let search_button = nav_button("system-search-symbolic", "Search", "Search your chats");
     rail.append(&search_button);
     let library_nav = nav_button(
         "folder-documents-symbolic",
@@ -358,17 +350,13 @@ fn build_ui(app: &gtk::Application) {
             "What you and your Muse are working toward.",
         ),
         ("create", "Create", "Start something new with your Muse."),
-        (
-            "feed",
-            "Feed",
-            "Briefings and updates from your Muse.",
-        ),
+        ("feed", "Feed", "Briefings and updates from your Muse."),
         (
             "host",
             "Local host",
             "Consent, folder grants and local approvals for this machine.",
         ),
-] {
+    ] {
         panel_stack.add_named(&panel_placeholder(title, copy), Some(name));
     }
     panel.append(&panel_stack);
@@ -1009,7 +997,6 @@ fn build_ui(app: &gtk::Application) {
             );
         }
     });
-
 
     // The rail is the muse.ai menu and nothing else: Chat, Search,
     // Library, Ideas, Goals, Create and Feed, then New, Download and
