@@ -211,6 +211,51 @@ print(json.dumps({'ok': True, 'data': {'total_count': 76, 'has_more': True, 'art
 }
 
 #[test]
+fn permissions_parses_the_projected_active_grants() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'permissions'
+assert request['config_dir'].endswith('/config')
+print(json.dumps({'ok': True, 'data': {'grants': [
+  {'permission_id': 'p-1', 'kind': 'egress', 'lifetime': 'always', 'mode': 'allow',
+   'policy_subject': 'example.com', 'expires_at_ms': 1799999999000,
+   'revocable': True, 'title': 'example.com'},
+  {'permission_id': 'p-2', 'kind': 'connector', 'lifetime': None, 'mode': None,
+   'policy_subject': None, 'expires_at_ms': None, 'revocable': False, 'title': ''}]}}))
+"#,
+    );
+    let list = f.client().permissions().unwrap();
+    assert_eq!(list.grants.len(), 2);
+    let grant = &list.grants[0];
+    assert_eq!(grant.permission_id, "p-1");
+    assert_eq!(grant.policy_subject.as_deref(), Some("example.com"));
+    assert_eq!(grant.expires_at_ms, Some(1_799_999_999_000));
+    assert!(grant.revocable);
+    assert!(!list.grants[1].revocable);
+}
+
+#[test]
+fn revoke_sends_one_named_grant_and_reports_acceptance_only() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'revoke' and request['permission_id'] == 'p-1'
+print(json.dumps({'ok': True, 'data': {'permission_id': 'p-1', 'accepted': True,
+                                          'revoked': True}}))
+"#,
+    );
+    let answer = f.client().revoke("p-1").unwrap();
+    assert!(answer.accepted);
+    assert_eq!(answer.revoked, Some(true));
+    // A malformed id is refused before a child is ever spawned.
+    assert!(f.client().revoke("").is_err());
+    assert!(f.client().revoke("x".repeat(257).as_str()).is_err());
+}
+
+#[test]
 fn an_unidentified_library_row_is_a_protocol_error_not_an_empty_list() {
     let f = Fixture::new(
         r#"

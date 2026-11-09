@@ -240,6 +240,47 @@ pub struct DecisionAnswer {
     #[serde(default)]
     pub decision: Option<String>,
 }
+/// One grant the service says is still in force.
+///
+/// The fields are the service's own words, projected by the bridge: the id a
+/// revocation must name, what the grant covers, when it ends, and whether the
+/// service itself marks it revocable. A window shows these; it does not
+/// reinterpret them into categories of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveGrant {
+    pub permission_id: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub lifetime: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub policy_subject: Option<String>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    pub revocable: bool,
+    #[serde(default)]
+    pub title: String,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveGrants {
+    #[serde(default)]
+    pub grants: Vec<ActiveGrant>,
+}
+/// What the service said about a revocation it took.
+///
+/// `accepted` means the service accepted the request; it does not mean the
+/// grant is gone. Only a fresh read of the active list proves that, so
+/// callers re-read rather than trusting this answer, and `revoked` is the
+/// service's own word when it supplied one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevokeAnswer {
+    pub permission_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub revoked: Option<bool>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -469,6 +510,25 @@ impl AccountClient {
                 "approval_id": approval_id,
                 "decision": decision.as_str(),
             }),
+            false,
+        )
+    }
+    /// List the grants still in force. Read-only: listing never revokes.
+    pub fn permissions(&self) -> Result<ActiveGrants, AccountError> {
+        self.request(serde_json::json!({"op": "permissions"}), false)
+    }
+    /// Revoke exactly one grant, once.
+    ///
+    /// The id must be one the active listing published, and the bridge makes
+    /// a single request, so one press maps to one write. Whether the grant is
+    /// actually gone afterwards is proven by re-reading the list, never by
+    /// this answer alone.
+    pub fn revoke(&self, permission_id: &str) -> Result<RevokeAnswer, AccountError> {
+        if permission_id.is_empty() || permission_id.len() > 256 || permission_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "revoke", "permission_id": permission_id}),
             false,
         )
     }

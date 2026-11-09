@@ -1081,6 +1081,103 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(gateway._read_frame().stream_id, 7)
 
 
+class PermissionTests(unittest.TestCase):
+    def test_active_grants_are_projected_in_the_service_vocabulary_only(self):
+        bridge = load_bridge()
+        payload = {
+            "items": [{
+                "permission_id": "p-1", "kind": "egress", "lifetime": "always",
+                "mode": "allow", "policy_subject": "example.com",
+                "expires_at_ms": 1799999999000, "revocable": True,
+                "access_token": "SECRET",
+                "display": {"summary_title": "example.com", "raw": "SECRET"},
+            }, {
+                "permission_id": "p-2", "kind": "connector", "revocable": False,
+            }],
+            "cursor": "SECRET",
+        }
+        self.assertEqual(bridge.permission_rows(payload), {"grants": [{
+            "permission_id": "p-1", "kind": "egress", "lifetime": "always",
+            "mode": "allow", "policy_subject": "example.com",
+            "expires_at_ms": 1799999999000, "revocable": True,
+            "title": "example.com",
+        }, {
+            "permission_id": "p-2", "kind": "connector", "lifetime": None,
+            "mode": None, "policy_subject": None, "expires_at_ms": None,
+            "revocable": False, "title": "",
+        }]})
+        self.assertNotIn("SECRET", str(bridge.permission_rows(payload)))
+
+    def test_a_grant_without_an_id_fails_closed(self):
+        bridge = load_bridge()
+        for payload in ({}, {"items": [{"kind": "egress"}]}, {"items": "nope"},
+                        {"items": [{"permission_id": "  "}]}):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.permission_rows(payload)
+            self.assertEqual(caught.exception.code, "protocol_error")
+
+    def test_the_permissions_route_asks_the_sentinel_service_and_closes_it(self):
+        bridge = load_bridge()
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["method"] = method
+                seen["timeout"] = kwargs.get("timeout")
+                return {"items": []}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch({"op": "permissions"})
+        self.assertEqual(result, {"grants": []})
+        self.assertEqual(seen["method"], "egress.permissions.active")
+        self.assertEqual(seen["timeout"], 20)
+        self.assertTrue(seen["closed"])
+
+    def test_a_revocation_asks_the_sentinel_route_once_and_claims_acceptance_only(self):
+        bridge = load_bridge()
+        seen = {"calls": 0}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["calls"] += 1
+                seen["method"] = method
+                seen.update(kwargs)
+                return {"revoked": True, "access_token": "SECRET"}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch(
+                {"op": "revoke", "permission_id": "p-1"})
+        self.assertEqual(seen["calls"], 1)
+        self.assertEqual(seen["method"], "egress.permissions.revoke")
+        self.assertEqual(seen["body"], {"permission_id": "p-1"})
+        self.assertTrue(seen["closed"])
+        # Acceptance is not disappearance: only the service's own word travels,
+        # and proving the grant is gone is a fresh read's job, not this answer's.
+        self.assertEqual(result, {"permission_id": "p-1", "accepted": True,
+                                  "revoked": True})
+        self.assertNotIn("SECRET", str(result))
+
+    def test_a_revocation_names_only_an_id_the_listing_published(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "revoke", "config_dir": "/tmp",
+                                 "permission_id": "p-1"})
+        for bad in ("", None, 1, "x" * 257, "a\x00b"):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.validate_request({"op": "revoke", "config_dir": "/tmp",
+                                         "permission_id": bad})
+            self.assertEqual(caught.exception.code, "invalid_request")
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "revoke", "config_dir": "/tmp"})
+
+
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
         bridge = load_bridge()
