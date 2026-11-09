@@ -338,20 +338,56 @@ time.sleep(10)
 
 #[test]
 fn saturated_event_queue_preserves_terminal_closure() {
+    // Saturation must be observed without reading the session: try_recv
+    // drains the bounded queue, so a consumer that starts reading before the
+    // worker hits the cap can keep pace and avert the very saturation being
+    // tested (the old fixed 650 ms sleep guessed when that had happened and
+    // raced slow scheduling). Instead the helper floods without bound and
+    // the test waits for the helper's death, which only happens when the
+    // worker exits and its Guard reaps the process group — and with nobody
+    // draining, a full queue is the only exit the flood can reach. The
+    // deadline is a failure bound, not a timing assumption.
     let fixture = Fixture::new(
         r#"
-import sys,time,json
-sys.stdin.readline()
+import json,sys,time,os,pathlib
+start=json.loads(sys.stdin.readline())
+pathlib.Path(start['config_dir'],'pid').write_text(str(os.getpid()))
 for state in ['connecting','registered']:
  print(json.dumps({'type':'state','state':state}),flush=True)
-for i in range(64):
+for i in range(100000):
  print(json.dumps({'type':'invoke','id':str(i),'command':'safe.read','params':{},'timeout_ms':1}),flush=True)
- time.sleep(.01)
-time.sleep(10)
+ time.sleep(.02)
 "#,
     );
     let session = HostSession::spawn(fixture.config()).unwrap();
-    std::thread::sleep(Duration::from_millis(650));
+    let pid_path = fixture.0.join("pid");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let pid: i32 = loop {
+        if let Ok(text) = fs::read_to_string(&pid_path)
+            && let Ok(pid) = text.trim().parse()
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "helper never wrote its pid");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let live = || {
+        fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            !stat
+                .split(')')
+                .nth(1)
+                .unwrap()
+                .trim_start()
+                .starts_with('Z')
+        })
+    };
+    while live() {
+        assert!(
+            Instant::now() < deadline,
+            "helper survived: the event queue never saturated"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(closed(&session), "queue_full");
     assert!(matches!(
         session.try_recv(),
