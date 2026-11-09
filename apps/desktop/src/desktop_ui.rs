@@ -241,9 +241,9 @@ mod native {
     pub fn build() -> DesktopPage {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
-        root.append(&label(
-            "Desktop · portal screenshots and URL opening, always explicit",
-        ));
+        let heading = label("Desktop · portal screenshots and URL opening, always explicit");
+        heading.add_css_class("page-heading");
+        root.append(&heading);
 
         let settings = gtk::Expander::new(Some("Session bus (XDG portal, explicit path)"));
         settings.add_css_class("settings-disclosure");

@@ -54,92 +54,101 @@ fn bubble_alignment(role: ChatRole) -> BubbleAlignment {
 }
 
 const DARK_THEME_CSS: &str = r#"
-window, .app-shell { background-color: #111318; color: #e9ebf0; }
-window.dark-window { background-color: #111318; }
+/* Visual language follows the Mac/Windows Muse client: near-black neutral
+   surfaces, hairline borders instead of boxes, one quiet accent, generous
+   padding, and assistant replies as plain text rather than bubbles. */
+window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", system-ui, sans-serif; }
+window.dark-window { background-color: #0d0d10; }
 scrolledwindow viewport { background-color: transparent; }
-.navigation-rail { background-color: #151820; border-right: 1px solid #292d37; padding: 16px 12px; min-width: 184px; }
-.brand-row { padding: 0 6px 14px; }
-.brand-mark { background-color: #2867c7; color: #ffffff; border-radius: 12px; font-weight: 700; min-width: 34px; min-height: 34px; }
-.brand-label { color: #f3f5f8; font-size: 15px; font-weight: 700; }
-.nav-section-label { color: #7f8796; font-size: 11px; font-weight: 700; padding: 12px 10px 5px; }
-.nav-item { min-height: 38px; padding: 0 10px; border-radius: 10px; background: transparent; color: #b5bac6; border-color: transparent; }
-.nav-item:hover { background-color: #242833; color: #ffffff; }
-.nav-item.active { background-color: #26344a; color: #8fbdff; }
-.nav-item:focus { outline-width: 2px; outline-style: solid; outline-color: #3f7ad1; outline-offset: 1px; }
+.navigation-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 16px 12px; min-width: 188px; }
+.brand-row { padding: 2px 6px 16px; }
+.brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 10px; font-weight: 700; min-width: 34px; min-height: 34px; }
+.brand-label { color: #f4f4f6; font-size: 15px; font-weight: 700; }
+.nav-section-label { color: #6f6f7a; font-size: 11px; font-weight: 700; padding: 14px 10px 5px; }
+.nav-item { min-height: 36px; padding: 0 10px; border-radius: 8px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
+.nav-item:hover { background-color: rgba(255, 255, 255, 0.05); color: #f4f4f6; }
+.nav-item.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
+.nav-item:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
 .nav-icon { min-width: 20px; }
 .nav-label { padding-left: 10px; }
-.rail-button { min-width: 44px; min-height: 44px; padding: 0; border-radius: 22px; background: transparent; color: #b5bac6; border-color: transparent; transition: background-color 120ms ease-in-out; }
-.rail-button:hover { background-color: #242833; color: #ffffff; }
-.rail-button.active { background-color: #26344a; color: #8fbdff; }
-.rail-button:focus { outline-width: 2px; outline-style: solid; outline-color: #3f7ad1; outline-offset: 1px; }
-.main-column { background-color: #111318; }
-.topbar { padding: 12px 20px; border-bottom: 1px solid #292d37; }
-.topbar-button { min-width: 36px; min-height: 36px; padding: 0; border-radius: 18px; }
-.page-title { background-color: #1d2028; border-radius: 20px; padding: 8px 14px; font-weight: 600; }
-.status-chip { color: #aeb5c2; background-color: #1b1e25; border: 1px solid #2b303b; border-radius: 14px; padding: 6px 10px; }
-.page-content { padding: 18px 24px; }
+.rail-button { min-width: 44px; min-height: 44px; padding: 0; border-radius: 22px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
+.rail-button:hover { background-color: rgba(255, 255, 255, 0.05); color: #ffffff; }
+.rail-button.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
+.rail-button:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
+.main-column { background-color: #0d0d10; }
+.topbar { padding: 10px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+.topbar-button { min-width: 34px; min-height: 34px; padding: 0; border-radius: 17px; background: transparent; border-color: transparent; box-shadow: none; }
+.topbar-button:hover { background-color: rgba(255, 255, 255, 0.06); }
+.page-title { background-color: transparent; border-radius: 0; padding: 4px 2px; font-size: 15px; font-weight: 600; color: #f4f4f6; }
+.status-chip { color: #a7a7b1; background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 5px 11px; font-size: 12px; }
+.page-content { padding: 22px 28px; }
+.page-heading { font-size: 21px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
+.page-subtitle { color: #a7a7b1; }
 .chat-column { }
 .chat-scroll { background: transparent; }
 .assistant-identity { padding: 0 0 6px; }
-.assistant-avatar { background-color: #303947; color: #dbe9ff; border-radius: 20px; min-width: 40px; min-height: 40px; font-weight: 700; }
-.message-avatar { background-color: #303947; color: #dbe9ff; border-radius: 16px; min-width: 32px; min-height: 32px; font-weight: 700; margin-top: 2px; }
+.assistant-avatar { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 20px; min-width: 40px; min-height: 40px; font-weight: 700; }
+.message-avatar { background-color: #26262d; color: #d7d7de; border-radius: 16px; min-width: 32px; min-height: 32px; font-weight: 700; margin-top: 2px; }
 .assistant-name { font-weight: 600; }
-.message-meta { color: #8b91a0; font-size: smaller; padding: 2px 6px; }
-.day-divider { color: #8b91a0; font-size: smaller; padding: 8px 0 2px; }
-.section-heading { font-weight: 700; color: #dfe3ea; }
-.settings-disclosure { background-color: #191c23; border: 1px solid #292d37; border-radius: 14px; padding: 10px 14px; }
-.welcome-card { background-color: #1b2637; border: 1px solid #31445f; border-radius: 16px; padding: 20px; }
-.welcome-title { color: #f3f5f8; font-size: 22px; font-weight: 700; }
-.welcome-copy { color: #c7d1df; }
+.message-meta { color: #6f6f7a; font-size: smaller; padding: 2px 6px; }
+.day-divider { color: #6f6f7a; font-size: smaller; padding: 8px 0 2px; }
+.section-heading { font-weight: 600; font-size: 14px; color: #f4f4f6; padding-top: 8px; }
+.title-2 { font-weight: 600; font-size: 14px; color: #f4f4f6; }
+.settings-disclosure { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 10px 14px; }
+.welcome-card { background-image: linear-gradient(180deg, #1e1e28, #17171d); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 20px; }
+.welcome-title { color: #f4f4f6; font-size: 22px; font-weight: 700; }
+.welcome-copy { color: #c9c9d1; }
 .settings-content { padding: 10px 2px 4px; }
 .toolbar { }
-.chat-bubble { padding: 12px 16px; border-radius: 16px; font-size: 14px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35); }
-.chat-bubble.user { background-color: #173d67; color: #edf5ff; }
-.chat-bubble.assistant { background-color: #222630; color: #edf0f5; }
-.chat-bubble.notice { background-color: #352d1d; color: #f4d99b; }
-.chat-status { color: #aeb5c2; padding: 2px 6px; }
-.composer { background-color: #1c2028; border: 1px solid #303541; border-radius: 26px; padding: 8px 8px 8px 14px; }
-.composer:focus-within { border-color: #3f7ad1; }
+.chat-bubble { padding: 11px 15px; border-radius: 16px; font-size: 14px; }
+.chat-bubble.user { background-color: #26262d; color: #f4f4f6; }
+.chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
+.chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
+.chat-status { color: #a7a7b1; padding: 2px 6px; }
+.composer { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 24px; padding: 7px 7px 7px 14px; }
+.composer:focus-within { border-color: rgba(255, 255, 255, 0.28); }
 .composer entry { background: transparent; border: 0; box-shadow: none; }
-.composer button.suggested-action { border-radius: 20px; padding: 8px 18px; font-weight: 600; }
-entry, searchentry, textview { color: #edf0f5; background-color: #191c23; border: 1px solid #303541; border-radius: 12px; }
-button { color: #e9ebf0; background-color: #242832; border: 1px solid #303541; border-radius: 12px; padding: 8px 12px; }
-button:hover { background-color: #303541; }
-button.suggested-action { color: #ffffff; background-color: #2867c7; border-color: #2867c7; }
-button.suggested-action:hover { background-color: #3478dc; }
-button.destructive-action { color: #ffb4ab; background-color: #3a2226; border-color: #5c2f35; }
-button.destructive-action:hover { background-color: #4a2b30; }
-.dim-label { color: #aeb5c2; }
-.build-identity { color: #7f8796; font-size: 11px; padding: 10px 6px 2px; }
-notebook header { background-color: #111318; border-bottom: 1px solid #292d37; }
-notebook tab { color: #aeb5c2; background-color: transparent; border-radius: 10px; padding: 8px 12px; }
-notebook tab:checked { color: #edf0f5; background-color: #222630; }
-notebook stack { background-color: #111318; }
-combobox box, combobox cellview { color: #edf0f5; }
-popover contents { background-color: #1b1e25; }
-popover modelbutton { color: #e9ebf0; }
-popover modelbutton:hover { background-color: #242832; }
-list row { color: #e9ebf0; }
-list row:selected { background-color: #26344a; }
-.card { color: #c6cad3; background-color: #1b1e25; border: 1px solid #292d37; border-radius: 12px; padding: 12px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); }
+.composer button.suggested-action { border-radius: 19px; padding: 7px 16px; font-weight: 600; }
+entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px; padding: 7px 11px; }
+entry:focus, searchentry:focus, textview:focus { border-color: rgba(255, 255, 255, 0.28); }
+button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px; padding: 7px 13px; box-shadow: none; }
+button:hover { background-color: #26262e; }
+button.suggested-action { color: #101014; background-color: #f4f4f6; border-color: transparent; }
+button.suggested-action:hover { background-color: #ffffff; }
+button.destructive-action { color: #ffb4ab; background-color: #332024; border-color: rgba(255, 180, 171, 0.25); }
+button.destructive-action:hover { background-color: #42262a; }
+.dim-label { color: #a7a7b1; }
+.build-identity { color: #6f6f7a; font-size: 11px; padding: 10px 6px 2px; }
+notebook header { background-color: #0d0d10; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+notebook tab { color: #a7a7b1; background-color: transparent; border-radius: 8px; padding: 7px 12px; }
+notebook tab:checked { color: #f4f4f6; background-color: rgba(255, 255, 255, 0.08); }
+notebook stack { background-color: #0d0d10; }
+combobox box, combobox cellview { color: #f4f4f6; }
+popover contents { background-color: #1a1a20; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; }
+popover modelbutton { color: #e9e9ee; }
+popover modelbutton:hover { background-color: rgba(255, 255, 255, 0.06); }
+list { background-color: transparent; }
+list row { color: #e9e9ee; padding: 6px 8px; border-radius: 8px; }
+list row:selected { background-color: rgba(255, 255, 255, 0.09); }
+.card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 14px; }
 .approval-card { border-left: 3px solid #c98a2b; }
 .approval-icon { color: #d8b25c; font-weight: 700; }
-.approval-heading { font-weight: 700; color: #e9ebf0; }
-.approval-details { background-color: #14161c; border: 1px solid #2b303b; border-radius: 10px; padding: 8px; }
+.approval-heading { font-weight: 700; color: #f4f4f6; }
+.approval-details { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 10px; padding: 8px; }
 .approval-details textview { background: transparent; border: 0; }
 .approval-scroll { }
 .approval-countdown { color: #d8b25c; }
 .approval-actions { }
 .file-row { border-radius: 10px; }
 notebook { background-color: transparent; }
-notebook > header { background-color: transparent; border-bottom: 1px solid #292d37; padding: 4px; }
-notebook > header > tabs > tab { background-color: transparent; color: #aeb5c2; border-radius: 12px; padding: 8px 14px; border: 1px solid transparent; }
-notebook > header > tabs > tab:hover { background-color: #1d2129; color: #e9ebf0; }
-notebook > header > tabs > tab:checked { background-color: #26344a; color: #8fbdff; border-color: #31445f; }
+notebook > header { background-color: transparent; border-bottom: 1px solid rgba(255, 255, 255, 0.07); padding: 4px; }
+notebook > header > tabs > tab { background-color: transparent; color: #a7a7b1; border-radius: 10px; padding: 7px 13px; border: 1px solid transparent; }
+notebook > header > tabs > tab:hover { background-color: rgba(255, 255, 255, 0.05); color: #f4f4f6; }
+notebook > header > tabs > tab:checked { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; border-color: transparent; }
 notebook > stack { background-color: transparent; padding-top: 12px; }
-scrollbar slider { background-color: #333945; border-radius: 8px; }
-tooltip { background-color: #242832; color: #e9ebf0; border: 1px solid #3a4050; border-radius: 8px; padding: 6px 10px; }
-checkbutton { color: #d7dae1; padding: 2px; }
+scrollbar slider { background-color: rgba(255, 255, 255, 0.16); border-radius: 8px; min-width: 8px; min-height: 8px; }
+tooltip { background-color: #26262e; color: #f4f4f6; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 6px 10px; }
+checkbutton { color: #d7d7de; padding: 2px; }
 "#;
 
 fn install_dark_theme() {

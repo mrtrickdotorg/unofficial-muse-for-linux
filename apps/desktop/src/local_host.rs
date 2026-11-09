@@ -697,7 +697,9 @@ mod native {
     pub(crate) fn build(context: AccountContext, device: SharedDevice) -> HostPage {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
-        root.append(&label("Local host · your existing Muse agent on Linux"));
+        let heading = label("Local host · your existing Muse agent on Linux");
+        heading.add_css_class("page-heading");
+        root.append(&heading);
         root.append(&label("Separate from account connection and the read-only Local files browser. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. In a read-only folder every write is refused outright; in a read-write folder, every write requires your local Allow once approval of the exact path and, where text changes, the complete resulting content: create a new file, edit one exact occurrence, rename, or move a file to the Trash. Nothing is overwritten, permanently deleted, or run as a shell command."));
         root.append(&label(IDENTITY_COPY));
         let consent = gtk::CheckButton::with_label(

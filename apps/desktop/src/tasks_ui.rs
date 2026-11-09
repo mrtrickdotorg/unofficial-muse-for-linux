@@ -350,10 +350,14 @@ mod native {
     pub fn build_with_dir(dir: PathBuf, preset_notice: Option<&str>) -> TasksPage {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
-        root.append(&label("Reminders · durable local tasks"));
-        root.append(&label(
+        let heading = label("Reminders · durable local tasks");
+        heading.add_css_class("page-heading");
+        root.append(&heading);
+        let intro = label(
             "One-shot local reminders. No command execution, nothing leaves this machine. This page re-reads the store every 15 seconds, and with the reminder service installed, due items also arrive as desktop notifications.",
-        ));
+        );
+        intro.add_css_class("page-subtitle");
+        root.append(&intro);
 
         let create_heading = label("New reminder");
         create_heading.add_css_class("section-heading");

@@ -821,9 +821,9 @@ mod native {
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
-        root.append(&label(
-            "Calendar · generic CalDAV read and approval-gated create",
-        ));
+        let heading = label("Calendar · generic CalDAV read and approval-gated create");
+        heading.add_css_class("page-heading");
+        root.append(&heading);
 
         let settings = gtk::Expander::new(Some("CalDAV connection (HTTPS, no OAuth)"));
         settings.add_css_class("settings-disclosure");
