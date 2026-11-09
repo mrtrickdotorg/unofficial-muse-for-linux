@@ -23,7 +23,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task"})
 
 
 ERROR_CODES = frozenset({"auth_required", "account_changed", "vm_unavailable", "timeout", "invalid_request",
@@ -304,6 +304,7 @@ def validate_request(request):
                "decide": {"approval_id", "decision"},
                "permissions": set(),
                "revoke": {"permission_id"},
+               "delete_task": {"job_id"},
                "tasks": set(),
                "artifacts": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
@@ -359,6 +360,13 @@ def validate_request(request):
         permission_id = request.get("permission_id")
         if (not isinstance(permission_id, str) or not 1 <= len(permission_id) <= 256
                 or "\x00" in permission_id):
+            raise BridgeFailure("invalid_request")
+    if op == "delete_task":
+        # The id is the service's own, taken from the schedule listing it
+        # published; anything else would be deleting a guess.
+        job_id = request.get("job_id")
+        if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
+                or "\x00" in job_id):
             raise BridgeFailure("invalid_request")
     if op == "send":
         message = request.get("message")
@@ -955,6 +963,24 @@ def revoke_answer(permission_id, answer):
     }
 
 
+def delete_answer(job_id, answer):
+    """What came back from a schedule deletion, without overstating it.
+
+    Acceptance is not absence: whether the schedule is actually gone is a
+    fact only a fresh read of the listing holds, so the caller re-reads and
+    reports that. The service's own `deleted` word travels when it gives
+    one; nothing here invents it.
+    """
+    if not isinstance(answer, dict):
+        raise BridgeFailure("protocol_error")
+    deleted = answer.get("deleted")
+    return {
+        "job_id": job_id,
+        "accepted": True,
+        "deleted": deleted if isinstance(deleted, bool) else None,
+    }
+
+
 def updated_at_text(session):
     millis = session.get("updated_at_ms")
     if isinstance(millis, (int, float)) and not isinstance(millis, bool):
@@ -1071,6 +1097,17 @@ class Adapter:
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
             }
+        if request["op"] == "delete_task":
+            # A write on the shared gateway: one deletion, never retried here.
+            # The id is one the schedule listing published, and whether the
+            # schedule is gone afterwards is proven by re-reading that
+            # listing, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "tasks.delete",
+                    path_params={"job_id": request["job_id"]},
+                )
+            return delete_answer(request["job_id"], answer)
         if request["op"] == "artifacts":
             # One read of the Library listing. Listing is never consent: nothing
             # here opens, shares or deletes, and the projection keeps the cursor
