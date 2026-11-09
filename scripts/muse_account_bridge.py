@@ -302,6 +302,8 @@ def validate_request(request):
                "cancel": set(),
                "approvals": set(),
                "decide": {"approval_id", "decision"},
+               "permissions": set(),
+               "revoke": {"permission_id"},
                "tasks": set(),
                "artifacts": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
@@ -350,6 +352,13 @@ def validate_request(request):
         # Refuse an outcome the service never published rather than guessing a
         # mapping: a decision is a write, and a wrong word is not recoverable.
         if request.get("decision") not in DECISIONS:
+            raise BridgeFailure("invalid_request")
+    if op == "revoke":
+        # The id is the service's own, taken from the active listing it
+        # published; anything else would be revoking a guess.
+        permission_id = request.get("permission_id")
+        if (not isinstance(permission_id, str) or not 1 <= len(permission_id) <= 256
+                or "\x00" in permission_id):
             raise BridgeFailure("invalid_request")
     if op == "send":
         message = request.get("message")
@@ -889,6 +898,63 @@ def decision_answer(approval_id, decision, answer):
     }
 
 
+def permission_rows(payload):
+    """Project the grants the service says are still in force.
+
+    The active listing is the only evidence of what an earlier "always" left
+    behind, so it is projected as-is: the service's id (the only thing a
+    revocation can name), its own kind/lifetime words, the subject the grant
+    covers, its expiry, and whether the service itself marks it revocable.
+    A grant with no id can be neither revoked nor safely acted on, so it fails
+    closed like an approval with no id, rather than being silently dropped
+    from a list whose whole point is completeness.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    items = payload.get("items")
+    if not isinstance(items, list) or len(items) > 200:
+        raise BridgeFailure("protocol_error")
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise BridgeFailure("protocol_error")
+        permission_id = item.get("permission_id")
+        if not isinstance(permission_id, str) or not permission_id.strip():
+            raise BridgeFailure("protocol_error")
+        display = item.get("display") if isinstance(item.get("display"), dict) else {}
+        expires = item.get("expires_at_ms")
+        rows.append({
+            "permission_id": permission_id,
+            "kind": optional_text(item.get("kind")),
+            "lifetime": optional_text(item.get("lifetime")),
+            "mode": optional_text(item.get("mode")),
+            "policy_subject": optional_text(item.get("policy_subject")),
+            "expires_at_ms": expires if isinstance(expires, int)
+            and not isinstance(expires, bool) else None,
+            "revocable": item.get("revocable") is True,
+            "title": optional_text(display.get("summary_title")) or "",
+        })
+    return {"grants": rows}
+
+
+def revoke_answer(permission_id, answer):
+    """What came back from a revocation, without overstating it.
+
+    Acceptance is not disappearance: whether the grant is actually gone is a
+    fact only a fresh read of the active listing holds, so the caller re-reads
+    and reports that. The service's own `revoked` word travels when it gives
+    one; nothing here invents it.
+    """
+    if not isinstance(answer, dict):
+        raise BridgeFailure("protocol_error")
+    revoked = answer.get("revoked")
+    return {
+        "permission_id": permission_id,
+        "accepted": True,
+        "revoked": revoked if isinstance(revoked, bool) else None,
+    }
+
+
 def updated_at_text(session):
     millis = session.get("updated_at_ms")
     if isinstance(millis, (int, float)) and not isinstance(millis, bool):
@@ -1036,6 +1102,31 @@ class Adapter:
             finally:
                 gateway.close()
             return decision_answer(request["approval_id"], request["decision"], answer)
+        if request["op"] == "permissions":
+            # Read-only, on the sentinel service like the approvals it came
+            # from: listing a grant never revokes it, and the projection keeps
+            # the raw listing (which runs to hundreds of KB) inside the bridge.
+            gateway = sentinel_gateway(self.config)
+            try:
+                payload = gateway.call_json("egress.permissions.active", timeout=20)
+            finally:
+                gateway.close()
+            return permission_rows(payload)
+        if request["op"] == "revoke":
+            # A write on the sentinel service: one revocation, one connection,
+            # never retried here. The id is one the active listing published,
+            # and whether the grant is gone afterwards is proven by re-reading
+            # that listing, not by this answer.
+            gateway = sentinel_gateway(self.config)
+            try:
+                answer = gateway.call_json(
+                    "egress.permissions.revoke",
+                    body={"permission_id": request["permission_id"]},
+                    timeout=20,
+                )
+            finally:
+                gateway.close()
+            return revoke_answer(request["permission_id"], answer)
         if request["op"] == "activity":
             return activity_rows(self.client, self.config, request["timeout"])
         if request["op"] == "cancel":

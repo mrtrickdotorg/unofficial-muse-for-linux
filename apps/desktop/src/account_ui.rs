@@ -11,6 +11,8 @@ enum Operation {
     Cancel,
     Approvals,
     Decide,
+    Permissions,
+    Revoke,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +74,15 @@ struct Controller<A, H, T> {
     /// The live status text that already caused a read of the pending list, so
     /// the same status cannot trigger a second one.
     approvals_sought: String,
+    /// Grants the service last reported as still in force. Empty means the
+    /// last read found none; it never means nothing was ever granted.
+    grants: Vec<muse_account::ActiveGrant>,
+    /// What the last grants read or revocation reported, in the service's
+    /// own terms.
+    grant_notice: String,
+    /// The grant whose revocation is in flight, so its row stops accepting a
+    /// second press while the first is unanswered.
+    revoking: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +104,29 @@ fn account_surface_visibility(connected: bool) -> (bool, bool) {
 /// The live event that carries reply text as it is produced. Fragments are raw
 /// chunks ("anti", "-Sullan", " government"), so they are joined verbatim.
 const DELTA_EVENT: &str = "delta.text_append";
+
+/// Format an epoch-milliseconds expiry as a UTC date and time.
+///
+/// The service reports grant expiry only as epoch milliseconds; showing the
+/// raw number would make a person do the conversion the app exists to do.
+/// Civil-from-days is the standard days-to-date algorithm; the tests pin it
+/// against known timestamps.
+fn format_expiry_utc(expires_at_ms: i64) -> String {
+    let days = expires_at_ms.div_euclid(86_400_000);
+    let day_ms = expires_at_ms.rem_euclid(86_400_000);
+    let (hour, minute) = (day_ms / 3_600_000, (day_ms % 3_600_000) / 60_000);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
 
 /// True when the newest service event closes the turn. The status line describes
 /// work in progress, so a completed assistant message ends it: leaving "Is
@@ -250,6 +284,9 @@ impl<A, H, T> Default for Controller<A, H, T> {
             approval_notice: String::new(),
             deciding: None,
             approvals_sought: String::new(),
+            grants: Vec::new(),
+            grant_notice: String::new(),
+            revoking: None,
         }
     }
 }
@@ -550,6 +587,78 @@ impl<A, H, T> Controller<A, H, T> {
             Err(error) => {
                 self.approval_notice = format!(
                     "Decision failed: {error}. The request may still be waiting; read the list again instead of pressing twice."
+                );
+                false
+            }
+        }
+    }
+
+    /// Take the busy slot for a read of the grants still in force. Listing is
+    /// not revoking, but it shares the exclusive slot so a revocation cannot
+    /// race the list it was read from.
+    fn begin_permissions(&mut self) -> Option<Ticket> {
+        self.account.as_ref()?;
+        self.issue(Operation::Permissions)
+    }
+
+    /// Take the busy slot for one revocation, remembering which grant it
+    /// names so no second revocation can leave while the first is unanswered.
+    fn begin_revoke(&mut self, permission_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::Revoke)?;
+        self.revoking = Some(permission_id.to_owned());
+        Some(ticket)
+    }
+
+    fn finish_permissions(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::ActiveGrants, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        match result {
+            Ok(snapshot) => {
+                self.grants = snapshot.grants;
+                self.grant_notice = if self.grants.is_empty() {
+                    "The service reports no grants are in force.".into()
+                } else {
+                    String::new()
+                };
+            }
+            Err(error) => self.grant_notice = format!("Could not read grants: {error}"),
+        }
+        true
+    }
+
+    /// Record a revocation's answer. True only when the service took it; the
+    /// grant leaves the list on acceptance, and the re-read that follows is
+    /// what proves whether it is actually gone — if it is still in force, it
+    /// comes back in that read, in plain sight.
+    fn finish_revoke(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::RevokeAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.revoking = None;
+        match result {
+            Ok(answer) => {
+                self.grants
+                    .retain(|grant| grant.permission_id != answer.permission_id);
+                self.grant_notice = if answer.accepted {
+                    "The service accepted the revocation. Reading the list again to confirm the grant is gone.".into()
+                } else {
+                    "The service did not accept the revocation. The grant is still in force.".into()
+                };
+                answer.accepted
+            }
+            Err(error) => {
+                self.grant_notice = format!(
+                    "Revocation failed: {error}. The grant may still be in force; read the list again instead of pressing twice."
                 );
                 false
             }
@@ -878,6 +987,10 @@ mod native {
         approvals_box: gtk::Box,
         approval_notice: gtk::Label,
         approvals_refresh: gtk::Button,
+        /// Grant rows, one per grant the service says is still in force.
+        grants_box: gtk::Box,
+        grant_notice: gtk::Label,
+        grants_refresh: gtk::Button,
         /// Weak handle so a card built during render can call back into the page.
         self_weak: RefCell<std::rc::Weak<Ui>>,
         /// A watch is bounded: an absent status on an old row must not leave a
@@ -900,6 +1013,8 @@ mod native {
         Cancel(Result<muse_account::CancelAnswer, String>),
         Approvals(Result<muse_account::PendingApprovals, String>),
         Decide(Result<muse_account::DecisionAnswer, String>),
+        Permissions(Result<muse_account::ActiveGrants, String>),
+        Revoke(Result<muse_account::RevokeAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -1524,6 +1639,11 @@ mod native {
         ));
         toolbar.append(&older);
         toolbar.append(&approvals_refresh);
+        let grants_refresh = gtk::Button::with_label("Check allowed sites");
+        grants_refresh.set_tooltip_text(Some(
+            "Reads the grants the service says are still in force — what an earlier Allow always left behind. Reading never revokes anything; only a grant's own Revoke button does, one grant at a time.",
+        ));
+        toolbar.append(&grants_refresh);
         chat.append(&toolbar);
         let scope_label = label("No conversation selected until account connection.");
         chat.append(&scope_label);
@@ -1545,6 +1665,13 @@ mod native {
         approval_notice.add_css_class("chat-status");
         approval_notice.set_visible(false);
         chat.append(&approval_notice);
+        let grants_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        grants_box.set_visible(false);
+        chat.append(&grants_box);
+        let grant_notice = label("");
+        grant_notice.add_css_class("chat-status");
+        grant_notice.set_visible(false);
+        chat.append(&grant_notice);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
@@ -1635,6 +1762,9 @@ mod native {
             approvals_box,
             approval_notice,
             approvals_refresh,
+            grants_box,
+            grant_notice,
+            grants_refresh,
             self_weak: RefCell::new(std::rc::Weak::new()),
             watch_until: std::cell::Cell::new(None),
             live_turn: std::cell::Cell::new(true),
@@ -1743,6 +1873,11 @@ mod native {
             let u = Rc::clone(&ui);
             ui.approvals_refresh
                 .connect_clicked(move |_| u.check_approvals());
+        }
+        {
+            let u = Rc::clone(&ui);
+            ui.grants_refresh
+                .connect_clicked(move |_| u.check_permissions());
         }
         *ui.self_weak.borrow_mut() = Rc::downgrade(&ui);
         let weak = Rc::downgrade(&ui);
@@ -2112,6 +2247,45 @@ mod native {
             });
         }
 
+        /// Read the grants still in force. Explicit: the service is asked
+        /// when the reader presses, and the answer is the service's.
+        fn check_permissions(self: &Rc<Self>) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().grant_notice =
+                    "Not connected. Connect your Muse session before reading grants.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_permissions() else {
+                return;
+            };
+            self.launch(ticket, move || match client.permissions() {
+                Ok(snapshot) => Reply::Permissions(Ok(snapshot)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::Permissions(Err(error.to_string())),
+            });
+        }
+
+        /// Send exactly the revocation the reader pressed, once.
+        fn revoke(self: &Rc<Self>, permission_id: String) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().grant_notice =
+                    "Not connected. Connect your Muse session before revoking a grant.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_revoke(&permission_id) else {
+                return;
+            };
+            self.launch(ticket, move || match client.revoke(&permission_id) {
+                Ok(answer) => Reply::Revoke(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::Revoke(Err(error.to_string())),
+            });
+        }
+
         fn cancel_run(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
@@ -2283,6 +2457,12 @@ mod native {
                         Operation::Decide => {
                             Reply::Decide(Err("Decision worker stopped unexpectedly.".into()))
                         }
+                        Operation::Permissions => {
+                            Reply::Permissions(Err("Grants worker stopped unexpectedly.".into()))
+                        }
+                        Operation::Revoke => {
+                            Reply::Revoke(Err("Revocation worker stopped unexpectedly.".into()))
+                        }
                     },
                 };
                 ui.complete(&ticket, reply);
@@ -2301,6 +2481,7 @@ mod native {
             // link step: same consent, same bridge validation, one less click.
             let mut link_after_login = false;
             let mut reread_approvals = false;
+            let mut reread_grants = false;
             let mut approvals_after = false;
             let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
             let auth_expired = matches!(&reply, Reply::AuthExpired);
@@ -2410,6 +2591,18 @@ mod native {
                             reread_approvals = true;
                         }
                     }
+                    Reply::Permissions(result) => {
+                        // A list is a report: nothing here revokes anything.
+                        state.finish_permissions(ticket, result);
+                    }
+                    Reply::Revoke(result) => {
+                        // Acceptance is not disappearance: ask the service
+                        // what is still in force rather than trusting our own
+                        // copy after a write.
+                        if state.finish_revoke(ticket, result) {
+                            reread_grants = true;
+                        }
+                    }
                     Reply::Send(result) | Reply::SendConnectionError(result) => {
                         let confirmed = matches!(&result, SendOutcome::Confirmed);
                         state.finish_send(ticket, result);
@@ -2474,6 +2667,9 @@ mod native {
             }
             if approvals_after {
                 self.check_approvals();
+            }
+            if reread_grants {
+                self.check_permissions();
             }
         }
 
@@ -2543,6 +2739,8 @@ mod native {
                     Operation::Cancel => " \u{b7} stopping the run\u{2026}",
                     Operation::Approvals => " \u{b7} reading pending approvals\u{2026}",
                     Operation::Decide => " \u{b7} sending your decision\u{2026}",
+                    Operation::Permissions => " \u{b7} reading grants in force\u{2026}",
+                    Operation::Revoke => " \u{b7} sending your revocation\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -2690,6 +2888,73 @@ mod native {
                 add("Deny", muse_account::Decision::Deny, false);
                 card.append(&buttons);
                 self.approvals_box.append(&card);
+            }
+            self.grants_box.set_visible(!state.grants.is_empty());
+            self.grant_notice.set_text(&state.grant_notice);
+            self.grant_notice
+                .set_visible(!state.grant_notice.is_empty());
+            self.grants_refresh.set_sensitive(connected && idle);
+            super::super::clear_chat(&self.grants_box);
+            for grant in &state.grants {
+                let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                card.add_css_class("welcome-card");
+                let heading = label(if !grant.title.trim().is_empty() {
+                    grant.title.trim()
+                } else if let Some(subject) = grant
+                    .policy_subject
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    subject
+                } else {
+                    "A grant the service reports"
+                });
+                heading.add_css_class("assistant-name");
+                card.append(&heading);
+                // The service's own words for what this grant is and covers,
+                // verbatim: they are what a revocation would end.
+                let mut evidence = String::new();
+                for (name, value) in [
+                    ("Kind", grant.kind.as_deref()),
+                    ("Covers", grant.policy_subject.as_deref()),
+                    ("Lifetime", grant.lifetime.as_deref()),
+                    ("Mode", grant.mode.as_deref()),
+                ] {
+                    if let Some(value) = value.filter(|text| !text.trim().is_empty()) {
+                        evidence.push_str(&format!("{name}: {value}\n"));
+                    }
+                }
+                if let Some(expires) = grant.expires_at_ms {
+                    evidence.push_str(&format!("Expires: {}\n", format_expiry_utc(expires)));
+                }
+                if !evidence.is_empty() {
+                    let facts = label(evidence.trim_end());
+                    facts.add_css_class("dim-label");
+                    card.append(&facts);
+                }
+                if grant.revocable {
+                    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    buttons.add_css_class("toolbar");
+                    let button = gtk::Button::with_label("Revoke");
+                    // One press, one revocation: nothing is ever re-sent by a
+                    // timer, and every row stops accepting presses while one
+                    // revocation is in flight.
+                    button.set_sensitive(state.revoking.is_none());
+                    let weak = self.self_weak.borrow().clone();
+                    let id = grant.permission_id.clone();
+                    button.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.revoke(id.clone());
+                        }
+                    });
+                    buttons.append(&button);
+                    card.append(&buttons);
+                } else {
+                    let note = label("The service does not mark this grant revocable.");
+                    note.add_css_class("dim-label");
+                    card.append(&note);
+                }
+                self.grants_box.append(&card);
             }
             self.tasks_notice.set_text(&state.tasks_notice);
             self.send_notice.set_text(&state.send_notice);
@@ -3417,6 +3682,88 @@ mod tests {
         state.finish_approvals(&ticket, Ok(muse_account::PendingApprovals::default()));
         assert!(state.approvals.is_empty());
         assert!(state.approval_notice.contains("no approvals are waiting"));
+    }
+
+    fn grant(id: &str, revocable: bool) -> muse_account::ActiveGrant {
+        muse_account::ActiveGrant {
+            permission_id: id.into(),
+            kind: Some("egress".into()),
+            lifetime: Some("always".into()),
+            mode: Some("allow".into()),
+            policy_subject: Some("example.test".into()),
+            expires_at_ms: None,
+            revocable,
+            title: "example.test".into(),
+        }
+    }
+
+    #[test]
+    fn an_accepted_revocation_leaves_the_list_but_only_claims_acceptance() {
+        let mut state: State = Controller {
+            grants: vec![grant("p-1", true), grant("p-2", false)],
+            ..Controller::default()
+        };
+        let ticket = state.issue(Operation::Permissions).expect("ticket");
+        assert!(state.finish_permissions(
+            &ticket,
+            Ok(muse_account::ActiveGrants {
+                grants: vec![grant("p-1", true)],
+            })
+        ));
+        assert_eq!(state.grants.len(), 1);
+        state.revoking = Some("p-1".into());
+        let ticket = state.issue(Operation::Revoke).expect("ticket");
+        assert!(state.finish_revoke(
+            &ticket,
+            Ok(muse_account::RevokeAnswer {
+                permission_id: "p-1".into(),
+                accepted: true,
+                revoked: Some(true),
+            })
+        ));
+        assert!(state.grants.is_empty());
+        assert!(state.revoking.is_none());
+        // Acceptance is not disappearance: the wording sends the reader to
+        // the re-read for proof, and never claims the grant is gone.
+        assert!(state.grant_notice.contains("accepted"));
+        assert!(state.grant_notice.contains("confirm"));
+        assert!(!state.grant_notice.contains("is gone from your account"));
+    }
+
+    #[test]
+    fn an_unanswered_revocation_keeps_the_grant_on_screen() {
+        let mut state: State = Controller {
+            grants: vec![grant("p-1", true)],
+            revoking: Some("p-1".into()),
+            ..Controller::default()
+        };
+        let ticket = state.issue(Operation::Revoke).expect("ticket");
+        assert!(!state.finish_revoke(&ticket, Err("timeout".into())));
+        assert_eq!(state.grants.len(), 1);
+        assert!(state.revoking.is_none());
+        assert!(state.grant_notice.contains("instead of pressing twice"));
+    }
+
+    #[test]
+    fn an_empty_grants_read_reports_no_grants_in_force() {
+        let mut state: State = Controller {
+            grants: vec![grant("p-1", true)],
+            ..Controller::default()
+        };
+        let ticket = state.issue(Operation::Permissions).expect("ticket");
+        state.finish_permissions(&ticket, Ok(muse_account::ActiveGrants::default()));
+        assert!(state.grants.is_empty());
+        assert!(state.grant_notice.contains("no grants are in force"));
+    }
+
+    #[test]
+    fn expiry_formatting_matches_known_timestamps() {
+        assert_eq!(format_expiry_utc(0), "1970-01-01 00:00 UTC");
+        // 2026-11-09 14:00 EST is 19:00 UTC.
+        assert_eq!(format_expiry_utc(1_794_250_800_000), "2026-11-09 19:00 UTC");
+        // A leap day and a year boundary.
+        assert_eq!(format_expiry_utc(1_709_164_800_000), "2024-02-29 00:00 UTC");
+        assert_eq!(format_expiry_utc(1_767_225_599_000), "2025-12-31 23:59 UTC");
     }
 
     #[test]
