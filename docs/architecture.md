@@ -5,14 +5,15 @@
 - `muse-linux-core`: permission-scoped, read-only filesystem operations and policy tests; independent of GUI and network access.
 - `muse-account`: typed account/history/tasks/send operations with a bounded Python subprocess. Account construction alone does not access credentials or the network; operations are explicit.
 - `scripts/muse_account_bridge.py`: our allowlisted JSON sidecar over an explicitly selected external community Python environment. It imports the source checkout; no MCP server or raw API is exposed to the UI.
-- `scripts/muse_account_login.py`: explicit user-controlled official Muse browser sign-in using an isolated Chromium-compatible profile and a narrowly scoped app-owned session jar. A compatible browser is an external prerequisite; fresh live sign-in remains a separate validation gate.
-- `apps/desktop`: native GTK4 dark Chats/Files shell, account configuration and native shared history/task views. Network and subprocess work must not block GTK's main thread.
+- `scripts/muse_account_login.py`: explicit user-controlled official Muse browser sign-in using an isolated Chromium-compatible profile and a narrowly scoped app-owned session jar. A compatible browser is an external prerequisite; fresh live sign-in has since been exercised against the real service (see the [roadmap](mac-parity-roadmap.md) P0 gate), while expiry/revocation are surfaced as explicit states.
+- `apps/desktop`: native GTK4 dark shell with Chats/Files views, account configuration, native shared history/task views, streamed replies with live status and approval cards, a read-only Library page, and the Local host page (grants, approval cards, activity log). Network and subprocess work must not block GTK's main thread.
+- `muse-local-link` + `muse-local-tools`: the account-linked local host — a persistent control connection that registers a narrow command manifest, and the descriptor-pinned `openat2` permission broker that executes approved invocations inside granted roots only. See [local host](local-host.md).
 - `muse-meta-api` and `muse-agent-runtime`: the separate experimental developer-key Model API and bounded read-only tool loop. These are not consumer Muse login or a local-host bridge for the account adapter.
 - Future local connectors: narrow typed capabilities with grants and auditable results, never an unrestricted shell or whole-home-directory API.
 
 ## Muse.ai account link and local-host bridge are core requirements
 
-The goal is the user's existing Muse personal agent plus permissioned Linux capabilities—not a website wrapper, a separate model client, or a Mac relay. Account continuity and local-host integration are separate requirements. The second batch addresses the former through an **unsupported authenticated community adapter**; it does not establish Mac-style node/device registration, local-tool dispatch, or full parity.
+The goal is the user's existing Muse personal agent plus permissioned Linux capabilities—not a website wrapper, a separate model client, or a Mac relay. Account continuity and local-host integration are separate requirements. Account continuity runs through an **unsupported authenticated community adapter**. Local-host integration is a separate layer on top of it: the explicitly started local host registers this machine under one persisted node identity and dispatches a narrow file manifest through the Rust permission broker — live registration and an agent-to-Linux read have been exercised against the real service (see [local host](local-host.md) and the [roadmap](mac-parity-roadmap.md)). Neither layer is full Mac parity.
 
 ```text
 GTK -> muse-account -> our JSON sidecar -> selected Python environment
@@ -20,9 +21,10 @@ GTK -> muse-account -> our JSON sidecar -> selected Python environment
                                        -> Muse account/personal-agent gateway
 
 Files view -> muse-linux-core -> selected read-only folder
+Local host -> muse-local-link -> muse-local-tools broker -> granted folders only
 ```
 
-The account interface is limited to connect, scoped history, scheduled-task/run reads, and sending a prompt. Internally, task routes are restricted to `tasks.list` (schedules) and `tasks.runs` (executions). Do not expose a general route method, account-backed remote filesystem, or local command execution. Selected local files are not automatically shared with the account-linked agent.
+The account interface is an allowlist, not a general route method: `connect`, `identity`, `history`, `watch`, `activity`, `cancel`, `approvals`, `decide`, `tasks`, `artifacts`, and `send`. Internally, task routes are restricted to `tasks.list` (schedules) and `tasks.runs` (executions), and approval reads/decisions go through the sentinel service on their own connection. Do not expose a general route method, account-backed remote filesystem, or local command execution. Selected local files are not automatically shared with the account-linked agent — only an explicit local-host folder grant does that, and only inside the granted root.
 
 Prompt dispatch may trigger the personal agent's existing remote capabilities. It is an explicit external action. Send once, then verify through scoped history: prompt persistence is not assistant completion. Uncertain outcomes must not cause automatic retry. Read operations, history scope, identity, and task shapes need real-account checks separate from offline tests.
 

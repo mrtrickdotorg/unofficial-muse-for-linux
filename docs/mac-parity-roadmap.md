@@ -462,8 +462,17 @@ voice** is unconfirmed for the Mac build — both need evidence before they earn
 
 ## Next three actions
 
-1. Complete a fresh packaged sign-in and record the exact states (success, expired, revoked).
-2. Register the local host against the real service and invoke `files.read_text` on a scratch file —
-   the first live agent-to-Linux call.
-3. Extend `account-probe` to report route availability for streaming, artifacts and memory, so P1, P5
-   and P6 are planned against facts.
+_The previous three actions — fresh packaged sign-in with recorded states, live local-host
+registration with a `files.read_text` invocation, and route reconnaissance for streaming, artifacts
+and memory — are done; their evidence is in P0, P1, P5 and the route table above._
+
+1. **P2, live:** press one real approval decision when one is pending (no decision has ever been
+   pressed live), then wire the allowed-sites listing (`egress.permissions.active`) and revocation
+   (`egress.permissions.revoke`) behind the policy model — one explicit press, no background call,
+   no retry, the service's answer reported rather than assumed.
+2. **P3, live:** have the real agent perform an approval-gated `files.create_text` on a scratch
+   file (exercised so far only by tests), and prove revocation during an in-flight invocation
+   against the live service.
+3. **P5, probe:** probe the space export route that `can_download_html: true` advertises, since
+   `artifacts.fetch_url` yields no URL for any artifact kind; if it answers, a space preview has a
+   path and the list-only Library page can grow one.

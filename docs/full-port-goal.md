@@ -1,6 +1,6 @@
 # Goal-ready plan: full-feature Linux port of Muse for Mac
 
-**Plan status:** account-linked second batch, updated October 17, 2026 (America/Detroit). This is the target contract, not a claim of full parity or verified fresh sign-in. The current priority ordering lives in [the Mac parity roadmap](mac-parity-roadmap.md), which supersedes the phase sequence below while keeping this acceptance contract.
+**Plan status:** acceptance contract, updated November 9, 2026 (America/Detroit). This is the target contract, not a claim of full parity. Fresh sign-in, local-host registration/dispatch, streaming, cancel, and approval reads/decisions have since been implemented and — where the roadmap records it — proven live; the gaps that remain are listed in the baseline below. The current priority ordering lives in [the Mac parity roadmap](mac-parity-roadmap.md), which supersedes the phase sequence below while keeping this acceptance contract.
 
 ## Copy-ready goal
 
@@ -11,11 +11,11 @@ Build a standalone, Linux-native companion/local host for the user's existing Mu
 ## Current baseline and gaps
 
 - Native dark GTK4 Chats/Files shell; session-only read-only folder grant, confined browsing, bounded UTF-8 previews and bounded recursive filename search without following symlinks. Earlier AppImage chooser/list/preview and navigation checks ran on KDE Wayland **through XWayland**; native Wayland is unverified.
-- Second-batch account code: typed connection, native shared thread/history and scheduled-task/run lists, and one-shot prompt dispatch through external pinned community source and the user's explicitly selected session. See [account integration](account-integration.md) for architecture, source/license, private plaintext session storage and protocol drift.
-- Explicit isolated official-browser sign-in helper and opt-in existing local session path. Offline helper tests or authenticated existing-session probes are **not proof of fresh browser authentication**, server-side revocation, or packaged GUI behavior.
-- Account linkage is **not Mac-style device/node registration or local-capability dispatch**. Local files stay read-only and separate; no local shell, browser, screen, or app tools are granted by connecting an account.
+- Account code: typed connection, native shared thread/history and scheduled-task/run lists, prompt dispatch, streamed replies with live status, cancel, reattach to an in-progress run, pending-approval reads and on-press decisions, and a read-only Library list, through the external pinned community source and the user's explicitly selected session. See [account integration](account-integration.md) for architecture, source/license, private plaintext session storage and protocol drift.
+- Explicit isolated official-browser sign-in helper and opt-in existing local session path. Fresh isolated-browser sign-in has since been completed against the real service, and expired/revoked sessions surface as explicit states; offline helper tests or existing-session probes alone would **not** have been proof of that.
+- Account linkage **by itself** is not local-capability dispatch — but the separate local host does register this machine (one persisted node identity) and dispatches a narrow approval-gated file manifest (create/read/search/edit/rename/delete-to-Trash) inside granted folders, proven live for registration and read. No local shell, browser, screen, or app tools are granted by connecting an account, and the human-side local Files view stays read-only and separate.
 - Developer-key Model API/runtime crates remain separate experiments. They do not provide personal-account login or continuity.
-- Streaming, plans/approvals/cancel/resume, task editing, file writes, desktop/browser/provider connectors, durable Linux background work, and full privacy/revocation controls remain incomplete.
+- Still incomplete: plan view and resume, a durable approval policy store (allowed-sites listing/revocation not yet wired), a live-pressed approval decision, an approval-gated create exercised by the real agent, task creation/editing, provider connectors, Library preview (blocked service-side), durable Linux background work, keyring session storage, and native Wayland verification.
 
 The canonical [feature matrix](feature-parity.md) separates implemented scope from verification. Release evidence must identify the exact artifact, local date/timezone and exercised scope; never put account names/IDs, messages or credentials in public evidence. Record the exact Mac build before freezing its reference behavior—product-wide marketing is not proof of a feature in that build.
 
@@ -31,7 +31,7 @@ The canonical [feature matrix](feature-parity.md) separates implemented scope fr
 
 ## Account integration versus local-host pairing
 
-The current account adapter is the community `muse-mcp` source at the pin documented in [account integration](account-integration.md), loaded by an explicitly selected per-user Python interpreter. It reaches the personal-agent gateway using the user's session; the Rust app exposes only connect/history/tasks/send. The task lists are backend schedules and executions, not a new Linux scheduler. The runtime does not run an MCP server or expose arbitrary routes.
+The current account adapter is the community `muse-mcp` source at the pin documented in [account integration](account-integration.md), loaded by an explicitly selected per-user Python interpreter. It reaches the personal-agent gateway using the user's session; the Rust app exposes only the allowlisted operations (`connect`, `identity`, `history`, `watch`, `activity`, `cancel`, `approvals`, `decide`, `tasks`, `artifacts`, `send`). The task lists are backend schedules and executions, not a new Linux scheduler. The runtime does not run an MCP server or expose arbitrary routes. Local-host dispatch is a separate layer with its own registration, permission and revocation surface, specified in [local host](local-host.md).
 
 The first-party Linux gadget SDK is a separate phone/BLE device-token path, not personal-client login and not a chat-history/task-fetch API. Its library `subscribe_chat()` is not evidence of a complete desktop account protocol; the stock Unix IPC path is send-only. It is not integrated in this batch. Any future local-host route requires its own registration, dispatch, permission and revocation tests; do not add broad `system.run` access as a shortcut.
 
