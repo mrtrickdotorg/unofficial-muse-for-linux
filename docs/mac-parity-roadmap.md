@@ -360,6 +360,15 @@ degraded to time-only and documented as such.
 *Gate:* a task created in the app runs while the window is closed, notifies, survives reboot without
 duplicating, can be stopped, and leaves an audit trail.
 
+*Cancellation from Linux is wired (Nov 9).* The route table's only schedule mutation is
+`tasks.delete` (DELETE /api/tasks/{job_id}) — there is no create, edit or enable/disable route, so
+creation stays conversational (ask the agent) rather than being invented here. The bridge gained a
+`delete_task` operation on the shared gateway (one call, never retried, acceptance reported rather
+than absence), and each schedule row on the chat page carries a Delete button that arms on the first
+press and sends on the second — deletion is permanent and has no undo. An accepted deletion triggers
+a full refresh, so a schedule that is still there is still listed. No live deletion has been pressed.
+The durable local half of this phase (the user-level service and scheduler below) is untouched.
+
 ### P5 — Artifacts, Library and Upcoming (M)
 
 *Gap:* the Mac client has Library (saved artifacts), System Files (the VM filesystem) and Upcoming.
