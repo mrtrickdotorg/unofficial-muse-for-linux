@@ -1,0 +1,9 @@
+[package]
+name = "muse-reminder-runner"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Headless reminder runner: claims due tasks from the muse-tasks store and posts desktop notifications"
+
+[dependencies]
+muse-tasks = { path = "../muse-tasks" }
