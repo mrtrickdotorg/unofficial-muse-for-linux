@@ -1178,6 +1178,48 @@ class PermissionTests(unittest.TestCase):
             bridge.validate_request({"op": "revoke", "config_dir": "/tmp"})
 
 
+class DeleteTaskTests(unittest.TestCase):
+    def test_a_deletion_asks_the_tasks_route_once_and_claims_acceptance_only(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        seen = {"calls": 0}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["calls"] += 1
+                seen["method"] = method
+                seen.update(kwargs)
+                return {"deleted": True, "access_token": "SECRET"}
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "delete_task", "job_id": "job-1"})
+        self.assertEqual(seen["calls"], 1)
+        self.assertEqual(seen["method"], "tasks.delete")
+        self.assertEqual(seen["path_params"], {"job_id": "job-1"})
+        # Acceptance is not absence: only the service's own word travels, and
+        # proving the schedule is gone is a fresh read's job.
+        self.assertEqual(result, {"job_id": "job-1", "accepted": True,
+                                  "deleted": True})
+        self.assertNotIn("SECRET", str(result))
+
+    def test_a_deletion_names_only_an_id_the_listing_published(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "delete_task", "config_dir": "/tmp",
+                                 "job_id": "job-1"})
+        for bad in ("", None, 1, "x" * 257, "a\x00b"):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.validate_request({"op": "delete_task", "config_dir": "/tmp",
+                                         "job_id": bad})
+            self.assertEqual(caught.exception.code, "invalid_request")
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "delete_task", "config_dir": "/tmp"})
+
+
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
         bridge = load_bridge()

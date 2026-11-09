@@ -13,6 +13,7 @@ enum Operation {
     Decide,
     Permissions,
     Revoke,
+    DeleteTask,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +84,13 @@ struct Controller<A, H, T> {
     /// The grant whose revocation is in flight, so its row stops accepting a
     /// second press while the first is unanswered.
     revoking: Option<String>,
+    /// The schedule whose deletion is in flight, so its row stops accepting
+    /// presses while the service is unanswered.
+    deleting: Option<String>,
+    /// The schedule armed for deletion by a first press. Deleting a schedule
+    /// is permanent and has no undo, so the press that arms and the press
+    /// that sends are two different presses.
+    confirming_delete: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,6 +295,8 @@ impl<A, H, T> Default for Controller<A, H, T> {
             grants: Vec::new(),
             grant_notice: String::new(),
             revoking: None,
+            deleting: None,
+            confirming_delete: None,
         }
     }
 }
@@ -407,6 +417,9 @@ impl<A, H, T> Controller<A, H, T> {
         match tasks {
             Ok(tasks) => {
                 self.tasks = Some(tasks);
+                // A fresh list is a new decision surface: an armed deletion
+                // belonged to the list it was armed on.
+                self.confirming_delete = None;
                 self.tasks_notice = "Scheduled tasks and recent runs loaded from Muse (read-only, service-bounded list).".into();
             }
             Err(error) => {
@@ -659,6 +672,61 @@ impl<A, H, T> Controller<A, H, T> {
             Err(error) => {
                 self.grant_notice = format!(
                     "Revocation failed: {error}. The grant may still be in force; read the list again instead of pressing twice."
+                );
+                false
+            }
+        }
+    }
+
+    /// Arm one schedule for deletion. The first press only arms: deletion is
+    /// permanent, so the confirming press is a separate, deliberate one, and
+    /// arming a different schedule disarms the previous one.
+    fn arm_delete(&mut self, job_id: &str) {
+        self.confirming_delete = Some(job_id.to_owned());
+        self.tasks_notice =
+            "Press Delete again to permanently remove this scheduled task. This cannot be undone."
+                .into();
+    }
+
+    /// Take the busy slot for one schedule deletion. Only an armed schedule
+    /// can take it, so a stray first press can never reach the service.
+    fn begin_delete_task(&mut self, job_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.confirming_delete.as_deref() != Some(job_id) {
+            return None;
+        }
+        let ticket = self.issue(Operation::DeleteTask)?;
+        self.confirming_delete = None;
+        self.deleting = Some(job_id.to_owned());
+        Some(ticket)
+    }
+
+    /// Record a deletion's answer. True only when the service took it, which
+    /// is what triggers the refresh that follows: that re-read is what proves
+    /// whether the schedule is actually gone — if it is still scheduled, it
+    /// is still listed there, in plain sight.
+    fn finish_delete_task(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::DeleteAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.deleting = None;
+        match result {
+            Ok(answer) => {
+                self.tasks_notice = if answer.accepted {
+                    "The service accepted the deletion. Refreshing to confirm the schedule is gone."
+                        .into()
+                } else {
+                    "The service did not accept the deletion. The schedule is still listed.".into()
+                };
+                answer.accepted
+            }
+            Err(error) => {
+                self.tasks_notice = format!(
+                    "Deletion failed: {error}. The schedule may still exist; refresh instead of pressing twice."
                 );
                 false
             }
@@ -1015,6 +1083,7 @@ mod native {
         Decide(Result<muse_account::DecisionAnswer, String>),
         Permissions(Result<muse_account::ActiveGrants, String>),
         Revoke(Result<muse_account::RevokeAnswer, String>),
+        DeleteTask(Result<muse_account::DeleteAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -2286,6 +2355,36 @@ mod native {
             });
         }
 
+        /// Delete one scheduled task. The first press only arms the row —
+        /// deletion is permanent — and the second press sends exactly one
+        /// deletion for the schedule the reader armed.
+        fn delete_task(self: &Rc<Self>, job_id: String) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().tasks_notice =
+                    "Not connected. Connect your Muse session before deleting a schedule.".into();
+                self.render();
+                return;
+            };
+            {
+                let mut state = self.state.borrow_mut();
+                if state.confirming_delete.as_deref() != Some(job_id.as_str()) {
+                    state.arm_delete(&job_id);
+                    drop(state);
+                    self.render();
+                    return;
+                }
+            }
+            let Some(ticket) = self.state.borrow_mut().begin_delete_task(&job_id) else {
+                return;
+            };
+            self.launch(ticket, move || match client.delete_task(&job_id) {
+                Ok(answer) => Reply::DeleteTask(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::DeleteTask(Err(error.to_string())),
+            });
+        }
+
         fn cancel_run(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
@@ -2463,6 +2562,9 @@ mod native {
                         Operation::Revoke => {
                             Reply::Revoke(Err("Revocation worker stopped unexpectedly.".into()))
                         }
+                        Operation::DeleteTask => {
+                            Reply::DeleteTask(Err("Deletion worker stopped unexpectedly.".into()))
+                        }
                     },
                 };
                 ui.complete(&ticket, reply);
@@ -2589,6 +2691,14 @@ mod native {
                         // trusting our own copy after a write.
                         if state.finish_decide(ticket, result) {
                             reread_approvals = true;
+                        }
+                    }
+                    Reply::DeleteTask(result) => {
+                        // Acceptance is not absence: refresh asks the service
+                        // what is still scheduled rather than trusting our own
+                        // copy after a write.
+                        if state.finish_delete_task(ticket, result) {
+                            refresh_after = true;
                         }
                     }
                     Reply::Permissions(result) => {
@@ -2741,6 +2851,7 @@ mod native {
                     Operation::Decide => " \u{b7} sending your decision\u{2026}",
                     Operation::Permissions => " \u{b7} reading grants in force\u{2026}",
                     Operation::Revoke => " \u{b7} sending your revocation\u{2026}",
+                    Operation::DeleteTask => " \u{b7} deleting the scheduled task\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -3032,7 +3143,29 @@ mod native {
                         utc_time(schedule.next_run_at_utc)
                     ));
                     item.add_css_class("card");
-                    self.tasks.append(&item);
+                    let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                    row.append(&item);
+                    // Deleting a schedule is permanent, so the button arms on
+                    // the first press and only the second sends the deletion.
+                    let armed = state.confirming_delete.as_deref() == Some(schedule.id.as_str());
+                    let delete = gtk::Button::with_label(if armed {
+                        "Press again to delete"
+                    } else {
+                        "Delete"
+                    });
+                    if armed {
+                        delete.add_css_class("destructive-action");
+                    }
+                    delete.set_sensitive(connected && idle && state.deleting.is_none());
+                    let weak = self.self_weak.borrow().clone();
+                    let id = schedule.id.clone();
+                    delete.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.delete_task(id.clone());
+                        }
+                    });
+                    row.append(&delete);
+                    self.tasks.append(&row);
                 }
                 self.tasks
                     .append(&label("Recent task runs (no retry controls)"));
@@ -3754,6 +3887,50 @@ mod tests {
         state.finish_permissions(&ticket, Ok(muse_account::ActiveGrants::default()));
         assert!(state.grants.is_empty());
         assert!(state.grant_notice.contains("no grants are in force"));
+    }
+
+    #[test]
+    fn a_schedule_deletion_needs_an_armed_second_press() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        // Unarmed: no ticket exists, so nothing can reach the service.
+        assert!(state.begin_delete_task("job-1").is_none());
+        state.arm_delete("job-1");
+        assert!(state.tasks_notice.contains("Press Delete again"));
+        // Arming a different schedule moves the arm; the first is safe.
+        state.arm_delete("job-2");
+        assert!(state.begin_delete_task("job-1").is_none());
+        let ticket = state.begin_delete_task("job-2").expect("ticket");
+        assert_eq!(state.deleting.as_deref(), Some("job-2"));
+        assert!(state.confirming_delete.is_none());
+        assert!(state.finish_delete_task(
+            &ticket,
+            Ok(muse_account::DeleteAnswer {
+                job_id: "job-2".into(),
+                accepted: true,
+                deleted: Some(true),
+            })
+        ));
+        assert!(state.deleting.is_none());
+        // Acceptance is not absence: the wording sends the reader to the
+        // refresh for proof, and never claims the schedule is gone.
+        assert!(state.tasks_notice.contains("accepted"));
+        assert!(state.tasks_notice.contains("confirm"));
+    }
+
+    #[test]
+    fn an_unanswered_deletion_reports_and_clears_the_flight() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        state.arm_delete("job-1");
+        let ticket = state.begin_delete_task("job-1").expect("ticket");
+        assert!(!state.finish_delete_task(&ticket, Err("timeout".into())));
+        assert!(state.deleting.is_none());
+        assert!(state.tasks_notice.contains("instead of pressing twice"));
     }
 
     #[test]

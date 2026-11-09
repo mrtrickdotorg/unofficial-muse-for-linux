@@ -256,6 +256,25 @@ print(json.dumps({'ok': True, 'data': {'permission_id': 'p-1', 'accepted': True,
 }
 
 #[test]
+fn delete_task_sends_one_named_schedule_and_reports_acceptance_only() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'delete_task' and request['job_id'] == 'job-1'
+print(json.dumps({'ok': True, 'data': {'job_id': 'job-1', 'accepted': True,
+                                          'deleted': True}}))
+"#,
+    );
+    let answer = f.client().delete_task("job-1").unwrap();
+    assert!(answer.accepted);
+    assert_eq!(answer.deleted, Some(true));
+    // A malformed id is refused before a child is ever spawned.
+    assert!(f.client().delete_task("").is_err());
+    assert!(f.client().delete_task("x".repeat(257).as_str()).is_err());
+}
+
+#[test]
 fn an_unidentified_library_row_is_a_protocol_error_not_an_empty_list() {
     let f = Fixture::new(
         r#"

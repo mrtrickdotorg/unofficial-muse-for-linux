@@ -281,6 +281,19 @@ pub struct RevokeAnswer {
     #[serde(default)]
     pub revoked: Option<bool>,
 }
+/// What the service said about a schedule deletion it took.
+///
+/// `accepted` means the service accepted the request; it does not mean the
+/// schedule is gone. Only a fresh read of the listing proves that, so
+/// callers re-read rather than trusting this answer, and `deleted` is the
+/// service's own word when it supplied one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteAnswer {
+    pub job_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub deleted: Option<bool>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -529,6 +542,21 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "revoke", "permission_id": permission_id}),
+            false,
+        )
+    }
+    /// Delete exactly one scheduled task, once.
+    ///
+    /// The id must be one the schedule listing published, and the bridge
+    /// makes a single request, so one confirmed press maps to one write.
+    /// Whether the schedule is actually gone afterwards is proven by
+    /// re-reading the list, never by this answer alone.
+    pub fn delete_task(&self, job_id: &str) -> Result<DeleteAnswer, AccountError> {
+        if job_id.is_empty() || job_id.len() > 256 || job_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "delete_task", "job_id": job_id}),
             false,
         )
     }
