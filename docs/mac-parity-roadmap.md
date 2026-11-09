@@ -351,8 +351,17 @@ read-only" toggle on the Local host page at grant time. The broker carries the m
 the manifest marks it (`access: read_only` / `read_write`) so the agent knows before it tries, and
 a mutation under a read-only root is refused with `read_only` before a proposal exists — the
 person set that boundary at grant time and is never asked to police it per file. Reads and search
-are unaffected. Still open in this phase: cross-root move, content search, and the live gate
-(approval-gated create, revocation mid-invocation).
+are unaffected.
+
+*Content search and cross-folder move landed (Nov 9).* A seventh command,
+`files.search_content`, runs the same confined walk and returns matching lines (path, 1-based
+line, ≤200 chars) from UTF-8 files, bounded at 200 files opened and 50 matches. `files.rename`
+gained an optional `target_grant_id`: the move resolves both grants under one lock and epoch, a
+read-only destination refuses it before a proposal exists, the approval card names both folders,
+commit is one `renameat2` between the two roots (an existing destination name is refused, never
+overwritten; different filesystems answer `cross_device`), and the read-back verifies the moved
+inode in its new home. Still open in this phase: the live gate (approval-gated create, revocation
+mid-invocation).
 
 ### P4 — Scheduled tasks and durable background work (L)
 
