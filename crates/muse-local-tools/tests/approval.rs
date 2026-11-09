@@ -169,3 +169,85 @@ fn bounded_pending_and_id_cache_fail_closed_without_eviction() {
     );
     assert_eq!(std::fs::read_dir(d.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn a_read_only_grant_reads_but_refuses_every_mutation_before_proposal() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("keep.txt"), "original").unwrap();
+    let b = ToolBroker::new();
+    let g = b.grant_read_only(dir.path()).unwrap();
+    assert!(!g.writable);
+    // The manifest tells the agent the mode up front, so a refused mutation
+    // is never a surprise it has to discover by trying.
+    let manifest = b.manifest();
+    assert_eq!(manifest["grants"][0]["access"], "read_only");
+
+    // Reads and search still run immediately.
+    let read = b.invoke(Invocation {
+        id: "r1".into(),
+        command: "files.read_text".into(),
+        params: json!({"grant_id":g.id,"path":"keep.txt"}),
+        timeout_ms: 1000,
+    });
+    assert!(matches!(read, Decision::Reply(r) if r.ok));
+    let search = b.invoke(Invocation {
+        id: "r2".into(),
+        command: "files.search".into(),
+        params: json!({"grant_id":g.id,"query":"keep"}),
+        timeout_ms: 1000,
+    });
+    assert!(matches!(search, Decision::Reply(r) if r.ok));
+
+    // Every mutation is a refusal, never an approval request.
+    for (id, command, params) in [
+        (
+            "m1",
+            "files.create_text",
+            json!({"grant_id":g.id,"path":"new.txt","content":"x"}),
+        ),
+        (
+            "m2",
+            "files.edit",
+            json!({"grant_id":g.id,"path":"keep.txt","old_text":"original","new_text":"changed"}),
+        ),
+        (
+            "m3",
+            "files.rename",
+            json!({"grant_id":g.id,"path":"keep.txt","new_path":"moved.txt"}),
+        ),
+        (
+            "m4",
+            "files.delete",
+            json!({"grant_id":g.id,"path":"keep.txt"}),
+        ),
+    ] {
+        let decision = b.invoke(Invocation {
+            id: id.into(),
+            command: command.into(),
+            params,
+            timeout_ms: 1000,
+        });
+        assert!(
+            matches!(decision, Decision::Reply(ref r) if !r.ok && r.error.as_deref() == Some("read_only")),
+            "{command} under a read-only grant must be refused, got {decision:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+        "original"
+    );
+    assert!(!dir.path().join("new.txt").exists());
+}
+
+#[test]
+fn a_read_write_grant_still_proposes_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = ToolBroker::new();
+    let g = b.grant(dir.path()).unwrap();
+    assert!(g.writable);
+    assert_eq!(b.manifest()["grants"][0]["access"], "read_write");
+    assert!(matches!(
+        create(&b, &g, "w1", "note", "x", 1000),
+        Decision::Approval(_)
+    ));
+}

@@ -17,6 +17,12 @@ pub struct GrantInfo {
     pub id: String,
     pub label: String,
     pub root: PathBuf,
+    /// Whether mutation commands may be proposed under this grant. A
+    /// read-only grant is a different promise from a read-write one: reads
+    /// and search work, and every mutation is refused by the broker before
+    /// it can become an approval request — the person is never asked to
+    /// police a boundary they already set.
+    pub writable: bool,
 }
 #[derive(Clone, Debug)]
 pub struct Invocation {
@@ -192,7 +198,17 @@ impl ToolBroker {
             pause: Arc::default(),
         }
     }
+    /// Grant a folder read-write: reads and search run immediately, and
+    /// mutations may be proposed for approval.
     pub fn grant(&self, root: &Path) -> Result<GrantInfo, ToolError> {
+        self.grant_inner(root, true)
+    }
+    /// Grant a folder read-only: reads and search run immediately, and the
+    /// broker refuses every mutation under it outright.
+    pub fn grant_read_only(&self, root: &Path) -> Result<GrantInfo, ToolError> {
+        self.grant_inner(root, false)
+    }
+    fn grant_inner(&self, root: &Path, writable: bool) -> Result<GrantInfo, ToolError> {
         if root.as_os_str().is_empty() {
             return Err(ToolError("invalid_path"));
         }
@@ -226,6 +242,7 @@ impl ToolBroker {
             id: format!("grant-{}-{}", state.nonce, state.next),
             label: format!("Folder {}", state.next),
             root: root.to_path_buf(),
+            writable,
         };
         state.grants.insert(
             info.id.clone(),
@@ -252,7 +269,7 @@ impl ToolBroker {
         let grants: Vec<_> = self
             .grants()
             .into_iter()
-            .map(|g| json!({"id":g.id,"label":g.label}))
+            .map(|g| json!({"id":g.id,"label":g.label,"access":if g.writable {"read_write"} else {"read_only"}}))
             .collect();
         let grant_ids: Vec<_> = grants.iter().map(|grant| grant["id"].clone()).collect();
         let grant_description = format!(
@@ -287,7 +304,7 @@ impl ToolBroker {
     pub fn invoke(&self, invocation: Invocation) -> Decision {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(invocation.timeout_ms.min(120_000));
-        let (root, root_path, epoch) = {
+        let (root, root_path, epoch, writable) = {
             let mut state = self.state.lock().unwrap();
             if invocation.id.is_empty() || invocation.id.len() > 256 {
                 return Decision::Reply(fail(&invocation.id, "invalid_id"));
@@ -339,7 +356,12 @@ impl ToolBroker {
                         valid_path(params["new_path"].as_str().unwrap())?;
                     }
                 }
-                Ok((grant.fd.clone(), grant.info.root.clone(), state.epoch))
+                Ok((
+                    grant.fd.clone(),
+                    grant.info.root.clone(),
+                    state.epoch,
+                    grant.info.writable,
+                ))
             })();
             match result {
                 Ok(v) => v,
@@ -350,6 +372,12 @@ impl ToolBroker {
             invocation.command.as_str(),
             "files.create_text" | "files.edit" | "files.rename" | "files.delete"
         ) {
+            // A read-only grant refuses mutations here, before any proposal
+            // exists: there is no approval to ask for, because the person
+            // already answered when they granted the folder.
+            if !writable {
+                return Decision::Reply(fail(&invocation.id, "read_only"));
+            }
             return self.propose(invocation, root, root_path, epoch, deadline);
         }
         let result = if invocation.command == "files.search" {
