@@ -345,3 +345,52 @@ fn duplicate_and_unknown_fields_are_corrupt_not_skipped() {
     ));
     let _ = task;
 }
+
+#[test]
+fn claim_due_marks_once_and_only_the_due_pending() {
+    let (mut store, _dir) = open("claim");
+    let t = now();
+    let due_a = store.create("due a", "", t - 10).unwrap();
+    let due_b = store.create("due b", "", t - 5).unwrap();
+    let future = store.create("future", "", t + 3600).unwrap();
+    let paused = store.create("paused", "", t - 10).unwrap();
+    store.pause(paused.id).unwrap();
+
+    let claimed = store.claim_due(t).unwrap();
+    let ids: Vec<u64> = claimed.iter().map(|x| x.id).collect();
+    assert_eq!(ids, vec![due_a.id, due_b.id], "due order, pending only");
+    assert!(claimed.iter().all(|x| x.notified));
+
+    // At-most-once: a second claim at the same time finds nothing, and the
+    // claim survives a reopen (catch-up must not re-fire what fired).
+    assert!(store.claim_due(t).unwrap().is_empty());
+    let dir = store.dir().to_path_buf();
+    drop(store);
+    let mut store2 = TaskStore::open(&dir).unwrap();
+    assert!(store2.claim_due(t).unwrap().is_empty());
+    assert!(!store2.get(future.id).unwrap().notified);
+    assert!(!store2.get(paused.id).unwrap().notified);
+}
+
+#[test]
+fn a_second_open_waits_for_the_first_handle_to_drop() {
+    let (store, dir) = open("lockwait");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dir2 = dir.clone();
+    let opener = std::thread::spawn(move || {
+        let s = TaskStore::open(&dir2).expect("second open eventually succeeds");
+        tx.send(s.list().len()).unwrap();
+    });
+    // The first handle holds the lock: the second open must not complete.
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "second open completed while the first handle held the lock"
+    );
+    drop(store);
+    let n = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("second open completes after the first handle drops");
+    assert_eq!(n, 0);
+    opener.join().unwrap();
+}

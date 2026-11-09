@@ -1037,8 +1037,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "muse-reminder-runner"
+version = "0.1.0"
+dependencies = [
+ "muse-tasks",
+]
+
+[[package]]
 name = "muse-tasks"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "native-tls"

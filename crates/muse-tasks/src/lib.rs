@@ -5,8 +5,15 @@
 //!
 //! Scope: durable reminders only. This crate performs no command execution,
 //! no network access, no notification delivery, and spawns no threads.
-//! Delivery and UI are the parent's job. Single-process use only: no file
-//! locking is performed.
+//! Delivery and UI are the parent's job.
+//!
+//! Several processes may share one store directory — the desktop app and
+//! the reminder runner do — because [`TaskStore::open`] takes an exclusive
+//! advisory lock (`tasks.lock`, `flock`) and holds it for the handle's
+//! lifetime. Handles are therefore short-lived transactions: open, operate,
+//! drop. The kernel releases the lock if a holder dies, so a crashed holder
+//! can never wedge the store; a live holder only ever holds it for the span
+//! of one user action or one scheduler cycle.
 //!
 //! Times are Unix seconds (`u64`). The caller supplies `now`; the crate also
 //! reads the system clock for `created_unix_secs` and due-bound checks.
@@ -20,6 +27,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// File name of the JSON-lines store inside the store directory.
 pub const STORE_FILE_NAME: &str = "tasks.jsonl";
+/// File name of the advisory lock file inside the store directory.
+pub const LOCK_FILE_NAME: &str = "tasks.lock";
 /// Maximum title length in Unicode scalar values.
 pub const TITLE_MAX_CHARS: usize = 200;
 /// Maximum body length in bytes.
@@ -482,13 +491,19 @@ fn task_from_json(line: &str) -> Result<Task, ()> {
 
 /// Durable local reminder-task store backed by a single JSON-lines file.
 ///
-/// Open with [`TaskStore::open`]. All mutations are persisted atomically
+/// Open with [`TaskStore::open`], which takes the store directory's
+/// exclusive advisory lock for the handle's lifetime — keep handles
+/// short-lived (open, operate, drop) so the app and the reminder runner can
+/// share one directory. All mutations are persisted atomically
 /// (temporary file + rename) before the call returns, so dropping the store
 /// without any close step loses nothing.
 #[derive(Debug)]
 pub struct TaskStore {
     dir: PathBuf,
     tasks: Vec<Task>,
+    /// The held advisory lock. Dropping the store closes this file, which is
+    /// what releases the lock — there is no separate unlock step to forget.
+    _lock: File,
 }
 
 impl TaskStore {
@@ -524,6 +539,13 @@ impl TaskStore {
             return Err(TaskError::InvalidArgument("directory refused"));
         }
 
+        // Take the store lock before reading anything: from here on this
+        // handle is the only reader/writer, so the snapshot it loads and
+        // every rewrite it persists are one transaction. Blocking is right —
+        // holders are short-lived by contract, and the kernel releases the
+        // lock if a holder dies without dropping the handle.
+        let lock = acquire_lock(dir)?;
+
         let store_path = dir.join(STORE_FILE_NAME);
         let mut tasks = Vec::new();
         if std::fs::symlink_metadata(&store_path)
@@ -548,6 +570,7 @@ impl TaskStore {
         Ok(TaskStore {
             dir: dir.to_path_buf(),
             tasks,
+            _lock: lock,
         })
     }
 
@@ -642,6 +665,40 @@ impl TaskStore {
         self.transition(id, TaskStatus::Pending, TaskStatus::Done)
     }
 
+    /// Claim every task [`TaskStore::due`] reports at `now_unix_secs`,
+    /// marking them notified in one atomic persist, and return them in due
+    /// order.
+    ///
+    /// This is the scheduler's dispatch step, and it is deliberately
+    /// at-most-once: the claim is durable before the caller delivers
+    /// anything, so a runner that dies after claiming never re-fires those
+    /// reminders on its next start — and one that dies before claiming
+    /// leaves them for the next cycle untouched. Paused, terminal and
+    /// already-notified tasks are never claimed, and a second claim at the
+    /// same `now` returns nothing.
+    pub fn claim_due(&mut self, now_unix_secs: u64) -> Result<Vec<Task>, TaskError> {
+        let due = self.due(now_unix_secs);
+        if due.is_empty() {
+            return Ok(due);
+        }
+        let ids: HashSet<u64> = due.iter().map(|t| t.id).collect();
+        let mut next = self.tasks.clone();
+        for task in next.iter_mut() {
+            if ids.contains(&task.id) {
+                task.notified = true;
+            }
+        }
+        persist(&self.dir, &next)?;
+        self.tasks = next;
+        Ok(due
+            .into_iter()
+            .map(|mut task| {
+                task.notified = true;
+                task
+            })
+            .collect())
+    }
+
     /// Flag a pending or paused task as notified.
     pub fn mark_notified(&mut self, id: u64) -> Result<Task, TaskError> {
         let idx = self.index_of(id)?;
@@ -700,6 +757,34 @@ impl TaskStore {
         self.tasks = next;
         Ok(task)
     }
+}
+
+/// Open (creating with mode 0600) the store's lock file and take the
+/// exclusive advisory lock on it. The returned file owns the lock: closing
+/// it, by drop or by process death, is the release.
+fn acquire_lock(dir: &Path) -> Result<File, TaskError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+    let lock_path = dir.join(LOCK_FILE_NAME);
+    if std::fs::symlink_metadata(&lock_path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(TaskError::InvalidArgument("directory refused"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|_| TaskError::Io("store lock unavailable"))?;
+    // SAFETY: the fd is valid for the file's lifetime and LOCK_EX takes no
+    // pointers; a failed flock is reported, never retried blindly.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(TaskError::Io("store lock unavailable"));
+    }
+    Ok(file)
 }
 
 fn corrupt_line(n: usize) -> TaskError {
