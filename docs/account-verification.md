@@ -1,5 +1,7 @@
 # Account-linked batch verification — October 18, 2026
 
+> **Dated snapshot.** This report records the October 18, 2026 batch exactly as it stood then. Statements below that fresh sign-in, device registration, or local-host dispatch were unproven were true on that date and have since been superseded: fresh isolated-browser sign-in, live local-host registration, and an agent-to-Linux `files.read_text` round-trip were all exercised against the real service in November 2026. Current state and evidence live in the [Mac parity roadmap](mac-parity-roadmap.md) and [local host](local-host.md); do not cite this report for what the app can do today.
+
 All dates below use America/Detroit (EDT). This report distinguishes the account backend, packaged GUI, fresh interactive sign-in, and Linux tool-host pairing.
 
 ## Executed checks

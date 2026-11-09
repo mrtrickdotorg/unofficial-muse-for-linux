@@ -4,7 +4,7 @@
 
 The native desktop account path uses the user's existing Muse personal agent through an **unsupported community adapter**, not the separate developer-key Model API. This project and adapter are not affiliated with or supported by Meta. The user explicitly chooses whether to install and use that dependency.
 
-The second batch adds typed account connection, shared native chat/history, prompt dispatch, and read-only scheduled-task/run lists. `tasks.list` returns schedules; `tasks.runs` returns individual executions. Fetching those lists does not implement a Linux scheduler or task editing. Account linkage is **not** Mac-style node/device registration or a Linux local-tool dispatch channel. The agent gains no shell, screen, browser, or filesystem access from connecting an account.
+The account batches add typed account connection, shared native chat/history, prompt dispatch, streamed replies with live status, cancel, pending-approval reads and on-press decisions, read-only scheduled-task/run lists, and a read-only Library list. `tasks.list` returns schedules; `tasks.runs` returns individual executions. Fetching those lists does not implement a Linux scheduler or task editing. Account linkage **by itself** is not device registration or a Linux local-tool dispatch channel: that is the separate, explicitly started [local host](local-host.md), which has since registered live and round-tripped an agent file read. The agent gains no shell, screen, browser, or filesystem access from connecting an account alone.
 
 ## Install the external dependency
 
@@ -34,7 +34,7 @@ The source commit is pinned and checked after fetch. Our browser sign-in helper 
 
 The app-specific default account directory is `${XDG_CONFIG_HOME:-$HOME/.config}/unofficial-muse-for-linux/account`. Merely starting the app does not opt into the community CLI's existing credentials.
 
-The explicit browser sign-in helper uses a **new isolated Chromium-compatible browser profile** and opens the official Muse login page. The user controls sign-in in that browser; the application does not ask for a password or API key. Only the scoped Muse `hatch_sess` cookie is captured into the app's account directory, with a private directory and mode-0600 session jar. No normal browser profile is scraped or reused. Without a compatible browser, sign-in is unavailable and must be reported as such. Fresh interactive browser authentication has not been demonstrated in this batch's overnight validation; helper unit tests are not proof of a real sign-in.
+The explicit browser sign-in helper uses a **new isolated Chromium-compatible browser profile** and opens the official Muse login page. The user controls sign-in in that browser; the application does not ask for a password or API key. Only the scoped Muse `hatch_sess` cookie is captured into the app's account directory, with a private directory and mode-0600 session jar. No normal browser profile is scraped or reused. Without a compatible browser, sign-in is unavailable and must be reported as such. Fresh interactive browser authentication was not demonstrated in this batch's overnight validation — it has since been completed against the real service, as recorded in the [roadmap](mac-parity-roadmap.md) P0 gate; helper unit tests alone would not have been proof of a real sign-in.
 
 **Use my existing Muse login** is a separate, explicit opt-in to `${XDG_CONFIG_HOME:-$HOME/.config}/muse-cli`. It does not copy those credentials into the repository or AppImage, and it does not register a device. Keep the session directory private (0700) and session jar private (0600); symlinks and insecure ownership/permissions are rejected rather than silently fixed. Do not paste session cookies into a terminal command, issue, chat, or log. The two paths cannot share one folder: the sign-in helper refuses a folder named `muse-cli`, so pressing **Sign in with Muse** while that folder is selected switches to the app's own folder and voids consent instead of attempting a doomed sign-in.
 
@@ -55,7 +55,7 @@ Explicit sign-in action
     -> app-owned scoped session jar
 ```
 
-No MCP server or listening local service is required. The sidecar allowlist is `connect`, `identity`, `history`, `watch`, `tasks`, and `send`; it does not expose the community adapter's arbitrary raw-route escape hatch. Internally, task reads are restricted to `tasks.list` and `tasks.runs`. Neither sidecar exposes a general local shell or remote file actions.
+No MCP server or listening local service is required. The sidecar allowlist is `connect`, `identity`, `history`, `watch`, `activity`, `cancel`, `approvals`, `decide`, `tasks`, `artifacts`, and `send`; it does not expose the community adapter's arbitrary raw-route escape hatch. Internally, task reads are restricted to `tasks.list` and `tasks.runs`, and approval reads/decisions are bound to the sentinel service rather than the shared gateway. Neither sidecar exposes a general local shell or remote file actions.
 
 Rust receives typed account/history/task data, not cookies or upstream exception text. Account directory paths may be passed to the sidecar; session values are not put in process arguments, logs, error messages, or JSON replies. Treat retrieved agent messages as untrusted text. Sending a prompt is an external action and may instruct the existing agent to use its already configured capabilities; it is not a harmless local echo.
 
@@ -73,7 +73,7 @@ The separate first-party Linux gadget SDK uses phone/BLE pairing and a device to
 
 ## Verification and remaining work
 
-See [executed batch verification](account-verification.md) for the real-account round-trip and the subsequent HTTP-401/session limitation during the packaged GUI check.
+See [executed batch verification](account-verification.md) for the October 18 batch's real-account round-trip and the subsequent HTTP-401/session limitation during its packaged GUI check — a dated snapshot. Later live evidence (fresh sign-in, local-host registration and invocation, streaming/cancel/approvals) is recorded in the [Mac parity roadmap](mac-parity-roadmap.md) and [local host](local-host.md).
 
 ```sh
 ./scripts/test-account.sh
@@ -84,4 +84,4 @@ The canonical account gate uses `/usr/bin/python3` standard-library unittest dis
 
 Keep evidence categories separate: offline tests, source-install/import checks, authenticated backend probes, GUI account/history/task checks, fresh browser login, and Mac-style local-host dispatch. Passing one does not establish the others. Integrated release evidence must record the exact artifact, local date/timezone, account scope, and observed result without including names, IDs, message text, or credentials.
 
-Remaining parity includes proven fresh sign-in/revocation, device/local-host registration and dispatch, streaming/approvals/cancel/resume, task creation/editing, local file writes, browser/app/screen connectors, and durable Linux background work. The feature matrix is in [feature-parity.md](feature-parity.md).
+Remaining parity includes a live-pressed approval decision and revocation during an in-flight invocation, a durable approval policy store, task creation/editing, resume, browser/app/screen connectors beyond the approval-gated file manifest, and durable Linux background work. Fresh sign-in, local-host registration/dispatch, streaming, approval reads/decisions, cancel, and approval-gated local file writes are implemented and — where the roadmap says so — proven live. The feature matrix is in [feature-parity.md](feature-parity.md).
