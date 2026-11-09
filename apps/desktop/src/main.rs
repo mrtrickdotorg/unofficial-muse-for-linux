@@ -60,17 +60,27 @@ const DARK_THEME_CSS: &str = r#"
 window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", system-ui, sans-serif; }
 window.dark-window { background-color: #0d0d10; }
 scrolledwindow viewport { background-color: transparent; }
-.navigation-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 16px 12px; min-width: 188px; }
-.brand-row { padding: 2px 6px 16px; }
+.app-sidebar { background-color: #131318; }
+.icon-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 12px 8px; }
+.side-panel-wrap { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 12px 10px; }
+.side-panel { padding: 0 2px; }
+.panel-list { background: transparent; }
+.panel-list row { padding: 7px 10px; border-radius: 8px; background: transparent; color: #d7d7dd; }
+.panel-list row:hover { background-color: rgba(255, 255, 255, 0.05); }
+.panel-list row:selected { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; }
+.panel-item-label { font-size: 13.5px; }
+.panel-heading { color: #8e8e99; font-size: 11.5px; font-weight: 700; padding: 10px 10px 4px; }
+.panel-title { color: #f4f4f6; font-size: 15px; font-weight: 700; padding: 2px 4px 4px; }
+.panel-copy { color: #b3b3bc; font-size: 13px; padding: 0 4px; }
+.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 16px; min-height: 32px; padding: 0 10px; font-size: 13.5px; color: #f4f4f6; }
+.search-pill:focus { border-color: rgba(255, 255, 255, 0.25); }
+.rail-separator { background-color: rgba(255, 255, 255, 0.08); min-height: 1px; margin: 6px 8px; }
 .brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 10px; font-weight: 700; min-width: 34px; min-height: 34px; }
-.brand-label { color: #f4f4f6; font-size: 15px; font-weight: 700; }
-.nav-section-label { color: #6f6f7a; font-size: 11px; font-weight: 700; padding: 14px 10px 5px; }
-.nav-item { min-height: 36px; padding: 0 10px; border-radius: 8px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
+.nav-item { min-width: 40px; min-height: 40px; padding: 0; border-radius: 10px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
 .nav-item:hover { background-color: rgba(255, 255, 255, 0.05); color: #f4f4f6; }
 .nav-item.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
 .nav-item:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
 .nav-icon { min-width: 20px; }
-.nav-label { padding-left: 10px; }
 .rail-button { min-width: 44px; min-height: 44px; padding: 0; border-radius: 22px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
 .rail-button:hover { background-color: rgba(255, 255, 255, 0.05); color: #ffffff; }
 .rail-button.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
@@ -99,12 +109,12 @@ scrolledwindow viewport { background-color: transparent; }
 .welcome-title { color: #f4f4f6; font-size: 22px; font-weight: 700; }
 .welcome-copy { color: #c9c9d1; }
 .settings-content { padding: 10px 2px 4px; }
-.toolbar { }
+.toolbar { padding: 2px 0 0; }
+.toolbar button { font-size: 12.5px; min-height: 28px; padding: 2px 9px; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action) { background-color: transparent; background-image: none; border-color: transparent; box-shadow: none; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action):hover { background-color: rgba(255, 255, 255, 0.06); }
-.toolbar combobox button { background-color: transparent; background-image: none; border-color: transparent; box-shadow: none; }
 .chat-bubble { padding: 11px 15px; border-radius: 16px; font-size: 15px; }
-.chat-bubble.user { background-color: #26262d; color: #f4f4f6; }
+.chat-bubble.user { background-color: #0a84ff; color: #ffffff; }
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
 .chat-status { color: #b3b3bc; padding: 2px 6px; }
@@ -112,6 +122,10 @@ scrolledwindow viewport { background-color: transparent; }
 .composer:focus-within { border-color: rgba(255, 255, 255, 0.28); }
 .composer entry { background: transparent; border: 0; box-shadow: none; font-size: 15px; }
 .composer button.suggested-action { border-radius: 19px; padding: 7px 16px; font-weight: 600; }
+.composer-pill { background-color: #1e1e24; }
+.send-round { min-width: 36px; min-height: 36px; padding: 0; border-radius: 18px; background-color: #f4f4f6; background-image: none; color: #131316; font-size: 17px; font-weight: 700; border-color: transparent; box-shadow: none; }
+.send-round:hover { background-color: #ffffff; }
+.send-round:disabled { background-color: rgba(255, 255, 255, 0.14); color: rgba(244, 244, 246, 0.45); }
 entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px; padding: 7px 11px; }
 entry:focus, searchentry:focus, textview:focus { border-color: rgba(255, 255, 255, 0.28); }
 button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 10px; padding: 7px 13px; box-shadow: none; }
@@ -239,115 +253,158 @@ fn build_ui(app: &gtk::Application) {
     // column that eats the chat area on small windows.
     let shell = gtk::Paned::new(gtk::Orientation::Horizontal);
     shell.add_css_class("app-shell");
-    shell.set_position(200);
+    shell.set_position(304);
     shell.set_resize_start_child(false);
     shell.set_shrink_start_child(false);
     shell.set_wide_handle(false);
 
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    sidebar.add_css_class("navigation-rail");
-    sidebar.set_size_request(132, -1);
-    // The rail keeps its own width; the split must not stretch it back out.
+    // muse.ai-shaped shell: a slim icon rail for the sections, then a
+    // sidebar panel whose content follows the selected section — for
+    // Chat, the conversation list itself (Main chat + Side chats).
+    let sidebar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    sidebar.add_css_class("app-sidebar");
+    // The rail and panel keep their own widths; the split must not
+    // stretch them back out.
     sidebar.set_hexpand(false);
 
-    let brand_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    brand_row.add_css_class("brand-row");
+    let rail = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    rail.add_css_class("icon-rail");
+    rail.set_size_request(56, -1);
     let brand = gtk::Label::new(Some("M"));
     brand.add_css_class("brand-mark");
-    let brand_label = gtk::Label::new(Some("Muse"));
-    brand_label.add_css_class("brand-label");
-    brand_label.set_halign(gtk::Align::Start);
-    brand_row.append(&brand);
-    brand_row.append(&brand_label);
-    sidebar.append(&brand_row);
-
-    let primary_heading = gtk::Label::new(Some("WORKSPACE"));
-    primary_heading.add_css_class("nav-section-label");
-    primary_heading.set_halign(gtk::Align::Start);
-    sidebar.append(&primary_heading);
+    brand.set_halign(gtk::Align::Center);
+    brand.set_tooltip_text(Some("Unofficial Muse client for Linux"));
+    rail.append(&brand);
     let chats_nav = nav_button(
         "chat-symbolic",
         "Chat",
         "Chat with your connected Muse account",
     );
     chats_nav.add_css_class("active");
-    sidebar.append(&chats_nav);
+    rail.append(&chats_nav);
     let files_nav = nav_button(
         "folder-symbolic",
         "Files",
         "Browse the explicitly granted local folder",
     );
-    sidebar.append(&files_nav);
+    rail.append(&files_nav);
     let tasks_nav = nav_button(
         "task-due-symbolic",
         "Reminders",
         "Local reminders and tasks",
     );
-    sidebar.append(&tasks_nav);
+    rail.append(&tasks_nav);
     let library_nav = nav_button(
         "folder-documents-symbolic",
         "Library",
         "Saved artifacts for the connected account (read-only)",
     );
-    sidebar.append(&library_nav);
-
-    let connections_heading = gtk::Label::new(Some("CONNECTIONS"));
-    connections_heading.add_css_class("nav-section-label");
-    connections_heading.set_halign(gtk::Align::Start);
-    sidebar.append(&connections_heading);
+    rail.append(&library_nav);
+    let rail_separator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    rail_separator.add_css_class("rail-separator");
+    rail.append(&rail_separator);
     let host_nav = nav_button(
         "network-server-symbolic",
         "Local host",
         "Consent, folder grants and local approvals",
     );
-    sidebar.append(&host_nav);
+    rail.append(&host_nav);
     let mail_nav = nav_button(
         "mail-symbolic",
         "Mail",
         "Read mail and approve outgoing messages",
     );
-    sidebar.append(&mail_nav);
+    rail.append(&mail_nav);
     let calendar_nav = nav_button(
         "x-office-calendar-symbolic",
         "Calendar",
         "Read calendars and approve new events",
     );
-    sidebar.append(&calendar_nav);
+    rail.append(&calendar_nav);
     let desktop_nav = nav_button(
         "video-display-symbolic",
         "Desktop",
         "Portal screenshots and URL opening",
     );
-    sidebar.append(&desktop_nav);
+    rail.append(&desktop_nav);
     let computer_control_nav = nav_button(
         "input-mouse-symbolic",
         "Computer Control",
         "Explicit portal-gated pointer and keyboard test actions",
     );
-    sidebar.append(&computer_control_nav);
-
-    let advanced_heading = gtk::Label::new(Some("ADVANCED"));
-    advanced_heading.add_css_class("nav-section-label");
-    advanced_heading.set_halign(gtk::Align::Start);
-    sidebar.append(&advanced_heading);
+    rail.append(&computer_control_nav);
+    let rail_separator_two = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    rail_separator_two.add_css_class("rail-separator");
+    rail.append(&rail_separator_two);
     let developer_nav = nav_button(
         "applications-engineering-symbolic",
         "Developer API",
         "Separate paid developer-model experiment",
     );
-    sidebar.append(&developer_nav);
+    rail.append(&developer_nav);
+    let rail_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    rail_spacer.set_vexpand(true);
+    rail.append(&rail_spacer);
+    sidebar.append(&rail);
 
-    let nav_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    nav_spacer.set_vexpand(true);
-    sidebar.append(&nav_spacer);
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    panel.add_css_class("side-panel-wrap");
+    panel.set_size_request(248, -1);
+    let panel_stack = gtk::Stack::new();
+    panel_stack.set_vexpand(true);
+    panel_stack.set_vhomogeneous(false);
+    panel_stack.set_hhomogeneous(false);
+    // Chat's panel (the conversation list) is added once the account
+    // page exists; the rest start as titled panels.
+    for (name, title, copy) in [
+        ("files", "Files", "Browse the explicitly granted local folder."),
+        (
+            "host",
+            "Local host",
+            "Consent, folder grants and local approvals for this machine.",
+        ),
+        ("mail", "Mail", "Read mail and approve outgoing messages."),
+        (
+            "calendar",
+            "Calendar",
+            "Read calendars and approve new events.",
+        ),
+        (
+            "desktop",
+            "Desktop",
+            "Portal screenshots and URL opening.",
+        ),
+        (
+            "computer-control",
+            "Computer Control",
+            "Explicit portal-gated pointer and keyboard test actions.",
+        ),
+        ("tasks", "Reminders", "Local reminders and tasks."),
+        (
+            "library",
+            "Library",
+            "Saved artifacts for the connected account (read-only).",
+        ),
+        (
+            "developer",
+            "Developer API",
+            "Separate paid developer-model experiment.",
+        ),
+    ] {
+        panel_stack.add_named(&panel_placeholder(title, copy), Some(name));
+    }
+    panel.append(&panel_stack);
 
-    // Lower-left build identity: a stale AppImage is otherwise impossible to
-    // tell apart from the build that fixed the thing being reported.
+    // Panel-bottom build identity: a stale AppImage is otherwise
+    // impossible to tell apart from the build that fixed the thing
+    // being reported.
     let build_label = gtk::Label::new(Some(&build_identity::label()));
     build_label.add_css_class("build-identity");
     build_label.set_halign(gtk::Align::Start);
+    build_label.set_wrap(true);
     build_label.set_tooltip_text(Some("Version and when this build was produced (UTC)"));
-    sidebar.append(&build_label);
+    panel.append(&build_label);
+    sidebar.append(&panel);
 
     let main_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     main_column.add_css_class("main-column");
@@ -408,6 +465,16 @@ fn build_ui(app: &gtk::Application) {
         gtk::glib::Propagation::Proceed
     });
     stack.set_visible_child_name("chats");
+    panel_stack.add_named(&account_page.threads_panel, Some("chats"));
+    panel_stack.set_visible_child_name("chats");
+    // The sidebar panel follows whichever page the stack shows, whoever
+    // asked for the switch (rail, settings popover, Open files).
+    let panel_follow = panel_stack.clone();
+    stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
+        if let Some(name) = stack.visible_child_name() {
+            panel_follow.set_visible_child_name(&name);
+        }
+    });
     let chat_page = gtk::Box::new(gtk::Orientation::Vertical, 14);
     chat_page.add_css_class("page-content");
 
@@ -1051,23 +1118,33 @@ fn build_ui(app: &gtk::Application) {
 }
 
 fn nav_button(icon_name: &str, label: &str, tooltip: &str) -> gtk::Button {
+    // Icon rail button, muse.ai-shaped: the section name lives in the
+    // tooltip and the sidebar panel title, not beside the icon.
     let button = gtk::Button::new();
-    button.set_tooltip_text(Some(tooltip));
+    button.set_tooltip_text(Some(&format!("{label} — {tooltip}")));
     button.add_css_class("nav-item");
-    button.set_hexpand(true);
-    button.set_halign(gtk::Align::Fill);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    button.set_halign(gtk::Align::Center);
     let icon = gtk::Image::from_icon_name(icon_name);
     icon.add_css_class("nav-icon");
-    icon.set_pixel_size(18);
-    let text = gtk::Label::new(Some(label));
-    text.add_css_class("nav-label");
-    text.set_halign(gtk::Align::Start);
-    text.set_hexpand(true);
-    row.append(&icon);
-    row.append(&text);
-    button.set_child(Some(&row));
+    icon.set_pixel_size(20);
+    button.set_child(Some(&icon));
     button
+}
+
+fn panel_placeholder(title: &str, copy: &str) -> gtk::Box {
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    panel.add_css_class("side-panel");
+    let heading = gtk::Label::new(Some(title));
+    heading.add_css_class("panel-title");
+    heading.set_halign(gtk::Align::Start);
+    let text = gtk::Label::new(Some(copy));
+    text.add_css_class("panel-copy");
+    text.set_wrap(true);
+    text.set_xalign(0.0);
+    text.set_halign(gtk::Align::Start);
+    panel.append(&heading);
+    panel.append(&text);
+    panel
 }
 
 fn nav_css_classes(active: bool) -> &'static [&'static str] {
@@ -1401,14 +1478,22 @@ mod tests {
         // so polish classes never silently stop applying.
         for class in [
             "app-shell",
-            "navigation-rail",
-            "brand-row",
+            "app-sidebar",
+            "icon-rail",
+            "side-panel-wrap",
+            "side-panel",
+            "panel-list",
+            "panel-item-label",
+            "panel-heading",
+            "panel-title",
+            "panel-copy",
+            "search-pill",
+            "rail-separator",
+            "composer-pill",
+            "send-round",
             "brand-mark",
-            "brand-label",
-            "nav-section-label",
             "nav-item",
             "nav-icon",
-            "nav-label",
             "rail-button",
             "main-column",
             "topbar",
