@@ -1,0 +1,17 @@
+[Unit]
+Description=Unofficial Muse for Linux — reminder runner
+Documentation=https://github.com/mrtrickdotorg/unofficial-muse-for-linux
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Installed by scripts/install-reminder-service.sh, which rewrites this
+# path to the installed binary. The runner owns no state: the reminder
+# store is the state, claims are durable and at-most-once, so a restart
+# can never duplicate a reminder.
+ExecStart=%h/.local/bin/muse-reminder-runner
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

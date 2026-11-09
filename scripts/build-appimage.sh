@@ -39,11 +39,16 @@ cd "$ROOT"
 ./scripts/test-account.sh
 cargo test --workspace --locked
 cargo build --release --locked -p unofficial-muse-for-linux
+cargo build --release --locked -p muse-reminder-runner
 
 rm -rf -- "$APPDIR"
 ACCOUNT_DIR="$APPDIR/usr/share/unofficial-muse-for-linux/account"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/metainfo" "$ACCOUNT_DIR"
 install -m 755 "$ROOT/target/release/unofficial-muse-for-linux" "$APPDIR/usr/bin/unofficial-muse-for-linux"
+# The reminder runner ships in the image so AppImage users can extract it
+# and install the user service (scripts/install-reminder-service.sh); the
+# image itself cannot register a systemd unit.
+install -m 755 "$ROOT/target/release/muse-reminder-runner" "$APPDIR/usr/bin/muse-reminder-runner"
 install -m 644 "$ROOT/resources/unofficial-muse-for-linux.appdata.xml" "$APPDIR/usr/share/metainfo/unofficial-muse-for-linux.appdata.xml"
 # Bundle only this project's typed sidecars, never the external community
 # checkout, Meta-derived protocol assets, Python environment, or account state.

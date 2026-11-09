@@ -1,10 +1,13 @@
 //! Local reminders UI over the durable `muse-tasks` store.
 //!
-//! One-shot delayed reminders only: no command execution, no background
-//! polling, no notification daemon. Every store op runs inline on an
-//! explicit button press against a private app directory (0700); due
-//! reminders surface only when the user presses Check due, and
-//! acknowledging them is a separate explicit press.
+//! One-shot delayed reminders only: no command execution, nothing leaves
+//! this machine. Every store op on this page runs inline on an explicit
+//! button press against a private app directory (0700); the page itself
+//! never polls. Firing on time is the reminder runner's job
+//! (`muse-reminder-runner`, a separate user service sharing this store
+//! under its lock): when it is installed, due reminders also arrive as
+//! desktop notifications with the app closed, and this page's Check due
+//! then finds them already marked notified.
 #![allow(unexpected_cfgs)]
 
 #[cfg(not(tasks_controller_only))]
@@ -310,11 +313,9 @@ mod native {
     pub fn build_with_dir(dir: PathBuf, preset_notice: Option<&str>) -> TasksPage {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
+        root.append(&label("Reminders · durable local tasks"));
         root.append(&label(
-            "Reminders · durable local tasks, explicit checks only",
-        ));
-        root.append(&label(
-            "One-shot local reminders. No command execution, no background polling, nothing leaves this machine. Due items appear only when you press Check due.",
+            "One-shot local reminders. No command execution, nothing leaves this machine. With the reminder service installed, due items also arrive as desktop notifications; here they appear when you press Check due.",
         ));
 
         let create_heading = label("New reminder");

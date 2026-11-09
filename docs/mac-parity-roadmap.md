@@ -360,6 +360,20 @@ degraded to time-only and documented as such.
 *Gate:* a task created in the app runs while the window is closed, notifies, survives reboot without
 duplicating, can be stopped, and leaves an audit trail.
 
+*The durable local half has its engine and runner (Nov 9).* The store stopped being
+single-process: `TaskStore::open` now takes an exclusive advisory lock (`tasks.lock`) held for the
+handle's lifetime, so the app and a second process can share one directory in short transactions,
+and the kernel frees the lock if a holder dies. On top of it, `claim_due` claims everything due in
+one atomic persist — the scheduler's at-most-once dispatch step: claim first, deliver after, so a
+crash can lose a notification but can never duplicate one, and anything unclaimed fires on the next
+cycle however late (catch-up by construction). `muse-reminder-runner` is the headless half: a small
+binary that cycles claim → `notify-send` (the session's `org.freedesktop.Notifications` server) →
+sleep, owns no state of its own, and logs failures by task id only. It ships in the AppImage and
+installs as a user service via `scripts/install-reminder-service.sh` (unit in
+`resources/systemd/`). Still open in this phase: proving the gate live on a real desktop (a task
+firing with the window closed, across a reboot), the Tasks page reflecting runner state without a
+press, and location reminders (documented as time-only, per the work list).
+
 *Cancellation from Linux is wired (Nov 9).* The route table's only schedule mutation is
 `tasks.delete` (DELETE /api/tasks/{job_id}) — there is no create, edit or enable/disable route, so
 creation stays conversational (ask the agent) rather than being invented here. The bridge gained a
