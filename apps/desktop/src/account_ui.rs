@@ -1025,6 +1025,9 @@ mod native {
 
     pub struct AccountPage {
         pub root: gtk::Box,
+        /// The muse.ai-shaped sidebar content (search, Main chat, Side
+        /// chats) for the shell to embed beside the icon rail.
+        pub threads_panel: gtk::Box,
         pub settings: gtk::Expander,
         pub cancel_login: Rc<dyn Fn()>,
         pub host_context: AccountContext,
@@ -1060,7 +1063,9 @@ mod native {
         connection_notice: gtk::Label,
         identity: gtk::Label,
         chip: gtk::Label,
-        threads: gtk::ComboBoxText,
+        thread_main_list: gtk::ListBox,
+        thread_list: gtk::ListBox,
+        thread_search: gtk::Entry,
         threads_key: RefCell<String>,
         scope_label: gtk::Label,
         refresh: gtk::Button,
@@ -1731,12 +1736,8 @@ mod native {
         chat.append(&column);
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         toolbar.add_css_class("toolbar");
-        let threads = gtk::ComboBoxText::new();
-        threads.set_hexpand(true);
-        threads.set_tooltip_text(Some("Main conversation or actual service-provided side chats. Archived sessions are labeled; no local/synthetic sessions are created."));
         let refresh = gtk::Button::with_label("Refresh shared data");
         let older = gtk::Button::with_label("Load older (+50, max 200)");
-        toolbar.append(&threads);
         toolbar.append(&refresh);
         let approvals_refresh = gtk::Button::with_label("Check approvals");
         approvals_refresh.set_tooltip_text(Some(
@@ -1750,6 +1751,62 @@ mod native {
         ));
         toolbar.append(&grants_refresh);
         column.append(&toolbar);
+
+        // The sidebar panel, muse.ai-shaped: a search box, the main
+        // conversation, then the service-provided side chats as a list.
+        // The shell embeds this next to the icon rail; selection here is
+        // the same scope change the old toolbar dropdown drove. No
+        // local or synthetic sessions are ever created.
+        let threads_panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        threads_panel.add_css_class("side-panel");
+        let thread_search = gtk::Entry::new();
+        thread_search.set_placeholder_text(Some("Search"));
+        thread_search.add_css_class("search-pill");
+        thread_search.set_icon_from_icon_name(
+            gtk::EntryIconPosition::Primary,
+            Some("system-search-symbolic"),
+        );
+        thread_search.set_tooltip_text(Some(
+            "Filters the side-chat list by title. It never searches message contents.",
+        ));
+        threads_panel.append(&thread_search);
+        let thread_main_list = gtk::ListBox::new();
+        thread_main_list.add_css_class("panel-list");
+        thread_main_list.set_selection_mode(gtk::SelectionMode::Single);
+        let main_row = gtk::ListBoxRow::new();
+        main_row.set_widget_name("main");
+        let main_row_label = label("Main chat");
+        main_row_label.add_css_class("panel-item-label");
+        main_row.set_child(Some(&main_row_label));
+        thread_main_list.append(&main_row);
+        threads_panel.append(&thread_main_list);
+        let side_chats_heading = label("Side chats");
+        side_chats_heading.add_css_class("panel-heading");
+        threads_panel.append(&side_chats_heading);
+        let thread_list = gtk::ListBox::new();
+        thread_list.add_css_class("panel-list");
+        thread_list.set_selection_mode(gtk::SelectionMode::Single);
+        let thread_scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        thread_scroll.set_child(Some(&thread_list));
+        threads_panel.append(&thread_scroll);
+        {
+            let search = thread_search.clone();
+            thread_list.set_filter_func(move |row| {
+                let query = search.text().to_string().to_lowercase();
+                if query.is_empty() {
+                    return true;
+                }
+                let title = row
+                    .child()
+                    .and_downcast::<gtk::Label>()
+                    .map(|label| label.text().to_string().to_lowercase())
+                    .unwrap_or_default();
+                title.contains(&query)
+            });
+        }
         let scope_label = label("No conversation selected until account connection.");
         column.append(&scope_label);
         let live_notice = label("");
@@ -1797,16 +1854,19 @@ mod native {
         column.append(&acknowledge);
         let composer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         composer.add_css_class("composer");
+        composer.add_css_class("composer-pill");
         let prompt = gtk::Entry::new();
         prompt.set_hexpand(true);
-        prompt.set_placeholder_text(Some("Message your existing Muse agent…"));
+        prompt.set_placeholder_text(Some("Message"));
         let stop = gtk::Button::with_label("Stop agent");
         stop.set_tooltip_text(Some(
             "Asks the service to stop the run it has in flight. The service answers whether anything was actually stopped, and this window reports that answer instead of assuming it.",
         ));
-        let send = gtk::Button::with_label("Send to Muse");
-        send.add_css_class("suggested-action");
-        send.add_css_class("primary-action");
+        let send = gtk::Button::with_label("↑");
+        send.add_css_class("send-round");
+        send.set_tooltip_text(Some(
+            "Send to Muse — sends once to your existing Muse agent and may trigger external actions. No local files are uploaded automatically, and a send is never repeated without you.",
+        ));
         send.set_tooltip_text(Some(
             "Sends once to your existing Muse agent and may trigger external actions. No local files are uploaded automatically, and a send is never repeated without you.",
         ));
@@ -1865,7 +1925,9 @@ mod native {
             connection_notice,
             identity,
             chip: chip.clone(),
-            threads,
+            thread_main_list,
+            thread_list,
+            thread_search,
             threads_key: RefCell::new(String::new()),
             scope_label,
             live_notice,
@@ -1940,21 +2002,47 @@ mod native {
             ui.older.connect_clicked(move |_| u.read(true, false));
         }
         {
+            // Sidebar selection drives the same scope change the toolbar
+            // dropdown used to: picking a conversation loads it.
             let u = Rc::clone(&ui);
-            ui.threads.connect_changed(move |combo| {
+            ui.thread_main_list
+                .connect_selected_rows_changed(move |list| {
+                    if u.rendering.get() || list.selected_row().is_none() {
+                        return;
+                    }
+                    let changed = u.state.borrow_mut().select_thread(None);
+                    if changed {
+                        u.prompt.set_text("");
+                        u.render();
+                        u.read(false, false);
+                    }
+                });
+        }
+        {
+            let u = Rc::clone(&ui);
+            ui.thread_list.connect_selected_rows_changed(move |list| {
                 if u.rendering.get() {
                     return;
                 }
-                let Some(id) = combo.active_id() else {
+                let Some(row) = list.selected_row() else {
                     return;
                 };
-                let scope = id.strip_prefix("thread:").map(str::to_string);
-                let changed = u.state.borrow_mut().select_thread(scope);
+                let name = row.widget_name();
+                let Some(scope) = name.strip_prefix("thread:").map(str::to_string) else {
+                    return;
+                };
+                let changed = u.state.borrow_mut().select_thread(Some(scope));
                 if changed {
                     u.prompt.set_text("");
                     u.render();
                     u.read(false, false);
                 }
+            });
+        }
+        {
+            let list = ui.thread_list.clone();
+            ui.thread_search.connect_changed(move |_| {
+                list.invalidate_filter();
             });
         }
         {
@@ -2050,6 +2138,7 @@ mod native {
         });
         AccountPage {
             root,
+            threads_panel,
             settings,
             cancel_login,
             host_context,
@@ -2867,7 +2956,9 @@ mod native {
             self.refresh.set_sensitive(connected && idle);
             self.older
                 .set_sensitive(connected && idle && state.limit < 200);
-            self.threads.set_sensitive(connected && idle);
+            self.thread_main_list.set_sensitive(connected && idle);
+            self.thread_list.set_sensitive(connected && idle);
+            self.thread_search.set_sensitive(connected);
             // A stop press only needs a connection; whether anything was
             // actually stopped is the service's answer, not this button's.
             self.cancel.set_sensitive(connected && state.busy.is_none());
@@ -2930,8 +3021,10 @@ mod native {
             );
             if self.threads_key.borrow().as_str() != threads_key {
                 *self.threads_key.borrow_mut() = threads_key;
-                self.threads.remove_all();
-                self.threads.append(Some("main"), "Main conversation");
+                while let Some(row) = self.thread_list.row_at_index(0) {
+                    self.thread_list.remove(&row);
+                }
+                let mut selected_row: Option<gtk::ListBoxRow> = None;
                 if let Some(account) = &state.account {
                     for thread in &account.threads {
                         let archived = if thread.archived { " [archived]" } else { "" };
@@ -2940,25 +3033,47 @@ mod native {
                             .as_deref()
                             .map(|s| format!(" · {s}"))
                             .unwrap_or_default();
-                        self.threads.append(
-                            Some(&format!("thread:{}", thread.session_id)),
-                            &format!("{}{archived}{updated}", thread.title),
-                        );
+                        let row = gtk::ListBoxRow::new();
+                        row.set_widget_name(&format!("thread:{}", thread.session_id));
+                        let row_label =
+                            label(&format!("{}{archived}{updated}", thread.title));
+                        row_label.add_css_class("panel-item-label");
+                        row.set_child(Some(&row_label));
+                        if state.scope.as_deref() == Some(thread.session_id.as_str()) {
+                            selected_row = Some(row.clone());
+                        }
+                        self.thread_list.append(&row);
                     }
                 }
-                let selected = state
-                    .scope
-                    .as_ref()
-                    .map(|id| format!("thread:{id}"))
-                    .unwrap_or_else(|| "main".into());
-                // A disappearing service thread keeps its exact scope; never silently fall back to main.
-                if !self.threads.set_active_id(Some(&selected)) {
-                    self.threads.append(
-                        Some(&selected),
+                // A disappearing service thread keeps its exact scope;
+                // never silently fall back to the main conversation.
+                if let Some(scope) = &state.scope
+                    && selected_row.is_none()
+                {
+                    let row = gtk::ListBoxRow::new();
+                    row.set_widget_name(&format!("thread:{scope}"));
+                    let row_label = label(
                         "Selected conversation (not in current service thread list)",
                     );
-                    self.threads.set_active_id(Some(&selected));
+                    row_label.add_css_class("panel-item-label");
+                    row.set_child(Some(&row_label));
+                    selected_row = Some(row.clone());
+                    self.thread_list.append(&row);
                 }
+                match (&state.scope, &selected_row) {
+                    (None, _) => {
+                        if let Some(main_row) = self.thread_main_list.row_at_index(0) {
+                            self.thread_main_list.select_row(Some(&main_row));
+                        }
+                        self.thread_list.unselect_all();
+                    }
+                    (Some(_), Some(row)) => {
+                        self.thread_main_list.unselect_all();
+                        self.thread_list.select_row(Some(row));
+                    }
+                    _ => {}
+                }
+                self.thread_list.invalidate_filter();
             }
             self.scope_label.set_text(&format!(
                 "Conversation scope: {} · latest {} service events",
