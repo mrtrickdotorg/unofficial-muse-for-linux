@@ -280,7 +280,7 @@ impl Controller {
         });
         Ok(())
     }
-    fn grant(&self, path: PathBuf, consent: bool) -> Result<(), &'static str> {
+    fn grant(&self, path: PathBuf, consent: bool, writable: bool) -> Result<(), &'static str> {
         if !consent || self.phase != Phase::Disconnected || self.workers.load(Ordering::SeqCst) != 0
         {
             return Err("Stop the host and explicitly consent before granting a folder.");
@@ -291,10 +291,13 @@ impl Controller {
         let broker = self.broker.clone();
         self.work(move || {
             Completed::Grant(
-                broker
-                    .grant(&path)
-                    .map(|_| ())
-                    .map_err(|_| "Folder access was denied."),
+                (if writable {
+                    broker.grant(&path)
+                } else {
+                    broker.grant_read_only(&path)
+                })
+                .map(|_| ())
+                .map_err(|_| "Folder access was denied."),
             )
         })
     }
@@ -641,6 +644,7 @@ mod native {
         device: SharedDevice,
         root: gtk::Box,
         pub(super) consent: gtk::CheckButton,
+        read_only: gtk::CheckButton,
         pub(super) choose: gtk::Button,
         pub(super) start: gtk::Button,
         stop: gtk::Button,
@@ -664,12 +668,16 @@ mod native {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
         root.append(&label("Local host · your existing Muse agent on Linux"));
-        root.append(&label("Separate from account connection and the read-only Local files browser. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. Every write requires your local Allow once approval of the exact path and, where text changes, the complete resulting content: create a new file, edit one exact occurrence, rename, or move a file to the Trash. Nothing is overwritten, permanently deleted, or run as a shell command."));
+        root.append(&label("Separate from account connection and the read-only Local files browser. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. In a read-only folder every write is refused outright; in a read-write folder, every write requires your local Allow once approval of the exact path and, where text changes, the complete resulting content: create a new file, edit one exact occurrence, rename, or move a file to the Trash. Nothing is overwritten, permanently deleted, or run as a shell command."));
         root.append(&label(IDENTITY_COPY));
         let consent = gtk::CheckButton::with_label(
             "I explicitly enable this local host and allow granted filenames and text to reach Muse.",
         );
         root.append(&consent);
+        let read_only = gtk::CheckButton::with_label(
+            "Grant read-only: folders granted while this is on can be read and searched, but Muse can never propose a write in them — the broker refuses mutations before any approval.",
+        );
+        root.append(&read_only);
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         toolbar.add_css_class("toolbar");
         let choose = gtk::Button::with_label("Grant a folder to Muse…");
@@ -715,6 +723,7 @@ mod native {
             device,
             root: root.clone(),
             consent,
+            read_only,
             choose,
             start,
             stop,
@@ -832,7 +841,7 @@ mod native {
                         && (u.context)().is_some()
                         && let Some(path) = chooser.file().and_then(|f| f.path())
                     {
-                        let result = u.host.borrow().grant(path, true);
+                        let result = u.host.borrow().grant(path, true, !u.read_only.is_active());
                         if let Err(e) = result {
                             u.host.borrow_mut().notice = e.into();
                         }
@@ -855,6 +864,7 @@ mod native {
             let working = host.workers.load(Ordering::SeqCst) > 0;
             let connected = (self.context)().is_some();
             self.consent.set_sensitive(idle);
+            self.read_only.set_sensitive(idle);
             self.choose.set_sensitive(
                 idle && !working
                     && connected
@@ -886,7 +896,15 @@ mod native {
             } else {
                 grants
                     .iter()
-                    .map(|g| format!("{} · {}\n{}", g.label, g.id, g.root.display()))
+                    .map(|g| {
+                        format!(
+                            "{} · {}{}\n{}",
+                            g.label,
+                            g.id,
+                            if g.writable { "" } else { " · read-only" },
+                            g.root.display()
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n\n")
             });
@@ -1146,7 +1164,7 @@ for line in sys.stdin:
     fn real_transport_broker_approval_creates_only_after_allow_and_delivers_result() {
         let f = Fixture::new("files.create_text", "exact full content\n", 30000);
         let mut host = Controller::new();
-        host.grant(f.0.clone(), true).unwrap();
+        host.grant(f.0.clone(), true, true).unwrap();
         pump(&mut host, |h| !h.broker.grants().is_empty());
         host.start(Some(f.config()), true).unwrap();
         assert_eq!(host.phase, Phase::Connecting);
@@ -1179,7 +1197,7 @@ for line in sys.stdin:
             serde_json::from_str(&fs::read_to_string(f.0.join("reply")).unwrap()).unwrap();
         assert_eq!(reply["id"], "one");
         assert_eq!(reply["ok"], true);
-        assert!(host.grant(f.0.clone(), true).is_err());
+        assert!(host.grant(f.0.clone(), true, true).is_err());
         host.stop();
         assert!(!device.active.load(Ordering::SeqCst));
         assert!(host.cards.is_empty());
@@ -1331,7 +1349,7 @@ for line in sys.stdin:
                 if outcome == "expiry" { 500 } else { 30000 },
             );
             let mut host = Controller::new();
-            host.grant(f.0.clone(), true).unwrap();
+            host.grant(f.0.clone(), true, true).unwrap();
             pump(&mut host, |h| !h.broker.grants().is_empty());
             host.start(Some(f.config()), true).unwrap();
             pump(&mut host, |h| !h.cards.is_empty());
@@ -1396,7 +1414,7 @@ for line in sys.stdin:
     fn activity_log_records_redacted_lifecycle_and_resets_on_stop() {
         let f = Fixture::new("files.create_text", "exact full content\n", 30000);
         let mut host = Controller::new();
-        host.grant(f.0.clone(), true).unwrap();
+        host.grant(f.0.clone(), true, true).unwrap();
         pump(&mut host, |h| !h.broker.grants().is_empty());
         host.start(Some(f.config()), true).unwrap();
         pump(&mut host, |h| !h.cards.is_empty());
@@ -1462,7 +1480,7 @@ for line in sys.stdin:
     fn activity_log_records_expiry_and_caps_oldest() {
         let f = Fixture::new("files.create_text", "never", 500);
         let mut host = Controller::new();
-        host.grant(f.0.clone(), true).unwrap();
+        host.grant(f.0.clone(), true, true).unwrap();
         pump(&mut host, |h| !h.broker.grants().is_empty());
         host.start(Some(f.config()), true).unwrap();
         pump(&mut host, |h| !h.cards.is_empty());
@@ -1481,7 +1499,7 @@ for line in sys.stdin:
     fn activity_log_records_revoke_boundary_and_clear_is_display_only() {
         let f = Fixture::new("files.create_text", "never", 30000);
         let mut host = Controller::new();
-        host.grant(f.0.clone(), true).unwrap();
+        host.grant(f.0.clone(), true, true).unwrap();
         pump(&mut host, |h| !h.broker.grants().is_empty());
         host.start(Some(f.config()), true).unwrap();
         pump(&mut host, |h| !h.cards.is_empty());

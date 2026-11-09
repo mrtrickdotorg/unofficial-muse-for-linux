@@ -346,6 +346,14 @@ and outcome both in the Activity log; revoke stops it mid-task; denied operation
 *Why here:* highest value per unit of work in the whole plan — the capabilities exist and are tested
 for human use; only the dispatch surface is missing.
 
+*Per-root modes landed (Nov 9).* A grant is now read-write or read-only, chosen by a "Grant
+read-only" toggle on the Local host page at grant time. The broker carries the mode on the grant,
+the manifest marks it (`access: read_only` / `read_write`) so the agent knows before it tries, and
+a mutation under a read-only root is refused with `read_only` before a proposal exists — the
+person set that boundary at grant time and is never asked to police it per file. Reads and search
+are unaffected. Still open in this phase: cross-root move, content search, and the live gate
+(approval-gated create, revocation mid-invocation).
+
 ### P4 — Scheduled tasks and durable background work (L)
 
 *Gap:* Mac has one-time, recurring and location reminders, delivered as chat messages, with approvals

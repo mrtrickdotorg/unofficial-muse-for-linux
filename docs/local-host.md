@@ -12,6 +12,8 @@ This is a capability slice toward Muse-for-Mac parity, not a claim of full parit
 
 ## Privacy and filesystem authority
 
+A grant is read-write or read-only, chosen when the folder is granted. Under a read-only grant the broker refuses every mutation (`read_only`) before a proposal exists, while reads and search run as usual; the registered manifest marks each grant's mode so the agent knows the boundary before invoking. The mode is fixed for the grant's lifetime — changing it means revoking and re-granting.
+
 Roots are pinned directory descriptors, not paths checked once and reopened later. Linux `openat2` beneath/no-symlink resolution confines remote paths. Replacing a granted pathname cannot redirect the capability to a different root. The grant follows the original directory inode after a rename; this is an inode-capability boundary, not a same-UID process sandbox.
 
 The service sees opaque grant IDs and generic folder labels in the registered command definitions, never the absolute local root. Search results and read contents deliberately leave the device only under the explicit remote folder grant. Private absolute paths may be displayed in local settings; do not log proposals or tool results.
