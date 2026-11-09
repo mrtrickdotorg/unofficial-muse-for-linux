@@ -74,6 +74,9 @@ struct Pending {
     root: Arc<File>,
     /// The granted path, used only for a Trash record's absolute origin.
     root_path: PathBuf,
+    /// Destination root for a cross-folder rename; None means the
+    /// destination lives under `root` like every other operation.
+    target_root: Option<Arc<File>>,
     /// Exact file bytes at proposal time, for an edit that must not clobber a
     /// file the person never saw.
     before: Option<Vec<u8>>,
@@ -279,10 +282,11 @@ impl ToolBroker {
         let mut commands = serde_json::Map::new();
         for (name,description,fields) in [
             ("files.search","Search filenames in an explicitly granted folder.",vec![("grant_id","Granted folder ID"),("query","Case-sensitive filename substring; max 256 bytes")]),
+            ("files.search_content","Search file contents in an explicitly granted folder. Returns matching lines (path, 1-based line number, line text) from UTF-8 text files only; bounded in files read, matches returned and line length.",vec![("grant_id","Granted folder ID"),("query","Case-sensitive text substring; max 256 bytes")]),
             ("files.read_text","Read at most 64 KiB of UTF-8 text inside a granted folder.",vec![("grant_id","Granted folder ID"),("path","Strict relative path")]),
             ("files.create_text","Propose a NEW UTF-8 text file. Always requires local approval of exact path and content; never overwrite.",vec![("grant_id","Granted folder ID"),("path","Strict relative new-file path; parent must exist"),("content","Exact UTF-8 text, at most 65536 bytes")]),
             ("files.edit","Propose replacing ONE exact occurrence of text in an existing UTF-8 file. Always requires local approval of the exact resulting content; fails if the text is absent, ambiguous, or the file changed after approval.",vec![("grant_id","Granted folder ID"),("path","Strict relative path to an existing file"),("old_text","Exact text to replace; must occur exactly once"),("new_text","Exact replacement text")]),
-            ("files.rename","Propose renaming or moving a file inside one granted folder. Always requires local approval; never overwrites an existing name.",vec![("grant_id","Granted folder ID"),("path","Strict relative source path"),("new_path","Strict relative destination path; must not exist")]),
+            ("files.rename","Propose renaming a file inside one granted folder, or moving it into another granted folder by also passing target_grant_id. Always requires local approval; never overwrites an existing name.",vec![("grant_id","Granted folder ID"),("path","Strict relative source path"),("new_path","Strict relative destination path; must not exist")]),
             ("files.delete","Propose moving a regular file to the desktop Trash. Always requires local approval; nothing is unlinked and the file stays recoverable.",vec![("grant_id","Granted folder ID"),("path","Strict relative path to an existing file")]),
         ] {
             let required: serde_json::Map<String, Value> = fields
@@ -297,14 +301,25 @@ impl ToolBroker {
                 })
                 .collect();
             let names:Vec<_>=fields.iter().map(|(key,_)|*key).collect();
-            commands.insert(name.into(),json!({"description":description,"required":required,"optional":{},"timeout_ms":120000,"parameters":{"type":"object","properties":required,"required":names,"additionalProperties":false}}));
+            // files.rename's one optional parameter: the destination folder
+            // for a cross-folder move. It joins the schema's properties (so
+            // the strict additionalProperties check admits it) but never the
+            // required list.
+            let mut optional = serde_json::Map::new();
+            let mut properties = required.clone();
+            if name == "files.rename" {
+                let target_param = json!({"type":"string","description":"Destination granted folder ID for a move into another folder; omit to rename within the source folder","enum":grant_ids});
+                optional.insert("target_grant_id".into(), target_param.clone());
+                properties.insert("target_grant_id".into(), target_param);
+            }
+            commands.insert(name.into(),json!({"description":description,"required":required,"optional":optional,"timeout_ms":120000,"parameters":{"type":"object","properties":properties,"required":names,"additionalProperties":false}}));
         }
         json!({"commands_v2":commands,"grants":grants})
     }
     pub fn invoke(&self, invocation: Invocation) -> Decision {
         let started = Instant::now();
         let deadline = started + Duration::from_millis(invocation.timeout_ms.min(120_000));
-        let (root, root_path, epoch, writable) = {
+        let (root, root_path, epoch, writable, target_grant) = {
             let mut state = self.state.lock().unwrap();
             if invocation.id.is_empty() || invocation.id.len() > 256 {
                 return Decision::Reply(fail(&invocation.id, "invalid_id"));
@@ -321,6 +336,7 @@ impl ToolBroker {
                 let keys: &[&str] = match invocation.command.as_str() {
                     "files.read_text" => &["grant_id", "path"],
                     "files.search" => &["grant_id", "query"],
+                    "files.search_content" => &["grant_id", "query"],
                     "files.create_text" => &["grant_id", "path", "content"],
                     "files.edit" => &["grant_id", "path", "old_text", "new_text"],
                     "files.rename" => &["grant_id", "path", "new_path"],
@@ -331,11 +347,23 @@ impl ToolBroker {
                     .params
                     .as_object()
                     .ok_or(ToolError("invalid_params"))?;
-                if params.len() != keys.len()
-                    || keys
-                        .iter()
-                        .any(|key| params.get(*key).and_then(Value::as_str).is_none())
-                {
+                // files.rename alone takes one optional parameter:
+                // target_grant_id names a second granted folder to move into.
+                let params_valid = if invocation.command == "files.rename" {
+                    (params.len() == 3 || params.len() == 4)
+                        && keys
+                            .iter()
+                            .all(|key| params.get(*key).and_then(Value::as_str).is_some())
+                        && params
+                            .get("target_grant_id")
+                            .is_none_or(|v| v.as_str().is_some())
+                } else {
+                    params.len() == keys.len()
+                        && keys
+                            .iter()
+                            .all(|key| params.get(*key).and_then(Value::as_str).is_some())
+                };
+                if !params_valid {
                     return Err(ToolError("invalid_params"));
                 }
                 if Instant::now() >= deadline {
@@ -350,17 +378,36 @@ impl ToolBroker {
                     if query.len() > 256 || query.contains(['/', '\0']) {
                         return Err(ToolError("invalid_params"));
                     }
+                } else if invocation.command == "files.search_content" {
+                    // A content query is text, not a path: '/' is legitimate,
+                    // emptiness and NUL are not.
+                    let query = params["query"].as_str().unwrap();
+                    if query.is_empty() || query.len() > 256 || query.contains('\0') {
+                        return Err(ToolError("invalid_params"));
+                    }
                 } else {
                     valid_path(params["path"].as_str().unwrap())?;
                     if invocation.command == "files.rename" {
                         valid_path(params["new_path"].as_str().unwrap())?;
                     }
                 }
+                // A cross-folder move resolves its destination grant here,
+                // under the same lock and epoch as the source: an unknown
+                // destination is not_granted, exactly like an unknown source,
+                // and naming the source folder again is a plain rename.
+                let target = match params.get("target_grant_id").and_then(Value::as_str) {
+                    Some(tid) if tid != grant.info.id => {
+                        let dest = state.grants.get(tid).ok_or(ToolError("not_granted"))?;
+                        Some((dest.fd.clone(), dest.info.root.clone(), dest.info.writable))
+                    }
+                    _ => None,
+                };
                 Ok((
                     grant.fd.clone(),
                     grant.info.root.clone(),
                     state.epoch,
                     grant.info.writable,
+                    target,
                 ))
             })();
             match result {
@@ -374,14 +421,22 @@ impl ToolBroker {
         ) {
             // A read-only grant refuses mutations here, before any proposal
             // exists: there is no approval to ask for, because the person
-            // already answered when they granted the folder.
-            if !writable {
+            // already answered when they granted the folder. A cross-folder
+            // move writes into TWO folders, so a read-only destination
+            // refuses it the same way.
+            if !writable || target_grant.as_ref().is_some_and(|(_, _, w)| !w) {
                 return Decision::Reply(fail(&invocation.id, "read_only"));
             }
-            return self.propose(invocation, root, root_path, epoch, deadline);
+            return self.propose(invocation, root, root_path, epoch, deadline, target_grant);
         }
         let result = if invocation.command == "files.search" {
             search(
+                &root,
+                invocation.params["query"].as_str().unwrap(),
+                deadline,
+            )
+        } else if invocation.command == "files.search_content" {
+            search_content(
                 &root,
                 invocation.params["query"].as_str().unwrap(),
                 deadline,
@@ -413,6 +468,7 @@ impl ToolBroker {
         root_path: PathBuf,
         epoch: u64,
         deadline: Instant,
+        target_grant: Option<(Arc<File>, PathBuf, bool)>,
     ) -> Decision {
         let id = invocation.id.clone();
         let path = invocation.params["path"].as_str().unwrap().to_string();
@@ -465,9 +521,15 @@ impl ToolBroker {
             }
             "files.rename" => {
                 let target = invocation.params["new_path"].as_str().unwrap();
-                // A missing destination parent is a broken request, not a reason
-                // to ask a person for permission that cannot be exercised.
-                if target == path || parent_of(&root, target).is_err() {
+                // The destination parent must exist in the DESTINATION root:
+                // the source root for a plain rename, the second granted
+                // folder for a cross-folder move. A missing one is a broken
+                // request, not a reason to ask a person for permission that
+                // cannot be exercised.
+                let dest_root = target_grant.as_ref().map(|(fd, _, _)| fd).unwrap_or(&root);
+                if (target_grant.is_none() && target == path)
+                    || parent_of(dest_root, target).is_err()
+                {
                     return Decision::Reply(fail(&id, "rename_denied"));
                 }
                 if open_beneath(&root, &path, false).is_err() {
@@ -475,7 +537,11 @@ impl ToolBroker {
                 }
                 (
                     "files.rename",
-                    "Rename a file",
+                    if target_grant.is_some() {
+                        "Move a file to another granted folder"
+                    } else {
+                        "Rename a file"
+                    },
                     Some(target.to_string()),
                     String::new(),
                     None,
@@ -525,6 +591,7 @@ impl ToolBroker {
                 request: request.clone(),
                 root,
                 root_path,
+                target_root: target_grant.map(|(fd, _, _)| fd),
                 before,
                 deadline,
                 epoch,
@@ -842,8 +909,9 @@ fn commit_rename(pending: &Pending) -> Result<Value, ToolError> {
     let source = open_beneath(&pending.root, path, false)?;
     let meta = source.metadata().map_err(|_| ToolError("io_denied"))?;
     let (dev, ino) = (meta.dev(), meta.ino());
+    let dest_root = pending.target_root.as_deref().unwrap_or(&pending.root);
     let from_parent = parent_of(&pending.root, path)?;
-    let to_parent = parent_of(&pending.root, target)?;
+    let to_parent = parent_of(dest_root, target)?;
     let from_name = cstr(split_path(path).1)?;
     let to_name = cstr(split_path(target).1)?;
     // SAFETY: fds and C strings remain live; RENAME_NOREPLACE makes an existing
@@ -858,6 +926,12 @@ fn commit_rename(pending: &Pending) -> Result<Value, ToolError> {
         )
     };
     if rc != 0 {
+        // renameat2 between two granted roots on different filesystems
+        // cannot link them; that is its own answer, not a generic denial —
+        // the caller can copy via create+delete under separate approvals.
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EXDEV) {
+            return Err(ToolError("cross_device"));
+        }
         return Err(ToolError("rename_denied"));
     }
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -1189,6 +1263,136 @@ fn search(root: &File, query: &str, deadline: Instant) -> Result<Value, ToolErro
     }
     paths.sort();
     Ok(json!({"paths":paths,"scanned":scanned,"truncated":false}))
+}
+/// Content search: the same confined walk as [`search`], but a regular file
+/// is opened (beneath the root, no symlinks) and its lines are matched.
+/// Bounds keep one call finite: the walk's own 10,000-entry cap, at most 200
+/// files opened, at most 50 matches returned, each line's text cut at 200
+/// chars. Non-UTF-8 files are skipped, never errored — a folder of mixed
+/// content is normal, and filename search's strictness about *names* does
+/// not extend to file *bytes*.
+fn search_content(root: &File, query: &str, deadline: Instant) -> Result<Value, ToolError> {
+    let mut stack = vec![(String::new(), 0usize)];
+    let mut matches: Vec<Value> = Vec::new();
+    let mut scanned = 0usize;
+    let mut files_read = 0usize;
+    while let Some((relative, depth)) = stack.pop() {
+        let directory = if relative.is_empty() {
+            // Open a fresh description: dup() would share readdir offsets across calls.
+            let how = OpenHow {
+                flags: (libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY) as u64,
+                mode: 0,
+                resolve: 0x08 | 0x04 | 0x02,
+            };
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    root.as_raw_fd(),
+                    c".".as_ptr(),
+                    &how,
+                    std::mem::size_of::<OpenHow>(),
+                )
+            };
+            if fd < 0 {
+                return Err(ToolError("io_denied"));
+            }
+            unsafe { File::from_raw_fd(fd as i32) }
+        } else {
+            open_beneath(root, &relative, true)?
+        };
+        use std::os::fd::IntoRawFd;
+        let fd = directory.into_raw_fd();
+        let raw = unsafe { libc::fdopendir(fd) };
+        if raw.is_null() {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(ToolError("io_denied"));
+        }
+        let dir = Dir(raw);
+        loop {
+            if Instant::now() >= deadline {
+                return Err(ToolError("expired"));
+            }
+            unsafe {
+                *libc::__errno_location() = 0;
+            }
+            let entry = unsafe { libc::readdir(dir.0) };
+            if entry.is_null() {
+                if unsafe { *libc::__errno_location() } != 0 {
+                    return Err(ToolError("io_denied"));
+                }
+                break;
+            }
+            let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if name.to_bytes() == b"." || name.to_bytes() == b".." {
+                continue;
+            }
+            if scanned == 10_000 {
+                return Ok(json!({"matches":matches,"scanned":scanned,"truncated":true}));
+            }
+            scanned += 1;
+            let name_str = name.to_str().map_err(|_| ToolError("invalid_utf8"))?;
+            let path = if relative.is_empty() {
+                name_str.into()
+            } else {
+                format!("{relative}/{name_str}")
+            };
+            valid_path(&path)?;
+            let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if unsafe {
+                libc::fstatat(
+                    fd,
+                    name.as_ptr(),
+                    stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err(ToolError("io_denied"));
+            }
+            let kind = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT;
+            match kind {
+                libc::S_IFREG => {
+                    if files_read == 200 {
+                        return Ok(json!({"matches":matches,"scanned":scanned,"truncated":true}));
+                    }
+                    files_read += 1;
+                    let Ok(bytes) = read_bytes(root, &path) else {
+                        continue;
+                    };
+                    let Ok(text) = std::str::from_utf8(&bytes) else {
+                        continue;
+                    };
+                    for (index, line) in text.lines().enumerate() {
+                        if line.contains(query) {
+                            let excerpt: String = line.chars().take(200).collect();
+                            matches.push(json!({
+                                "path": path,
+                                "line": index + 1,
+                                "text": excerpt,
+                            }));
+                            if matches.len() == 50 {
+                                return Ok(json!({
+                                    "matches": matches,
+                                    "scanned": scanned,
+                                    "truncated": true
+                                }));
+                            }
+                        }
+                    }
+                }
+                libc::S_IFDIR => {
+                    if depth >= 64 {
+                        return Err(ToolError("depth_limit"));
+                    }
+                    stack.push((path, depth + 1));
+                }
+                _ => return Err(ToolError("special_file")),
+            }
+        }
+    }
+    Ok(json!({"matches":matches,"scanned":scanned,"truncated":false}))
 }
 impl Default for ToolBroker {
     fn default() -> Self {

@@ -251,3 +251,176 @@ fn a_read_write_grant_still_proposes_mutations() {
         Decision::Approval(_)
     ));
 }
+
+#[test]
+fn content_search_finds_lines_and_skips_what_it_cannot_read_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("notes.txt"),
+        "first line\nthe needle is here\nlast needle line\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/deep.txt"), "deep needle\n").unwrap();
+    std::fs::write(
+        dir.path().join("bin.dat"),
+        [0xff, 0xfe, b'n', b'e', b'e', b'd', b'l', b'e'],
+    )
+    .unwrap();
+    let b = ToolBroker::new();
+    let g = b.grant_read_only(dir.path()).unwrap();
+    let Decision::Reply(reply) = b.invoke(Invocation {
+        id: "c1".into(),
+        command: "files.search_content".into(),
+        params: json!({"grant_id":g.id,"query":"needle"}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("content search is a read: it must reply, never propose");
+    };
+    assert!(reply.ok, "{reply:?}");
+    let matches = reply.output["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3, "{matches:?}");
+    assert!(matches
+        .iter()
+        .any(|m| m["path"] == "notes.txt" && m["line"] == 2 && m["text"] == "the needle is here"));
+    assert!(matches
+        .iter()
+        .any(|m| m["path"] == "notes.txt" && m["line"] == 3));
+    assert!(matches
+        .iter()
+        .any(|m| m["path"] == "sub/deep.txt" && m["line"] == 1));
+    assert_eq!(reply.output["truncated"], false);
+    // Case-sensitive, like filename search.
+    let Decision::Reply(none) = b.invoke(Invocation {
+        id: "c2".into(),
+        command: "files.search_content".into(),
+        params: json!({"grant_id":g.id,"query":"NEEDLE"}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("must reply");
+    };
+    assert!(none.ok && none.output["matches"].as_array().unwrap().is_empty());
+    // An empty query is a malformed call, not a match-everything search.
+    let Decision::Reply(bad) = b.invoke(Invocation {
+        id: "c3".into(),
+        command: "files.search_content".into(),
+        params: json!({"grant_id":g.id,"query":""}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("must reply");
+    };
+    assert!(!bad.ok && bad.error.as_deref() == Some("invalid_params"));
+}
+
+#[test]
+fn cross_folder_move_approves_into_the_second_grant() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::fs::write(a.path().join("note.txt"), "move me").unwrap();
+    std::fs::create_dir(b.path().join("inbox")).unwrap();
+    let broker = ToolBroker::new();
+    let ga = broker.grant(a.path()).unwrap();
+    let gb = broker.grant(b.path()).unwrap();
+    let Decision::Approval(request) = broker.invoke(Invocation {
+        id: "x1".into(),
+        command: "files.rename".into(),
+        params: json!({"grant_id":ga.id,"path":"note.txt","new_path":"inbox/note.txt","target_grant_id":gb.id}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("a cross-folder move must propose");
+    };
+    assert_eq!(request.operation, "files.rename");
+    assert_eq!(request.title, "Move a file to another granted folder");
+    let reply = broker.approve(&request.approval_id);
+    assert!(reply.ok, "{reply:?}");
+    assert!(!a.path().join("note.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(b.path().join("inbox/note.txt")).unwrap(),
+        "move me"
+    );
+    // An existing destination name in the other folder is refused at commit,
+    // never overwritten; an unknown destination grant is not_granted; a
+    // read-only destination refuses before any proposal exists.
+    std::fs::write(a.path().join("note.txt"), "again").unwrap();
+    let Decision::Approval(second) = broker.invoke(Invocation {
+        id: "x2".into(),
+        command: "files.rename".into(),
+        params: json!({"grant_id":ga.id,"path":"note.txt","new_path":"inbox/note.txt","target_grant_id":gb.id}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("must propose");
+    };
+    let reply = broker.approve(&second.approval_id);
+    assert!(
+        !reply.ok && reply.error.as_deref() == Some("rename_denied"),
+        "{reply:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b.path().join("inbox/note.txt")).unwrap(),
+        "move me"
+    );
+    let Decision::Reply(unknown) = broker.invoke(Invocation {
+        id: "x3".into(),
+        command: "files.rename".into(),
+        params: json!({"grant_id":ga.id,"path":"note.txt","new_path":"x.txt","target_grant_id":"grant-nope"}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("must reply");
+    };
+    assert!(!unknown.ok && unknown.error.as_deref() == Some("not_granted"));
+    let ro = ToolBroker::new();
+    let src = ro.grant(a.path()).unwrap();
+    let dst = ro.grant_read_only(b.path()).unwrap();
+    let Decision::Reply(refused) = ro.invoke(Invocation {
+        id: "x4".into(),
+        command: "files.rename".into(),
+        params: json!({"grant_id":src.id,"path":"note.txt","new_path":"inbox/note.txt","target_grant_id":dst.id}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("a read-only destination must refuse outright, never propose");
+    };
+    assert!(!refused.ok && refused.error.as_deref() == Some("read_only"));
+    // Naming the source folder as its own target is a plain rename.
+    let Decision::Approval(plain) = broker.invoke(Invocation {
+        id: "x5".into(),
+        command: "files.rename".into(),
+        params: json!({"grant_id":ga.id,"path":"note.txt","new_path":"renamed.txt","target_grant_id":ga.id}),
+        timeout_ms: 5000,
+    }) else {
+        panic!("must propose");
+    };
+    assert_eq!(plain.title, "Rename a file");
+    assert!(broker.approve(&plain.approval_id).ok);
+    assert!(a.path().join("renamed.txt").exists());
+}
+
+#[test]
+fn manifest_exposes_content_search_and_the_optional_move_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = ToolBroker::new();
+    let g = b.grant(dir.path()).unwrap();
+    let manifest = b.manifest();
+    let commands = &manifest["commands_v2"];
+    assert!(commands["files.search_content"].is_object());
+    let rename = &commands["files.rename"];
+    assert_eq!(rename["optional"]["target_grant_id"]["type"], "string");
+    assert_eq!(
+        rename["parameters"]["properties"]["target_grant_id"]["type"],
+        "string"
+    );
+    let required: Vec<&str> = rename["parameters"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(required, ["grant_id", "path", "new_path"]);
+    // The grant enum on the optional parameter lists the live grant.
+    let ids: Vec<&str> = rename["optional"]["target_grant_id"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [g.id.as_str()]);
+}

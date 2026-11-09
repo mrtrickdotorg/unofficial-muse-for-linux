@@ -13,6 +13,8 @@ use std::{
 struct Card {
     request: ApprovalRequest,
     root: PathBuf,
+    /// Destination folder for a cross-folder move; None for every other card.
+    target_root: Option<PathBuf>,
     grant_id: String,
     deadline: Instant,
     deciding: bool,
@@ -21,7 +23,14 @@ enum Completed {
     Grant(Result<(), &'static str>),
     // Boxed: an approval card carries a full proposal, and the grant variant must
     // not carry that weight through every channel send.
-    Operation(Box<Decision>, PathBuf, String, Instant, String),
+    Operation(
+        Box<Decision>,
+        PathBuf,
+        String,
+        Instant,
+        String,
+        Option<PathBuf>,
+    ),
 }
 /// Session activity log capacity: oldest entries are dropped first.
 const MAX_LOG: usize = 64;
@@ -108,8 +117,13 @@ fn persisted_node_id(directory: &std::path::Path) -> Result<String, &'static str
 /// string (paths, content) can never reach the log.
 fn safe_command(raw: &str) -> &str {
     match raw {
-        "files.search" | "files.read_text" | "files.create_text" | "files.edit"
-        | "files.rename" | "files.delete" => raw,
+        "files.search"
+        | "files.search_content"
+        | "files.read_text"
+        | "files.create_text"
+        | "files.edit"
+        | "files.rename"
+        | "files.delete" => raw,
         _ => "unknown-command",
     }
 }
@@ -312,13 +326,20 @@ impl Controller {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
-        let root = self
-            .broker
-            .grants()
-            .into_iter()
+        let grants = self.broker.grants();
+        let root = grants
+            .iter()
             .find(|g| g.id == grant_id)
-            .map(|g| g.root)
+            .map(|g| g.root.clone())
             .unwrap_or_default();
+        // A cross-folder move's card must name the destination folder too;
+        // resolve it from the same grant list the broker checks against.
+        let target_root = invocation
+            .params
+            .get("target_grant_id")
+            .and_then(|v| v.as_str())
+            .and_then(|tid| grants.iter().find(|g| g.id == tid))
+            .map(|g| g.root.clone());
         let deadline = Instant::now() + Duration::from_millis(invocation.timeout_ms.min(120000));
         let broker = self.broker.clone();
         let command = invocation.command.clone();
@@ -332,7 +353,14 @@ impl Controller {
         if self
             .work(move || {
                 let decision = run_invocation(&broker, invocation, deadline);
-                Completed::Operation(Box::new(decision), root, grant_id, deadline, command)
+                Completed::Operation(
+                    Box::new(decision),
+                    root,
+                    grant_id,
+                    deadline,
+                    command,
+                    target_root,
+                )
             })
             .is_err()
         {
@@ -370,6 +398,7 @@ impl Controller {
                 String::new(),
                 Instant::now(),
                 String::new(),
+                None,
             )
         })?;
         self.cards[index].deciding = true;
@@ -445,7 +474,7 @@ impl Controller {
                         Err(e) => e.into(),
                     }
                 }
-                Completed::Operation(decision, root, grant_id, deadline, command)
+                Completed::Operation(decision, root, grant_id, deadline, command, target_root)
                     if self.phase == Phase::Registered =>
                 {
                     match *decision {
@@ -481,6 +510,7 @@ impl Controller {
                                 self.cards.push(Card {
                                     request,
                                     root,
+                                    target_root,
                                     grant_id,
                                     deadline,
                                     deciding: false,
@@ -933,14 +963,25 @@ mod native {
                     let heading_text = match card.request.operation.as_str() {
                         "files.rename" => {
                             let target = card.request.target_path.clone().unwrap_or_default();
-                            format!(
-                                "RENAME file (no overwrite)\nGrant: {}\nFolder: {}\nRelative source: {}\nRelative destination: {}\nFull destination: {}",
-                                card.grant_id,
-                                card.root.display(),
-                                card.request.path,
-                                target,
-                                card.root.join(&target).display()
-                            )
+                            match &card.target_root {
+                                Some(dest) => format!(
+                                    "MOVE file to another folder (no overwrite)\nGrant: {}\nFolder: {}\nRelative source: {}\nDestination folder: {}\nRelative destination: {}\nFull destination: {}",
+                                    card.grant_id,
+                                    card.root.display(),
+                                    card.request.path,
+                                    dest.display(),
+                                    target,
+                                    dest.join(&target).display()
+                                ),
+                                None => format!(
+                                    "RENAME file (no overwrite)\nGrant: {}\nFolder: {}\nRelative source: {}\nRelative destination: {}\nFull destination: {}",
+                                    card.grant_id,
+                                    card.root.display(),
+                                    card.request.path,
+                                    target,
+                                    card.root.join(&target).display()
+                                ),
+                            }
                         }
                         "files.delete" => format!(
                             "MOVE TO TRASH (recoverable)\nGrant: {}\nFolder: {}\nRelative path: {}\nFull path: {}\nNothing is deleted permanently.",
@@ -1389,6 +1430,7 @@ for line in sys.stdin:
                         "old".into(),
                         Instant::now() + Duration::from_secs(60),
                         "files.create_text".into(),
+                        None,
                     ),
                 })
                 .unwrap();
