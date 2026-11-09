@@ -83,10 +83,14 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
+        NOTES="Rolling x86_64 AppImage built from $GITHUB_SHA by the AppImage workflow."
         if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
           gh release upload "$RELEASE_TAG" "$ARTIFACT" --clobber
+          # --clobber replaces the asset but never the body, so without this
+          # the notes keep naming the commit that first created the release.
+          gh release edit "$RELEASE_TAG" --notes "$NOTES"
         else
           gh release create "$RELEASE_TAG" "$ARTIFACT" \
             --title "Latest AppImage (built from main)" \
-            --notes "Rolling x86_64 AppImage built from $GITHUB_SHA by the AppImage workflow."
+            --notes "$NOTES"
         fi
