@@ -236,11 +236,13 @@ pub fn build(context: AccountContext) -> LibraryPage {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.add_css_class("page-content");
     let heading = label("Library · saved artifacts, read-only");
-    heading.add_css_class("section-heading");
+    heading.add_css_class("page-heading");
     root.append(&heading);
-    root.append(&label(
+    let intro = label(
         "One press reads the artifact list for the connected account. This page cannot open, download, rename, share or delete anything: those actions stay on the Muse side. Nothing is fetched until you press Refresh Library, and no row is kept after the window closes.",
-    ));
+    );
+    intro.add_css_class("page-subtitle");
+    root.append(&intro);
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     toolbar.add_css_class("toolbar");

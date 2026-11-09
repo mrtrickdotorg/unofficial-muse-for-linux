@@ -743,7 +743,9 @@ mod native {
     pub fn build() -> ComputerControlPage {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
-        root.append(&label("Computer Control · explicit portal input session"));
+        let heading = label("Computer Control · explicit portal input session");
+        heading.add_css_class("page-heading");
+        root.append(&heading);
         root.append(&label(
         "Account sign-in does not grant Linux input access. This page asks the XDG Desktop Portal for a separate RemoteDesktop consent, and every test action needs one fresh Allow once approval.",
     ));

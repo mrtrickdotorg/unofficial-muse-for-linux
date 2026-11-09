@@ -481,9 +481,9 @@ mod native {
     pub fn build() -> MailPage {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
         root.add_css_class("page-content");
-        root.append(&label(
-            "Mail · generic IMAP reading, approval-gated SMTP sending",
-        ));
+        let heading = label("Mail · generic IMAP reading, approval-gated SMTP sending");
+        heading.add_css_class("page-heading");
+        root.append(&heading);
 
         let settings = gtk::Expander::new(Some(
             "Mail provider connection (generic IMAP/SMTP, no OAuth)",
