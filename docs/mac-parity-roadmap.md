@@ -378,9 +378,11 @@ cycle however late (catch-up by construction). `muse-reminder-runner` is the hea
 binary that cycles claim → `notify-send` (the session's `org.freedesktop.Notifications` server) →
 sleep, owns no state of its own, and logs failures by task id only. It ships in the AppImage and
 installs as a user service via `scripts/install-reminder-service.sh` (unit in
-`resources/systemd/`). Still open in this phase: proving the gate live on a real desktop (a task
-firing with the window closed, across a reboot), the Tasks page reflecting runner state without a
-press, and location reminders (documented as time-only, per the work list).
+`resources/systemd/`). The Tasks page now reflects the runner without a press: it re-reads the store every 15 seconds
+(selection preserved), so a claimed reminder shows as notified and a newly due one appears in the
+Due section on its own. Still open in this phase: proving the gate live on a real desktop (a task
+firing with the window closed, across a reboot), and location reminders (documented as time-only,
+per the work list).
 
 *Cancellation from Linux is wired (Nov 9).* The route table's only schedule mutation is
 `tasks.delete` (DELETE /api/tasks/{job_id}) — there is no create, edit or enable/disable route, so
