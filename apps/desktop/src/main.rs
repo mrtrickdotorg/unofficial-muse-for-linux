@@ -270,81 +270,70 @@ fn build_ui(app: &gtk::Application) {
     let rail = gtk::Box::new(gtk::Orientation::Vertical, 4);
     rail.add_css_class("icon-rail");
     rail.set_size_request(56, -1);
-    let brand = gtk::Label::new(Some("M"));
-    brand.add_css_class("brand-mark");
-    brand.set_halign(gtk::Align::Center);
-    brand.set_tooltip_text(Some("Unofficial Muse client for Linux"));
-    rail.append(&brand);
     let chats_nav = nav_button(
         "chat-symbolic",
         "Chat",
-        "Chat with your connected Muse account",
+        "Main chat and your side chats",
     );
     chats_nav.add_css_class("active");
     rail.append(&chats_nav);
-    let files_nav = nav_button(
-        "folder-symbolic",
-        "Files",
-        "Browse the explicitly granted local folder",
+    let search_button = nav_button(
+        "system-search-symbolic",
+        "Search",
+        "Search your chats",
     );
-    rail.append(&files_nav);
-    let tasks_nav = nav_button(
-        "task-due-symbolic",
-        "Reminders",
-        "Local reminders and tasks",
-    );
-    rail.append(&tasks_nav);
+    rail.append(&search_button);
     let library_nav = nav_button(
         "folder-documents-symbolic",
         "Library",
-        "Saved artifacts for the connected account (read-only)",
+        "Your spaces and saved artifacts",
     );
     rail.append(&library_nav);
-    let rail_separator = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    rail_separator.add_css_class("rail-separator");
-    rail.append(&rail_separator);
-    let host_nav = nav_button(
-        "network-server-symbolic",
-        "Local host",
-        "Consent, folder grants and local approvals",
+    let ideas_nav = nav_button(
+        "lightbulb-symbolic",
+        "Ideas",
+        "Ideas your Muse saved for you",
     );
-    rail.append(&host_nav);
-    let mail_nav = nav_button(
-        "mail-symbolic",
-        "Mail",
-        "Read mail and approve outgoing messages",
+    rail.append(&ideas_nav);
+    let goals_nav = nav_button(
+        "checkbox-checked-symbolic",
+        "Goals",
+        "What you and your Muse are working toward",
     );
-    rail.append(&mail_nav);
-    let calendar_nav = nav_button(
-        "x-office-calendar-symbolic",
-        "Calendar",
-        "Read calendars and approve new events",
+    rail.append(&goals_nav);
+    let create_nav = nav_button(
+        "view-grid-symbolic",
+        "Create",
+        "Start something new with your Muse",
     );
-    rail.append(&calendar_nav);
-    let desktop_nav = nav_button(
-        "video-display-symbolic",
-        "Desktop",
-        "Portal screenshots and URL opening",
+    rail.append(&create_nav);
+    let feed_nav = nav_button(
+        "image-x-generic-symbolic",
+        "Feed",
+        "Briefings and updates from your Muse",
     );
-    rail.append(&desktop_nav);
-    let computer_control_nav = nav_button(
-        "input-mouse-symbolic",
-        "Computer Control",
-        "Explicit portal-gated pointer and keyboard test actions",
-    );
-    rail.append(&computer_control_nav);
-    let rail_separator_two = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    rail_separator_two.add_css_class("rail-separator");
-    rail.append(&rail_separator_two);
-    let developer_nav = nav_button(
-        "applications-engineering-symbolic",
-        "Developer API",
-        "Separate paid developer-model experiment",
-    );
-    rail.append(&developer_nav);
+    rail.append(&feed_nav);
     let rail_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     rail_spacer.set_vexpand(true);
     rail.append(&rail_spacer);
+    let new_button = nav_button(
+        "list-add-symbolic",
+        "New chat",
+        "Go to the main chat and start typing",
+    );
+    rail.append(&new_button);
+    let download_button = nav_button(
+        "document-save-symbolic",
+        "Download",
+        "Get the latest build of this app",
+    );
+    rail.append(&download_button);
+    let menu_button = nav_button(
+        "open-menu-symbolic",
+        "Menu",
+        "Account connection and sign-in",
+    );
+    rail.append(&menu_button);
     sidebar.append(&rail);
 
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -357,40 +346,29 @@ fn build_ui(app: &gtk::Application) {
     // Chat's panel (the conversation list) is added once the account
     // page exists; the rest start as titled panels.
     for (name, title, copy) in [
-        ("files", "Files", "Browse the explicitly granted local folder."),
+        (
+            "library",
+            "Library",
+            "Your spaces and saved artifacts for the connected account.",
+        ),
+        ("ideas", "Ideas", "Ideas your Muse saved for you."),
+        (
+            "goals",
+            "Goals",
+            "What you and your Muse are working toward.",
+        ),
+        ("create", "Create", "Start something new with your Muse."),
+        (
+            "feed",
+            "Feed",
+            "Briefings and updates from your Muse.",
+        ),
         (
             "host",
             "Local host",
             "Consent, folder grants and local approvals for this machine.",
         ),
-        ("mail", "Mail", "Read mail and approve outgoing messages."),
-        (
-            "calendar",
-            "Calendar",
-            "Read calendars and approve new events.",
-        ),
-        (
-            "desktop",
-            "Desktop",
-            "Portal screenshots and URL opening.",
-        ),
-        (
-            "computer-control",
-            "Computer Control",
-            "Explicit portal-gated pointer and keyboard test actions.",
-        ),
-        ("tasks", "Reminders", "Local reminders and tasks."),
-        (
-            "library",
-            "Library",
-            "Saved artifacts for the connected account (read-only).",
-        ),
-        (
-            "developer",
-            "Developer API",
-            "Separate paid developer-model experiment.",
-        ),
-    ] {
+] {
         panel_stack.add_named(&panel_placeholder(title, copy), Some(name));
     }
     panel.append(&panel_stack);
@@ -420,10 +398,6 @@ fn build_ui(app: &gtk::Application) {
     service_status.set_hexpand(true);
     service_status.set_halign(gtk::Align::End);
     topbar.append(&service_status);
-    let settings_button = gtk::Button::from_icon_name("preferences-system-symbolic");
-    settings_button.set_tooltip_text(Some("Muse account connection and sign-in"));
-    settings_button.add_css_class("topbar-button");
-    topbar.append(&settings_button);
     main_column.append(&topbar);
 
     let stack = gtk::Stack::new();
@@ -440,19 +414,47 @@ fn build_ui(app: &gtk::Application) {
     *account_page.host_boundary.borrow_mut() = Some(host_page.shutdown.clone());
     stack.add_named(&host_page.root, Some("host"));
     let mail_page: mail_ui::MailPage = mail_ui::build();
-    stack.add_named(&mail_page.root, Some("mail"));
     let calendar_page: calendar_ui::CalendarPage = calendar_ui::build();
-    stack.add_named(&calendar_page.root, Some("calendar"));
     let desktop_page: desktop_ui::DesktopPage = desktop_ui::build();
-    stack.add_named(&desktop_page.root, Some("desktop"));
     let computer_control_page: computer_control_ui::ComputerControlPage =
         computer_control_ui::build();
-    stack.add_named(&computer_control_page.root, Some("computer-control"));
     let tasks_page: tasks_ui::TasksPage = tasks_ui::build();
-    stack.add_named(&tasks_page.root, Some("tasks"));
     let library_page: library_ui::LibraryPage =
         library_ui::build(account_page.host_context.clone());
     stack.add_named(&library_page.root, Some("library"));
+    stack.add_named(
+        &placeholder_page(
+            "Ideas",
+            "This is where your Muse's saved ideas live on muse.ai. The surface isn't connected in the Linux client yet — wiring it to your account is the next slice, and this page will show the real thing then.",
+        ),
+        Some("ideas"),
+    );
+    stack.add_named(
+        &placeholder_page(
+            "Goals",
+            "Your goals — what you and your Muse are working toward — live here on muse.ai. The surface isn't connected in the Linux client yet; this page will show the real goals once it is.",
+        ),
+        Some("goals"),
+    );
+    stack.add_named(
+        &placeholder_page(
+            "Create",
+            "Create is where muse.ai starts new pages, images and media with your Muse. The surface isn't connected in the Linux client yet.",
+        ),
+        Some("create"),
+    );
+    stack.add_named(
+        &placeholder_page(
+            "Feed",
+            "Your Muse feed — briefings and updates your agent publishes for you — lives here on muse.ai. The surface isn't connected in the Linux client yet.",
+        ),
+        Some("feed"),
+    );
+    // Pages from the old navigation (mail, calendar, desktop, computer
+    // control, reminders, the developer experiment, the files browser)
+    // are still built above so their lifecycle stays identical, but
+    // they are no longer part of the app Patrick asked for: the menu is
+    // muse.ai's, and nothing else is reachable.
     let cancel_login = Rc::clone(&account_page.cancel_login);
     let stop_host = host_page.shutdown.clone();
     let stop_calendar = calendar_page.shutdown.clone();
@@ -464,6 +466,15 @@ fn build_ui(app: &gtk::Application) {
         cancel_login();
         gtk::glib::Propagation::Proceed
     });
+    // Referenced so the built-but-unreachable pages above are plainly
+    // deliberate; their roots are simply never shown.
+    let _ = (
+        &mail_page.root,
+        &calendar_page.root,
+        &desktop_page.root,
+        &computer_control_page.root,
+        &tasks_page.root,
+    );
     stack.set_visible_child_name("chats");
     panel_stack.add_named(&account_page.threads_panel, Some("chats"));
     panel_stack.set_visible_child_name("chats");
@@ -591,7 +602,6 @@ fn build_ui(app: &gtk::Application) {
     chat_column.append(&prompt_row);
     chat_page.append(&chat_column);
 
-    stack.add_named(&chat_page, Some("developer"));
     main_column.append(&stack);
     shell.set_start_child(Some(&sidebar));
     shell.set_end_child(Some(&main_column));
@@ -1000,118 +1010,136 @@ fn build_ui(app: &gtk::Application) {
         }
     });
 
-    stack.add_named(&files_page, Some("files"));
 
+    // The rail is the muse.ai menu and nothing else: Chat, Search,
+    // Library, Ideas, Goals, Create and Feed, then New, Download and
+    // Menu as actions along the bottom.
     let navigation = [
         (&chats_nav, "chats"),
-        (&files_nav, "files"),
-        (&host_nav, "host"),
-        (&mail_nav, "mail"),
-        (&calendar_nav, "calendar"),
-        (&desktop_nav, "desktop"),
-        (&computer_control_nav, "computer-control"),
-        (&tasks_nav, "tasks"),
-        (&developer_nav, "developer"),
+        (&library_nav, "library"),
+        (&ideas_nav, "ideas"),
+        (&goals_nav, "goals"),
+        (&create_nav, "create"),
+        (&feed_nav, "feed"),
     ];
     for (button, page) in navigation {
         let stack = stack.clone();
         let title = page_title.clone();
         let chats = chats_nav.clone();
-        let files = files_nav.clone();
-        let host = host_nav.clone();
-        let mail = mail_nav.clone();
-        let calendar = calendar_nav.clone();
-        let desktop = desktop_nav.clone();
-        let computer_control = computer_control_nav.clone();
-        let tasks = tasks_nav.clone();
         let library = library_nav.clone();
-        let developer = developer_nav.clone();
+        let ideas = ideas_nav.clone();
+        let goals = goals_nav.clone();
+        let create = create_nav.clone();
+        let feed = feed_nav.clone();
         button.connect_clicked(move |_| {
             select_page(
                 &stack,
                 &title,
                 &[
                     (&chats, "chats"),
-                    (&files, "files"),
-                    (&host, "host"),
-                    (&mail, "mail"),
-                    (&calendar, "calendar"),
-                    (&desktop, "desktop"),
-                    (&computer_control, "computer-control"),
-                    (&tasks, "tasks"),
                     (&library, "library"),
-                    (&developer, "developer"),
+                    (&ideas, "ideas"),
+                    (&goals, "goals"),
+                    (&create, "create"),
+                    (&feed, "feed"),
                 ],
                 page,
             );
         });
     }
-
-    let stack_for_open_files = stack.clone();
-    let title_for_open_files = page_title.clone();
-    let chats_for_open_files = chats_nav.clone();
-    let files_for_open_files = files_nav.clone();
-    let host_for_open_files = host_nav.clone();
-    let mail_for_open_files = mail_nav.clone();
-    let calendar_for_open_files = calendar_nav.clone();
-    let desktop_for_open_files = desktop_nav.clone();
-    let computer_control_for_open_files = computer_control_nav.clone();
-    let tasks_for_open_files = tasks_nav.clone();
-    let library_for_open_files = library_nav.clone();
-    let developer_for_open_files = developer_nav.clone();
-    open_files.connect_clicked(move |_| {
-        select_page(
-            &stack_for_open_files,
-            &title_for_open_files,
-            &[
-                (&chats_for_open_files, "chats"),
-                (&files_for_open_files, "files"),
-                (&host_for_open_files, "host"),
-                (&mail_for_open_files, "mail"),
-                (&calendar_for_open_files, "calendar"),
-                (&desktop_for_open_files, "desktop"),
-                (&computer_control_for_open_files, "computer-control"),
-                (&tasks_for_open_files, "tasks"),
-                (&library_for_open_files, "library"),
-                (&developer_for_open_files, "developer"),
-            ],
-            "files",
+    {
+        // Search: land on Chat with the sidebar search focused.
+        let stack = stack.clone();
+        let title = page_title.clone();
+        let chats = chats_nav.clone();
+        let library = library_nav.clone();
+        let ideas = ideas_nav.clone();
+        let goals = goals_nav.clone();
+        let create = create_nav.clone();
+        let feed = feed_nav.clone();
+        let focus_search = Rc::clone(&account_page.focus_search);
+        search_button.connect_clicked(move |_| {
+            select_page(
+                &stack,
+                &title,
+                &[
+                    (&chats, "chats"),
+                    (&library, "library"),
+                    (&ideas, "ideas"),
+                    (&goals, "goals"),
+                    (&create, "create"),
+                    (&feed, "feed"),
+                ],
+                "chats",
+            );
+            focus_search();
+        });
+    }
+    {
+        // New: the main conversation, composer focused, ready to type.
+        let stack = stack.clone();
+        let title = page_title.clone();
+        let chats = chats_nav.clone();
+        let library = library_nav.clone();
+        let ideas = ideas_nav.clone();
+        let goals = goals_nav.clone();
+        let create = create_nav.clone();
+        let feed = feed_nav.clone();
+        let new_chat = Rc::clone(&account_page.new_chat);
+        new_button.connect_clicked(move |_| {
+            select_page(
+                &stack,
+                &title,
+                &[
+                    (&chats, "chats"),
+                    (&library, "library"),
+                    (&ideas, "ideas"),
+                    (&goals, "goals"),
+                    (&create, "create"),
+                    (&feed, "feed"),
+                ],
+                "chats",
+            );
+            new_chat();
+        });
+    }
+    download_button.connect_clicked(move |_| {
+        // On the web this icon gets you the app; here it gets the
+        // latest build of this one.
+        let _ = gtk::gio::AppInfo::launch_default_for_uri(
+            "https://github.com/mrtrickdotorg/unofficial-muse-for-linux/releases",
+            None::<&gtk::gio::AppLaunchContext>,
         );
     });
-
-    let stack_for_settings = stack.clone();
-    let title_for_settings = page_title.clone();
-    let chats_for_settings = chats_nav.clone();
-    let files_for_settings = files_nav.clone();
-    let host_for_settings = host_nav.clone();
-    let mail_for_settings = mail_nav.clone();
-    let calendar_for_settings = calendar_nav.clone();
-    let desktop_for_settings = desktop_nav.clone();
-    let computer_control_for_settings = computer_control_nav.clone();
-    let tasks_for_settings = tasks_nav.clone();
-    let library_for_settings = library_nav.clone();
-    let developer_for_settings = developer_nav.clone();
-    let setup_for_settings = account_page.settings.clone();
-    settings_button.connect_clicked(move |_| {
-        select_page(
-            &stack_for_settings,
-            &title_for_settings,
-            &[
-                (&chats_for_settings, "chats"),
-                (&files_for_settings, "files"),
-                (&host_for_settings, "host"),
-                (&mail_for_settings, "mail"),
-                (&calendar_for_settings, "calendar"),
-                (&desktop_for_settings, "desktop"),
-                (&computer_control_for_settings, "computer-control"),
-                (&tasks_for_settings, "tasks"),
-                (&library_for_settings, "library"),
-                (&developer_for_settings, "developer"),
-            ],
-            "chats",
-        );
-        setup_for_settings.set_expanded(true);
-    });
+    {
+        // Menu: the account connection, on the Chat page where the
+        // sign-in surface lives (the old topbar gear's exact behavior).
+        let stack = stack.clone();
+        let title = page_title.clone();
+        let chats = chats_nav.clone();
+        let library = library_nav.clone();
+        let ideas = ideas_nav.clone();
+        let goals = goals_nav.clone();
+        let create = create_nav.clone();
+        let feed = feed_nav.clone();
+        let setup_for_menu = account_page.settings.clone();
+        menu_button.connect_clicked(move |_| {
+            select_page(
+                &stack,
+                &title,
+                &[
+                    (&chats, "chats"),
+                    (&library, "library"),
+                    (&ideas, "ideas"),
+                    (&goals, "goals"),
+                    (&create, "create"),
+                    (&feed, "feed"),
+                ],
+                "chats",
+            );
+            setup_for_menu.set_expanded(true);
+        });
+    }
 
     window.set_child(Some(&shell));
     window.present();
@@ -1147,6 +1175,27 @@ fn panel_placeholder(title: &str, copy: &str) -> gtk::Box {
     panel
 }
 
+fn placeholder_page(title: &str, copy: &str) -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    page.add_css_class("page-content");
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    column.set_halign(gtk::Align::Center);
+    column.set_size_request(768, -1);
+    column.set_vexpand(true);
+    let heading = gtk::Label::new(Some(title));
+    heading.add_css_class("page-heading");
+    heading.set_halign(gtk::Align::Start);
+    let text = gtk::Label::new(Some(copy));
+    text.add_css_class("dim-label");
+    text.set_wrap(true);
+    text.set_xalign(0.0);
+    text.set_halign(gtk::Align::Start);
+    column.append(&heading);
+    column.append(&text);
+    page.append(&column);
+    page
+}
+
 fn nav_css_classes(active: bool) -> &'static [&'static str] {
     if active {
         &["nav-item", "active"]
@@ -1172,6 +1221,10 @@ fn select_page(
         "computer-control" => "Computer Control",
         "tasks" => "Reminders",
         "library" => "Library",
+        "ideas" => "Ideas",
+        "goals" => "Goals",
+        "create" => "Create",
+        "feed" => "Feed",
         "developer" => "Developer API",
         _ => "Unknown page",
     });

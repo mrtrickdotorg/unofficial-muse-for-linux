@@ -1028,6 +1028,11 @@ mod native {
         /// The muse.ai-shaped sidebar content (search, Main chat, Side
         /// chats) for the shell to embed beside the icon rail.
         pub threads_panel: gtk::Box,
+        /// Focus the sidebar search entry (the rail's Search action).
+        pub focus_search: Rc<dyn Fn()>,
+        /// Go to the main conversation and focus the composer (the
+        /// rail's New action).
+        pub new_chat: Rc<dyn Fn()>,
         pub settings: gtk::Expander,
         pub cancel_login: Rc<dyn Fn()>,
         pub host_context: AccountContext,
@@ -2128,6 +2133,24 @@ mod native {
             }
         });
         let weak = Rc::downgrade(&ui);
+        let focus_search = Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.thread_search.grab_focus();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        let new_chat = Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                let changed = ui.state.borrow_mut().select_thread(None);
+                if changed {
+                    ui.prompt.set_text("");
+                    ui.render();
+                    ui.read(false, false);
+                }
+                ui.prompt.grab_focus();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
         let host_context = Rc::new(move || {
             let ui = weak.upgrade()?;
             if ui.state.borrow().account.is_some() && ui.host_verified.get() {
@@ -2139,6 +2162,8 @@ mod native {
         AccountPage {
             root,
             threads_panel,
+            focus_search,
+            new_chat,
             settings,
             cancel_login,
             host_context,
