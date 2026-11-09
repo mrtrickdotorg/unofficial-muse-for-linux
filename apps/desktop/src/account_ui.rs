@@ -996,6 +996,33 @@ mod native {
 
     type State = Controller<AccountSnapshot, HistoryMessage, TasksSnapshot>;
 
+    impl State {
+        /// A dispatch the service accepted but never confirmed is parked
+        /// as uncertain, and at first only a manual acknowledgment cleared
+        /// it. But a history load that shows the message in this
+        /// conversation IS the confirmation the dispatch lacked — the same
+        /// evidence the acknowledgment asked the user to eyeball — so the
+        /// park clears itself, the way a confirmed receipt does. The scope
+        /// must match: the loaded history belongs to the selected
+        /// conversation, and the parked dispatch must have been for it too.
+        fn reconcile_pending_send(&mut self) {
+            let Some(pending) = &self.pending_send else {
+                return;
+            };
+            if pending.scope != self.scope {
+                return;
+            }
+            let landed = self
+                .history
+                .iter()
+                .any(|row| row.role == "user" && row.text == pending.text);
+            if landed {
+                self.pending_send = None;
+                self.send_notice.clear();
+            }
+        }
+    }
+
     pub struct AccountPage {
         pub root: gtk::Box,
         pub settings: gtk::Expander,
@@ -2658,6 +2685,7 @@ mod native {
                         let closed = matches!(&history, Ok(rows) if history_closes_turn(rows));
                         let in_flight = matches!(&history, Ok(rows) if reply_in_flight(rows));
                         state.finish_refresh(ticket, account, history, tasks);
+                        state.reconcile_pending_send();
                         if closed {
                             state.note_turn_finished();
                         }
@@ -2667,6 +2695,7 @@ mod native {
                         let closed = matches!(&result, Ok(rows) if history_closes_turn(rows));
                         let in_flight = matches!(&result, Ok(rows) if reply_in_flight(rows));
                         state.finish_history(ticket, result);
+                        state.reconcile_pending_send();
                         if closed {
                             state.note_turn_finished();
                         }
@@ -2842,12 +2871,14 @@ mod native {
             // A stop press only needs a connection; whether anything was
             // actually stopped is the service's answer, not this button's.
             self.cancel.set_sensitive(connected && state.busy.is_none());
-            // Polling is background work: the composer stays usable, and a
-            // double dispatch is still prevented by `pending_send` in begin_send.
-            self.prompt
-                .set_sensitive(connected && state.pending_send.is_none());
-            self.send
-                .set_sensitive(connected && state.pending_send.is_none());
+            // Typing is never the dangerous operation: the parked text of
+            // an unresolved dispatch lives in `pending_send`, not in the
+            // composer, so the box stays usable while a send is sorted
+            // out. Send stays pressable too — `begin_send` still refuses a
+            // second dispatch, and `describe_send_block` explains why,
+            // which beats a dead button that cannot even say no.
+            self.prompt.set_sensitive(connected);
+            self.send.set_sensitive(connected);
             self.acknowledge
                 .set_visible(state.pending_send.is_some() && idle);
             self.acknowledge.set_sensitive(connected && idle);
@@ -3275,6 +3306,53 @@ mod native {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+        }
+
+        #[test]
+        fn reconcile_pending_send_clears_only_on_a_matching_history_row() {
+            fn row(role: &str, text: &str) -> HistoryMessage {
+                HistoryMessage {
+                    message_id: "m".into(),
+                    seq: 1,
+                    role: role.into(),
+                    text: text.into(),
+                    timestamp: None,
+                    status: None,
+                }
+            }
+            fn parked() -> State {
+                State {
+                    pending_send: Some(PendingSend {
+                        scope: None,
+                        text: "speed check".into(),
+                    }),
+                    send_notice: "Delivery uncertain".into(),
+                    ..State::default()
+                }
+            }
+            // The dispatched text visible as a user row in this
+            // conversation's history: the park clears, notice and all.
+            let mut state = parked();
+            state.history = vec![row("assistant", "hi"), row("user", "speed check")];
+            state.reconcile_pending_send();
+            assert!(state.pending_send.is_none());
+            assert!(state.send_notice.is_empty());
+            // Same text from the assistant is not the user's dispatch.
+            let mut state = parked();
+            state.history = vec![row("assistant", "speed check")];
+            state.reconcile_pending_send();
+            assert!(state.pending_send.is_some());
+            // A different message in history proves nothing about this one.
+            let mut state = parked();
+            state.history = vec![row("user", "something else")];
+            state.reconcile_pending_send();
+            assert!(state.pending_send.is_some());
+            // History of another conversation is not evidence either.
+            let mut state = parked();
+            state.scope = Some("thread-b".into());
+            state.history = vec![row("user", "speed check")];
+            state.reconcile_pending_send();
+            assert!(state.pending_send.is_some());
         }
 
         #[test]
