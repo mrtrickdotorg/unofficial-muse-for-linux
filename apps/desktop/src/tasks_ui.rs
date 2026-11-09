@@ -1,13 +1,14 @@
 //! Local reminders UI over the durable `muse-tasks` store.
 //!
 //! One-shot delayed reminders only: no command execution, nothing leaves
-//! this machine. Every store op on this page runs inline on an explicit
-//! button press against a private app directory (0700); the page itself
-//! never polls. Firing on time is the reminder runner's job
-//! (`muse-reminder-runner`, a separate user service sharing this store
-//! under its lock): when it is installed, due reminders also arrive as
-//! desktop notifications with the app closed, and this page's Check due
-//! then finds them already marked notified.
+//! this machine. Store mutations on this page run inline on an explicit
+//! button press against a private app directory (0700); reads are
+//! automatic — the page re-reads the store every 15 seconds, so what the
+//! reminder runner does is visible here without a press. Firing on time is
+//! the runner's job (`muse-reminder-runner`, a separate user service
+//! sharing this store under its lock): when it is installed, due
+//! reminders also arrive as desktop notifications with the app closed,
+//! and this page then shows them already marked notified.
 #![allow(unexpected_cfgs)]
 
 #[cfg(not(tasks_controller_only))]
@@ -125,9 +126,58 @@ mod native {
         }
     }
 
+    /// The Due section's text for a set of due reminders, used by both the
+    /// explicit check and the automatic re-read so the two never disagree.
+    pub(super) fn due_notice_text(due: &[Task]) -> String {
+        if due.is_empty() {
+            return "Nothing due right now.".to_string();
+        }
+        let lines: Vec<String> = due
+            .iter()
+            .map(|t| format!("#{}: {}", t.id, t.title))
+            .collect();
+        format!(
+            "Due now (local reminders, nothing was sent anywhere):\n{}",
+            lines.join("\n")
+        )
+    }
+
     impl Ui {
         fn open_store(&self) -> Result<TaskStore, String> {
             TaskStore::open(&self.dir).map_err(|e| e.to_string())
+        }
+
+        /// Re-read the store on the page's timer and reflect what changed —
+        /// above all what the reminder runner changed: a reminder it claimed
+        /// shows as notified here, and one that came due shows in the Due
+        /// section, neither waiting for a press. Silent by design: a failed
+        /// read (the runner mid-cycle holds the lock only briefly; a broken
+        /// store is the explicit Refresh button's story to tell) changes
+        /// nothing on screen, and an unchanged store repaints nothing, so a
+        /// selection the user is about to act on is never disturbed.
+        fn auto_refresh(&self) {
+            let Ok(store) = self.open_store() else {
+                return;
+            };
+            let tasks = store.list();
+            let due = store.due(now_secs());
+            drop(store);
+            let due_ids: Vec<u64> = due.iter().map(|t| t.id).collect();
+            if *self.tasks.borrow() != tasks {
+                let selected = self.selected_id();
+                self.tasks.replace(tasks);
+                self.render_list();
+                if let Some(id) = selected
+                    && let Some(index) = self.tasks.borrow().iter().position(|t| t.id == id)
+                    && let Some(row) = self.list.row_at_index(index as i32)
+                {
+                    self.list.select_row(Some(&row));
+                }
+            }
+            if *self.shown_due.borrow() != due_ids {
+                self.shown_due.replace(due_ids);
+                self.due_notice.set_text(&due_notice_text(&due));
+            }
         }
 
         fn refresh(&self) {
@@ -137,7 +187,7 @@ mod native {
                     self.tasks.replace(tasks);
                     self.render_list();
                     self.list_notice.set_text(
-                        "Reminders are local only. Nothing polls; press Check due to see what is due.",
+                        "Reminders are local only. This page re-reads the store every 15 seconds; with the reminder service installed, due items also arrive as notifications.",
                     );
                 }
                 Err(error) => {
@@ -246,20 +296,8 @@ mod native {
             match self.open_store() {
                 Ok(store) => {
                     let due = store.due(now_secs());
-                    if due.is_empty() {
-                        self.due_notice.set_text("Nothing due right now.");
-                        self.shown_due.replace(Vec::new());
-                    } else {
-                        let lines: Vec<String> = due
-                            .iter()
-                            .map(|t| format!("#{}: {}", t.id, t.title))
-                            .collect();
-                        self.due_notice.set_text(&format!(
-                            "Due now (local reminders, nothing was sent anywhere):\n{}",
-                            lines.join("\n")
-                        ));
-                        self.shown_due.replace(due.iter().map(|t| t.id).collect());
-                    }
+                    self.due_notice.set_text(&due_notice_text(&due));
+                    self.shown_due.replace(due.iter().map(|t| t.id).collect());
                     self.refresh();
                 }
                 Err(error) => {
@@ -272,8 +310,7 @@ mod native {
         fn acknowledge(&self) {
             let ids = self.shown_due.borrow().clone();
             if ids.is_empty() {
-                self.due_notice
-                    .set_text("Nothing shown to acknowledge. Press Check due first.");
+                self.due_notice.set_text("Nothing shown to acknowledge.");
                 return;
             }
             match self.open_store() {
@@ -315,7 +352,7 @@ mod native {
         root.add_css_class("page-content");
         root.append(&label("Reminders · durable local tasks"));
         root.append(&label(
-            "One-shot local reminders. No command execution, nothing leaves this machine. With the reminder service installed, due items also arrive as desktop notifications; here they appear when you press Check due.",
+            "One-shot local reminders. No command execution, nothing leaves this machine. This page re-reads the store every 15 seconds, and with the reminder service installed, due items also arrive as desktop notifications.",
         ));
 
         let create_heading = label("New reminder");
@@ -362,7 +399,7 @@ mod native {
         list_scroll.set_child(Some(&list));
         root.append(&list_scroll);
 
-        let due_heading = label("Due check (explicit)");
+        let due_heading = label("Due now");
         due_heading.add_css_class("section-heading");
         root.append(&due_heading);
         let due_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -372,7 +409,7 @@ mod native {
         due_row.append(&check);
         due_row.append(&ack);
         root.append(&due_row);
-        let due_notice = label("No due check yet.");
+        let due_notice = label("Nothing due right now.");
         root.append(&due_notice);
 
         let ui = Rc::new(Ui {
@@ -387,6 +424,22 @@ mod native {
             create_notice,
             due_notice,
         });
+        // Open on current data, then keep it current: the store is shared
+        // with the reminder runner, and what it claims must be visible here
+        // without anyone pressing Refresh.
+        ui.auto_refresh();
+        {
+            let weak = Rc::downgrade(&ui);
+            gtk::glib::timeout_add_local(std::time::Duration::from_secs(15), move || {
+                match weak.upgrade() {
+                    Some(ui) => {
+                        ui.auto_refresh();
+                        gtk::glib::ControlFlow::Continue
+                    }
+                    None => gtk::glib::ControlFlow::Break,
+                }
+            });
+        }
         {
             let ui = Rc::clone(&ui);
             create.connect_clicked(move |_| ui.create());
@@ -427,9 +480,27 @@ pub use native::{TasksPage, build};
 
 #[cfg(test)]
 mod tests {
-    use super::native::{build_with_dir, parse_due_in, relative_due};
+    use super::native::{build_with_dir, due_notice_text, parse_due_in, relative_due};
     use gtk::prelude::*;
     use gtk4 as gtk;
+
+    #[test]
+    fn due_notice_text_covers_empty_and_listing() {
+        assert_eq!(due_notice_text(&[]), "Nothing due right now.");
+        let task = |id: u64, title: &str| muse_tasks::Task {
+            id,
+            title: title.into(),
+            body: String::new(),
+            due_unix_secs: 0,
+            status: muse_tasks::TaskStatus::Pending,
+            created_unix_secs: 0,
+            notified: false,
+        };
+        let text = due_notice_text(&[task(3, "call the school"), task(7, "pay the bill")]);
+        assert!(text.starts_with("Due now (local reminders"));
+        assert!(text.contains("#3: call the school"));
+        assert!(text.contains("#7: pay the bill"));
+    }
 
     #[test]
     fn due_offsets_parse_and_reject() {
