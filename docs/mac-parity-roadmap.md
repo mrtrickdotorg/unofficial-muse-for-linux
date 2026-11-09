@@ -283,11 +283,23 @@ that must not mix.
 durable "this site was allowed always" record is `egress.approval.history`'s `always_allow_registrable_domain`,
 beside `host`, `port`, `decision` and `always_scope` — that is where the school domains in the history came from.
 Revocation is `POST /permissions/revoke` (`egress.permissions.revoke`), with per-connector reset at
-`DELETE /permissions/connectors/{connector}` and settings at `PATCH /permissions/settings`. None of these are wired
-into the bridge or the window yet, and they should not be until P2's policy model exists: revocation is a write,
+`DELETE /permissions/connectors/{connector}` and settings at `PATCH /permissions/settings`. Revocation is a write,
 so it inherits `decide`'s posture — one explicit press, no background call, no retry, and the service's answer
 reported rather than assumed. The permissions payload is ~496 KB, so any listing must project narrowly; the window
 must never hold the raw body.
+
+*Listing and revocation are now wired (Nov 9).* The bridge gained two operations on the sentinel service:
+`permissions` projects `egress.permissions.active` into narrow grant rows (the service's id, kind, lifetime,
+mode, subject, expiry and `revocable` flag, plus `display.summary_title`; a row with no id fails closed), and
+`revoke` sends exactly one `egress.permissions.revoke` naming an id the listing published, reporting acceptance
+and the service's own `revoked` word when it gives one — never disappearance. The window's *Check allowed sites*
+reads the list on demand and renders one row per grant, with a **Revoke** button only on rows the service marks
+revocable; one press takes the exclusive slot, sends one revocation, and then re-reads the list, so a grant that
+is still in force comes back in plain sight instead of vanishing on our say-so. Bridge, client and window tests
+cover the projection, the fail-closed id rule, the single-call rule and the accepted-is-not-gone wording. No live
+revocation has been pressed, for the same reason no live decision has: it is an irreversible write on the
+account owner's grants. Per-connector reset and the settings PATCH remain unwired — those belong to the policy
+model below, not to a per-grant surface.
 
 *Deciding is now implemented at the bridge.* `decide` takes an `approval_id` and one of the five published
 outcome words (`allow_once`, `allow_task`, `allow_site`, `allow_always`, `deny`), refuses every other value
@@ -466,10 +478,10 @@ _The previous three actions — fresh packaged sign-in with recorded states, liv
 registration with a `files.read_text` invocation, and route reconnaissance for streaming, artifacts
 and memory — are done; their evidence is in P0, P1, P5 and the route table above._
 
-1. **P2, live:** press one real approval decision when one is pending (no decision has ever been
-   pressed live), then wire the allowed-sites listing (`egress.permissions.active`) and revocation
-   (`egress.permissions.revoke`) behind the policy model — one explicit press, no background call,
-   no retry, the service's answer reported rather than assumed.
+1. **P2, live:** press one real approval decision when one is pending, and one real revocation
+   from *Check allowed sites* (neither has ever been pressed live; the listing, the cards and the
+   revoke path are wired and tested, so only the live presses remain). The durable policy store,
+   per-connector reset and the settings PATCH are the policy-model work that follows.
 2. **P3, live:** have the real agent perform an approval-gated `files.create_text` on a scratch
    file (exercised so far only by tests), and prove revocation during an in-flight invocation
    against the live service.
