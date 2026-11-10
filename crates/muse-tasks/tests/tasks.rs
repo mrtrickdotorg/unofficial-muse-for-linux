@@ -91,11 +91,18 @@ fn rejects_control_chars() {
 fn rejects_out_of_range_due() {
     let (mut store, _dir) = open("due-bounds");
     let t = now();
-    assert!(store.create("a", "", t.saturating_sub(3600)).is_err()); // at boundary, exclusive
-    assert!(store.create("a", "", t.saturating_sub(3599)).is_ok());
+    // Margins, not exact seconds: the store reads its own clock inside
+    // create(), a moment after this test reads `t`, so an assertion placed
+    // exactly on the boundary races that gap -- it failed a CI run when the
+    // two reads straddled a second. The exact boundary (exclusive past,
+    // inclusive future) is pinned deterministically against the pure
+    // validator in the crate's unit tests; this test proves the window is
+    // enforced end to end through the store.
+    assert!(store.create("a", "", t.saturating_sub(3600 + 120)).is_err());
+    assert!(store.create("a", "", t.saturating_sub(3600 - 120)).is_ok());
     let five_y = 5 * 365 * 86400u64;
-    assert!(store.create("a", "", t + five_y).is_ok());
-    assert!(store.create("a", "", t + five_y + 1).is_err());
+    assert!(store.create("a", "", t + five_y - 120).is_ok());
+    assert!(store.create("a", "", t + five_y + 120).is_err());
 }
 
 #[test]
