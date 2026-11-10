@@ -1396,19 +1396,47 @@ class Adapter:
             # newer is already there, so nothing that arrived while the request
             # was being set up is skipped.
             after = request.get("after")
+            # Ticks probe the tail with a small read: the full window of a
+            # long conversation is heavy to re-read twice a second, and the
+            # probe only has to notice a change. The rows a watch returns are
+            # always a read at the requested limit.
+            probe_limit = min(request["limit"], 25)
+
+            def probe():
+                return history_rows(self.client.history(
+                    thread=request.get("thread"), limit=probe_limit))
+
+            def full():
+                if probe_limit == request["limit"]:
+                    return None
+                return history_rows(self.client.history(
+                    thread=request.get("thread"), limit=request["limit"]))
+
+            def fingerprint(rows):
+                # A reply being produced mutates in place: same message id and
+                # seq while its text grows and its status flips at the end.
+                # Keying the wait on the id alone made a watch sleep through
+                # the whole reply and answer only at its deadline, which is
+                # why a finished answer could take the better part of a minute
+                # to reach the screen after it existed.
+                if not rows:
+                    return None
+                last = rows[-1]
+                return (len(rows), last["message_id"], last["seq"],
+                        last["status"], last["text"])
+
             baseline = None
             while True:
-                rows = history_rows(self.client.history(thread=request.get("thread"),
-                                                        limit=request["limit"]))
-                newest = (rows[-1]["message_id"], rows[-1]["seq"]) if rows else None
+                rows = probe()
+                mark = fingerprint(rows)
                 if baseline is None:
-                    if after is not None and (newest is None or newest[0] != after):
-                        return rows
-                    baseline = newest
-                elif newest != baseline:
-                    return rows
+                    if after is not None and (mark is None or mark[1] != after):
+                        return full() or rows
+                    baseline = mark
+                elif mark != baseline:
+                    return full() or rows
                 if time.monotonic() >= deadline:
-                    return rows
+                    return full() or rows
                 time.sleep(0.4)
         if request["op"] == "send":
             import time

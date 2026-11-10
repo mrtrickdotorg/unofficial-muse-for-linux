@@ -2942,6 +2942,16 @@ mod native {
                 }
             }
             self.render();
+            if send_confirmed {
+                // A send does not change the conversation chooser, and a full
+                // refresh re-verifies the account and lists every conversation
+                // before the reply poll can start. Ask for the answer now --
+                // first, before the live listen below: both polls share one
+                // slot, and a listen started first silently leaves the reply
+                // waiting for the timer's next alternation instead of this
+                // read.
+                self.poll_reply();
+            }
             if watch_after {
                 // Bound the watch, then attach: one live listen reports the
                 // status and the first fragments, and the timer keeps both the
@@ -2950,12 +2960,7 @@ mod native {
                     .set(Some(std::time::Instant::now() + Duration::from_secs(600)));
                 self.poll_live();
             }
-            if send_confirmed {
-                // A send does not change the conversation chooser, and a full
-                // refresh re-verifies the account and lists every conversation
-                // before the reply poll can start. Ask for the answer now.
-                self.poll_reply();
-            } else if refresh_after {
+            if !send_confirmed && refresh_after {
                 self.read(false, true);
             }
             if poll_after_cancel {

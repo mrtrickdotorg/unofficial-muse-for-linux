@@ -290,6 +290,68 @@ class BridgeTests(unittest.TestCase):
                 bridge.validate_request({"op": "watch", "limit": 20, "timeout": 10,
                     "after": bad, "config_dir": "/unused"})
 
+    def test_watch_returns_when_the_newest_row_mutates_in_place(self):
+        # A reply being produced keeps its message id and seq while its text
+        # grows and its status flips at the end. A watch keyed on the id alone
+        # slept through all of that and answered only at its deadline, which
+        # is why a finished reply reached the screen up to a watch-window
+        # late.
+        import time
+        bridge = load_bridge()
+        user = {"message_id": "a", "seq": 1, "role": "user", "text": "hi"}
+        class Growing(FakeClient):
+            def __init__(self):
+                self.calls = 0
+            def history(self, **kwargs):
+                self.calls += 1
+                reply = {"message_id": "b", "seq": 2, "role": "assistant",
+                         "text": "partial" if self.calls < 3 else "partial and more"}
+                if self.calls >= 3:
+                    reply["status"] = "completed"
+                return [user, reply]
+        client = Growing()
+        started = time.monotonic()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 30000, "after": "a"})
+        self.assertLess(time.monotonic() - started, 5.0)
+        # The first read already had a row newer than `after` (the in-flight
+        # reply), so this watch answered at once; a second watch anchored on
+        # the reply itself must then wake on the in-place change alone.
+        client.calls = 0
+        started = time.monotonic()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 30000, "after": "b"})
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual(result[-1]["text"], "partial and more")
+        self.assertEqual(result[-1]["status"], "completed")
+
+    def test_watch_probes_cheaply_and_returns_the_requested_window(self):
+        # Ticks read a small tail so a long conversation is not re-read in
+        # full twice a second; the rows a watch returns are one read at the
+        # requested limit.
+        bridge = load_bridge()
+        class Sized(FakeClient):
+            def __init__(self):
+                self.limits = []
+                self.calls = 0
+            def history(self, **kwargs):
+                self.limits.append(kwargs["limit"])
+                self.calls += 1
+                count = kwargs["limit"]
+                rows = [{"message_id": f"m{i}", "seq": i, "role": "user",
+                         "text": f"row {i}"} for i in range(count)]
+                if self.calls >= 2:
+                    rows.append({"message_id": "new", "seq": count + 1,
+                                 "role": "assistant", "text": "reply"})
+                return rows
+        client = Sized()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 50, "timeout": 5000})
+        self.assertEqual(client.limits[0], 25)
+        self.assertTrue(all(limit == 25 for limit in client.limits[:-1]))
+        self.assertEqual(client.limits[-1], 50)
+        self.assertEqual(result[-1]["message_id"], "new")
+
     def test_send_verifies_the_expected_session_before_dispatching(self):
         # The preflight rides inside the dispatch request, so it must fail before
         # anything reaches the service when the account changed underneath.
