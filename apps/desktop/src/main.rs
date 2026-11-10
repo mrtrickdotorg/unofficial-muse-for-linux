@@ -116,6 +116,7 @@ scrolledwindow viewport { background-color: transparent; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action):hover { background-color: rgba(255, 255, 255, 0.06); }
 .chat-bubble { padding: 11px 15px; border-radius: 16px; font-size: 15px; }
 .chat-bubble.user { background-color: #0a84ff; color: #ffffff; }
+.chat-bubble.user .message-meta { color: #dbeeff; }
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
 .chat-status { color: #b3b3bc; padding: 2px 6px; }
