@@ -3751,6 +3751,66 @@ mod native {
 
         #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn stamped_rows_carry_their_stamp_labels() {
+            // The Nov 10 timestamp build is only worth anything if the
+            // stamp actually lands in the bubble: walk the built rows and
+            // require both stamp strings to be present as labels -- the
+            // exact strings render() composes for an echo and for a reply
+            // that first printed this session.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            crate::append_chat_stamped(
+                &column,
+                crate::ChatRole::User,
+                "this is a test message",
+                Some("sent 08:38:12 AM".to_string()),
+            );
+            crate::append_chat_stamped(
+                &column,
+                crate::ChatRole::Assistant,
+                "Back at you right away",
+                Some("13:38 \u{00b7} shown 08:39:47 AM".to_string()),
+            );
+            let window = gtk::Window::builder()
+                .title("Stamp smoke")
+                .default_width(900)
+                .default_height(400)
+                .build();
+            window.set_child(Some(&column));
+            window.present();
+            let ctx = gtk::glib::MainContext::default();
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(750) {
+                while ctx.iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            fn collect_label_texts(widget: &gtk::Widget, out: &mut Vec<String>) {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    out.push(label.text().to_string());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    collect_label_texts(&current, out);
+                    child = current.next_sibling();
+                }
+            }
+            let mut texts = Vec::new();
+            collect_label_texts(column.upcast_ref(), &mut texts);
+            assert!(
+                texts.iter().any(|text| text == "sent 08:38:12 AM"),
+                "echo stamp missing from the row tree: {texts:?}"
+            );
+            assert!(
+                texts
+                    .iter()
+                    .any(|text| text == "13:38 \u{00b7} shown 08:39:47 AM"),
+                "shown stamp missing from the row tree: {texts:?}"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn native_account_context_device_dispatch_and_disconnect_coupling() {
             use crate::local_host::DeviceLease;
             use std::sync::atomic::{AtomicBool, Ordering};
