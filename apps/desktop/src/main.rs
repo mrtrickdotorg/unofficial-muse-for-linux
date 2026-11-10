@@ -984,6 +984,30 @@ fn build_ui(app: &gtk::Application) {
         }
     });
 
+    // Opening a data tab loads it: the shell fires each page's load
+    // hook as its stack page becomes visible, so Ideas, Goals, Feed
+    // and Library show their contents on the click that opens them
+    // instead of waiting for a Refresh press. The hook is a no-op
+    // while a read is already running; signed out, the page says so
+    // itself.
+    {
+        let ideas_load = ideas_page.load.clone();
+        let goals_load = goals_page.load.clone();
+        let feed_load = feed_page.load.clone();
+        let library_load = library_page.load.clone();
+        stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
+            if let Some(name) = stack.visible_child_name() {
+                match name.as_str() {
+                    "ideas" => ideas_load(),
+                    "goals" => goals_load(),
+                    "feed" => feed_load(),
+                    "library" => library_load(),
+                    _ => {}
+                }
+            }
+        });
+    }
+
     // The rail is the muse.ai menu and nothing else: Chat, Search,
     // Library, Ideas, Goals, Create and Feed, then New, Download and
     // Menu as actions along the bottom.

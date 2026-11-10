@@ -19,6 +19,10 @@ use std::time::Duration;
 
 pub struct ServicePage {
     pub root: gtk::Box,
+    /// Loads (or re-reads) the listing. Fired by the shell when the
+    /// page's tab is opened, so the surface shows its contents on the
+    /// click that opens it; the button remains for a manual re-read.
+    pub load: Rc<dyn Fn()>,
 }
 
 struct Spec {
@@ -239,7 +243,15 @@ fn build(context: AccountContext, spec: Spec) -> ServicePage {
         refresh.connect_clicked(move |_| ui.refresh(&ui));
     }
 
-    ServicePage { root }
+    let load = {
+        let weak = Rc::downgrade(&ui);
+        Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.refresh(&ui);
+            }
+        }) as Rc<dyn Fn()>
+    };
+    ServicePage { root, load }
 }
 
 pub fn ideas(context: AccountContext) -> ServicePage {
@@ -247,7 +259,7 @@ pub fn ideas(context: AccountContext) -> ServicePage {
         context,
         Spec {
             heading: "Ideas",
-            intro: "The idea cards your Muse saved for the connected account, read-only. Trying a card or rating it happens on the Muse side; this page only reads. Nothing is fetched until you press Refresh.",
+            intro: "The idea cards your Muse saved for the connected account, read-only. Trying a card or rating it happens on the Muse side; this page only reads. The list loads when you open this page.",
             refresh_label: "Refresh Ideas",
             empty_copy: "No idea cards yet — the service reported an empty list.",
             fetch: AccountClient::ideas,
@@ -260,7 +272,7 @@ pub fn goals(context: AccountContext) -> ServicePage {
         context,
         Spec {
             heading: "Goals",
-            intro: "The goals attached to the connected Muse account, read-only. Creating, editing or completing a goal happens on the Muse side; this page only reads. Nothing is fetched until you press Refresh.",
+            intro: "The goals attached to the connected Muse account, read-only. Creating, editing or completing a goal happens on the Muse side; this page only reads. The list loads when you open this page.",
             refresh_label: "Refresh Goals",
             empty_copy: "No goals yet — the service reported an empty list.",
             fetch: AccountClient::goals,
@@ -273,7 +285,7 @@ pub fn feed(context: AccountContext) -> ServicePage {
         context,
         Spec {
             heading: "Feed",
-            intro: "Briefings and updates your Muse published to the connected account's feed, read-only. Reactions and reordering happen on the Muse side; this page only reads. Nothing is fetched until you press Refresh.",
+            intro: "Briefings and updates your Muse published to the connected account's feed, read-only. Reactions and reordering happen on the Muse side; this page only reads. The list loads when you open this page.",
             refresh_label: "Refresh Feed",
             empty_copy: "Nothing in the feed yet — the service reported an empty list.",
             fetch: AccountClient::feed,
