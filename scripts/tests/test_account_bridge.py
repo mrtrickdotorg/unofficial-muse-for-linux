@@ -1387,6 +1387,78 @@ class ListingTests(unittest.TestCase):
         with self.assertRaises(bridge.BridgeFailure):
             bridge.listing_rows([{"title": "x"}] * 501, ("units",))
 
+    def test_ideas_sections_shape_projects_the_nested_cards(self):
+        # The production shape the community client itself reads: cards
+        # nest inside titled sections, under "cards" or "ideas".
+        bridge = load_bridge()
+        calls = []
+        client = self.gateway_client({
+            "sections": [
+                {"title": "For your family", "cards": [
+                    {"ideaCardId": "c1", "title": "Plan the week"},
+                    {"id": "c2", "title": "Book the dentist"},
+                ]},
+                {"title": "New", "ideas": [
+                    {"id": "c3", "title": "Try a recipe"},
+                ]},
+            ]
+        }, calls)
+        result = bridge.Adapter(client, {}).dispatch({"op": "ideas"})
+        self.assertEqual(calls, ["api.idea-cards.list"])
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(result["recognized"], 3)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(
+            [item["title"] for item in result["items"]],
+            ["Plan the week", "Book the dentist", "Try a recipe"],
+        )
+        self.assertEqual(result["items"][0]["id"], "c1")
+        # The section title is the card's kind when the card names none.
+        self.assertEqual(result["items"][0]["kind"], "For your family")
+        self.assertEqual(result["items"][2]["kind"], "New")
+
+    def test_feed_days_shape_projects_the_nested_units(self):
+        # The production shape the community client itself reads: units
+        # nest inside editions inside days.
+        bridge = load_bridge()
+        calls = []
+        client = self.gateway_client({
+            "days": [
+                {"local_date": "2026-11-09", "editions": [
+                    {"kind": "morning", "units": [
+                        {"unit_id": "u1", "title": "Morning brief",
+                         "content": "What matters today."},
+                        {"id": "u2", "title": "Second story",
+                         "body": "More detail.", "published_at": "2026-11-09T12:00:00Z"},
+                    ]},
+                    {"kind": "evening", "units": [
+                        {"unit_id": "u3", "title": "Evening wrap", "text": "The day, closed."},
+                    ]},
+                ]},
+            ]
+        }, calls)
+        result = bridge.Adapter(client, {}).dispatch({"op": "feed"})
+        self.assertEqual(calls, ["feed.list"])
+        self.assertEqual(result["recognized"], 3)
+        self.assertEqual(result["items"][0]["id"], "u1")
+        self.assertEqual(result["items"][0]["body"], "What matters today.")
+        # The day's date is the unit's stamp; the edition is its kind.
+        self.assertEqual(result["items"][0]["stamp"], "2026-11-09")
+        self.assertEqual(result["items"][0]["kind"], "morning")
+        # A unit's own published stamp wins over the day fallback.
+        self.assertEqual(result["items"][1]["stamp"], "2026-11-09T12:00:00Z")
+        self.assertEqual(result["items"][2]["kind"], "evening")
+
+    def test_goal_subtitle_rides_as_the_body(self):
+        bridge = load_bridge()
+        calls = []
+        client = self.gateway_client({"goals": [
+            {"goal_id": "g1", "title": "Ship it", "status": "active",
+             "subtitle": "Three steps left"},
+        ]}, calls)
+        result = bridge.Adapter(client, {}).dispatch({"op": "goals"})
+        self.assertEqual(result["items"][0]["body"], "Three steps left")
+
     def test_the_three_ops_validate_without_extra_keys(self):
         bridge = load_bridge()
         for op in ("ideas", "goals", "feed"):

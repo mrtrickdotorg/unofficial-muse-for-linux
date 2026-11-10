@@ -846,9 +846,9 @@ def artifact_rows(payload):
             "artifacts": rows}
 
 
-LISTING_ID_KEYS = ("id", "goal_id", "unit_id", "idea_card_id", "card_id", "idea_id")
+LISTING_ID_KEYS = ("id", "goal_id", "unit_id", "idea_card_id", "ideaCardId", "card_id", "idea_id")
 LISTING_TITLE_KEYS = ("title", "name", "headline")
-LISTING_BODY_KEYS = ("body", "description", "summary", "text", "content", "detail")
+LISTING_BODY_KEYS = ("body", "description", "summary", "text", "content", "detail", "subtitle")
 LISTING_KIND_KEYS = ("kind", "type", "status", "state")
 LISTING_STAMP_KEYS = ("updated_at", "created_at", "published_at", "date",
                       "updated_at_ms", "created_at_ms")
@@ -856,40 +856,19 @@ LISTING_MAX_ROWS = 200
 LISTING_MAX_CONTAINER = 500
 
 
-def listing_rows(payload, container_keys):
-    """Project an unprobed read-only listing into display rows.
+def project_listing_rows(entries, total_hint=None):
+    """Project flattened (row, kind fallback, stamp fallback) entries.
 
-    Ideas, goals and the feed have recorded routes but no recorded payload
-    shape, so unlike the Library this projection is tolerant by design: it
-    accepts a bare list or the first list found under the surface's known
-    container keys, unwraps `{node}` edges, and reads each row's identity,
-    title, body, kind and stamp from the first matching well-known key.
-    Every text value passes the same credential redaction as task content
-    and is length-capped here, so nothing unbounded or secret-shaped can
-    ride into the window. A row with neither a title nor a body cannot be
-    shown honestly, so it is skipped AND counted: the caller reports the
-    skip count, which keeps an unrecognized service shape visible instead
-    of masquerading as an empty list. A payload that is not list-shaped
-    at all, or absurdly large, still fails closed.
+    Every text value passes the credential redaction applied to task
+    content and is length-capped here, so nothing unbounded or
+    secret-shaped can ride into the window. A row with neither a title
+    nor a body cannot be shown honestly, so it is skipped AND counted:
+    the caller reports the skip count, which keeps an unrecognized
+    service shape visible instead of masquerading as an empty list.
     """
-    container = payload
-    total = None
-    if isinstance(payload, dict):
-        reported = payload.get("total_count", payload.get("total"))
-        if isinstance(reported, int) and not isinstance(reported, bool) and reported >= 0:
-            total = reported
-        container = None
-        for key in container_keys:
-            if isinstance(payload.get(key), list):
-                container = payload[key]
-                break
-        if container is None:
-            raise BridgeFailure("protocol_error")
-    if not isinstance(container, list) or len(container) > LISTING_MAX_CONTAINER:
-        raise BridgeFailure("protocol_error")
     rows = []
     skipped = 0
-    for entry in container:
+    for entry, kind_fallback, stamp_fallback in entries:
         node = entry.get("node") if isinstance(entry, dict) else None
         row = node if isinstance(node, dict) else entry
         if not isinstance(row, dict):
@@ -929,17 +908,114 @@ def listing_rows(payload, container_keys):
             "id": identifier,
             "title": title[:300],
             "body": body[:4000] if body else None,
-            "kind": kind,
-            "stamp": stamp,
+            "kind": kind or kind_fallback,
+            "stamp": stamp or stamp_fallback,
         })
         if len(rows) >= LISTING_MAX_ROWS:
             break
     return {
-        "total": total if total is not None else len(container),
+        "total": total_hint if total_hint is not None else len(entries),
         "recognized": len(rows),
         "skipped": skipped,
         "items": rows,
     }
+
+
+def listing_container(payload, container_keys):
+    """Resolve a listing payload to (flat entries, reported total).
+
+    Accepts a bare list or the first list found under the surface's
+    known container keys. Anything else — or an absurd size — fails
+    closed rather than reading as an empty surface.
+    """
+    if isinstance(payload, dict):
+        reported = payload.get("total_count", payload.get("total"))
+        total = reported if isinstance(reported, int) and not isinstance(
+            reported, bool) and reported >= 0 else None
+        for key in container_keys:
+            if isinstance(payload.get(key), list):
+                container = payload[key]
+                break
+        else:
+            raise BridgeFailure("protocol_error")
+    else:
+        total = None
+        container = payload
+    if not isinstance(container, list) or len(container) > LISTING_MAX_CONTAINER:
+        raise BridgeFailure("protocol_error")
+    return [(entry, None, None) for entry in container], total
+
+
+def listing_rows(payload, container_keys):
+    """Project a flat read-only listing (goals) into display rows."""
+    entries, total = listing_container(payload, container_keys)
+    return project_listing_rows(entries, total)
+
+
+def ideas_rows(payload):
+    """Project the idea-cards listing: cards nest inside sections.
+
+    The service answers `{sections: [{title, cards|ideas: [...]}]}` — the
+    shape the community client itself reads — so the section title rides
+    along as each card's kind when the card names none of its own. A flat
+    cards/items payload is still accepted, in case the shape flattens.
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("sections"), list):
+        sections = payload["sections"]
+        if len(sections) > LISTING_MAX_CONTAINER:
+            raise BridgeFailure("protocol_error")
+        entries = []
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            cards = section.get("cards")
+            if not isinstance(cards, list):
+                cards = section.get("ideas")
+            if not isinstance(cards, list):
+                continue
+            heading = optional_text(section.get("title"))
+            entries.extend((card, heading, None) for card in cards)
+        reported = payload.get("total_count", payload.get("total"))
+        total = reported if isinstance(reported, int) and not isinstance(
+            reported, bool) and reported >= 0 else None
+        return project_listing_rows(entries, total)
+    return listing_rows(payload, ("cards", "idea_cards", "items", "results", "data"))
+
+
+def feed_rows(payload):
+    """Project the feed listing: units nest inside days and editions.
+
+    The service answers `{days: [{local_date, editions: [{kind, units:
+    [...]}]}]}` — again the shape the community client itself reads — so
+    the day's date and the edition's kind ride along as each unit's stamp
+    and kind fallbacks. A flat units/items payload is still accepted.
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("days"), list):
+        days = payload["days"]
+        if len(days) > LISTING_MAX_CONTAINER:
+            raise BridgeFailure("protocol_error")
+        entries = []
+        for day in days:
+            if not isinstance(day, dict):
+                continue
+            date = optional_text(day.get("local_date")) or optional_text(day.get("date"))
+            editions = day.get("editions")
+            if not isinstance(editions, list):
+                continue
+            for edition in editions:
+                if not isinstance(edition, dict):
+                    continue
+                kind = optional_text(edition.get("kind")) or optional_text(
+                    edition.get("edition"))
+                units = edition.get("units")
+                if not isinstance(units, list):
+                    continue
+                entries.extend((unit, kind, date) for unit in units)
+        reported = payload.get("total_count", payload.get("total"))
+        total = reported if isinstance(reported, int) and not isinstance(
+            reported, bool) and reported >= 0 else None
+        return project_listing_rows(entries, total)
+    return listing_rows(payload, ("units", "items", "results", "data"))
 
 
 def approval_rows(payload):
@@ -1220,7 +1296,7 @@ class Adapter:
             # this client until it gets its own explicit press.
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("api.idea-cards.list", timeout=20)
-            return listing_rows(payload, ("cards", "idea_cards", "items", "results", "data"))
+            return ideas_rows(payload)
         if request["op"] == "goals":
             # Read-only: the account's goals as the recorded list route
             # reports them. Editing or deleting a goal is a write and is
@@ -1234,7 +1310,7 @@ class Adapter:
             # on the Muse side.
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("feed.list", timeout=20)
-            return listing_rows(payload, ("units", "items", "results", "data"))
+            return feed_rows(payload)
         if request["op"] == "approvals":
             # Read-only, and deliberately on its own connection: listing what the
             # agent is asking for must never decide it, and the sentinel service

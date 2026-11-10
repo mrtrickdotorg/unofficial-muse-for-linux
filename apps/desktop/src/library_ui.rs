@@ -18,6 +18,9 @@ use std::time::Duration;
 
 pub struct LibraryPage {
     pub root: gtk::Box,
+    /// Loads (or re-reads) the artifact list; fired by the shell when
+    /// the Library tab is opened.
+    pub load: Rc<dyn Fn()>,
     #[cfg(test)]
     pub(super) ui: Rc<Ui>,
 }
@@ -239,7 +242,7 @@ pub fn build(context: AccountContext) -> LibraryPage {
     heading.add_css_class("page-heading");
     root.append(&heading);
     let intro = label(
-        "One press reads the artifact list for the connected account. This page cannot open, download, rename, share or delete anything: those actions stay on the Muse side. Nothing is fetched until you press Refresh Library, and no row is kept after the window closes.",
+        "One press reads the artifact list for the connected account. This page cannot open, download, rename, share or delete anything: those actions stay on the Muse side. The list loads when you open this page, and no row is kept after the window closes.",
     );
     intro.add_css_class("page-subtitle");
     root.append(&intro);
@@ -253,7 +256,7 @@ pub fn build(context: AccountContext) -> LibraryPage {
     toolbar.append(&spinner);
     root.append(&toolbar);
 
-    let notice = label("Nothing read yet. Press Refresh Library.");
+    let notice = label("Nothing read yet.");
     root.append(&notice);
 
     let list = gtk::ListBox::new();
@@ -276,8 +279,17 @@ pub fn build(context: AccountContext) -> LibraryPage {
         refresh.connect_clicked(move |_| ui.refresh(&ui));
     }
 
+    let load = {
+        let weak = Rc::downgrade(&ui);
+        Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.refresh(&ui);
+            }
+        }) as Rc<dyn Fn()>
+    };
     LibraryPage {
         root,
+        load,
         #[cfg(test)]
         ui,
     }
