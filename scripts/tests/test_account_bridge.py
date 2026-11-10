@@ -765,18 +765,27 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(caught.exception.uncertain)
         self.assertEqual(client.sends, 1)
 
-    def test_real_client_waits_for_gateway_response_before_closing_dispatch(self):
-        # Regression: upstream fire-and-forget closes Noise immediately after
-        # writing the request; the live prompt never reached shared history.
+    def test_real_client_dispatches_without_reading_the_turn_stream(self):
+        # Regression, both directions: upstream fire-and-forget closed the
+        # Noise connection immediately after writing and a live prompt
+        # never reached shared history; the first fix read the chat.stream
+        # response to its end, which made every send wait out the agent's
+        # whole turn before the app learned the dispatch had completed.
+        # The dispatch now opens the stream and returns at once — the
+        # send operation's own confirmation reads keep the connection
+        # busy afterwards, and history, not the transport, proves the
+        # prompt landed.
         import types
         from unittest.mock import patch
         from contextlib import contextmanager
         bridge = load_bridge()
         events = []
         class Gateway:
-            def request(self, method, **kwargs):
+            def _open(self, method, **kwargs):
                 events.append((method, kwargs))
-                return b'{"ok":true}'
+                return 7
+            def request(self, method, **kwargs):
+                raise AssertionError('the turn stream must not be read to its end')
         class BaseClient:
             def __init__(self, config_loader):
                 self.config_loader = config_loader
@@ -785,7 +794,7 @@ class BridgeTests(unittest.TestCase):
                 yield Gateway()
                 events.append('closed')
             def send(self, **kwargs):
-                raise AssertionError('must not use unacknowledged fire-and-forget')
+                raise AssertionError('must not use the base client send')
         module = types.ModuleType('muse_mcp.client')
         setattr(module, 'MuseClient', BaseClient)
         with patch.dict('sys.modules', {'muse_mcp.client': module}):

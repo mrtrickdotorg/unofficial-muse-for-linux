@@ -64,6 +64,11 @@ struct Controller<A, H, T> {
     /// middle of a run attaches to it instead of sitting idle.
     watching_run: bool,
     pending_send: Option<PendingSend>,
+    /// The dispatch behind `pending_send` has finished (confirmed or
+    /// uncertain), so the next history load for its scope settles the
+    /// record either way: the row is there, or it never landed. While a
+    /// dispatch is still in flight only a matching row settles it.
+    pending_send_finished: bool,
     /// Pending approvals exactly as the service last reported them. Empty means
     /// the last read found none; it never means the agent wants nothing.
     approvals: Vec<muse_account::Approval>,
@@ -288,6 +293,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             live_delta_seq: 0,
             watching_run: false,
             pending_send: None,
+            pending_send_finished: false,
             approvals: Vec::new(),
             approval_notice: String::new(),
             deciding: None,
@@ -335,6 +341,7 @@ impl<A, H, T> Controller<A, H, T> {
             scope: self.scope.clone(),
             text: text.into(),
         });
+        self.pending_send_finished = false;
         self.send_notice.clear();
         Some(ticket)
     }
@@ -359,21 +366,27 @@ impl<A, H, T> Controller<A, H, T> {
             SendOutcome::Confirmed => {
                 // The reply landing in the transcript is the confirmation; a
                 // sentence about it is one more line over the message box.
-                self.pending_send = None;
+                // The dispatch record stays as the transcript's local echo
+                // until a history load settles it: the service's own row
+                // replaces it, so the message never leaves the screen
+                // between sending and the next read landing.
+                self.pending_send_finished = true;
                 self.send_notice.clear();
             }
             SendOutcome::NotSent(error) => {
                 self.pending_send = None;
+                self.pending_send_finished = false;
                 self.send_notice =
                     format!("Not sent: {error}. No automatic retry; the composer is unchanged.");
             }
             SendOutcome::Uncertain(error) => {
                 // No park, no acknowledgment gate (Patrick's call, Nov 9):
                 // an uncertain dispatch is reported in the notice line and
-                // the composer stays free. If the message never lands in
-                // the conversation, the user can simply send it again —
-                // the muse.ai behaviour — instead of clearing a bar first.
-                self.pending_send = None;
+                // the composer stays free. The record stays as the local
+                // echo until a history load settles whether it landed; if
+                // it never lands, the user can simply send it again — the
+                // muse.ai behaviour — instead of clearing a bar first.
+                self.pending_send_finished = true;
                 let scope = ticket.scope.as_deref().unwrap_or("Main conversation");
                 self.send_notice = format!(
                     "Delivery uncertain in {scope}: {error}. It may already be running; if it does not appear in this conversation, send it again."
@@ -1007,7 +1020,15 @@ mod native {
                 .any(|row| row.role == "user" && row.text == pending.text);
             if landed {
                 self.pending_send = None;
+                self.pending_send_finished = false;
                 self.send_notice.clear();
+            } else if self.pending_send_finished && self.sending.is_none() {
+                // The dispatch finished and this conversation's fresh
+                // history does not hold the message: it never landed, so
+                // the echo record goes too. (The uncertainty notice, when
+                // there is one, stays — it is still the latest word.)
+                self.pending_send = None;
+                self.pending_send_finished = false;
             }
         }
     }
@@ -2750,7 +2771,6 @@ mod native {
             let mut reread_approvals = false;
             let mut reread_grants = false;
             let mut approvals_after = false;
-            let send_connection_error = matches!(&reply, Reply::SendConnectionError(_));
             let auth_expired = matches!(&reply, Reply::AuthExpired);
             let send_confirmed = matches!(&reply, Reply::Send(SendOutcome::Confirmed));
             // A dispatched message is answered by the service; poll history
@@ -2891,7 +2911,14 @@ mod native {
                         if confirmed {
                             self.prompt.set_text("");
                         }
-                        refresh_after = !send_connection_error;
+                        // No full refresh after a send: it re-verifies the
+                        // account and lists every conversation while holding
+                        // the slot the reply polls wait on, and a send
+                        // changes none of that. The immediate reply poll
+                        // (below) and the watch bring the history; the
+                        // sender's own message is already on screen as the
+                        // local echo.
+                        refresh_after = false;
                     }
                     Reply::Login(result) => {
                         self.login_cancellation.borrow_mut().take();
@@ -3295,6 +3322,25 @@ mod native {
                     message.timestamp.as_deref().and_then(short_stamp),
                 );
             }
+            // The local echo: a message this window sent shows at once, in
+            // its own conversation, until a history load settles the record
+            // (the service's row then replaces it — the reconcile above
+            // clears the record the moment the row is in `state.history`,
+            // so the two never appear side by side).
+            if let Some(pending) = &state.pending_send
+                && pending.scope == state.scope
+                && !state
+                    .history
+                    .iter()
+                    .any(|row| row.role == "user" && row.text == pending.text)
+            {
+                super::super::append_chat_stamped(
+                    &self.history,
+                    super::super::ChatRole::User,
+                    &super::presentation_text(&pending.text),
+                    None,
+                );
+            }
             // Newest messages are at the bottom. Follow them when the reader
             // was already there or the pin demands it, and repeat after
             // allocation: a fresh row only enlarges the adjustment once it
@@ -3506,6 +3552,23 @@ mod native {
             let mut state = parked();
             state.scope = Some("thread-b".into());
             state.history = vec![row("user", "speed check")];
+            state.reconcile_pending_send();
+            assert!(state.pending_send.is_some());
+            // A FINISHED dispatch settles either way on this conversation's
+            // next load: absent here means it never landed, so the local
+            // echo record goes too (the uncertainty notice stays).
+            let mut state = parked();
+            state.pending_send_finished = true;
+            state.history = vec![row("assistant", "hi")];
+            state.reconcile_pending_send();
+            assert!(state.pending_send.is_none());
+            assert!(!state.send_notice.is_empty());
+            // And a finished record in another conversation still waits
+            // for its own conversation's load.
+            let mut state = parked();
+            state.pending_send_finished = true;
+            state.scope = Some("thread-b".into());
+            state.history = vec![];
             state.reconcile_pending_send();
             assert!(state.pending_send.is_some());
         }
@@ -4543,7 +4606,9 @@ mod tests {
         let mut state = connected();
         let first = state.begin_send("once").unwrap();
         state.finish_send(&first, SendOutcome::Confirmed);
-        assert!(state.pending_send.is_none());
+        // The record stays as the transcript's local echo until a history
+        // load settles it; it never re-dispatches anything.
+        assert!(state.pending_send.is_some());
         assert!(state.busy.is_none());
         // A confirmed send leaves no standing text above the composer.
         assert!(state.send_notice.is_empty());
@@ -4591,7 +4656,9 @@ mod tests {
         assert!(state.begin_send("duplicate").is_none());
         assert!(!state.select_thread(Some("different-thread".into())));
         state.finish_send(&ticket, SendOutcome::Uncertain("deadline exceeded".into()));
-        assert!(state.pending_send.is_none());
+        // The record stays as the local echo until a history load settles
+        // whether the message landed; it blocks nothing.
+        assert!(state.pending_send.is_some());
         assert!(state.send_notice.contains("deadline exceeded"));
         // No acknowledgment step: the next message can be sent at once.
         let next = state.begin_send("a deliberate new message").unwrap();
@@ -4608,7 +4675,11 @@ mod tests {
             Ok(vec![]),
             Ok("tasks".into()),
         );
-        assert!(state.pending_send.is_none());
+        // The refresh alone does not settle the echo record — the
+        // completion path's reconcile against this fresh history does
+        // (proven in the reconcile test). The notice remains the latest
+        // word either way, and nothing blocks the next send.
+        assert!(state.pending_send.is_some());
         assert!(state.send_notice.contains("deadline exceeded"));
         assert!(state.begin_send("fourth").is_some());
     }
