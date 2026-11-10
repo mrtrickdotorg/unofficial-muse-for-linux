@@ -58,30 +58,30 @@ const DARK_THEME_CSS: &str = r#"
 /* Visual language follows the Mac/Windows Muse client: near-black neutral
    surfaces, hairline borders instead of boxes, one quiet accent, generous
    padding, and assistant replies as plain text rather than bubbles. */
-window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", system-ui, sans-serif; }
+window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", "Cantarell", "Noto Sans", system-ui, sans-serif; }
 window.dark-window { background-color: #0d0d10; }
 scrolledwindow viewport { background-color: transparent; }
 .app-sidebar { background-color: #131318; }
-.icon-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 12px 8px; }
-.side-panel-wrap { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 12px 10px; }
+.icon-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 10px 8px; }
+.side-panel-wrap { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 14px 12px; }
 .side-panel { padding: 0 2px; }
 .panel-list { background: transparent; }
-.panel-list row { padding: 7px 10px; border-radius: 8px; background: transparent; color: #d7d7dd; }
+.panel-list row { padding: 9px 12px; border-radius: 10px; background: transparent; color: #d7d7dd; }
 .panel-list row:hover { background-color: rgba(255, 255, 255, 0.05); }
 .panel-list row:selected { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; }
-.panel-item-label { font-size: 13.5px; }
-.panel-heading { color: #8e8e99; font-size: 11.5px; font-weight: 700; padding: 10px 10px 4px; }
+.panel-item-label { font-size: 15px; }
+.panel-heading { color: #9a9aa5; font-size: 13px; font-weight: 600; padding: 14px 12px 6px; }
 .panel-title { color: #f4f4f6; font-size: 15px; font-weight: 700; padding: 2px 4px 4px; }
 .panel-copy { color: #b3b3bc; font-size: 13px; padding: 0 4px; }
-.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 16px; min-height: 32px; padding: 0 10px; font-size: 13.5px; color: #f4f4f6; }
+.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 19px; min-height: 38px; padding: 0 12px; font-size: 14.5px; color: #f4f4f6; }
 .search-pill:focus { border-color: rgba(255, 255, 255, 0.25); }
 .rail-separator { background-color: rgba(255, 255, 255, 0.08); min-height: 1px; margin: 6px 8px; }
 .brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 10px; font-weight: 700; min-width: 34px; min-height: 34px; }
-.nav-item { min-width: 40px; min-height: 40px; padding: 0; border-radius: 10px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
+.nav-item { min-width: 48px; min-height: 48px; padding: 0; border-radius: 12px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
 .nav-item:hover { background-color: rgba(255, 255, 255, 0.05); color: #f4f4f6; }
 .nav-item.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
 .nav-item:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
-.nav-icon { min-width: 20px; }
+.nav-icon { min-width: 24px; }
 .rail-button { min-width: 44px; min-height: 44px; padding: 0; border-radius: 22px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
 .rail-button:hover { background-color: rgba(255, 255, 255, 0.05); color: #ffffff; }
 .rail-button.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
@@ -170,7 +170,81 @@ tooltip { background-color: #26262e; color: #f4f4f6; border: 1px solid rgba(255,
 checkbutton { color: #d7d7de; padding: 2px; }
 "#;
 
+/// Rail glyphs drawn to match muse.ai's (bubble, magnifier, book, bulb,
+/// check-square, shapes, bars, plus, download tray, menu), shipped as
+/// strings in the binary: the system icon theme cannot be trusted with
+/// these names -- on Patrick's KDE the theme names fell back to generic
+/// document and picture glyphs (his Nov 10 side-by-side screenshot). The
+/// SVGs are written once into the app's cache dir and registered as
+/// unthemed icons, so the theme can never substitute a different glyph.
+/// Fixed light-gray stroke: the rail button's highlight pill carries the
+/// active state, as on the web.
+const BUNDLED_ICONS: &[(&str, &str)] = &[
+    (
+        "umfl-chat",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 4.4c4.6 0 8.2 3 8.2 6.8 0 3.8-3.6 6.8-8.2 6.8-1 0-1.9-.14-2.8-.4L5 19.7l.66-2.5C4.55 15.9 3.8 13.7 3.8 11.2 3.8 7.4 7.4 4.4 12 4.4Z\"/></svg>",
+    ),
+    (
+        "umfl-search",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"6.4\"/><path d=\"M15.9 15.9l4.3 4.3\"/></svg>",
+    ),
+    (
+        "umfl-library",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 6.4C10.2 5 7.4 4.5 4.6 5v13.6c2.8-.5 5.6 0 7.4 1.4 1.8-1.4 4.6-1.9 7.4-1.4V5C16.6 4.5 13.8 5 12 6.4Z\"/><path d=\"M12 6.4v13.6\"/></svg>",
+    ),
+    (
+        "umfl-ideas",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3.9a5.7 5.7 0 0 1 3.25 10.4c-.6.44-.87.97-.87 1.85H9.62c0-.88-.27-1.41-.87-1.85A5.7 5.7 0 0 1 12 3.9Z\"/><path d=\"M9.7 19.3h4.6\"/><path d=\"M10.4 21.5h3.2\"/></svg>",
+    ),
+    (
+        "umfl-goals",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"4.2\" y=\"4.2\" width=\"15.6\" height=\"15.6\" rx=\"3.6\"/><path d=\"M8.4 12.5l2.5 2.5 4.8-5.3\"/></svg>",
+    ),
+    (
+        "umfl-create",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"9\" cy=\"9\" r=\"4.5\"/><rect x=\"12.9\" y=\"12.9\" width=\"6.8\" height=\"6.8\" rx=\"1.2\"/><path d=\"M16.9 3.8l2.7 4.7h-5.4z\"/></svg>",
+    ),
+    (
+        "umfl-feed",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect x=\"5.6\" y=\"13\" width=\"3\" height=\"7\" rx=\"1\" fill=\"#d9d9e0\"/><rect x=\"10.5\" y=\"4.5\" width=\"3\" height=\"15.5\" rx=\"1\" fill=\"#d9d9e0\"/><rect x=\"15.4\" y=\"9.5\" width=\"3\" height=\"10.5\" rx=\"1\" fill=\"#d9d9e0\"/></svg>",
+    ),
+    (
+        "umfl-new",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5.5v13M5.5 12h13\"/></svg>",
+    ),
+    (
+        "umfl-download",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 4.2v10.4\"/><path d=\"M6.9 10.3L12 15.4l5.1-5.1\"/><path d=\"M4.6 19.6h14.8\"/></svg>",
+    ),
+    (
+        "umfl-menu",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#d9d9e0\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4.6 7h14.8M4.6 12h14.8M4.6 17h14.8\"/></svg>",
+    ),
+];
+
+fn install_bundled_icons() {
+    let dir = gtk::glib::user_cache_dir()
+        .join("unofficial-muse-for-linux")
+        .join("icons");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    for (name, svg) in BUNDLED_ICONS {
+        let path = dir.join(format!("{name}.svg"));
+        let stale = std::fs::read_to_string(&path)
+            .map(|existing| existing != *svg)
+            .unwrap_or(true);
+        if stale {
+            let _ = std::fs::write(&path, svg);
+        }
+    }
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::IconTheme::for_display(&display).add_search_path(&dir);
+    }
+}
+
 fn install_dark_theme() {
+    install_bundled_icons();
     if let Some(display) = gtk::gdk::Display::default() {
         // Unstyled widgets (notebook tabs, combo popups, menus) must also
         // default to the dark variant: without a settings daemon they would
@@ -255,7 +329,7 @@ fn build_ui(app: &gtk::Application) {
     // column that eats the chat area on small windows.
     let shell = gtk::Paned::new(gtk::Orientation::Horizontal);
     shell.add_css_class("app-shell");
-    shell.set_position(304);
+    shell.set_position(372);
     shell.set_resize_start_child(false);
     shell.set_shrink_start_child(false);
     shell.set_wide_handle(false);
@@ -269,70 +343,54 @@ fn build_ui(app: &gtk::Application) {
     // stretch them back out.
     sidebar.set_hexpand(false);
 
-    let rail = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let rail = gtk::Box::new(gtk::Orientation::Vertical, 6);
     rail.add_css_class("icon-rail");
-    rail.set_size_request(56, -1);
-    let chats_nav = nav_button("chat-symbolic", "Chat", "Main chat and your side chats");
+    rail.set_size_request(64, -1);
+    let chats_nav = nav_button("umfl-chat", "Chat", "Main chat and your side chats");
     chats_nav.add_css_class("active");
     rail.append(&chats_nav);
-    let search_button = nav_button("system-search-symbolic", "Search", "Search your chats");
+    let search_button = nav_button("umfl-search", "Search", "Search your chats");
     rail.append(&search_button);
-    let library_nav = nav_button(
-        "folder-documents-symbolic",
-        "Library",
-        "Your spaces and saved artifacts",
-    );
+    let library_nav = nav_button("umfl-library", "Library", "Your spaces and saved artifacts");
     rail.append(&library_nav);
-    let ideas_nav = nav_button(
-        "lightbulb-symbolic",
-        "Ideas",
-        "Ideas your Muse saved for you",
-    );
+    let ideas_nav = nav_button("umfl-ideas", "Ideas", "Ideas your Muse saved for you");
     rail.append(&ideas_nav);
     let goals_nav = nav_button(
-        "checkbox-checked-symbolic",
+        "umfl-goals",
         "Goals",
         "What you and your Muse are working toward",
     );
     rail.append(&goals_nav);
     let create_nav = nav_button(
-        "view-grid-symbolic",
+        "umfl-create",
         "Create",
         "Start something new with your Muse",
     );
     rail.append(&create_nav);
-    let feed_nav = nav_button(
-        "image-x-generic-symbolic",
-        "Feed",
-        "Briefings and updates from your Muse",
-    );
+    let feed_nav = nav_button("umfl-feed", "Feed", "Briefings and updates from your Muse");
     rail.append(&feed_nav);
     let rail_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     rail_spacer.set_vexpand(true);
     rail.append(&rail_spacer);
     let new_button = nav_button(
-        "list-add-symbolic",
+        "umfl-new",
         "New chat",
         "Go to the main chat and start typing",
     );
     rail.append(&new_button);
     let download_button = nav_button(
-        "document-save-symbolic",
+        "umfl-download",
         "Download",
         "Get the latest build of this app",
     );
     rail.append(&download_button);
-    let menu_button = nav_button(
-        "open-menu-symbolic",
-        "Menu",
-        "Account connection and sign-in",
-    );
+    let menu_button = nav_button("umfl-menu", "Menu", "Account connection and sign-in");
     rail.append(&menu_button);
     sidebar.append(&rail);
 
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.add_css_class("side-panel-wrap");
-    panel.set_size_request(248, -1);
+    panel.set_size_request(300, -1);
     let panel_stack = gtk::Stack::new();
     panel_stack.set_vexpand(true);
     panel_stack.set_vhomogeneous(false);
@@ -1152,7 +1210,7 @@ fn nav_button(icon_name: &str, label: &str, tooltip: &str) -> gtk::Button {
     button.set_halign(gtk::Align::Center);
     let icon = gtk::Image::from_icon_name(icon_name);
     icon.add_css_class("nav-icon");
-    icon.set_pixel_size(20);
+    icon.set_pixel_size(24);
     button.set_child(Some(&icon));
     button
 }

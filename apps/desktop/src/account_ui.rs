@@ -3143,14 +3143,13 @@ mod native {
                 if let Some(account) = &state.account {
                     for thread in &account.threads {
                         let archived = if thread.archived { " [archived]" } else { "" };
-                        let updated = thread
-                            .updated_at
-                            .as_deref()
-                            .map(|s| format!(" · {s}"))
-                            .unwrap_or_default();
                         let row = gtk::ListBoxRow::new();
                         row.set_widget_name(&format!("thread:{}", thread.session_id));
-                        let row_label = row_label(&format!("{}{archived}{updated}", thread.title));
+                        // Names only, like the muse.ai list: the raw ISO
+                        // updated-at string that used to trail the title
+                        // wrapped rows onto two lines and matched nothing
+                        // on the web (Patrick's Nov 10 side-by-side).
+                        let row_label = row_label(&format!("{}{archived}", thread.title));
                         row_label.add_css_class("panel-item-label");
                         row.set_child(Some(&row_label));
                         if state.scope.as_deref() == Some(thread.session_id.as_str()) {
