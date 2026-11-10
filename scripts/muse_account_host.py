@@ -91,6 +91,24 @@ def authorized(connection):
     return uid is None or uid == os.getuid()
 
 
+# How long one dispatch on a held connection may run before it is treated
+# as stuck, per bridge op. The transport's own request timeout is only
+# checked between frames, so a held connection whose peer vanished without
+# closing it (an idle connection dropped by an intermediary) blocks its
+# reader indefinitely -- no error ever reaches the retry logic below, and
+# every later request queues behind the lock. Nov 10 field evidence: the
+# service answered a test message in ~3s while the app sat on a wedged
+# held connection for over two minutes. The watchdog in dispatch() is the
+# bound: on expiry it closes the connection from another thread, which is
+# what makes the stuck call let go.
+OP_BUDGETS = {"watch": 75.0, "send": 30.0, "activity": 20.0}
+DEFAULT_BUDGET = 25.0
+
+
+def op_budget(op):
+    return OP_BUDGETS.get(op, DEFAULT_BUDGET)
+
+
 class Connection:
     """One held gateway connection; exactly one request uses it at a time.
 
@@ -107,6 +125,7 @@ class Connection:
         self.client = None
         self.digest = None
         self.opened = 0
+        self.active_token = None
 
     def close(self):
         stack, self.stack = self.stack, None
@@ -120,29 +139,67 @@ class Connection:
 
     def dispatch(self, request):
         with self.lock:
+            token = object()
+            self.active_token = token
             try:
-                return self._dispatch(request)
-            except Exception as exc:
-                error = self.bridge.classify_exception(exc)
-                if error.code not in RETRY_CODES:
-                    raise error from None
-                # The held connection is no longer trustworthy.
-                self.close()
-                if error.uncertain:
-                    # The service may already have run it: never replay.
-                    raise error from None
-                # Nothing reached the service (the bridge clears `uncertain`
-                # until it dispatches), so reconnecting and asking once more is
-                # safe even for a send.
-                try:
-                    return self._dispatch(request)
-                except Exception as retry_exc:
-                    retry_error = self.bridge.classify_exception(retry_exc)
-                    if retry_error.code in RETRY_CODES:
-                        self.close()
-                    raise retry_error from None
+                outcome = {}
 
-    def _dispatch(self, request):
+                def run():
+                    try:
+                        outcome["data"] = self._dispatch_guarded(request, token)
+                    except BaseException as exc:  # delivered to the caller below
+                        outcome["error"] = exc
+
+                worker = threading.Thread(target=run, daemon=True)
+                worker.start()
+                worker.join(op_budget(request.get("op")))
+                if worker.is_alive():
+                    # The gateway call is stuck on a connection whose peer
+                    # vanished: no error will ever arrive to classify.
+                    # Closing the transport is what makes it let go, and
+                    # dropping the token first means the abandoned worker
+                    # can never dispatch on the fresh connection afterwards
+                    # (a replayed send would duplicate the user's message).
+                    self.active_token = None
+                    self.close()
+                    worker.join(5)
+                    raise self.bridge.BridgeFailure(
+                        "timeout", uncertain=request.get("op") == "send")
+                if "error" in outcome:
+                    raise outcome["error"]
+                return outcome["data"]
+            finally:
+                if self.active_token is token:
+                    self.active_token = None
+
+    def _dispatch_guarded(self, request, token):
+        try:
+            return self._dispatch(request, token)
+        except Exception as exc:
+            error = self.bridge.classify_exception(exc)
+            if error.code not in RETRY_CODES:
+                raise error from None
+            # The held connection is no longer trustworthy.
+            self.close()
+            if error.uncertain:
+                # The service may already have run it: never replay.
+                raise error from None
+            # Nothing reached the service (the bridge clears `uncertain`
+            # until it dispatches), so reconnecting and asking once more is
+            # safe even for a send.
+            try:
+                return self._dispatch(request, token)
+            except Exception as retry_exc:
+                retry_error = self.bridge.classify_exception(retry_exc)
+                if retry_error.code in RETRY_CODES:
+                    self.close()
+                raise retry_error from None
+
+    def _dispatch(self, request, token):
+        if self.active_token is not token:
+            # This attempt belongs to a dispatch the watchdog already
+            # abandoned; whatever connection is held now is not its to use.
+            raise self.bridge.BridgeFailure("bridge_failure")
         with self.bridge.secure_config(self.config_dir) as config:
             digest = cookie_digest(config.get("cookies_file"))
             if self.client is None or digest != self.digest:
@@ -242,9 +299,17 @@ def serve(host, path, stop, idle_seconds=None, accept_timeout=0.5):
     except OSError:
         listener.close()
         return
+    pid_path = path + ".pid"
     try:
         os.chmod(path, 0o600)
         listener.listen(8)
+        # The client kills a wedged host by this pid (SIGTERM is a clean
+        # shutdown here: it sets the stop event the accept loop watches).
+        try:
+            with open(pid_path, "w") as handle:
+                handle.write(str(os.getpid()))
+        except OSError:
+            pass
         listener.settimeout(accept_timeout)
         while not stop.is_set():
             if idle_seconds is not None and host.idle_for() >= idle_seconds:
@@ -259,10 +324,11 @@ def serve(host, path, stop, idle_seconds=None, accept_timeout=0.5):
                              daemon=True).start()
     finally:
         listener.close()
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        for stale in (path, pid_path):
+            try:
+                os.unlink(stale)
+            except OSError:
+                pass
 
 
 def already_served(path):

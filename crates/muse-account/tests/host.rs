@@ -125,3 +125,14 @@ fn the_socket_name_matches_the_published_fnv_1a_64_vectors() {
     );
     assert!(path.to_string_lossy().ends_with(".sock"));
 }
+
+#[test]
+fn the_pid_file_sits_beside_the_socket() {
+    // The Python host publishes its pid at socket_path + ".pid"; the client
+    // derives the same path to terminate a wedged host.
+    let socket = Path::new("/run/user/1000/unofficial-muse-for-linux/account-ab12.sock");
+    assert_eq!(
+        muse_account::host_pid_path(socket),
+        Path::new("/run/user/1000/unofficial-muse-for-linux/account-ab12.sock.pid")
+    );
+}

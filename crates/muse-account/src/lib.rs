@@ -20,7 +20,22 @@ use std::{
 
 const MAX_REQUEST: usize = 1024 * 1024;
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
-const DEADLINE: Duration = Duration::from_secs(180);
+/// How long one account operation may take before the client gives up on
+/// it, by bridge op. These are the outer bound: the account host enforces
+/// a tighter per-op budget of its own and recycles a stuck connection.
+/// They replace a flat 180s that let one wedged call freeze the app for
+/// minutes (Nov 10: the service answered a test in ~3s while the app
+/// waited on a held gateway connection whose peer had vanished without
+/// closing it -- the transport only checks its timeout between frames,
+/// so no error ever surfaced).
+fn deadline_for(op: Option<&str>) -> Duration {
+    match op {
+        Some("watch") => Duration::from_secs(100),
+        Some("send") => Duration::from_secs(50),
+        Some("activity") => Duration::from_secs(35),
+        _ => Duration::from_secs(45),
+    }
+}
 
 #[cfg(test)]
 mod process_tests;
@@ -720,6 +735,7 @@ impl AccountClient {
             .config_dir
             .to_str()
             .ok_or_else(|| AccountError::new(ErrorCode::InvalidRequest, false))?;
+        let deadline = deadline_for(request.get("op").and_then(serde_json::Value::as_str));
         request["config_dir"] = serde_json::Value::String(config_dir.to_owned());
         let bytes = serde_json::to_vec(&request)
             .map_err(|_| AccountError::new(ErrorCode::InvalidRequest, false))?;
@@ -729,7 +745,7 @@ impl AccountClient {
         // A live host answers in ~0.1s on a connection it already holds. When
         // there is none (or it cannot start), the one-shot bridge below is
         // unchanged: a missing host must never block an account operation.
-        let output = match self.host_exchange(&bytes, sending)? {
+        let output = match self.host_exchange(&bytes, sending, deadline)? {
             Some(output) => output,
             None => {
                 // Only the one-shot path needs the interpreter and script; a
@@ -738,7 +754,7 @@ impl AccountClient {
                 run_bridge_active(
                     &self.config,
                     &bytes,
-                    DEADLINE,
+                    deadline,
                     sending,
                     self.active.as_deref(),
                 )?
@@ -768,31 +784,64 @@ impl AccountClient {
         &self,
         request: &[u8],
         sending: bool,
+        deadline: Duration,
     ) -> Result<Option<Vec<u8>>, AccountError> {
         let socket = self
             .host
             .clone()
             .unwrap_or_else(|| host_socket(&self.config.config_dir));
         if let Ok(stream) = UnixStream::connect(&socket) {
-            match self.exchange_on(stream, request, sending) {
+            match self.exchange_on(stream, request, sending, deadline) {
                 Ok(line) => return Ok(Some(line)),
+                Err(error) if matches!(error.code, ErrorCode::Timeout) => {
+                    // The host answered nothing within the op's budget: one
+                    // of its held connections is wedged. Terminate the host
+                    // (SIGTERM is a clean shutdown for it) so the next
+                    // exchange starts fresh instead of queueing behind the
+                    // same wedge; a read may retry on the fresh host, a send
+                    // may not be replayed.
+                    self.kill_host(&socket);
+                    if !sending {
+                        return self.start_and_exchange(&socket, request, deadline);
+                    }
+                    return Err(error);
+                }
                 // A socket left behind by a host that has just exited: a read is
                 // idempotent and can be retried on a fresh host, a send cannot
                 // be replayed because it may already have been written.
-                Err(_) if !sending => return self.start_and_exchange(&socket, request),
+                Err(_) if !sending => return self.start_and_exchange(&socket, request, deadline),
                 Err(error) => return Err(error),
             }
         }
-        self.start_and_exchange(&socket, request)
+        self.start_and_exchange(&socket, request, deadline)
     }
     fn start_and_exchange(
         &self,
         socket: &Path,
         request: &[u8],
+        deadline: Duration,
     ) -> Result<Option<Vec<u8>>, AccountError> {
         match self.start_host().and_then(|()| wait_for_socket(socket)) {
-            Some(stream) => self.exchange_on(stream, request, false).map(Some),
+            Some(stream) => self.exchange_on(stream, request, false, deadline).map(Some),
             None => Ok(None),
+        }
+    }
+    /// Terminate the account host that owns `socket`, via the pid file it
+    /// publishes beside the socket. Best-effort: a missing or stale pid
+    /// file just leaves the host as it was.
+    fn kill_host(&self, socket: &Path) {
+        let Ok(text) = std::fs::read_to_string(host_pid_path(socket)) else {
+            return;
+        };
+        let Ok(pid) = text.trim().parse::<libc::pid_t>() else {
+            return;
+        };
+        if pid > 0 {
+            // SAFETY: kill() with a pid parsed from the host's own pid
+            // file; SIGTERM is the host's documented clean shutdown.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
         }
     }
     fn exchange_on(
@@ -800,11 +849,12 @@ impl AccountClient {
         stream: UnixStream,
         request: &[u8],
         sending: bool,
+        deadline: Duration,
     ) -> Result<Vec<u8>, AccountError> {
         let fail = |code: ErrorCode| AccountError::new(code, sending);
         let started = Instant::now();
         stream
-            .set_write_timeout(Some(DEADLINE))
+            .set_write_timeout(Some(deadline))
             .map_err(|_| fail(ErrorCode::BridgeFailure))?;
         // Short reads so a cancelled lease is noticed during a long wait.
         stream
@@ -841,7 +891,7 @@ impl AccountClient {
             {
                 return Err(fail(ErrorCode::BridgeFailure));
             }
-            if started.elapsed() >= DEADLINE {
+            if started.elapsed() >= deadline {
                 return Err(fail(ErrorCode::Timeout));
             }
             match reader.read_until(b'\n', &mut line) {
@@ -937,6 +987,15 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
         value = value.wrapping_mul(0x0000_0100_0000_01b3);
     }
     value
+}
+
+/// The pid file the account host publishes beside its socket; the Python
+/// host derives it the same way (`socket_path + ".pid"`), so this is a
+/// cross-language contract rather than an internal detail.
+pub fn host_pid_path(socket: &Path) -> PathBuf {
+    let mut name = socket.as_os_str().to_owned();
+    name.push(".pid");
+    PathBuf::from(name)
 }
 
 pub fn host_socket(config_dir: &Path) -> PathBuf {
@@ -1131,5 +1190,32 @@ fn run_bridge_active(
             return Ok(output);
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::deadline_for;
+    use std::time::Duration;
+
+    #[test]
+    fn op_deadlines_bound_a_wedged_call_well_under_the_old_flat_180s() {
+        // Regression shape for the Nov 10 lockup: every op's outer bound
+        // must land in tens of seconds, the watch must still cover its
+        // 45s window plus the full-window read, and the activity listen
+        // must cover its ~4s subscribe with room for a cold start.
+        for op in [
+            None,
+            Some("history"),
+            Some("send"),
+            Some("watch"),
+            Some("activity"),
+        ] {
+            assert!(deadline_for(op) < Duration::from_secs(180), "{op:?}");
+        }
+        assert!(deadline_for(Some("watch")) >= Duration::from_secs(60));
+        assert!(deadline_for(Some("activity")) >= Duration::from_secs(15));
+        assert!(deadline_for(Some("watch")) > deadline_for(Some("send")));
+        assert!(deadline_for(Some("send")) > deadline_for(Some("activity")));
     }
 }
