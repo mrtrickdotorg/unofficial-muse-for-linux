@@ -824,3 +824,21 @@ fn persist(dir: &Path, tasks: &[Task]) -> Result<(), TaskError> {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn due_window_boundaries_are_exact() {
+        // The pure validator takes its clock as an argument, so the exact
+        // edges can be pinned without racing a live read: the past edge is
+        // exclusive (a due exactly at the grace limit is already too old),
+        // the future edge inclusive (exactly five years out is allowed).
+        let now = 1_800_000_000u64;
+        assert!(validate_due(now - PAST_GRACE_SECS, now).is_err());
+        assert!(validate_due(now - PAST_GRACE_SECS + 1, now).is_ok());
+        assert!(validate_due(now + FUTURE_WINDOW_SECS, now).is_ok());
+        assert!(validate_due(now + FUTURE_WINDOW_SECS + 1, now).is_err());
+    }
+}
