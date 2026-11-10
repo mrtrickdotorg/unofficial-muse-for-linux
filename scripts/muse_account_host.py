@@ -249,7 +249,25 @@ class Host:
             # it (the one-shot bridge requires one) but can never redirect it.
             request["config_dir"] = self.config_dir
             self.bridge.validate_request(request)
-            data = self.connection(request["op"]).dispatch(request)
+            connection = self.connection(request["op"])
+            began = time.monotonic()
+            try:
+                data = connection.dispatch(request)
+            except Exception as exc:
+                error = self.bridge.classify_exception(exc)
+                self.bridge.timing_log(
+                    self.config_dir,
+                    "host op={} conn={} ms={} ok=0 code={}".format(
+                        request["op"],
+                        "waiting" if connection is self.waiting else "control",
+                        int((time.monotonic() - began) * 1000), error.code))
+                raise
+            self.bridge.timing_log(
+                self.config_dir,
+                "host op={} conn={} ms={} ok=1".format(
+                    request["op"],
+                    "waiting" if connection is self.waiting else "control",
+                    int((time.monotonic() - began) * 1000)))
             return {"ok": True, "data": data}
         except Exception as exc:
             return self.bridge.error_response(self.bridge.classify_exception(exc))
@@ -303,6 +321,9 @@ def serve(host, path, stop, idle_seconds=None, accept_timeout=0.5):
     try:
         os.chmod(path, 0o600)
         listener.listen(8)
+        host.bridge.timing_log(
+            host.config_dir,
+            "host serve start pid={} watchdog=on".format(os.getpid()))
         # The client kills a wedged host by this pid (SIGTERM is a clean
         # shutdown here: it sets the stop event the accept loop watches).
         try:

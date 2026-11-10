@@ -151,6 +151,26 @@ def object_rows(rows):
     return rows
 
 
+def timing_log(config_dir, line):
+    """Append one timing line to <config_dir>/op-timing.log.
+
+    Deliberately content-free: op names, durations and row counts only --
+    never message text, conversation ids, or credentials. This is the
+    instrument that ended the Nov 10 guessing about where a round trip
+    goes: the service answered in ~3s while the app took minutes, and
+    every layer's own account of itself looked fine.
+    """
+    if not config_dir:
+        return
+    try:
+        import time
+        path = os.path.join(str(config_dir), "op-timing.log")
+        with open(path, "a") as handle:
+            handle.write("{} {}\n".format(int(time.time() * 1000), line))
+    except OSError:
+        pass
+
+
 def history_rows(rows):
     rows = object_rows(rows)
     latest = {}
@@ -1390,12 +1410,16 @@ class Adapter:
             # an answer take seconds to appear.
             import time
             timeout = request["timeout"] / 1000.0
-            deadline = time.monotonic() + timeout
+            began = time.monotonic()
+            deadline = began + timeout
             # A caller that already knows the newest message it has seen sends
             # it as `after`: the first read then answers at once when anything
             # newer is already there, so nothing that arrived while the request
             # was being set up is skipped.
             after = request.get("after")
+            timing_log(request.get("config_dir"),
+                       "bridge watch begin limit={} after={}".format(
+                           request["limit"], after is not None))
             # Ticks probe the tail with a small read: the full window of a
             # long conversation is heavy to re-read twice a second, and the
             # probe only has to notice a change. The rows a watch returns are
@@ -1406,11 +1430,27 @@ class Adapter:
                 return history_rows(self.client.history(
                     thread=request.get("thread"), limit=probe_limit))
 
+            full_ms = []
+
             def full():
                 if probe_limit == request["limit"]:
                     return None
-                return history_rows(self.client.history(
+                started = time.monotonic()
+                rows = history_rows(self.client.history(
                     thread=request.get("thread"), limit=request["limit"]))
+                full_ms.append(int((time.monotonic() - started) * 1000))
+                return rows
+
+            probes = [0]
+
+            def done(why, rows):
+                timing_log(request.get("config_dir"),
+                           "bridge watch return why={} ms={} probes={} "
+                           "full_ms={} rows={}".format(
+                               why, int((time.monotonic() - began) * 1000),
+                               probes[0], full_ms[0] if full_ms else "-",
+                               len(rows)))
+                return rows
 
             def fingerprint(rows):
                 # A reply being produced mutates in place: same message id and
@@ -1428,18 +1468,20 @@ class Adapter:
             baseline = None
             while True:
                 rows = probe()
+                probes[0] += 1
                 mark = fingerprint(rows)
                 if baseline is None:
                     if after is not None and (mark is None or mark[1] != after):
-                        return full() or rows
+                        return done("after", full() or rows)
                     baseline = mark
                 elif mark != baseline:
-                    return full() or rows
+                    return done("change", full() or rows)
                 if time.monotonic() >= deadline:
-                    return full() or rows
+                    return done("deadline", full() or rows)
                 time.sleep(0.4)
         if request["op"] == "send":
             import time
+            send_began = time.monotonic()
             thread = request.get("thread")
             message = request["message"]
             if "expect_vm_id" in request:
@@ -1473,10 +1515,16 @@ class Adapter:
                     if (row["seq"] > baseline_seq and row["message_id"] not in baseline_ids
                             and row["role"] == "user"
                             and row["text"].strip() == message.strip()):
+                        timing_log(request.get("config_dir"),
+                                   "bridge send return confirmed ms={}".format(
+                                       int((time.monotonic() - send_began) * 1000)))
                         return {"sent": True, "confirmed": True, "message_id": row["message_id"]}
                 if time.monotonic() >= deadline:
                     break
                 time.sleep(0.2)
+            timing_log(request.get("config_dir"),
+                       "bridge send return unconfirmed ms={}".format(
+                           int((time.monotonic() - send_began) * 1000)))
             return {"sent": bool(result.get("sent")), "confirmed": False, "message_id": None}
         raise BridgeFailure("invalid_request")
 
