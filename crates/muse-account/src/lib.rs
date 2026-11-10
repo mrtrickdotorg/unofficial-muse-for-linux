@@ -997,14 +997,17 @@ impl AccountClient {
         }
         let mut command = Command::new(&self.config.python);
         bridge_environment(&mut command);
-        // SAFETY: prctl is async-signal-safe and only gives the child a
-        // parent-death signal of its own; nothing here touches parent state.
-        unsafe {
-            command.pre_exec(|| {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-                Ok(())
-            });
-        }
+        // Deliberately NO PR_SET_PDEATHSIG: it fires when the creating
+        // *thread* dies, and account jobs run on short-lived worker
+        // threads -- so every host was SIGTERM'd the moment the job that
+        // happened to spawn it finished (Patrick's op-timing.log, Nov 10:
+        // four host serve-starts in twelve seconds, each serving one to
+        // three ops; a watch that started as its host died never landed,
+        // which presented as replies taking minutes while the service
+        // answered in seconds). The host's lifetime contract is its own:
+        // it exits when its parent *process* changes (a ppid watch) or
+        // after five idle minutes, both of which key on the app, not on
+        // whichever job thread arrived first.
         command
             .arg("-I")
             .arg(&script)
