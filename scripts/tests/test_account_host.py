@@ -39,6 +39,7 @@ class FakeBridge:
         self._contextmanager = contextmanager
         self.bridge = load("account_bridge_for_host", "muse_account_bridge.py")
         self.BridgeFailure = self.bridge.BridgeFailure
+        self.timing_log = self.bridge.timing_log
         self.parse_pairs = self.bridge.parse_pairs
         self.classify_exception = self.bridge.classify_exception
         self.error_response = self.bridge.error_response

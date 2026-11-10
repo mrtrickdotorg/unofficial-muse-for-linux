@@ -736,6 +736,11 @@ impl AccountClient {
             .to_str()
             .ok_or_else(|| AccountError::new(ErrorCode::InvalidRequest, false))?;
         let deadline = deadline_for(request.get("op").and_then(serde_json::Value::as_str));
+        let op_name = request
+            .get("op")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?")
+            .to_owned();
         request["config_dir"] = serde_json::Value::String(config_dir.to_owned());
         let bytes = serde_json::to_vec(&request)
             .map_err(|_| AccountError::new(ErrorCode::InvalidRequest, false))?;
@@ -745,35 +750,73 @@ impl AccountClient {
         // A live host answers in ~0.1s on a connection it already holds. When
         // there is none (or it cannot start), the one-shot bridge below is
         // unchanged: a missing host must never block an account operation.
-        let output = match self.host_exchange(&bytes, sending, deadline)? {
-            Some(output) => output,
-            None => {
+        let started = Instant::now();
+        let via;
+        let output = match self.host_exchange(&bytes, sending, deadline) {
+            Ok(Some(output)) => {
+                via = "host";
+                output
+            }
+            Ok(None) => {
+                via = "oneshot";
                 // Only the one-shot path needs the interpreter and script; a
                 // host that is already running answers without either.
-                self.require_bridge()?;
-                run_bridge_active(
+                if let Err(error) = self.require_bridge() {
+                    self.log_timing(&op_name, started, via, false);
+                    return Err(error);
+                }
+                match run_bridge_active(
                     &self.config,
                     &bytes,
                     deadline,
                     sending,
                     self.active.as_deref(),
-                )?
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        self.log_timing(&op_name, started, via, false);
+                        return Err(error);
+                    }
+                }
+            }
+            Err(error) => {
+                self.log_timing(&op_name, started, "host", false);
+                return Err(error);
             }
         };
-        let envelope: Envelope<T> = serde_json::from_slice(&output)
-            .map_err(|_| AccountError::new(ErrorCode::ProtocolError, sending))?;
-        if envelope.ok {
-            if envelope.error.is_some() {
-                return Err(AccountError::new(ErrorCode::ProtocolError, sending));
+        let result = (|| {
+            let envelope: Envelope<T> = serde_json::from_slice(&output)
+                .map_err(|_| AccountError::new(ErrorCode::ProtocolError, sending))?;
+            if envelope.ok {
+                if envelope.error.is_some() {
+                    return Err(AccountError::new(ErrorCode::ProtocolError, sending));
+                }
+                envelope
+                    .data
+                    .ok_or_else(|| AccountError::new(ErrorCode::ProtocolError, sending))
+            } else {
+                Err(envelope
+                    .error
+                    .unwrap_or_else(|| AccountError::new(ErrorCode::ProtocolError, sending)))
             }
-            envelope
-                .data
-                .ok_or_else(|| AccountError::new(ErrorCode::ProtocolError, sending))
-        } else {
-            Err(envelope
-                .error
-                .unwrap_or_else(|| AccountError::new(ErrorCode::ProtocolError, sending)))
-        }
+        })();
+        self.log_timing(&op_name, started, via, result.is_ok());
+        result
+    }
+    /// Append one content-free timing line (op, duration, route, outcome)
+    /// to the same op-timing.log the host and bridge write: together the
+    /// three layers show which one of them ate a round trip's time.
+    fn log_timing(&self, op: &str, started: Instant, via: &str, ok: bool) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!(
+                "client op={} ms={} ok={} via={}",
+                op,
+                started.elapsed().as_millis(),
+                u8::from(ok),
+                via
+            ),
+        );
     }
     /// One request line to the host, one reply line back.
     ///
@@ -987,6 +1030,24 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
         value = value.wrapping_mul(0x0000_0100_0000_01b3);
     }
     value
+}
+
+/// Append one line to <config_dir>/op-timing.log (epoch-ms prefixed, the
+/// same file the Python host and bridge write). Best-effort: timing must
+/// never fail an account operation.
+pub fn append_timing_line(config_dir: &Path, line: &str) {
+    use std::io::Write;
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(config_dir.join("op-timing.log"))
+    {
+        let _ = writeln!(file, "{epoch_ms} {line}");
+    }
 }
 
 /// The pid file the account host publishes beside its socket; the Python
