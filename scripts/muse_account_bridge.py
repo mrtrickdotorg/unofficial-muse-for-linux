@@ -574,9 +574,19 @@ def community_client(config):
                 yield gateway
 
         def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
-            # Keep the Noise connection alive until the server processes the
-            # request. Upstream's immediate-close dispatch can drop the write.
-            # History below, not this transport response, proves persistence.
+            # Dispatch only: open the chat stream, write the prompt, return.
+            # An earlier version read the stream's response to its end to
+            # keep the connection alive until the server processed the
+            # request — but that response IS the agent's turn, so every send
+            # waited out the whole reply before the app even learned the
+            # dispatch had completed, and a quiet stream could hold it far
+            # longer. The write itself is synchronous, and this send runs
+            # inside the bridge's send operation, whose confirmation loop
+            # keeps reading history on this same connection for seconds
+            # after the dispatch: the connection closing instantly after
+            # the write — the failure that once lost a live prompt — cannot
+            # happen on this path. History below, not this transport
+            # response, proves persistence.
             body = {"items": [{"type": "text", "text": message}],
                     "node_id": config["node_id"], "capabilities": {}}
             if device_id is not None:
@@ -588,7 +598,7 @@ def community_client(config):
             # read), so the write is not exposed to unrelated traffic, and the
             # whole send pays one handshake instead of two.
             with self._gateway(config) as gateway:
-                gateway.request("chat.stream", body=body, timeout=30)
+                gateway._open("chat.stream", body=body)
             return {"ok": True, "sent": True}
     return AwaitedMuseClient(config_loader=lambda: config)
 
