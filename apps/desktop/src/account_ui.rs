@@ -1138,6 +1138,20 @@ mod native {
         label
     }
 
+    /// A conversation-list row label. Unlike `label` it is NOT
+    /// selectable: a selectable label swallows the click to place a
+    /// text cursor, so the row never selects and the conversation
+    /// never switches — the list must behave like muse.ai, where one
+    /// click on a chat opens it.
+    fn row_label(text: &str) -> gtk::Label {
+        let label = gtk::Label::new(Some(text));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_selectable(false);
+        label.set_max_width_chars(110);
+        label
+    }
+
     fn home() -> PathBuf {
         std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -1780,7 +1794,7 @@ mod native {
         thread_main_list.set_selection_mode(gtk::SelectionMode::Single);
         let main_row = gtk::ListBoxRow::new();
         main_row.set_widget_name("main");
-        let main_row_label = label("Main chat");
+        let main_row_label = row_label("Main chat");
         main_row_label.add_css_class("panel-item-label");
         main_row.set_child(Some(&main_row_label));
         thread_main_list.append(&main_row);
@@ -3060,7 +3074,7 @@ mod native {
                             .unwrap_or_default();
                         let row = gtk::ListBoxRow::new();
                         row.set_widget_name(&format!("thread:{}", thread.session_id));
-                        let row_label = label(&format!("{}{archived}{updated}", thread.title));
+                        let row_label = row_label(&format!("{}{archived}{updated}", thread.title));
                         row_label.add_css_class("panel-item-label");
                         row.set_child(Some(&row_label));
                         if state.scope.as_deref() == Some(thread.session_id.as_str()) {
@@ -3077,7 +3091,7 @@ mod native {
                     let row = gtk::ListBoxRow::new();
                     row.set_widget_name(&format!("thread:{scope}"));
                     let row_label =
-                        label("Selected conversation (not in current service thread list)");
+                        row_label("Selected conversation (not in current service thread list)");
                     row_label.add_css_class("panel-item-label");
                     row.set_child(Some(&row_label));
                     selected_row = Some(row.clone());
@@ -3491,6 +3505,19 @@ mod native {
             state.history = vec![row("user", "speed check")];
             state.reconcile_pending_send();
             assert!(state.pending_send.is_some());
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn conversation_row_labels_are_not_selectable() {
+            // A selectable label inside a ListBoxRow eats the click to
+            // place a text cursor, so the row never selects and the
+            // conversation never switches (Patrick, Nov 9: "I just get
+            // a cursor on the menu item"). Row labels stay
+            // non-selectable; ordinary labels keep text selection.
+            let _ = gtk::init();
+            assert!(!row_label("UMFL").is_selectable());
+            assert!(label("transcript").is_selectable());
         }
 
         #[test]
