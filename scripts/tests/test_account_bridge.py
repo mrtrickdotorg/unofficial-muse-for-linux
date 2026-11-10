@@ -1313,3 +1313,83 @@ class ActivityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListingTests(unittest.TestCase):
+    def gateway_client(self, payload, calls):
+        from contextlib import contextmanager
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append(method)
+                return payload
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        return Client()
+
+    def test_ideas_read_the_recorded_route_and_project_display_fields(self):
+        bridge = load_bridge()
+        calls = []
+        client = self.gateway_client({"cards": [
+            {"id": "card-1", "title": "Try a morning brief", "description": "A short brief.",
+             "type": "habit", "created_at": "2026-11-08", "raw": "SECRET"},
+            {"idea_card_id": "card-2", "name": "Bearer abcdef123456 in the body",
+             "body": "Token is access_token=xyz987 in this text"},
+        ]}, calls)
+        result = bridge.Adapter(client, {}).dispatch({"op": "ideas"})
+        self.assertEqual(calls, ["api.idea-cards.list"])
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["recognized"], 2)
+        self.assertEqual(result["skipped"], 0)
+        first, second = result["items"]
+        self.assertEqual(first["id"], "card-1")
+        self.assertEqual(first["title"], "Try a morning brief")
+        self.assertEqual(first["body"], "A short brief.")
+        self.assertEqual(first["kind"], "habit")
+        self.assertEqual(first["stamp"], "2026-11-08")
+        self.assertEqual(second["id"], "card-2")
+        # Unlisted fields never cross, and credential shapes are redacted.
+        self.assertNotIn("SECRET", str(result))
+        self.assertNotIn("abcdef123456", str(result))
+        self.assertNotIn("xyz987", str(result))
+
+    def test_goals_accept_a_bare_list_and_count_unshowable_rows(self):
+        bridge = load_bridge()
+        calls = []
+        client = self.gateway_client([
+            {"id": "g1", "title": "Ship the Linux client", "status": "active"},
+            {"id": "g2", "description": "A goal described only by its body text"},
+            {"id": "g3", "unrelated": True},
+        ], calls)
+        result = bridge.Adapter(client, {}).dispatch({"op": "goals"})
+        self.assertEqual(calls, ["goals.list"])
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(result["recognized"], 2)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["items"][0]["kind"], "active")
+        # A body-only goal is shown under its own opening words, not dropped.
+        self.assertEqual(result["items"][1]["title"], "A goal described only by its body text")
+
+    def test_feed_unwraps_edges_and_fails_closed_on_a_non_list_shape(self):
+        bridge = load_bridge()
+        calls = []
+        client = self.gateway_client({"units": [
+            {"node": {"unit_id": "u1", "headline": "Morning briefing", "text": "Body."}},
+        ]}, calls)
+        result = bridge.Adapter(client, {}).dispatch({"op": "feed"})
+        self.assertEqual(calls, ["feed.list"])
+        self.assertEqual(result["items"][0]["id"], "u1")
+        self.assertEqual(result["items"][0]["title"], "Morning briefing")
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.listing_rows({"unexpected": {}}, ("units",))
+        self.assertEqual(caught.exception.code, "protocol_error")
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.listing_rows([{"title": "x"}] * 501, ("units",))
+
+    def test_the_three_ops_validate_without_extra_keys(self):
+        bridge = load_bridge()
+        for op in ("ideas", "goals", "feed"):
+            bridge.validate_request({"op": op, "config_dir": "/unused"})
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request({"op": op, "config_dir": "/unused", "limit": 1})

@@ -11,6 +11,7 @@ mod files_write_ui;
 mod library_ui;
 mod local_host;
 mod mail_ui;
+mod service_ui;
 mod tasks_ui;
 use muse_agent_runtime::{AgentResponse, AgentSession, ToolPolicy};
 use muse_linux_core::filesystem::{FileEntry, FilesystemGrant};
@@ -410,20 +411,10 @@ fn build_ui(app: &gtk::Application) {
     let library_page: library_ui::LibraryPage =
         library_ui::build(account_page.host_context.clone());
     stack.add_named(&library_page.root, Some("library"));
-    stack.add_named(
-        &placeholder_page(
-            "Ideas",
-            "This is where your Muse's saved ideas live on muse.ai. The surface isn't connected in the Linux client yet — wiring it to your account is the next slice, and this page will show the real thing then.",
-        ),
-        Some("ideas"),
-    );
-    stack.add_named(
-        &placeholder_page(
-            "Goals",
-            "Your goals — what you and your Muse are working toward — live here on muse.ai. The surface isn't connected in the Linux client yet; this page will show the real goals once it is.",
-        ),
-        Some("goals"),
-    );
+    let ideas_page = service_ui::ideas(account_page.host_context.clone());
+    stack.add_named(&ideas_page.root, Some("ideas"));
+    let goals_page = service_ui::goals(account_page.host_context.clone());
+    stack.add_named(&goals_page.root, Some("goals"));
     stack.add_named(
         &placeholder_page(
             "Create",
@@ -431,13 +422,8 @@ fn build_ui(app: &gtk::Application) {
         ),
         Some("create"),
     );
-    stack.add_named(
-        &placeholder_page(
-            "Feed",
-            "Your Muse feed — briefings and updates your agent publishes for you — lives here on muse.ai. The surface isn't connected in the Linux client yet.",
-        ),
-        Some("feed"),
-    );
+    let feed_page = service_ui::feed(account_page.host_context.clone());
+    stack.add_named(&feed_page.root, Some("feed"));
     // Pages from the old navigation (mail, calendar, desktop, computer
     // control, reminders, the developer experiment, the files browser)
     // are still built above so their lifecycle stays identical, but

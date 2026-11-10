@@ -307,6 +307,9 @@ def validate_request(request):
                "delete_task": {"job_id"},
                "tasks": set(),
                "artifacts": set(),
+               "ideas": set(),
+               "goals": set(),
+               "feed": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"}}
     if not isinstance(op, str) or op not in allowed:
@@ -843,6 +846,102 @@ def artifact_rows(payload):
             "artifacts": rows}
 
 
+LISTING_ID_KEYS = ("id", "goal_id", "unit_id", "idea_card_id", "card_id", "idea_id")
+LISTING_TITLE_KEYS = ("title", "name", "headline")
+LISTING_BODY_KEYS = ("body", "description", "summary", "text", "content", "detail")
+LISTING_KIND_KEYS = ("kind", "type", "status", "state")
+LISTING_STAMP_KEYS = ("updated_at", "created_at", "published_at", "date",
+                      "updated_at_ms", "created_at_ms")
+LISTING_MAX_ROWS = 200
+LISTING_MAX_CONTAINER = 500
+
+
+def listing_rows(payload, container_keys):
+    """Project an unprobed read-only listing into display rows.
+
+    Ideas, goals and the feed have recorded routes but no recorded payload
+    shape, so unlike the Library this projection is tolerant by design: it
+    accepts a bare list or the first list found under the surface's known
+    container keys, unwraps `{node}` edges, and reads each row's identity,
+    title, body, kind and stamp from the first matching well-known key.
+    Every text value passes the same credential redaction as task content
+    and is length-capped here, so nothing unbounded or secret-shaped can
+    ride into the window. A row with neither a title nor a body cannot be
+    shown honestly, so it is skipped AND counted: the caller reports the
+    skip count, which keeps an unrecognized service shape visible instead
+    of masquerading as an empty list. A payload that is not list-shaped
+    at all, or absurdly large, still fails closed.
+    """
+    container = payload
+    total = None
+    if isinstance(payload, dict):
+        reported = payload.get("total_count", payload.get("total"))
+        if isinstance(reported, int) and not isinstance(reported, bool) and reported >= 0:
+            total = reported
+        container = None
+        for key in container_keys:
+            if isinstance(payload.get(key), list):
+                container = payload[key]
+                break
+        if container is None:
+            raise BridgeFailure("protocol_error")
+    if not isinstance(container, list) or len(container) > LISTING_MAX_CONTAINER:
+        raise BridgeFailure("protocol_error")
+    rows = []
+    skipped = 0
+    for entry in container:
+        node = entry.get("node") if isinstance(entry, dict) else None
+        row = node if isinstance(node, dict) else entry
+        if not isinstance(row, dict):
+            skipped += 1
+            continue
+        title = None
+        for key in LISTING_TITLE_KEYS:
+            title = content_text(row.get(key))
+            if title:
+                break
+        body = None
+        for key in LISTING_BODY_KEYS:
+            body = content_text(row.get(key))
+            if body:
+                break
+        if not title and not body:
+            skipped += 1
+            continue
+        if not title:
+            title = body[:80]
+        identifier = None
+        for key in LISTING_ID_KEYS:
+            identifier = optional_text(row.get(key))
+            if identifier:
+                break
+        kind = None
+        for key in LISTING_KIND_KEYS:
+            kind = optional_text(row.get(key))
+            if kind:
+                break
+        stamp = None
+        for key in LISTING_STAMP_KEYS:
+            stamp = optional_text(row.get(key))
+            if stamp:
+                break
+        rows.append({
+            "id": identifier,
+            "title": title[:300],
+            "body": body[:4000] if body else None,
+            "kind": kind,
+            "stamp": stamp,
+        })
+        if len(rows) >= LISTING_MAX_ROWS:
+            break
+    return {
+        "total": total if total is not None else len(container),
+        "recognized": len(rows),
+        "skipped": skipped,
+        "items": rows,
+    }
+
+
 def approval_rows(payload):
     """Project pending approvals, keeping the service's own vocabulary.
 
@@ -1115,6 +1214,27 @@ class Adapter:
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("artifacts.list", timeout=20)
             return artifact_rows(payload)
+        if request["op"] == "ideas":
+            # Read-only: the idea cards the service recorded a list route
+            # for. Executing or rating a card is a write and stays out of
+            # this client until it gets its own explicit press.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json("api.idea-cards.list", timeout=20)
+            return listing_rows(payload, ("cards", "idea_cards", "items", "results", "data"))
+        if request["op"] == "goals":
+            # Read-only: the account's goals as the recorded list route
+            # reports them. Editing or deleting a goal is a write and is
+            # not offered here.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json("goals.list", timeout=20)
+            return listing_rows(payload, ("goals", "items", "results", "data"))
+        if request["op"] == "feed":
+            # Read-only: the feed units the recorded list route returns.
+            # Reactions, reordering and regeneration are writes and stay
+            # on the Muse side.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json("feed.list", timeout=20)
+            return listing_rows(payload, ("units", "items", "results", "data"))
         if request["op"] == "approvals":
             # Read-only, and deliberately on its own connection: listing what the
             # agent is asking for must never decide it, and the sentinel service
