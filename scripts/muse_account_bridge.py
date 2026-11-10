@@ -1465,8 +1465,14 @@ class Adapter:
             while True:
                 rows = history_rows(self.client.history(thread=thread, limit=25))
                 for row in rows:
+                    # The text comparison ignores surrounding whitespace: the
+                    # service's stored display text is not guaranteed to be
+                    # byte-identical to what was typed, and an exact match
+                    # that never lands reports every healthy send as
+                    # unconfirmed.
                     if (row["seq"] > baseline_seq and row["message_id"] not in baseline_ids
-                            and row["role"] == "user" and row["text"] == message):
+                            and row["role"] == "user"
+                            and row["text"].strip() == message.strip()):
                         return {"sent": True, "confirmed": True, "message_id": row["message_id"]}
                 if time.monotonic() >= deadline:
                     break
