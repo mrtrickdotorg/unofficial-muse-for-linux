@@ -327,7 +327,7 @@ impl<A, H, T> Controller<A, H, T> {
 
     fn begin_send(&mut self, text: &str) -> Option<Ticket> {
         self.account.as_ref()?;
-        if self.pending_send.is_some() || text.trim().is_empty() {
+        if self.sending.is_some() || text.trim().is_empty() {
             return None;
         }
         let ticket = self.issue(Operation::Send)?;
@@ -344,14 +344,6 @@ impl<A, H, T> Controller<A, H, T> {
     fn describe_send_block(&self, text: &str) -> &'static str {
         if self.account.is_none() {
             return "Not connected. Connect your Muse session before sending.";
-        }
-        // In flight is not the same story as uncertain: nothing is unresolved yet,
-        // the receipt simply has not arrived.
-        if self.sending.is_some() && self.pending_send.is_some() {
-            return "The previous message is still being dispatched. Wait for its receipt before sending.";
-        }
-        if self.pending_send.is_some() {
-            return "A previous send is uncertain. Check its original shared history, then allow another send.";
         }
         if text.trim().is_empty() {
             return "Enter a message before sending.";
@@ -376,20 +368,19 @@ impl<A, H, T> Controller<A, H, T> {
                     format!("Not sent: {error}. No automatic retry; the composer is unchanged.");
             }
             SendOutcome::Uncertain(error) => {
+                // No park, no acknowledgment gate (Patrick's call, Nov 9):
+                // an uncertain dispatch is reported in the notice line and
+                // the composer stays free. If the message never lands in
+                // the conversation, the user can simply send it again —
+                // the muse.ai behaviour — instead of clearing a bar first.
+                self.pending_send = None;
                 let scope = ticket.scope.as_deref().unwrap_or("Main conversation");
                 self.send_notice = format!(
-                    "Delivery uncertain in {scope}: {error}. It may already be running. Do not repeat it; inspect this conversation's shared history before allowing another send. Original text and scope remain in memory."
+                    "Delivery uncertain in {scope}: {error}. It may already be running; if it does not appear in this conversation, send it again."
                 );
             }
         }
         true
-    }
-
-    fn acknowledge_send(&mut self) {
-        if self.busy.is_none() && self.sending.is_none() && self.pending_send.is_some() {
-            self.pending_send = None;
-            self.send_notice.clear();
-        }
     }
 
     fn finish_refresh(
@@ -997,14 +988,12 @@ mod native {
     type State = Controller<AccountSnapshot, HistoryMessage, TasksSnapshot>;
 
     impl State {
-        /// A dispatch the service accepted but never confirmed is parked
-        /// as uncertain, and at first only a manual acknowledgment cleared
-        /// it. But a history load that shows the message in this
-        /// conversation IS the confirmation the dispatch lacked — the same
-        /// evidence the acknowledgment asked the user to eyeball — so the
-        /// park clears itself, the way a confirmed receipt does. The scope
-        /// must match: the loaded history belongs to the selected
-        /// conversation, and the parked dispatch must have been for it too.
+        /// While a dispatch is in flight, a history load that already
+        /// shows the message in this conversation settles its record
+        /// early: the message demonstrably landed, so the finish path
+        /// has nothing left to reconcile. The scope must match: the
+        /// loaded history belongs to the selected conversation, and the
+        /// dispatch must have been for it too.
         fn reconcile_pending_send(&mut self) {
             let Some(pending) = &self.pending_send else {
                 return;
@@ -1053,6 +1042,12 @@ mod native {
         login_cancellation: RefCell<Option<Arc<Cancellation>>>,
         persistence_warning: RefCell<Option<String>>,
         rendering: Cell<bool>,
+        /// Pin the transcript to its newest message on the next renders:
+        /// set when a read targets a conversation other than the one last
+        /// read (an open or a switch) and after the user's own send.
+        /// Consumed by the first render that finds no operation in flight.
+        scroll_to_bottom: Cell<bool>,
+        read_scope: RefCell<Option<String>>,
         reply_until: Cell<Option<std::time::Instant>>,
         root: gtk::Box,
         welcome: gtk::Box,
@@ -1081,7 +1076,6 @@ mod native {
         tasks: gtk::Box,
         tasks_notice: gtk::Label,
         send_notice: gtk::Label,
-        acknowledge: gtk::Button,
         prompt: gtk::Entry,
         send: gtk::Button,
         cancel: gtk::Button,
@@ -1867,10 +1861,6 @@ mod native {
         let send_notice = label("");
         send_notice.add_css_class("chat-status");
         column.append(&send_notice);
-        let acknowledge = gtk::Button::with_label(
-            "I've checked the original shared history — allow another send",
-        );
-        column.append(&acknowledge);
         let composer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         composer.add_css_class("composer");
         composer.add_css_class("composer-pill");
@@ -1929,6 +1919,8 @@ mod native {
             login_cancellation: RefCell::new(None),
             persistence_warning: RefCell::new(None),
             rendering: Cell::new(false),
+            scroll_to_bottom: Cell::new(false),
+            read_scope: RefCell::new(None),
             reply_until: Cell::new(None),
             root: root.clone(),
             welcome: welcome.clone(),
@@ -1968,7 +1960,6 @@ mod native {
             tasks,
             tasks_notice,
             send_notice,
-            acknowledge,
             prompt,
             send,
             cancel: stop.clone(),
@@ -2071,15 +2062,6 @@ mod native {
             ui.send.connect_clicked(move |_| u.send_message());
             let enter = Rc::clone(&ui);
             ui.prompt.connect_activate(move |_| enter.send_message());
-        }
-        {
-            let u = Rc::clone(&ui);
-            ui.acknowledge.connect_clicked(move |_| {
-                u.state.borrow_mut().acknowledge_send();
-                // Never leave the uncertain text primed for an accidental resend.
-                u.prompt.set_text("");
-                u.render();
-            });
         }
         for entry in [&ui.python, &ui.config_dir] {
             let u = Rc::clone(&ui);
@@ -2338,6 +2320,17 @@ mod native {
         }
 
         fn read(self: &Rc<Self>, older: bool, refresh: bool) {
+            {
+                // Opening or switching a conversation lands on its newest
+                // message, the way muse.ai opens a chat; a re-read of the
+                // conversation already on screen leaves the reader's place
+                // alone (the was-at-bottom follow in render covers it).
+                let scope = self.state.borrow().scope.clone();
+                if *self.read_scope.borrow() != scope {
+                    *self.read_scope.borrow_mut() = scope;
+                    self.scroll_to_bottom.set(true);
+                }
+            }
             let Some(client) = self.client.borrow().clone() else {
                 return;
             };
@@ -2609,6 +2602,8 @@ mod native {
                 self.render();
                 return;
             };
+            // Your own message and its reply land at the bottom.
+            self.scroll_to_bottom.set(true);
             let request = ticket.clone();
             let device = self
                 .host_device
@@ -3001,17 +2996,14 @@ mod native {
             // A stop press only needs a connection; whether anything was
             // actually stopped is the service's answer, not this button's.
             self.cancel.set_sensitive(connected && state.busy.is_none());
-            // Typing is never the dangerous operation: the parked text of
-            // an unresolved dispatch lives in `pending_send`, not in the
-            // composer, so the box stays usable while a send is sorted
-            // out. Send stays pressable too — `begin_send` still refuses a
-            // second dispatch, and `describe_send_block` explains why,
-            // which beats a dead button that cannot even say no.
+            // Typing is never the dangerous operation, and neither is
+            // sending: an uncertain dispatch is reported in the notice
+            // line, never parked behind an acknowledgment. Send stays
+            // pressable — `begin_send` refuses only a second dispatch
+            // while one is in flight, and `describe_send_block` explains
+            // why, which beats a dead button that cannot even say no.
             self.prompt.set_sensitive(connected);
             self.send.set_sensitive(connected);
-            self.acknowledge
-                .set_visible(state.pending_send.is_some() && idle);
-            self.acknowledge.set_sensitive(connected && idle);
             self.spinner.set_spinning(!idle && !background);
             let busy = state
                 .busy
@@ -3272,6 +3264,16 @@ mod native {
                 let adjustment = self.scroll.vadjustment();
                 adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0
             };
+            // An open, a switch or the user's own send pins the transcript
+            // to the newest message regardless of where the previous
+            // conversation was left scrolled. The pin survives renders
+            // while an operation is in flight — the rows it targets may
+            // land one render later — and is consumed by the first
+            // settled render that acts on it.
+            let pin_to_bottom = self.scroll_to_bottom.get();
+            if pin_to_bottom && state.busy.is_none() {
+                self.scroll_to_bottom.set(false);
+            }
             super::super::clear_chat(&self.history);
             if !state.history.is_empty() {
                 super::super::append_day_divider(&self.history);
@@ -3294,10 +3296,11 @@ mod native {
                 );
             }
             // Newest messages are at the bottom. Follow them when the reader
-            // was already there, and repeat after allocation: a fresh row only
-            // enlarges the adjustment once it has been laid out.
-            if was_at_bottom {
-                for delay in [0u64, 60] {
+            // was already there or the pin demands it, and repeat after
+            // allocation: a fresh row only enlarges the adjustment once it
+            // has been laid out.
+            if was_at_bottom || pin_to_bottom {
+                for delay in [0u64, 60, 250] {
                     let scroll = self.scroll.clone();
                     gtk::glib::timeout_add_local_once(Duration::from_millis(delay), move || {
                         let adjustment = scroll.vadjustment();
@@ -3615,7 +3618,6 @@ print(json.dumps({'ok':True,'data':data}))
                 serde_json::from_str(&std::fs::read_to_string(scratch.join("sent")).unwrap())
                     .unwrap();
             assert_eq!(sent["device_id"], "linux-registered-test");
-            page.ui.state.borrow_mut().acknowledge_send();
             page.host_device.borrow_mut().take();
             active.store(false, Ordering::SeqCst);
             page.ui.prompt.set_text("after stop");
@@ -3667,7 +3669,6 @@ print(json.dumps({'ok':True,'data':data}))
                 (page.host_context)().is_none(),
                 "stale successful refresh cannot re-enable host context"
             );
-            page.ui.state.borrow_mut().acknowledge_send();
             let failed_send = page
                 .ui
                 .state
@@ -4578,22 +4579,28 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_send_retains_scope_blocks_resend_and_survives_history_refresh() {
+    fn uncertain_send_is_reported_and_never_parks_the_composer() {
+        // Patrick's call (Nov 9): the check-the-history acknowledgment bar
+        // and its send block are gone. An uncertain dispatch is reported
+        // in the notice and the composer is immediately free again.
         let mut state = connected();
         state.select_thread(Some("original-thread".into()));
         let ticket = state.begin_send("original unmodified text ").unwrap();
+        // A second dispatch while the first is in flight is still refused,
+        // and switching conversations mid-dispatch still waits.
         assert!(state.begin_send("duplicate").is_none());
         assert!(!state.select_thread(Some("different-thread".into())));
         state.finish_send(&ticket, SendOutcome::Uncertain("deadline exceeded".into()));
-        assert_eq!(
-            state.pending_send.as_ref().unwrap(),
-            &PendingSend {
-                scope: Some("original-thread".into()),
-                text: "original unmodified text ".into()
-            }
-        );
+        assert!(state.pending_send.is_none());
         assert!(state.send_notice.contains("deadline exceeded"));
-        assert!(state.begin_send("duplicate").is_none());
+        // No acknowledgment step: the next message can be sent at once.
+        let next = state.begin_send("a deliberate new message").unwrap();
+        state.finish_send(&next, SendOutcome::Confirmed);
+        // A history refresh neither resurrects a park nor clears the
+        // uncertainty notice, which stays the latest word until a send
+        // resolves it.
+        let ticket = state.begin_send("third").unwrap();
+        state.finish_send(&ticket, SendOutcome::Uncertain("deadline exceeded".into()));
         let refresh = state.begin_read(false, true).unwrap();
         state.finish_refresh(
             &refresh,
@@ -4601,10 +4608,9 @@ mod tests {
             Ok(vec![]),
             Ok("tasks".into()),
         );
-        assert!(state.pending_send.is_some());
+        assert!(state.pending_send.is_none());
         assert!(state.send_notice.contains("deadline exceeded"));
-        state.acknowledge_send();
-        assert!(state.begin_send("a deliberate new message").is_some());
+        assert!(state.begin_send("fourth").is_some());
     }
 
     #[test]
@@ -4643,11 +4649,9 @@ mod tests {
         assert!(ready.finish_history(&read, Ok(vec![])));
         let _busy = ready.begin_send("after").unwrap();
         ready.finish_send(&_busy, SendOutcome::Uncertain("deadline exceeded".into()));
-        assert!(
-            ready
-                .describe_send_block("second")
-                .contains("allow another send")
-        );
+        // An uncertain outcome is a notice, not a block: the composer is
+        // free again without any acknowledgment step.
+        assert!(ready.begin_send("second").is_some());
     }
 
     #[test]
