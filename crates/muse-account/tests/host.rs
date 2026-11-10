@@ -140,7 +140,14 @@ except OSError:
 finally:
     probe.close()
 listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-listener.bind(path)
+try:
+    listener.bind(path)
+except OSError:
+    import traceback
+    with open(os.path.join(config_dir, "stub-error.log"), "a") as fh:
+        fh.write("bind failed for %r (len %d):\n" % (path, len(path)))
+        traceback.print_exc(file=fh)
+    raise
 listener.listen(8)
 listener.settimeout(0.5)
 with open(os.path.join(config_dir, "serve-starts.log"), "a") as fh:
@@ -182,7 +189,15 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
     let script = fixture.0.join("muse_account_bridge.py");
     fs::write(&script, "# stub: only the sibling host script matters\n").unwrap();
     fs::write(fixture.0.join("muse_account_host.py"), STUB_HOST).unwrap();
-    let runtime = fixture.0.join("runtime");
+    // The runtime dir must be SHORT: AF_UNIX paths cap at ~108 bytes, and
+    // nesting it inside the fixture pushed the socket path past the limit
+    // on CI (TMPDIR=/home/runner/work/_temp), so the stub's bind failed
+    // and the client fell back to the one-shot bridge (ProtocolError).
+    let runtime = fixture.0.with_file_name(format!(
+        "umfl-rt-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::create_dir_all(&runtime).unwrap();
     // SAFETY: this test owns the variable's meaning for its fixture; the
     // other host tests either pin their socket explicitly or fall back to
@@ -199,7 +214,11 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
             .unwrap_or_else(|_| "<no stub boot log>".to_string());
         let starts = fs::read_to_string(config_dir.join("serve-starts.log"))
             .unwrap_or_else(|_| "<no serve starts>".to_string());
-        panic!("first call failed: {error:?}\nstub boot: {boot}\nserve starts: {starts}");
+        let stub_error = fs::read_to_string(config_dir.join("stub-error.log"))
+            .unwrap_or_else(|_| "<no stub error>".to_string());
+        panic!(
+            "first call failed: {error:?}\nstub boot: {boot}\nserve starts: {starts}\nstub error: {stub_error}"
+        );
     }
     std::thread::sleep(std::time::Duration::from_millis(700));
     let second = fixture.client("/usr/bin/python3", script);
@@ -211,6 +230,7 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
         1,
         "one host must serve both calls: {starts}"
     );
+    let _ = fs::remove_dir_all(&runtime);
 }
 
 #[test]
