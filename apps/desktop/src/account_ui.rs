@@ -1078,9 +1078,16 @@ mod native {
         /// printed it. Backlog rows from the first load of a conversation
         /// are never stamped (they printed long before this session), which
         /// `history_primed` and `shown_scope` keep honest.
-        shown_stamps: RefCell<std::collections::HashMap<String, String>>,
+        shown_stamps: RefCell<std::collections::HashMap<String, Option<String>>>,
         shown_scope: RefCell<Option<String>>,
         history_primed: Cell<bool>,
+        /// (first, last) message ids of the previous render, so a pure
+        /// prepend (Load older) is recognised as backlog rather than news.
+        history_edges: RefCell<(Option<String>, Option<String>)>,
+        /// When the in-flight reply's first streamed words printed, so the
+        /// working bubble carries the same shown stamp the settled history
+        /// row will -- the gap between the two is the settle lag itself.
+        draft_stamp: RefCell<Option<String>>,
         read_scope: RefCell<Option<String>>,
         reply_until: Cell<Option<std::time::Instant>>,
         root: gtk::Box,
@@ -1949,6 +1956,8 @@ mod native {
             shown_stamps: RefCell::new(std::collections::HashMap::new()),
             shown_scope: RefCell::new(None),
             history_primed: Cell::new(false),
+            history_edges: RefCell::new((None, None)),
+            draft_stamp: RefCell::new(None),
             read_scope: RefCell::new(None),
             reply_until: Cell::new(None),
             root: root.clone(),
@@ -3353,22 +3362,42 @@ mod native {
             // backlog (its rows printed in some earlier session, so none of
             // them earns a shown stamp); once a backlog has rendered, any
             // row appearing for the first time is stamped with this
-            // render's local time -- the moment it actually printed.
+            // render's local time -- the moment it actually printed. The
+            // first build (dea5b61) got this wrong: it recorded nothing on
+            // the priming render, so the NEXT render stamped the whole
+            // backlog with one identical time -- Patrick's screenshot had
+            // every old message "shown 08:56:51 AM". The backlog is now
+            // recorded as seen-without-a-stamp (None) on the render that
+            // first displays it, and only genuinely new rows earn a stamp.
             {
                 let mut shown_scope = self.shown_scope.borrow_mut();
                 if *shown_scope != state.scope {
                     *shown_scope = state.scope.clone();
                     self.shown_stamps.borrow_mut().clear();
                     self.history_primed.set(false);
+                    *self.history_edges.borrow_mut() = (None, None);
                 }
             }
-            if self.history_primed.get() {
-                let now = local_clock_stamp();
+            let cur_first = state.history.first().map(|row| row.message_id.clone());
+            let cur_last = state.history.last().map(|row| row.message_id.clone());
+            {
                 let mut shown = self.shown_stamps.borrow_mut();
-                for message in &state.history {
-                    shown
-                        .entry(message.message_id.clone())
-                        .or_insert_with(|| now.clone());
+                if self.history_primed.get() {
+                    // A pure prepend (Load older) grows the front while the
+                    // tail stands still: those rows are backlog, not news.
+                    let (prev_first, prev_last) = self.history_edges.borrow().clone();
+                    let prepended =
+                        prev_first.is_some() && prev_first != cur_first && prev_last == cur_last;
+                    let now = local_clock_stamp();
+                    for message in &state.history {
+                        shown
+                            .entry(message.message_id.clone())
+                            .or_insert_with(|| if prepended { None } else { Some(now.clone()) });
+                    }
+                } else {
+                    for message in &state.history {
+                        shown.entry(message.message_id.clone()).or_insert(None);
+                    }
                 }
             }
             for message in &state.history {
@@ -3385,7 +3414,12 @@ mod native {
                 // printed, so a slow arrival is visible on the message
                 // itself instead of being a feeling.
                 let service_stamp = message.timestamp.as_deref().and_then(short_stamp);
-                let shown_stamp = self.shown_stamps.borrow().get(&message.message_id).cloned();
+                let shown_stamp = self
+                    .shown_stamps
+                    .borrow()
+                    .get(&message.message_id)
+                    .cloned()
+                    .flatten();
                 let stamp = match (service_stamp, shown_stamp) {
                     (Some(service), Some(shown)) => {
                         Some(format!("{service} \u{00b7} shown {shown}"))
@@ -3403,6 +3437,7 @@ mod native {
             }
             if !state.history.is_empty() {
                 self.history_primed.set(true);
+                *self.history_edges.borrow_mut() = (cur_first, cur_last);
             }
             // The local echo: a message this window sent shows at once, in
             // its own conversation, until a history load settles the record
@@ -3435,6 +3470,21 @@ mod native {
                 .history
                 .last()
                 .is_some_and(|row| row.role == "assistant" && row.status.is_none());
+            // The bubble earns its shown stamp when the first streamed
+            // words print -- the moment the reply itself reached the
+            // screen, before history settles it. "Thinking..." before that
+            // carries no stamp: it printed at send time and would only
+            // duplicate the echo's sent stamp.
+            let bubble_stamp = if !state.live_draft.is_empty() {
+                let mut slot = self.draft_stamp.borrow_mut();
+                Some(format!(
+                    "shown {}",
+                    slot.get_or_insert_with(local_clock_stamp)
+                ))
+            } else {
+                *self.draft_stamp.borrow_mut() = None;
+                None
+            };
             if (state.watching_run || state.sending.is_some()) && !newest_in_flight {
                 let working = if !state.live_draft.is_empty() {
                     state.live_draft.clone()
@@ -3447,7 +3497,7 @@ mod native {
                     &self.history,
                     super::super::ChatRole::Assistant,
                     &super::presentation_text(&working),
-                    None,
+                    bubble_stamp,
                 );
             }
             // Newest messages are at the bottom. Follow them when the reader
