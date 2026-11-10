@@ -102,6 +102,11 @@ struct Controller<A, H, T> {
 struct PendingSend {
     scope: Option<String>,
     text: String,
+    /// When the reader pressed send. The echo carries it as its stamp, so
+    /// the start of the round trip is on screen next to the message itself
+    /// (Patrick's ask, Nov 10: show the send time and the time the reply
+    /// actually prints, and let the gap speak for itself).
+    sent_at: std::time::SystemTime,
 }
 
 enum SendOutcome {
@@ -340,6 +345,7 @@ impl<A, H, T> Controller<A, H, T> {
         self.pending_send = Some(PendingSend {
             scope: self.scope.clone(),
             text: text.into(),
+            sent_at: std::time::SystemTime::now(),
         });
         self.pending_send_finished = false;
         self.send_notice.clear();
@@ -1067,6 +1073,14 @@ mod native {
         /// read (an open or a switch) and after the user's own send.
         /// Consumed by the first render that finds no operation in flight.
         scroll_to_bottom: Cell<bool>,
+        /// First-shown local stamps per service message id, this session:
+        /// the moment a row first printed, recorded by the render that
+        /// printed it. Backlog rows from the first load of a conversation
+        /// are never stamped (they printed long before this session), which
+        /// `history_primed` and `shown_scope` keep honest.
+        shown_stamps: RefCell<std::collections::HashMap<String, String>>,
+        shown_scope: RefCell<Option<String>>,
+        history_primed: Cell<bool>,
         read_scope: RefCell<Option<String>>,
         reply_until: Cell<Option<std::time::Instant>>,
         root: gtk::Box,
@@ -1932,6 +1946,9 @@ mod native {
             persistence_warning: RefCell::new(None),
             rendering: Cell::new(false),
             scroll_to_bottom: Cell::new(false),
+            shown_stamps: RefCell::new(std::collections::HashMap::new()),
+            shown_scope: RefCell::new(None),
+            history_primed: Cell::new(false),
             read_scope: RefCell::new(None),
             reply_until: Cell::new(None),
             root: root.clone(),
@@ -3332,6 +3349,28 @@ mod native {
             if !state.history.is_empty() {
                 super::super::append_day_divider(&self.history);
             }
+            // First-shown bookkeeping: a conversation switch starts a new
+            // backlog (its rows printed in some earlier session, so none of
+            // them earns a shown stamp); once a backlog has rendered, any
+            // row appearing for the first time is stamped with this
+            // render's local time -- the moment it actually printed.
+            {
+                let mut shown_scope = self.shown_scope.borrow_mut();
+                if *shown_scope != state.scope {
+                    *shown_scope = state.scope.clone();
+                    self.shown_stamps.borrow_mut().clear();
+                    self.history_primed.set(false);
+                }
+            }
+            if self.history_primed.get() {
+                let now = local_clock_stamp();
+                let mut shown = self.shown_stamps.borrow_mut();
+                for message in &state.history {
+                    shown
+                        .entry(message.message_id.clone())
+                        .or_insert_with(|| now.clone());
+                }
+            }
             for message in &state.history {
                 let role = match message.role.as_str() {
                     "user" => super::super::ChatRole::User,
@@ -3341,13 +3380,29 @@ mod native {
                 // No per-message telemetry line: role is visible from the
                 // bubble's side, and seq/status are service bookkeeping, not
                 // something a reader should have to look at 200 times. The
-                // bubble shows the message's own time when it has one.
+                // bubble shows the message's own time when it has one, and
+                // -- for a row that first printed this session -- when it
+                // printed, so a slow arrival is visible on the message
+                // itself instead of being a feeling.
+                let service_stamp = message.timestamp.as_deref().and_then(short_stamp);
+                let shown_stamp = self.shown_stamps.borrow().get(&message.message_id).cloned();
+                let stamp = match (service_stamp, shown_stamp) {
+                    (Some(service), Some(shown)) => {
+                        Some(format!("{service} \u{00b7} shown {shown}"))
+                    }
+                    (Some(service), None) => Some(service),
+                    (None, Some(shown)) => Some(format!("shown {shown}")),
+                    (None, None) => None,
+                };
                 super::super::append_chat_stamped(
                     &self.history,
                     role,
                     &super::presentation_text(&message.text),
-                    message.timestamp.as_deref().and_then(short_stamp),
+                    stamp,
                 );
+            }
+            if !state.history.is_empty() {
+                self.history_primed.set(true);
             }
             // The local echo: a message this window sent shows at once, in
             // its own conversation, until a history load settles the record
@@ -3365,7 +3420,7 @@ mod native {
                     &self.history,
                     super::super::ChatRole::User,
                     &super::presentation_text(&pending.text),
-                    None,
+                    Some(format!("sent {}", local_stamp_of(pending.sent_at))),
                 );
             }
             // The working bubble, the way muse.ai shows a turn in flight: an
@@ -3486,6 +3541,29 @@ mod native {
     /// The HH:MM out of a service timestamp for a bubble stamp. Anything that
     /// is not recognisably a timestamp yields None — an absent stamp is honest,
     /// a mangled one is noise.
+    /// The reader's own wall clock, with seconds: "08:24:10 AM". Send and
+    /// first-shown stamps use it so the two ends of a round trip can be
+    /// compared at a glance, in the reader's timezone, at second precision
+    /// (the service stamps slice HH:MM out of a UTC string, which hides
+    /// exactly the lag being measured).
+    fn local_clock_stamp() -> String {
+        gtk::glib::DateTime::now_local()
+            .and_then(|now| now.format("%I:%M:%S %p"))
+            .map(|stamp| stamp.to_string())
+            .unwrap_or_default()
+    }
+
+    fn local_stamp_of(moment: std::time::SystemTime) -> String {
+        let secs = moment
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0);
+        gtk::glib::DateTime::from_unix_local(secs)
+            .and_then(|when| when.format("%I:%M:%S %p"))
+            .map(|stamp| stamp.to_string())
+            .unwrap_or_default()
+    }
+
     fn short_stamp(timestamp: &str) -> Option<String> {
         let bytes = timestamp.as_bytes();
         if bytes.len() >= 16 && bytes.get(10) == Some(&b'T') {
@@ -3580,6 +3658,7 @@ mod native {
                     pending_send: Some(PendingSend {
                         scope: None,
                         text: "speed check".into(),
+                        sent_at: std::time::SystemTime::UNIX_EPOCH,
                     }),
                     send_notice: "Delivery uncertain".into(),
                     ..State::default()
