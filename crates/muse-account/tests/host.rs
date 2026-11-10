@@ -122,6 +122,8 @@ def fnv(data):
     return v
 
 config_dir = sys.argv[sys.argv.index("--config-dir") + 1]
+with open(os.path.join(config_dir, "stub-boot.log"), "a") as fh:
+    fh.write("boot argv=%r\n" % (sys.argv,))
 root = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.environ.get("HOME", ""), ".cache")
 path = os.path.join(root, "unofficial-muse-for-linux",
                     "account-%016x.sock" % fnv(os.fsencode(config_dir)))
@@ -191,9 +193,14 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
     }
 
     let first = fixture.client("/usr/bin/python3", script.clone());
-    std::thread::spawn(move || first.identity().unwrap())
-        .join()
-        .unwrap();
+    let first_outcome = std::thread::spawn(move || first.identity()).join().unwrap();
+    if let Err(error) = &first_outcome {
+        let boot = fs::read_to_string(config_dir.join("stub-boot.log"))
+            .unwrap_or_else(|_| "<no stub boot log>".to_string());
+        let starts = fs::read_to_string(config_dir.join("serve-starts.log"))
+            .unwrap_or_else(|_| "<no serve starts>".to_string());
+        panic!("first call failed: {error:?}\nstub boot: {boot}\nserve starts: {starts}");
+    }
     std::thread::sleep(std::time::Duration::from_millis(700));
     let second = fixture.client("/usr/bin/python3", script);
     second.identity().unwrap();
