@@ -376,8 +376,7 @@ impl<A, H, T> Controller<A, H, T> {
             SendOutcome::NotSent(error) => {
                 self.pending_send = None;
                 self.pending_send_finished = false;
-                self.send_notice =
-                    format!("Not sent: {error}. No automatic retry; the composer is unchanged.");
+                self.send_notice = format!("Not sent: {error}. No automatic retry.");
             }
             SendOutcome::Uncertain(error) => {
                 // No park, no acknowledgment gate (Patrick's call, Nov 9):
@@ -1102,7 +1101,6 @@ mod native {
         cancel: gtk::Button,
         spinner: gtk::Spinner,
         live_notice: gtk::Label,
-        draft: gtk::Label,
         /// Pending approval cards, one per request the service reported.
         approvals_box: gtk::Box,
         approval_notice: gtk::Label,
@@ -1847,13 +1845,6 @@ mod native {
         live_notice.add_css_class("chat-status");
         live_notice.set_visible(false);
         column.append(&live_notice);
-        let draft = label("");
-        draft.add_css_class("chat-status");
-        draft.set_visible(false);
-        draft.set_tooltip_text(Some(
-            "Reply text as the service streams it. The finished reply replaces it in the transcript.",
-        ));
-        column.append(&draft);
         let approvals_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
         approvals_box.set_visible(false);
         column.append(&approvals_box);
@@ -1963,7 +1954,6 @@ mod native {
             threads_key: RefCell::new(String::new()),
             scope_label,
             live_notice,
-            draft,
             approvals_box,
             approval_notice,
             approvals_refresh,
@@ -2625,6 +2615,11 @@ mod native {
             };
             // Your own message and its reply land at the bottom.
             self.scroll_to_bottom.set(true);
+            // The box empties when the message goes, like muse.ai: the text
+            // now lives in the transcript's echo, and a dispatch the service
+            // refuses puts it back (see `complete`) rather than leaving the
+            // reader to wonder whether anything was sent at all.
+            self.prompt.set_text("");
             let request = ticket.clone();
             let device = self
                 .host_device
@@ -2772,13 +2767,33 @@ mod native {
             let mut reread_grants = false;
             let mut approvals_after = false;
             let auth_expired = matches!(&reply, Reply::AuthExpired);
-            let send_confirmed = matches!(&reply, Reply::Send(SendOutcome::Confirmed));
-            // A dispatched message is answered by the service; poll history
-            // quickly for a while so the reply appears in seconds.
-            if matches!(&reply, Reply::Send(SendOutcome::Confirmed)) {
+            // A dispatch the service accepted starts the reply fast-path
+            // whether or not the bridge could confirm it in scoped history:
+            // confirmation is a second, slower proof about the same send, and
+            // gating the watch on it left accepted sends waiting on the idle
+            // refresh while the web showed the reply at once.
+            let send_dispatched = matches!(
+                &reply,
+                Reply::Send(SendOutcome::Confirmed) | Reply::Send(SendOutcome::Uncertain(_))
+            );
+            let reply_was_send = matches!(&reply, Reply::Send(_));
+            if send_dispatched {
                 self.reply_until
                     .set(Some(std::time::Instant::now() + Duration::from_secs(90)));
             }
+            // The composer emptied when the message was sent; a dispatch the
+            // service refused gives the text back, unless the reader has
+            // already typed over the empty box.
+            let refused_text = match &reply {
+                Reply::Send(SendOutcome::NotSent(_))
+                | Reply::SendConnectionError(SendOutcome::NotSent(_)) => self
+                    .state
+                    .borrow()
+                    .pending_send
+                    .as_ref()
+                    .map(|pending| pending.text.clone()),
+                _ => None,
+            };
             // Stop immediately on account verification errors or identity changes,
             // before any old account result is installed or rendered.
             if matches!(
@@ -2901,15 +2916,18 @@ mod native {
                         }
                     }
                     Reply::Send(result) | Reply::SendConnectionError(result) => {
-                        let confirmed = matches!(&result, SendOutcome::Confirmed);
+                        // An uncertain CLEAN dispatch (the service answered:
+                        // sent, not yet confirmed) starts the watch like a
+                        // confirmed one. An uncertain CONNECTION error does
+                        // not: the host is being stopped below, and a watch
+                        // against it would just fail in a loop.
+                        let dispatched = matches!(&result, SendOutcome::Confirmed)
+                            || (reply_was_send && matches!(&result, SendOutcome::Uncertain(_)));
                         state.finish_send(ticket, result);
-                        if confirmed && state.begin_watch() {
+                        if dispatched && state.begin_watch() {
                             // The reply we just asked for is a run to watch, same
                             // as one that was already going when we opened.
                             watch_after = true;
-                        }
-                        if confirmed {
-                            self.prompt.set_text("");
                         }
                         // No full refresh after a send: it re-verifies the
                         // account and lists every conversation while holding
@@ -2942,7 +2960,15 @@ mod native {
                 }
             }
             self.render();
-            if send_confirmed {
+            if let Some(text) = &refused_text
+                && self.prompt.text().is_empty()
+            {
+                // The refusal is the only case the emptied composer refills:
+                // the message never left, so its text belongs back where the
+                // reader can fix or resend it.
+                self.prompt.set_text(text);
+            }
+            if send_dispatched {
                 // A send does not change the conversation chooser, and a full
                 // refresh re-verifies the account and lists every conversation
                 // before the reply poll can start. Ask for the answer now --
@@ -2960,7 +2986,7 @@ mod native {
                     .set(Some(std::time::Instant::now() + Duration::from_secs(600)));
                 self.poll_live();
             }
-            if !send_confirmed && refresh_after {
+            if !send_dispatched && refresh_after {
                 self.read(false, true);
             }
             if poll_after_cancel {
@@ -3149,10 +3175,6 @@ mod native {
                 .set_visible(!state.history_notice.is_empty());
             self.live_notice.set_text(&state.live_status);
             self.live_notice.set_visible(!state.live_status.is_empty());
-            // Streamed fragments, shown as they arrive and dropped the moment the
-            // transcript carries the finished reply.
-            self.draft.set_text(&state.live_draft);
-            self.draft.set_visible(!state.live_draft.is_empty());
             self.approvals_box.set_visible(!state.approvals.is_empty());
             self.approval_notice.set_text(&state.approval_notice);
             self.approval_notice
@@ -3343,6 +3365,33 @@ mod native {
                     &self.history,
                     super::super::ChatRole::User,
                     &super::presentation_text(&pending.text),
+                    None,
+                );
+            }
+            // The working bubble, the way muse.ai shows a turn in flight: an
+            // assistant row in the transcript while the newest service row is
+            // still the reader's own message. It carries the streamed reply
+            // text as fragments land; before the first fragment it carries
+            // the working status, or "Thinking\u{2026}". An in-flight
+            // assistant row already in the transcript IS that bubble, so no
+            // second one is added over it, and the finished row replaces the
+            // bubble the moment the turn closes.
+            let newest_in_flight = state
+                .history
+                .last()
+                .is_some_and(|row| row.role == "assistant" && row.status.is_none());
+            if (state.watching_run || state.sending.is_some()) && !newest_in_flight {
+                let working = if !state.live_draft.is_empty() {
+                    state.live_draft.clone()
+                } else if let Some(status) = state.live_status.strip_prefix("Agent \u{00b7} ") {
+                    status.to_owned()
+                } else {
+                    "Thinking\u{2026}".to_owned()
+                };
+                super::super::append_chat_stamped(
+                    &self.history,
+                    super::super::ChatRole::Assistant,
+                    &super::presentation_text(&working),
                     None,
                 );
             }

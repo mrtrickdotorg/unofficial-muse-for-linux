@@ -389,6 +389,22 @@ class BridgeTests(unittest.TestCase):
             "op": "send", "message": "hello",
             "expect_vm_id": "vm-1", "expect_identity_name": "Test User"})
         self.assertTrue(result["confirmed"])
+        class Padded(FakeClient):
+            # The service's stored display text is not byte-identical to what
+            # was typed (a trailing newline here); confirmation must still
+            # land, or every healthy send reports itself unconfirmed.
+            def __init__(self):
+                self.calls = 0
+            def history(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return []
+                return [{"message_id": "m1", "seq": 1, "role": "user", "text": "hello\n"}]
+            def send(self, **kwargs):
+                return {"ok": True, "sent": True}
+        result = bridge.Adapter(Padded(), {}, confirmation_window=0).dispatch(
+            {"op": "send", "message": "hello"})
+        self.assertTrue(result["confirmed"])
         for bad in [{"expect_vm_id": ""}, {"expect_vm_id": 3},
                     {"expect_identity_name": ""}, {"expect_identity_name": "x" * 257}]:
             with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
