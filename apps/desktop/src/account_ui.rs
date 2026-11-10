@@ -531,9 +531,21 @@ impl<A, H, T> Controller<A, H, T> {
         Some(ticket)
     }
 
-    /// True while `ticket` still owns a slot, whichever kind it is.
+    /// True while `ticket` still owns a slot, whichever kind it is. All
+    /// three slots: when the dispatch took its own `sending` slot (so a
+    /// read in flight could not refuse the composer), this check was not
+    /// updated to match -- so the window's completion loop for a send saw
+    /// the ticket as unowned on its first tick and stopped waiting. The
+    /// dispatch still happened on the worker thread, but its completion
+    /// (finish_send, the reply window, the reply watch) was silently
+    /// discarded, and replies surfaced only through slow fallback reads
+    /// minutes later: the root cause of the round-trip lag Patrick
+    /// reported through Nov 9-10 (Nov 10: a reply that existed at
+    /// 10:20:14 printed in the app at 10:22:24).
     fn owns(&self, ticket: &Ticket) -> bool {
-        self.busy.as_ref() == Some(ticket) || self.polling.as_ref() == Some(ticket)
+        self.busy.as_ref() == Some(ticket)
+            || self.polling.as_ref() == Some(ticket)
+            || self.sending.as_ref() == Some(ticket)
     }
 
     fn finish_history(&mut self, ticket: &Ticket, result: Result<Vec<H>, String>) -> bool {
@@ -4783,6 +4795,19 @@ mod tests {
             state.sending.is_some(),
             "the poll resolving must not clear the send that is still running"
         );
+    }
+
+    #[test]
+    fn a_send_ticket_owns_its_slot_until_it_is_accepted() {
+        // Regression for the owns() gap above: the completion loop asks
+        // owns() before it waits for a job's reply, so a send ticket the
+        // controller itself does not recognise as owned loses its
+        // completion -- and with it the whole fast reply path.
+        let mut state = connected();
+        let send = state.begin_send("timing test").unwrap();
+        assert!(state.owns(&send), "a send must own its slot");
+        assert!(state.finish_send(&send, SendOutcome::Confirmed));
+        assert!(!state.owns(&send), "accepting releases the slot");
     }
 
     #[test]
