@@ -180,6 +180,58 @@ print(json.dumps({'ok':True,'data':{'schedules':[{'id':'job-1','title':'Daily','
 }
 
 #[test]
+fn listing_ops_parse_the_projected_rows() {
+    // One fixture per surface: the request carries only the op, and the
+    // projected listing keeps its recognized/skipped accounting intact.
+    let ideas = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'ideas'
+assert 'limit' not in request
+print(json.dumps({'ok': True, 'data': {'total': 2, 'recognized': 1, 'skipped': 1, 'items': [
+  {'id': 'card-1', 'title': 'Try a morning brief', 'body': 'A short brief.',
+   'kind': 'habit', 'stamp': '2026-11-08'}]}}))
+"#,
+    );
+    let page = ideas.client().ideas().unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.recognized, 1);
+    assert_eq!(page.skipped, 1);
+    assert_eq!(page.items[0].id.as_deref(), Some("card-1"));
+    assert_eq!(page.items[0].title, "Try a morning brief");
+    assert_eq!(page.items[0].body.as_deref(), Some("A short brief."));
+    assert_eq!(page.items[0].kind.as_deref(), Some("habit"));
+    assert_eq!(page.items[0].stamp.as_deref(), Some("2026-11-08"));
+
+    let goals = Fixture::new(
+        r#"
+import json, sys
+assert json.load(sys.stdin)['op'] == 'goals'
+print(json.dumps({'ok': True, 'data': {'total': 1, 'recognized': 1, 'skipped': 0, 'items': [
+  {'id': 'g1', 'title': 'Ship the Linux client', 'body': None,
+   'kind': 'active', 'stamp': None}]}}))
+"#,
+    );
+    let page = goals.client().goals().unwrap();
+    assert_eq!(page.items[0].title, "Ship the Linux client");
+    assert_eq!(page.items[0].body, None);
+    assert_eq!(page.items[0].stamp, None);
+
+    let feed = Fixture::new(
+        r#"
+import json, sys
+assert json.load(sys.stdin)['op'] == 'feed'
+print(json.dumps({'ok': True, 'data': {'total': 0, 'recognized': 0, 'skipped': 0,
+ 'items': []}}))
+"#,
+    );
+    let page = feed.client().feed().unwrap();
+    assert_eq!(page.total, 0);
+    assert!(page.items.is_empty());
+}
+
+#[test]
 fn artifacts_parses_one_projected_library_page() {
     let f = Fixture::new(
         r#"

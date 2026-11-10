@@ -157,6 +157,37 @@ pub struct ArtifactList {
     #[serde(default)]
     pub artifacts: Vec<ArtifactSummary>,
 }
+/// One row of an Ideas / Goals / Feed listing, as the bridge projected it.
+///
+/// These surfaces have recorded routes but no recorded payload shape, so
+/// the bridge normalizes tolerantly and the window shows exactly these
+/// fields: a title that always exists (the bridge derives one from the
+/// body when the service gave none), and optional body, kind and stamp.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListingItem {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub stamp: Option<String>,
+}
+/// One read of an Ideas / Goals / Feed listing.
+///
+/// `skipped` counts rows the service sent that this build could not
+/// recognize; it is reported, never folded into the total, so an
+/// unrecognized service shape cannot masquerade as an empty list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceListing {
+    pub total: u64,
+    pub recognized: u64,
+    pub skipped: u64,
+    #[serde(default)]
+    pub items: Vec<ListingItem>,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatchReceipt {
     pub sent: bool,
@@ -476,6 +507,23 @@ impl AccountClient {
     /// node payload reaches the window.
     pub fn artifacts(&self) -> Result<ArtifactList, AccountError> {
         self.request(serde_json::json!({"op": "artifacts"}), false)
+    }
+    /// List the account's idea cards, read-only.
+    ///
+    /// Executing or rating a card is a write; this client only reads.
+    pub fn ideas(&self) -> Result<ServiceListing, AccountError> {
+        self.request(serde_json::json!({"op": "ideas"}), false)
+    }
+    /// List the account's goals, read-only.
+    pub fn goals(&self) -> Result<ServiceListing, AccountError> {
+        self.request(serde_json::json!({"op": "goals"}), false)
+    }
+    /// List the account's feed units, read-only.
+    ///
+    /// Reactions, reordering and regeneration are writes and stay on the
+    /// Muse side.
+    pub fn feed(&self) -> Result<ServiceListing, AccountError> {
+        self.request(serde_json::json!({"op": "feed"}), false)
     }
     /// Listen briefly for live agent/task status.
     ///
