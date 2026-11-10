@@ -146,6 +146,64 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(fake.sends), 1)
         self.assertNotIn("SECRET", str(reply))
 
+    def test_a_stuck_gateway_call_times_out_recovers_and_never_replays(self):
+        # The Nov 10 lockup shape: a held connection whose peer vanished
+        # blocks its reader with no error at all, so nothing reaches the
+        # classify/retry path. The watchdog must bound the call, and the
+        # abandoned worker -- which wakes later and tries its guarded
+        # retry -- must never dispatch on the fresh connection.
+        module, host, fake, _jar, _ = self.host()
+        release = threading.Event()
+        calls = []
+
+        class BlockingAdapter:
+            def __init__(self, client, config):
+                pass
+
+            def dispatch(self, request):
+                calls.append(request["op"])
+                if len(calls) == 1:
+                    release.wait(2)
+                    raise RuntimeError("SECRET")
+                return {"recovered": True}
+
+        fake.Adapter = BlockingAdapter
+        module.OP_BUDGETS["history"] = 0.3
+        started = time.monotonic()
+        with self.assertRaises(fake.BridgeFailure) as caught:
+            host.control.dispatch({"op": "history"})
+        self.assertEqual(caught.exception.code, "timeout")
+        self.assertFalse(caught.exception.uncertain)
+        self.assertLess(time.monotonic() - started, 10)
+        # Let the abandoned worker wake and attempt its retry; then prove
+        # the next request succeeds on the fresh connection and the stuck
+        # request was dispatched exactly once in total.
+        release.set()
+        time.sleep(0.5)
+        self.assertEqual(host.control.dispatch({"op": "history"}),
+                         {"recovered": True})
+        self.assertEqual(calls, ["history", "history"])
+
+    def test_a_stuck_send_times_out_as_uncertain(self):
+        # A send abandoned by the watchdog may already have reached the
+        # service, so its timeout is reported uncertain, never replayed.
+        module, host, fake, _jar, _ = self.host()
+
+        class BlockingAdapter:
+            def __init__(self, client, config):
+                pass
+
+            def dispatch(self, request):
+                threading.Event().wait(2)
+                return {"sent": True}
+
+        fake.Adapter = BlockingAdapter
+        module.OP_BUDGETS["send"] = 0.3
+        with self.assertRaises(fake.BridgeFailure) as caught:
+            host.control.dispatch({"op": "send", "message": "hello"})
+        self.assertEqual(caught.exception.code, "timeout")
+        self.assertTrue(caught.exception.uncertain)
+
     def test_the_snapshot_shares_the_control_connection_and_recovers_from_a_failure(self):
         _, host, fake, _jar, _ = self.host()
         host.handle_line(b'{"op": "connect"}')
