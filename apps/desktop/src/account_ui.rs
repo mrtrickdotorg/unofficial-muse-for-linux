@@ -205,7 +205,21 @@ fn progress_text(event: &muse_account::LiveEvent) -> Option<String> {
     if settled_status(status) {
         return None;
     }
-    Some(format!("Agent · {}", status.trim()))
+    Some(format!("Agent · {}", friendly_status(status.trim())))
+}
+
+/// The service sometimes reports a machine code where a person-readable
+/// status belongs — Patrick's Nov 11 screenshot showed the working
+/// bubble reading "pending_init" — and the transcript must never show
+/// the code. Known codes get their words; any other snake_case token is
+/// a code as well and reads as generic work; a status with spaces is
+/// already human text and passes through untouched.
+fn friendly_status(status: &str) -> String {
+    match status {
+        "pending_init" => "is starting".to_owned(),
+        other if other.contains('_') && !other.contains(' ') => "is working".to_owned(),
+        other => other.to_owned(),
+    }
 }
 
 fn presentation_text(text: &str) -> String {
@@ -882,6 +896,27 @@ impl<A, H, T> Controller<A, H, T> {
             }
             Err(error) => self.live_status = format!("Live status unavailable: {error}"),
         }
+    }
+
+    /// Finish a live read: release its poll slot, then apply it. The slot
+    /// release is the point — until Nov 11 this arm of the completion path
+    /// applied the events without ever accepting the ticket, so the first
+    /// live read to complete held the shared polling slot forever and no
+    /// watch or live read ever ran again; replies then surfaced only when
+    /// something forced a busy-slot read (switching chats, the 180 s idle
+    /// refresh). Patrick's Nov 11 1:53 PM send wedged exactly this way:
+    /// the log shows the send, one watch, one activity read — then total
+    /// silence until he switched chats and back.
+    fn finish_live(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<Vec<muse_account::LiveEvent>, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.apply_live(result);
+        true
     }
 
     fn apply_history(&mut self, result: Result<Vec<H>, String>) {
@@ -3028,7 +3063,7 @@ mod native {
                         watch_after = in_flight && state.begin_watch();
                     }
                     Reply::Live(result) => {
-                        state.apply_live(result);
+                        state.finish_live(ticket, result);
                         // A status saying the agent is waiting is the one moment
                         // the list is worth reading unsolicited; the claim keeps
                         // that to once per status, never a standing poll.
@@ -4771,6 +4806,25 @@ mod tests {
     }
 
     #[test]
+    fn live_status_codes_never_reach_the_transcript() {
+        // The verbatim code from Patrick's Nov 11 screenshot.
+        assert_eq!(
+            progress_text(&event("agent.status", Some("pending_init"), None)).as_deref(),
+            Some("Agent · is starting")
+        );
+        // An unobserved code is still a code, not text for the reader.
+        assert_eq!(
+            progress_text(&event("agent.status", Some("queued_for_tools"), None)).as_deref(),
+            Some("Agent · is working")
+        );
+        // Human statuses pass through word for word.
+        assert_eq!(
+            progress_text(&event("agent.status", Some("is responding"), None)).as_deref(),
+            Some("Agent · is responding")
+        );
+    }
+
+    #[test]
     fn widget_markers_are_not_shown_as_raw_protocol_text() {
         // The colon form is the shape the service actually puts in
         // history (verbatim from a real transcript — the earlier tests
@@ -5028,6 +5082,41 @@ mod tests {
             state.sending.is_some(),
             "the poll resolving must not clear the send that is still running"
         );
+    }
+
+    #[test]
+    fn a_completed_live_read_releases_the_poll_slot() {
+        // Regression for the Nov 11 wedge: the Live completion applied its
+        // events without accepting the ticket, so the shared polling slot
+        // stayed held forever and neither the reply watch nor another live
+        // read could ever start — the transcript froze at "pending_init"
+        // until a chat switch forced a busy-slot read.
+        let mut state = connected();
+        let poll = state.begin_poll().unwrap();
+        assert!(state.begin_poll().is_none(), "one poll at a time");
+        assert!(state.finish_live(
+            &poll,
+            Ok(vec![event("agent.status", Some("is responding"), None)]),
+        ));
+        assert!(state.polling.is_none(), "the live read must free its slot");
+        assert!(state.live_status.contains("responding"));
+        // And the next poll — the watch that settles the turn — can start.
+        assert!(state.begin_poll().is_some());
+    }
+
+    #[test]
+    fn a_live_result_for_a_dead_ticket_applies_nothing() {
+        let mut state = connected();
+        let poll = state.begin_poll().unwrap();
+        assert!(state.finish_live(&poll, Ok(Vec::new())));
+        // The same ticket completing twice owns nothing the second time:
+        // its events must not be applied over the current state.
+        assert!(!state.finish_live(
+            &poll,
+            Ok(vec![event("agent.status", Some("is responding"), None)]),
+        ));
+        assert!(!state.watching_run);
+        assert!(state.live_status.is_empty());
     }
 
     #[test]
