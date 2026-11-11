@@ -1921,12 +1921,12 @@ mod native {
         let pages = gtk::Notebook::new();
         pages.set_vexpand(true);
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        // The transcript and composer live in a centered ~768px column, like
+        // The transcript and composer live in a centered ~1075px column, like
         // the Mac/Windows client: full-width lines on a wide window are the
         // readability problem, not a feature.
         let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
         column.set_halign(gtk::Align::Center);
-        column.set_size_request(768, -1);
+        column.set_size_request(1075, -1);
         column.set_vexpand(true);
         chat.append(&column);
         let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -2063,7 +2063,7 @@ mod native {
         let task_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let task_column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         task_column.set_halign(gtk::Align::Center);
-        task_column.set_size_request(768, -1);
+        task_column.set_size_request(1075, -1);
         task_column.set_vexpand(true);
         task_page.append(&task_column);
         task_column.append(&label("Shared schedules & recent runs · read-only"));
