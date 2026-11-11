@@ -3511,12 +3511,24 @@ mod native {
                     }
                 }
             }
+            // The assistant's circle carries the identity's own initial
+            // (his agent is "Lotus", not a generic M), and consecutive rows
+            // of one turn group tightly without repeating the avatar.
+            let avatar_initial = state
+                .account
+                .as_ref()
+                .and_then(|account| account.identity_name.chars().next())
+                .map(|initial| initial.to_uppercase().collect::<String>())
+                .unwrap_or_else(|| "M".to_string());
+            let mut previous_role: Option<super::super::ChatRole> = None;
             for message in &state.history {
                 let role = match message.role.as_str() {
                     "user" => super::super::ChatRole::User,
                     "assistant" => super::super::ChatRole::Assistant,
                     _ => super::super::ChatRole::Notice,
                 };
+                let grouped = previous_role == Some(role);
+                previous_role = Some(role);
                 // No per-message telemetry line: role is visible from the
                 // bubble's side, and seq/status are service bookkeeping, not
                 // something a reader should have to look at 200 times. The
@@ -3539,11 +3551,13 @@ mod native {
                     (None, Some(shown)) => Some(format!("shown {shown}")),
                     (None, None) => None,
                 };
-                super::super::append_chat_stamped(
+                super::super::append_chat_grouped(
                     &self.history,
                     role,
                     &super::presentation_text(&message.text),
                     stamp,
+                    &avatar_initial,
+                    grouped,
                 );
             }
             if !state.history.is_empty() {
@@ -3604,11 +3618,13 @@ mod native {
                 } else {
                     "Thinking\u{2026}".to_owned()
                 };
-                super::super::append_chat_stamped(
+                super::super::append_chat_grouped(
                     &self.history,
                     super::super::ChatRole::Assistant,
                     &super::presentation_text(&working),
                     bubble_stamp,
+                    &avatar_initial,
+                    false,
                 );
             }
             // Newest messages are at the bottom. Follow them when the reader

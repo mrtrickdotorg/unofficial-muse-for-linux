@@ -11,6 +11,7 @@ mod files_write_ui;
 mod library_ui;
 mod local_host;
 mod mail_ui;
+mod rich_text;
 mod service_ui;
 mod tasks_ui;
 use muse_agent_runtime::{AgentResponse, AgentSession, ToolPolicy};
@@ -120,6 +121,9 @@ scrolledwindow viewport { background-color: transparent; }
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
 .chat-status { color: #b3b3bc; padding: 2px 6px; }
+.code-block { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 10px; padding: 10px 12px; font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 13px; color: #d7d7dd; }
+.quote-block { border-left: 3px solid rgba(255, 255, 255, 0.22); padding-left: 12px; color: #c9c9d1; }
+selection { background-color: rgba(110, 168, 255, 0.35); color: #ffffff; }
 .composer { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 24px; padding: 7px 7px 7px 14px; }
 .composer:focus-within { border-color: rgba(255, 255, 255, 0.28); }
 .composer entry { background: transparent; border: 0; box-shadow: none; font-size: 15px; }
@@ -243,7 +247,52 @@ fn install_bundled_icons() {
     }
 }
 
+/// Inter (SIL Open Font License 1.1, license shipped alongside in
+/// assets/fonts/Inter-LICENSE.txt) is the face the theme's font stack
+/// names first, matching the web client's typography — but it is not
+/// installed on most systems, so the stack silently fell back to whatever
+/// sans the distro chose (Noto Sans on Patrick's KDE). The four static
+/// faces the UI uses are bundled and written into the user's fontconfig
+/// font directory before any widget exists, so the first Pango font map
+/// already sees them. Best-effort like the bundled icons: a failed write
+/// just leaves the fallback stack in charge.
+const BUNDLED_FONTS: &[(&str, &[u8])] = &[
+    (
+        "Inter-Regular.ttf",
+        include_bytes!("../assets/fonts/Inter-Regular.ttf"),
+    ),
+    (
+        "Inter-Medium.ttf",
+        include_bytes!("../assets/fonts/Inter-Medium.ttf"),
+    ),
+    (
+        "Inter-SemiBold.ttf",
+        include_bytes!("../assets/fonts/Inter-SemiBold.ttf"),
+    ),
+    (
+        "Inter-Bold.ttf",
+        include_bytes!("../assets/fonts/Inter-Bold.ttf"),
+    ),
+];
+
+fn install_bundled_fonts() {
+    let dir = gtk::glib::user_data_dir().join("fonts");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    for (name, bytes) in BUNDLED_FONTS {
+        let path = dir.join(name);
+        let stale = std::fs::read(&path)
+            .map(|existing| existing != *bytes)
+            .unwrap_or(true);
+        if stale {
+            let _ = std::fs::write(&path, bytes);
+        }
+    }
+}
+
 fn install_dark_theme() {
+    install_bundled_fonts();
     install_bundled_icons();
     if let Some(display) = gtk::gdk::Display::default() {
         // Unstyled widgets (notebook tabs, combo popups, menus) must also
@@ -1316,18 +1365,41 @@ fn append_chat(container: &gtk::Box, role: ChatRole, message: &str) {
 /// none) — never the render time, which would stamp a whole refreshed
 /// transcript with the current minute.
 fn append_chat_stamped(container: &gtk::Box, role: ChatRole, message: &str, stamp: Option<String>) {
+    append_chat_grouped(container, role, message, stamp, "M", false);
+}
+
+/// One transcript row. `avatar_initial` is the letter in the assistant's
+/// circle — the account identity's initial when the caller knows it.
+/// `grouped` marks a row continuing the previous row's turn: tighter
+/// margins and no repeated avatar (an equal-width spacer keeps the text
+/// column aligned), the way the web transcript groups a turn's rows.
+#[allow(clippy::too_many_arguments)]
+fn append_chat_grouped(
+    container: &gtk::Box,
+    role: ChatRole,
+    message: &str,
+    stamp: Option<String>,
+    avatar_initial: &str,
+    grouped: bool,
+) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_hexpand(true);
     row.set_margin_start(12);
     row.set_margin_end(12);
-    row.set_margin_top(6);
-    row.set_margin_bottom(6);
+    row.set_margin_top(if grouped { 1 } else { 6 });
+    row.set_margin_bottom(if grouped { 1 } else { 6 });
 
     if role == ChatRole::Assistant {
-        let avatar = gtk::Label::new(Some("M"));
-        avatar.add_css_class("message-avatar");
-        avatar.set_valign(gtk::Align::Start);
-        row.append(&avatar);
+        if grouped {
+            let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            spacer.set_width_request(32);
+            row.append(&spacer);
+        } else {
+            let avatar = gtk::Label::new(Some(avatar_initial));
+            avatar.add_css_class("message-avatar");
+            avatar.set_valign(gtk::Align::Start);
+            row.append(&avatar);
+        }
     }
     if role == ChatRole::User {
         // bubble_alignment() says End, but halign alone cannot move a
@@ -1350,12 +1422,24 @@ fn append_chat_stamped(container: &gtk::Box, role: ChatRole, message: &str, stam
         ChatRole::Assistant => "assistant",
         ChatRole::Notice => "notice",
     });
-    let label = gtk::Label::new(Some(message));
-    label.set_xalign(0.0);
-    label.set_wrap(true);
-    label.set_selectable(true);
-    label.set_max_width_chars(88);
-    bubble.append(&label);
+    // Assistant replies render rich when they carry markdown (the web
+    // client renders them; a raw label shows the machinery). Anything the
+    // rich path cannot validate falls back to the plain label, unchanged.
+    let rich = if role == ChatRole::Assistant && rich_text::looks_like_markdown(message) {
+        rich_bubble_content(message)
+    } else {
+        None
+    };
+    if let Some(rich) = rich {
+        bubble.append(&rich);
+    } else {
+        let label = gtk::Label::new(Some(message));
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_selectable(true);
+        label.set_max_width_chars(88);
+        bubble.append(&label);
+    }
     if let Some(stamp_text) = stamp {
         let stamp = gtk::Label::new(Some(&stamp_text));
         stamp.set_xalign(0.0);
@@ -1368,6 +1452,101 @@ fn append_chat_stamped(container: &gtk::Box, role: ChatRole, message: &str, stam
     }
     row.append(&bubble);
     container.append(&row);
+}
+
+/// Build the rich form of an assistant reply, or `None` when any block's
+/// markup fails Pango validation — the caller then uses the plain label,
+/// so a formatting surprise can never blank out the reply text.
+fn rich_bubble_content(message: &str) -> Option<gtk::Box> {
+    let blocks = rich_text::markdown_blocks(message);
+    if blocks.is_empty() {
+        return None;
+    }
+    for block in &blocks {
+        let payloads: Vec<&String> = match block {
+            rich_text::Block::Paragraph(text)
+            | rich_text::Block::Heading(_, text)
+            | rich_text::Block::Quote(text) => vec![text],
+            rich_text::Block::Bullets(items) | rich_text::Block::Numbers(items) => {
+                items.iter().collect()
+            }
+            rich_text::Block::Code(_) | rich_text::Block::Rule => Vec::new(),
+        };
+        for payload in payloads {
+            gtk::pango::parse_markup(payload, '\0').ok()?;
+        }
+    }
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    column.set_hexpand(true);
+    for block in &blocks {
+        column.append(&rich_block_widget(block));
+    }
+    Some(column)
+}
+
+fn markup_label(markup: &str) -> gtk::Label {
+    let label = gtk::Label::new(None);
+    label.set_markup(markup);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_selectable(true);
+    label.set_max_width_chars(88);
+    label
+}
+
+fn rich_block_widget(block: &rich_text::Block) -> gtk::Widget {
+    match block {
+        rich_text::Block::Paragraph(text) => markup_label(text).upcast(),
+        rich_text::Block::Heading(level, text) => {
+            let size = match level {
+                1 => "145%",
+                2 => "128%",
+                _ => "115%",
+            };
+            markup_label(&format!(
+                "<span size=\"{size}\" weight=\"bold\">{text}</span>"
+            ))
+            .upcast()
+        }
+        rich_text::Block::Bullets(items) => rich_list_widget(items, None).upcast(),
+        rich_text::Block::Numbers(items) => rich_list_widget(items, Some(1)).upcast(),
+        rich_text::Block::Code(raw) => {
+            let label = gtk::Label::new(Some(raw));
+            label.set_xalign(0.0);
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            label.set_selectable(true);
+            label.add_css_class("code-block");
+            label.set_hexpand(true);
+            label.upcast()
+        }
+        rich_text::Block::Quote(text) => {
+            let label = markup_label(text);
+            label.add_css_class("quote-block");
+            label.upcast()
+        }
+        rich_text::Block::Rule => gtk::Separator::new(gtk::Orientation::Horizontal).upcast(),
+    }
+}
+
+fn rich_list_widget(items: &[String], numbering: Option<usize>) -> gtk::Box {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    for (index, item) in items.iter().enumerate() {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let glyph = gtk::Label::new(Some(&match numbering {
+            Some(start) => format!("{}.", start + index),
+            None => "\u{2022}".to_string(),
+        }));
+        glyph.set_xalign(0.0);
+        glyph.set_valign(gtk::Align::Start);
+        glyph.add_css_class("dim-label");
+        row.append(&glyph);
+        let text = markup_label(item);
+        text.set_hexpand(true);
+        row.append(&text);
+        column.append(&row);
+    }
+    column
 }
 
 fn clear_chat(container: &gtk::Box) {
