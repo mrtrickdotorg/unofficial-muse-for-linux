@@ -209,7 +209,13 @@ fn progress_text(event: &muse_account::LiveEvent) -> Option<String> {
 }
 
 fn presentation_text(text: &str) -> String {
-    const WIDGET_MARKER: &str = "[[hatch_widget.";
+    // The marker matches the bare prefix on purpose: the service's real
+    // tokens use a colon ([[hatch_widget:widget-<uuid>]]) while this
+    // filter was written and tested against a guessed dot form, so it
+    // never fired and raw tokens rendered as text (Patrick's Nov 11
+    // screenshot). Both shapes — and any future separator — are covered
+    // by scanning to the closing ]].
+    const WIDGET_MARKER: &str = "[[hatch_widget";
     const WIDGET_FALLBACK: &str =
         "Muse returned an interactive widget that this Linux app cannot render yet.";
     if !text.contains(WIDGET_MARKER) {
@@ -234,7 +240,31 @@ fn presentation_text(text: &str) -> String {
         remainder = &marker_tail[end + 2..];
     }
 
-    let normalized = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Tidy the hole the token left WITHOUT flattening the message: the
+    // old code joined every whitespace run into single spaces, which
+    // would have destroyed paragraph breaks (and markdown structure)
+    // in any long message carrying a token. Keep line structure; just
+    // drop trailing spaces per line and collapse 3+ newlines to a
+    // paragraph break.
+    let mut normalized = String::with_capacity(cleaned.len());
+    let mut newline_run = 0usize;
+    for line in cleaned.lines() {
+        if line.trim().is_empty() {
+            newline_run += 1;
+            if newline_run > 1 {
+                continue;
+            }
+            normalized.push('\n');
+        } else {
+            newline_run = 0;
+            if !normalized.is_empty() && !normalized.ends_with('\n') {
+                normalized.push('\n');
+            }
+            normalized.push_str(line.trim_end());
+            normalized.push('\n');
+        }
+    }
+    let normalized = normalized.trim().to_owned();
     if normalized.is_empty() && removed_marker {
         WIDGET_FALLBACK.to_owned()
     } else {
@@ -4742,13 +4772,29 @@ mod tests {
 
     #[test]
     fn widget_markers_are_not_shown_as_raw_protocol_text() {
+        // The colon form is the shape the service actually puts in
+        // history (verbatim from a real transcript — the earlier tests
+        // used an invented dot form, which is why the filter never fired
+        // in production). The dot form stays covered: both are stripped.
+        assert_eq!(
+            presentation_text("[[hatch_widget:widget-80acc675-df45-4ed0-8abc-66c93ac7a1fe]]"),
+            "Muse returned an interactive widget that this Linux app cannot render yet."
+        );
         assert_eq!(
             presentation_text("[[hatch_widget.widget-80acc675-df45-4ed0-8abc-66c93ac7a1fe]]"),
             "Muse returned an interactive widget that this Linux app cannot render yet."
         );
         assert_eq!(
-            presentation_text("Hello [[hatch_widget.widget-abc]]"),
+            presentation_text("Hello [[hatch_widget:widget-abc]]"),
             "Hello"
+        );
+        // A token riding along in a long message leaves the message's
+        // paragraph (and markdown) structure intact.
+        assert_eq!(
+            presentation_text(
+                "First paragraph.\n\nSecond **paragraph**.\n[[hatch_widget:widget-abc]]"
+            ),
+            "First paragraph.\n\nSecond **paragraph**."
         );
     }
 
