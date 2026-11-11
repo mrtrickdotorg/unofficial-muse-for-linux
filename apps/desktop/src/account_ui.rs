@@ -1248,6 +1248,103 @@ mod native {
         Some(current.to_owned())
     }
 
+    /// Roots under which a session folder is fragile: a cache cleaner or a
+    /// temp sweep can delete the sign-in the app depends on.
+    fn fragile_roots() -> Vec<PathBuf> {
+        let mut roots = vec![gtk::glib::user_cache_dir(), std::env::temp_dir()];
+        if let Some(tmpdir) = std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+        {
+            roots.push(tmpdir);
+        }
+        roots
+    }
+
+    /// True when `path` sits under a cache or temp root. A saved preference
+    /// pointing there was a fallback, never a real choice: Patrick's session
+    /// lived in ~/.cache/muse-tmp/muse-ui-missing-config-133394 because an
+    /// early setup stored that path and every later launch trusted it
+    /// verbatim (found Nov 10, 2026, hunting the missing op-timing.log).
+    pub(super) fn is_fragile_session_dir(path: &Path, roots: &[PathBuf]) -> bool {
+        roots.iter().any(|root| path.starts_with(root))
+    }
+
+    /// Copy the session files from `old` into `new` (created 0700, files
+    /// 0600). When `new` already holds a cookies file at least as fresh as
+    /// the old one, the destination is the live session and nothing is
+    /// copied. Fails only when the old folder holds a cookies file the copy
+    /// could not reproduce: relocation must never strand a working sign-in
+    /// in an empty folder.
+    pub(super) fn copy_session_dir(old: &Path, new: &Path) -> Result<(), String> {
+        fs::create_dir_all(new).map_err(|_| "could not create the app session folder")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(new, fs::Permissions::from_mode(0o700));
+        }
+        let modified = |base: &Path| {
+            fs::metadata(base.join("cookies.txt"))
+                .and_then(|meta| meta.modified())
+                .ok()
+        };
+        if let (Some(source), Some(dest)) = (modified(old), modified(new))
+            && dest >= source
+        {
+            return Ok(());
+        }
+        let entries = match fs::read_dir(old) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(()), // No old folder: nothing to carry over.
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let dest = new.join(entry.file_name());
+            if fs::copy(&path, &dest).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&dest, fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
+        if old.join("cookies.txt").is_file() && !new.join("cookies.txt").is_file() {
+            return Err("could not copy the saved session into the app folder".into());
+        }
+        Ok(())
+    }
+
+    /// The session folder the app should actually use for a saved
+    /// preference. A fragile (cache/temp) location is relocated to the
+    /// app's own folder under the config home, carrying the session with
+    /// it, and the preference is re-saved so the relocation happens once.
+    /// Any failure leaves the saved path untouched: a working sign-in in a
+    /// bad place beats a broken sign-in in a good one. The user never has
+    /// to define or fix the folder by hand.
+    fn effective_saved_config_dir(python: &str, saved: &str) -> String {
+        let saved_path = Path::new(saved);
+        if !is_fragile_session_dir(saved_path, &fragile_roots()) {
+            return saved.to_string();
+        }
+        let Some(app_dir) = app_account_dir() else {
+            return saved.to_string();
+        };
+        if app_dir == saved_path {
+            return saved.to_string();
+        }
+        match copy_session_dir(saved_path, &app_dir) {
+            Ok(()) => {
+                let relocated = app_dir.display().to_string();
+                let _ = save_connection(python, &relocated);
+                relocated
+            }
+            Err(_) => saved.to_string(),
+        }
+    }
+
     fn valid_saved_path(value: &str) -> bool {
         !value.is_empty()
             && value.len() <= 4096
@@ -1762,7 +1859,10 @@ mod native {
         );
         if let Some((saved_python, saved_config_dir)) = load_saved_connection() {
             python.set_text(&preferred_saved_python(&saved_python, &default_python()));
-            config_dir.set_text(&saved_config_dir);
+            config_dir.set_text(&effective_saved_config_dir(
+                &saved_python,
+                &saved_config_dir,
+            ));
         }
         content.append(&config_dir);
         content.append(&label(
@@ -4664,6 +4764,77 @@ mod tests {
             Some("/srv/muse/account".into())
         );
         assert_eq!(native::browser_sign_in_dir("", None, None), None);
+    }
+
+    #[test]
+    fn cache_and_temp_session_dirs_are_fragile_but_real_ones_are_not() {
+        use std::path::PathBuf;
+        let roots = vec![
+            std::path::PathBuf::from("/home/u/.cache"),
+            PathBuf::from("/tmp"),
+        ];
+        // Patrick's actual saved folder (Nov 10, 2026).
+        assert!(native::is_fragile_session_dir(
+            std::path::Path::new("/home/u/.cache/muse-tmp/muse-ui-missing-config-133394"),
+            &roots
+        ));
+        assert!(native::is_fragile_session_dir(
+            std::path::Path::new("/tmp/scratch/session"),
+            &roots
+        ));
+        assert!(!native::is_fragile_session_dir(
+            std::path::Path::new("/home/u/.config/unofficial-muse-for-linux/account"),
+            &roots
+        ));
+        assert!(!native::is_fragile_session_dir(
+            std::path::Path::new("/srv/muse/account"),
+            &roots
+        ));
+        // A sibling that merely shares a name prefix is not inside the root.
+        assert!(!native::is_fragile_session_dir(
+            std::path::Path::new("/home/u/.cachex/session"),
+            &roots
+        ));
+    }
+
+    #[test]
+    fn session_copy_carries_the_session_and_respects_a_fresher_destination() {
+        use std::fs;
+        let root = std::env::var_os("TMPDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!(
+                "muse-ui-relocate-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let old = root.join("old");
+        let new = root.join("new");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("cookies.txt"), "live-session").unwrap();
+        fs::write(old.join("op-timing.log"), "timing").unwrap();
+        native::copy_session_dir(&old, &new).unwrap();
+        assert_eq!(
+            fs::read_to_string(new.join("cookies.txt")).unwrap(),
+            "live-session"
+        );
+        assert_eq!(
+            fs::read_to_string(new.join("op-timing.log")).unwrap(),
+            "timing"
+        );
+        // A destination whose cookies are at least as fresh is the live
+        // session: the copy must not clobber it with the older folder.
+        fs::write(new.join("cookies.txt"), "fresher-session").unwrap();
+        native::copy_session_dir(&old, &new).unwrap();
+        assert_eq!(
+            fs::read_to_string(new.join("cookies.txt")).unwrap(),
+            "fresher-session"
+        );
+        // No old folder at all is not an error: there is nothing to carry.
+        native::copy_session_dir(&root.join("absent"), &root.join("created")).unwrap();
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
