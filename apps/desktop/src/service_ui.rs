@@ -314,6 +314,7 @@ mod tests {
             recognized: 0,
             skipped: 5,
             items: vec![],
+            ..ServiceListing::default()
         };
         let text = summary_text(&page, "EMPTY");
         assert!(text.contains("client gap"), "{text}");
@@ -327,6 +328,7 @@ mod tests {
             recognized: 3,
             skipped: 1,
             items: vec![item("a"), item("b"), item("c")],
+            ..ServiceListing::default()
         };
         let text = summary_text(&page, "EMPTY");
         assert!(text.contains("3 shown"), "{text}");

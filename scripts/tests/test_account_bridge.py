@@ -486,12 +486,12 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result[1], {"message_id": "b", "seq": 7, "role": "assistant",
             "text": "done", "timestamp": "123", "status": "complete"})
 
-    def test_tasks_uses_only_two_read_routes_and_projects_types(self):
+    def test_tasks_uses_only_read_routes_and_projects_types(self):
         from contextlib import contextmanager
         bridge = load_bridge()
         calls = []
         class Gateway:
-            def call_json(self, method):
+            def call_json(self, method, timeout=None):
                 calls.append(method)
                 if method == "tasks.list":
                     return {"schedules": [{"id": "job-1", "title": "Daily", "enabled": True,
@@ -499,16 +499,23 @@ class BridgeTests(unittest.TestCase):
                 if method == "tasks.runs":
                     return {"runs": [{"run_id": "run-1", "job_id": "job-1", "status": "success",
                         "result_summary": "Done", "error_text": None, "scheduled_for_utc": 120, "raw": "SECRET"}]}
+                if method == "subagents.list":
+                    return {"active": [], "recent": [{"prompt": "Sweep", "status": "completed",
+                        "created_at": 100, "completed_at": 200, "final_response": "Swept."}]}
                 raise AssertionError("nonallowlisted route")
         class Client(FakeClient):
             @contextmanager
             def _gateway(self, config):
                 yield Gateway()
         result = bridge.Adapter(Client(), {}).dispatch({"op": "tasks"})
-        self.assertEqual(calls, ["tasks.list", "tasks.runs"])
+        self.assertEqual(calls, ["tasks.list", "tasks.runs", "subagents.list"])
         self.assertEqual(result, {"schedules": [{"id": "job-1", "title": "Daily", "enabled": True,
             "timezone": "UTC", "next_run_at_utc": 123}], "runs": [{"run_id": "run-1", "job_id": "job-1",
-            "status": "success", "result_summary": "Done", "error_text": None, "scheduled_for_utc": 120}]})
+            "status": "success", "result_summary": "Done", "error_text": None, "scheduled_for_utc": 120}],
+            "agents": [{"prompt": "Sweep", "status": "completed",
+            "created_at": "1970-01-01T00:01:40+00:00",
+            "completed_at": "1970-01-01T00:03:20+00:00",
+            "final_response": "Swept."}]})
 
     def test_artifacts_reads_one_route_and_projects_only_actionable_fields(self):
         from contextlib import contextmanager
@@ -1556,6 +1563,108 @@ class ActivityTests(unittest.TestCase):
                 bridge.validate_request(bad)
 
 
+class ProbeShapeBuildTests(unittest.TestCase):
+    """The Nov 12, 2026 probe harvest: feed visuals, widget options,
+    subagent activity and the feed prompt card, projected from the
+    shapes the probes confirmed on Patrick's own account."""
+
+    def test_feed_units_project_emoji_hero_and_own_stamp(self):
+        bridge = load_bridge()
+        payload = {"days": [{"local_date": "2026-11-12", "editions": [
+            {"kind": "morning", "units": [
+                {"unit_id": "u1", "title": "Post", "content": "Body.",
+                 "emoji": "\U0001F4CB", "created_at_ms": 1794504781613,
+                 "attachment": {"kind": "image",
+                                "hero_image_url": "https://example.com/h.webp"}},
+                {"unit_id": "u2", "title": "Plain", "content": "More.",
+                 "attachment": {"kind": "widget", "widget_html": "<div/>"}},
+            ]}]}]}
+        first, second = bridge.feed_rows(payload)["items"]
+        self.assertEqual(first["icon"], "\U0001F4CB")
+        self.assertEqual(first["image_url"], "https://example.com/h.webp")
+        # The unit's own instant, not the day fallback and not raw
+        # epoch digits.
+        self.assertTrue(first["stamp"].startswith("20"))
+        self.assertNotEqual(first["stamp"], "2026-11-12")
+        self.assertNotIn("1794504781613", first["stamp"])
+        self.assertNotIn("image_url", second)
+        self.assertNotIn("icon", second)
+
+    def test_widget_options_project_from_history_payload(self):
+        bridge = load_bridge()
+        rows = [{
+            "message_id": "m1", "seq": 3, "role": "assistant",
+            "text": "Pick one [[hatch_widget:widget-x]]",
+            "raw": {"payload": {"widgets": [{
+                "widget_id": "w1", "kind": "options",
+                "data": {"options": ["Yes, do it", "Not now"]},
+                "state": {"data": {}},
+            }]}},
+        }, {
+            "message_id": "m2", "seq": 4, "role": "assistant",
+            "text": "Done [[hatch_widget:widget-y]]",
+            "raw": {"payload": {"widgets": [{
+                "widget_id": "w2", "kind": "options",
+                "data": {"options": ["A", "B"]},
+                "state": {"data": {"selectedText": "B"}},
+            }]}},
+        }, {
+            "message_id": "m3", "seq": 5, "role": "user", "text": "plain",
+            "raw": {"payload": {}},
+        }]
+        result = bridge.history_rows(rows)
+        self.assertEqual(result[0]["options"], ["Yes, do it", "Not now"])
+        self.assertNotIn("selected_option", result[0])
+        self.assertEqual(result[1]["selected_option"], "B")
+        self.assertNotIn("options", result[2])
+
+    def test_agent_rows_lead_with_active_and_normalize_stamps(self):
+        bridge = load_bridge()
+        payload = {
+            "active": [{"prompt": "Running thing", "status": "running",
+                        "created_at": 1794504781}],
+            "recent": [{"prompt": "Finished thing", "status": "completed",
+                        "created_at": 1794500000, "completed_at": 1794501000,
+                        "final_response": "All done."}],
+        }
+        rows = bridge.agent_rows(payload)
+        self.assertEqual([r["prompt"] for r in rows],
+                         ["Running thing", "Finished thing"])
+        self.assertEqual(rows[1]["final_response"], "All done.")
+        self.assertTrue(rows[0]["created_at"].startswith("20"))
+        self.assertEqual(bridge.agent_rows({"nope": 1}), [])
+        self.assertEqual(bridge.agent_rows([1, 2]), [])
+
+    def test_feed_prompt_info_is_fail_soft(self):
+        bridge = load_bridge()
+
+        class Gateway:
+            def __init__(self, answers):
+                self.answers = answers
+
+            def call_json(self, route, timeout=None):
+                answer = self.answers[route]
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+        info = bridge._feed_prompt_info(Gateway({
+            "feed.prompt.get": {"prompt": {"free_text": "Keep it brief",
+                                           "enabled": True}},
+            "feed.status": {"refresh_in_progress": True,
+                            "next_edition_kind": "evening"},
+        }))
+        self.assertEqual(info["feed_prompt"],
+                         {"text": "Keep it brief", "enabled": True})
+        self.assertEqual(info["feed_status"],
+                         {"refresh_in_progress": True,
+                          "next_edition_kind": "evening"})
+        self.assertEqual(bridge._feed_prompt_info(Gateway({
+            "feed.prompt.get": RuntimeError("down"),
+            "feed.status": RuntimeError("down"),
+        })), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1623,7 +1732,7 @@ class ListingTests(unittest.TestCase):
             {"node": {"unit_id": "u1", "headline": "Morning briefing", "text": "Body."}},
         ]}, calls)
         result = bridge.Adapter(client, {}).dispatch({"op": "feed"})
-        self.assertEqual(calls, ["feed.list"])
+        self.assertEqual(calls, ["feed.list", "feed.prompt.get", "feed.status"])
         self.assertEqual(result["items"][0]["id"], "u1")
         self.assertEqual(result["items"][0]["title"], "Morning briefing")
         with self.assertRaises(bridge.BridgeFailure) as caught:
@@ -1683,7 +1792,7 @@ class ListingTests(unittest.TestCase):
             ]
         }, calls)
         result = bridge.Adapter(client, {}).dispatch({"op": "feed"})
-        self.assertEqual(calls, ["feed.list"])
+        self.assertEqual(calls, ["feed.list", "feed.prompt.get", "feed.status"])
         self.assertEqual(result["recognized"], 3)
         self.assertEqual(result["items"][0]["id"], "u1")
         self.assertEqual(result["items"][0]["body"], "What matters today.")
