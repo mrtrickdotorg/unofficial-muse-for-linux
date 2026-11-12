@@ -1204,6 +1204,7 @@ class _WidgetTextExtractor(HTMLParser):
         self.lines = []
         self._current = []
         self._skip = 0
+        self._anchor = None
 
     def _flush(self):
         text = " ".join("".join(self._current).split())
@@ -1214,17 +1215,34 @@ class _WidgetTextExtractor(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP:
             self._skip += 1
+        elif tag == "a" and not self._skip:
+            # A link stays a link: its text is buffered and re-emitted
+            # as markdown, so the card's rich rendering makes it live.
+            href = dict(attrs).get("href") or ""
+            if href.startswith(("https://", "http://")) \
+                    and not any(c in href for c in " \t\r\n)"):
+                self._anchor = (href, [])
         elif tag in self.BLOCK:
             self._flush()
 
     def handle_endtag(self, tag):
         if tag in self.SKIP and self._skip:
             self._skip -= 1
+        elif tag == "a" and self._anchor is not None:
+            href, parts = self._anchor
+            self._anchor = None
+            text = " ".join("".join(parts).split())
+            if text:
+                self._current.append(f"[{text}]({href})")
         elif tag in self.BLOCK:
             self._flush()
 
     def handle_data(self, data):
-        if not self._skip:
+        if self._skip:
+            return
+        if self._anchor is not None:
+            self._anchor[1].append(data)
+        else:
             self._current.append(data)
 
     def text_lines(self):
