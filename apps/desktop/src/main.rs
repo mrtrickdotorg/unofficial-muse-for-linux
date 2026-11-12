@@ -63,106 +63,108 @@ const DARK_THEME_CSS: &str = r#"
    Sizing is calibrated from measurement, not web CSS values: in
    Patrick's Nov 11 side-by-side screenshots the web client's text lines
    measured 24 device px tall against the app's 17 (the browser applies
-   his display scaling, the app renders at nominal px), so the whole
-   theme is scaled by that measured factor (~1.4 over the first pass,
-   ~1.6 over nominal web values) until text, icons, and menus READ the
-   same size on his screen. Do not "correct" these back to nominal. */
-window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", "Cantarell", "Noto Sans", system-ui, sans-serif; font-size: 24px; }
+   his display scaling, the app renders at nominal px), so the theme
+   was scaled by that measured factor (~1.4 over the first pass). His
+   verdict that evening — "it's nice to have it larger, but it's a
+   little too large" — stepped it back one notch to ~1.2 over the
+   first pass (base text 21px), proportions unchanged. His eye is the
+   calibration instrument; do not "correct" these back to nominal. */
+window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", "Cantarell", "Noto Sans", system-ui, sans-serif; font-size: 21px; }
 window.dark-window { background-color: #0d0d10; }
 scrolledwindow viewport { background-color: transparent; }
 .app-sidebar { background-color: #131318; }
-.icon-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 17px 14px; }
-.side-panel-wrap { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 22px 20px; }
+.icon-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 15px 12px; }
+.side-panel-wrap { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 19px 17px; }
 .side-panel { padding: 0 2px; }
-.side-panel-right { background: rgba(255, 255, 255, 0.03); border-left: 1px solid rgba(255, 255, 255, 0.08); padding: 14px; }
+.side-panel-right { background: rgba(255, 255, 255, 0.03); border-left: 1px solid rgba(255, 255, 255, 0.08); padding: 12px; }
 .panel-list { background: transparent; }
-.panel-list row { padding: 15px 20px; border-radius: 14px; background: transparent; color: #d7d7dd; }
+.panel-list row { padding: 13px 17px; border-radius: 12px; background: transparent; color: #d7d7dd; }
 .panel-list row:hover { background-color: rgba(255, 255, 255, 0.05); }
 .panel-list row:selected { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; }
-.panel-item-label { font-size: 24px; }
-.panel-heading { color: #9a9aa5; font-size: 20px; font-weight: 600; padding: 22px 17px 8px; }
-.panel-title { color: #f4f4f6; font-size: 24px; font-weight: 700; padding: 3px 6px 6px; }
-.panel-copy { color: #b3b3bc; font-size: 20px; padding: 0 6px; }
-.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 31px; min-height: 62px; padding: 0 20px; font-size: 23px; color: #f4f4f6; }
+.panel-item-label { font-size: 21px; }
+.panel-heading { color: #9a9aa5; font-size: 17px; font-weight: 600; padding: 19px 15px 7px; }
+.panel-title { color: #f4f4f6; font-size: 21px; font-weight: 700; padding: 3px 6px 6px; }
+.panel-copy { color: #b3b3bc; font-size: 17px; padding: 0 6px; }
+.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 27px; min-height: 53px; padding: 0 17px; font-size: 20px; color: #f4f4f6; }
 .search-pill:focus { border-color: rgba(255, 255, 255, 0.25); }
 .rail-separator { background-color: rgba(255, 255, 255, 0.08); min-height: 1px; margin: 6px 8px; }
-.brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 15px; font-weight: 700; min-width: 56px; min-height: 56px; }
-.nav-item { min-width: 78px; min-height: 78px; padding: 0; border-radius: 20px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
+.brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 13px; font-weight: 700; min-width: 48px; min-height: 48px; }
+.nav-item { min-width: 67px; min-height: 67px; padding: 0; border-radius: 17px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
 .nav-item:hover { background-color: rgba(255, 255, 255, 0.05); color: #f4f4f6; }
 .nav-item.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
 .nav-item:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
-.nav-icon { min-width: 40px; }
-.rail-button { min-width: 73px; min-height: 73px; padding: 0; border-radius: 36px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
+.nav-icon { min-width: 34px; }
+.rail-button { min-width: 63px; min-height: 63px; padding: 0; border-radius: 31px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
 .rail-button:hover { background-color: rgba(255, 255, 255, 0.05); color: #ffffff; }
 .rail-button.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
 .rail-button:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
 .main-column { background-color: #0d0d10; }
-.topbar { padding: 17px 31px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
-.topbar-button { min-width: 56px; min-height: 56px; padding: 0; border-radius: 28px; background: transparent; border-color: transparent; box-shadow: none; }
+.topbar { padding: 15px 27px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
+.topbar-button { min-width: 48px; min-height: 48px; padding: 0; border-radius: 24px; background: transparent; border-color: transparent; box-shadow: none; }
 .topbar-button:hover { background-color: rgba(255, 255, 255, 0.06); }
-.page-title { background-color: transparent; border-radius: 0; padding: 6px 3px; font-size: 24px; font-weight: 600; color: #f4f4f6; }
-.status-chip { color: #a7a7b1; background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 21px; padding: 8px 17px; font-size: 19px; }
-.page-content { padding: 36px 45px; }
-.page-heading { font-size: 34px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
+.page-title { background-color: transparent; border-radius: 0; padding: 6px 3px; font-size: 21px; font-weight: 600; color: #f4f4f6; }
+.status-chip { color: #a7a7b1; background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 18px; padding: 7px 15px; font-size: 16px; }
+.page-content { padding: 31px 39px; }
+.page-heading { font-size: 29px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
 .page-subtitle { color: #b3b3bc; }
 .chat-column { }
 .chat-scroll { background: transparent; }
 .assistant-identity { padding: 0 0 6px; }
-.assistant-avatar { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 31px; min-width: 62px; min-height: 62px; font-weight: 700; }
-.message-avatar { background-color: #26262d; color: #d7d7de; border-radius: 25px; min-width: 50px; min-height: 50px; font-weight: 700; margin-top: 3px; }
+.assistant-avatar { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 27px; min-width: 53px; min-height: 53px; font-weight: 700; }
+.message-avatar { background-color: #26262d; color: #d7d7de; border-radius: 21px; min-width: 43px; min-height: 43px; font-weight: 700; margin-top: 3px; }
 .assistant-name { font-weight: 600; }
-.message-meta { color: #8e8e99; font-size: 18px; padding: 3px 8px; }
+.message-meta { color: #8e8e99; font-size: 15px; padding: 3px 8px; }
 .day-divider { color: #6f6f7a; font-size: smaller; padding: 8px 0 2px; }
-.section-heading { font-weight: 600; font-size: 22px; color: #f4f4f6; padding-top: 11px; }
-.title-2 { font-weight: 600; font-size: 22px; color: #f4f4f6; }
-.settings-disclosure { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 20px; padding: 14px 20px; }
-.welcome-card { background-image: linear-gradient(180deg, #1e1e28, #17171d); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 22px; padding: 28px; }
-.welcome-title { color: #f4f4f6; font-size: 35px; font-weight: 700; }
+.section-heading { font-weight: 600; font-size: 19px; color: #f4f4f6; padding-top: 11px; }
+.title-2 { font-weight: 600; font-size: 19px; color: #f4f4f6; }
+.settings-disclosure { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 12px 17px; }
+.welcome-card { background-image: linear-gradient(180deg, #1e1e28, #17171d); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 19px; padding: 24px; }
+.welcome-title { color: #f4f4f6; font-size: 30px; font-weight: 700; }
 .welcome-copy { color: #c9c9d1; }
 .settings-content { padding: 10px 2px 4px; }
 .toolbar { padding: 2px 0 0; }
-.toolbar button { font-size: 20px; min-height: 45px; padding: 4px 15px; }
+.toolbar button { font-size: 17px; min-height: 39px; padding: 4px 13px; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action) { background-color: transparent; background-image: none; border-color: transparent; box-shadow: none; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action):hover { background-color: rgba(255, 255, 255, 0.06); }
-.chat-bubble { padding: 18px 24px; border-radius: 25px; font-size: 24px; }
+.chat-bubble { padding: 15px 21px; border-radius: 21px; font-size: 21px; }
 .chat-bubble.user { background-color: #0a84ff; color: #ffffff; }
 .chat-bubble.user .message-meta { color: #dbeeff; }
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
 .chat-status { color: #b3b3bc; padding: 2px 6px; }
-.code-block { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 15px 18px; font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 20px; color: #d7d7dd; }
-.quote-block { border-left: 4px solid rgba(255, 255, 255, 0.22); padding-left: 17px; color: #c9c9d1; }
+.code-block { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 12px; padding: 13px 15px; font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 17px; color: #d7d7dd; }
+.quote-block { border-left: 4px solid rgba(255, 255, 255, 0.22); padding-left: 15px; color: #c9c9d1; }
 selection { background-color: rgba(110, 168, 255, 0.35); color: #ffffff; }
-.composer { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 34px; padding: 10px 10px 10px 20px; }
+.composer { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 29px; padding: 9px 9px 9px 17px; }
 .composer:focus-within { border-color: rgba(255, 255, 255, 0.28); }
-.composer entry { background: transparent; border: 0; box-shadow: none; font-size: 24px; }
-.composer button.suggested-action { border-radius: 29px; padding: 11px 25px; font-weight: 600; }
+.composer entry { background: transparent; border: 0; box-shadow: none; font-size: 21px; }
+.composer button.suggested-action { border-radius: 25px; padding: 9px 21px; font-weight: 600; }
 .composer-pill { background-color: #1e1e24; }
-.send-round { min-width: 56px; min-height: 56px; padding: 0; border-radius: 28px; background-color: #f4f4f6; background-image: none; color: #131316; font-size: 27px; font-weight: 700; border-color: transparent; box-shadow: none; }
+.send-round { min-width: 48px; min-height: 48px; padding: 0; border-radius: 24px; background-color: #f4f4f6; background-image: none; color: #131316; font-size: 23px; font-weight: 700; border-color: transparent; box-shadow: none; }
 .send-round:hover { background-color: #ffffff; }
 .send-round:disabled { background-color: rgba(255, 255, 255, 0.14); color: rgba(244, 244, 246, 0.45); }
-entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 14px; padding: 11px 17px; font-size: 22px; }
+entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; padding: 9px 15px; font-size: 19px; }
 entry:focus, searchentry:focus, textview:focus { border-color: rgba(255, 255, 255, 0.28); }
-button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 14px; padding: 11px 20px; box-shadow: none; font-size: 21px; }
+button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; padding: 9px 17px; box-shadow: none; font-size: 18px; }
 button:hover { background-color: #26262e; }
 button.suggested-action, button.primary-action { color: #101014; background-color: #f4f4f6; background-image: none; border-color: transparent; }
 button.suggested-action:hover, button.primary-action:hover { background-color: #ffffff; background-image: none; }
 button.destructive-action { color: #ffb4ab; background-color: #332024; border-color: rgba(255, 180, 171, 0.25); }
 button.destructive-action:hover { background-color: #42262a; }
 .dim-label { color: #b3b3bc; }
-.build-identity { color: #6f6f7a; font-size: 18px; padding: 14px 8px 3px; }
+.build-identity { color: #6f6f7a; font-size: 15px; padding: 14px 8px 3px; }
 notebook header { background-color: #0d0d10; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
-notebook tab { color: #a7a7b1; background-color: transparent; border-radius: 11px; padding: 13px 20px; font-size: 22px; }
+notebook tab { color: #a7a7b1; background-color: transparent; border-radius: 9px; padding: 11px 17px; font-size: 19px; }
 notebook tab:checked { color: #f4f4f6; background-color: rgba(255, 255, 255, 0.08); }
 notebook stack { background-color: #0d0d10; }
 combobox box, combobox cellview { color: #f4f4f6; }
 popover contents { background-color: #1a1a20; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; }
-popover modelbutton { color: #e9e9ee; font-size: 22px; padding: 8px 14px; }
+popover modelbutton { color: #e9e9ee; font-size: 19px; padding: 7px 12px; }
 popover modelbutton:hover { background-color: rgba(255, 255, 255, 0.06); }
 list { background-color: transparent; }
-list row { color: #e9e9ee; padding: 11px 14px; border-radius: 11px; }
+list row { color: #e9e9ee; padding: 9px 12px; border-radius: 9px; }
 list row:selected { background-color: rgba(255, 255, 255, 0.09); }
-.card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 20px; padding: 22px; }
+.card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 19px; }
 .approval-card { border-left: 3px solid #c98a2b; }
 .approval-icon { color: #d8b25c; font-weight: 700; }
 .approval-heading { font-weight: 700; color: #f4f4f6; }
@@ -689,7 +691,7 @@ fn build_ui(app: &gtk::Application) {
 
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
     panel.add_css_class("side-panel-wrap");
-    panel.set_size_request(470, -1);
+    panel.set_size_request(403, -1);
     let panel_stack = gtk::Stack::new();
     panel_stack.set_vexpand(true);
     panel_stack.set_vhomogeneous(false);
@@ -740,11 +742,12 @@ fn build_ui(app: &gtk::Application) {
     let page_title = gtk::Label::new(Some("Chat"));
     page_title.add_css_class("page-title");
     topbar.append(&page_title);
+    // The Connected pill came out of the topbar on Patrick's order
+    // (Nov 11): connection state lives in the account page's own
+    // notices and the right panel's status line now. The label itself
+    // stays — the account page writes its state into it.
     let service_status = gtk::Label::new(Some("Not connected"));
     service_status.add_css_class("status-chip");
-    service_status.set_hexpand(true);
-    service_status.set_halign(gtk::Align::End);
-    topbar.append(&service_status);
     main_column.append(&topbar);
 
     let stack = gtk::Stack::new();
@@ -822,7 +825,7 @@ fn build_ui(app: &gtk::Application) {
     chat_page.add_css_class("page-content");
 
     // Mac-style centered reading column: conversation content is capped
-    // at ~1075px so bubbles keep messenger rhythm on wide windows instead
+    // at ~921px so bubbles keep messenger rhythm on wide windows instead
     // of stretching edge to edge — a cap, never a minimum (see
     // bind_reading_column). Setup stays full width above it.
     let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -1595,11 +1598,11 @@ fn panel_placeholder(title: &str, copy: &str) -> gtk::Box {
 
 /// The widest a centered reading column may grow, in app px (the
 /// calibrated scale's counterpart of the web's ~768 CSS px column).
-pub(crate) const READING_COLUMN_MAX_PX: i32 = 1075;
+pub(crate) const READING_COLUMN_MAX_PX: i32 = 921;
 
 /// The width a reading column starts at, before its binder adapts it:
 /// small enough that the shell's static minimum fits a laptop screen.
-pub(crate) const READING_COLUMN_START_PX: i32 = 560;
+pub(crate) const READING_COLUMN_START_PX: i32 = 480;
 
 /// Drive a reading column's width request from its parent's real
 /// allocation: min(parent width, READING_COLUMN_MAX_PX). A bare
