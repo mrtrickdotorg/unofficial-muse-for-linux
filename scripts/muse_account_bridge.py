@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 import secrets
 import stat
+import threading
 
 
 MAX_REQUEST = 1024 * 1024
@@ -209,6 +210,35 @@ def _probe_widget_payload(config_dir, raw):
         return
     _WIDGET_PROBED.add(signature)
     timing_log(config_dir, "widget-probe keys=" + signature[:1900])
+
+
+_SUBAGENTS_PROBED = False
+
+
+def _probe_subagents(config_dir, client, config):
+    """Reconnaissance for the right panel's agent-activity feed: the
+    web panel lists what the agent did today, which this service
+    exposes (if anywhere) through subagents.list — a route that
+    answered gateway probes in November, but whose response shape the
+    community client never recorded. Log its key paths (keys only,
+    never values) so the feed can be built against the real shape.
+    Runs on a daemon thread off the tasks answer it rides along with,
+    and any failure is the probe's alone."""
+    global _SUBAGENTS_PROBED
+    if _SUBAGENTS_PROBED or not config_dir:
+        return
+    _SUBAGENTS_PROBED = True
+
+    def run():
+        try:
+            with client._gateway(config) as gateway:
+                payload = gateway.call_json("subagents.list", timeout=20)
+        except Exception:
+            return
+        signature = ",".join(_key_paths(payload))
+        timing_log(config_dir, "subagents-probe keys=" + signature[:1900])
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def history_rows(rows, config_dir=None):
@@ -1329,7 +1359,7 @@ class Adapter:
             with self.client._gateway(self.config) as gateway:
                 schedules = gateway.call_json("tasks.list")["schedules"]
                 runs = gateway.call_json("tasks.runs")["runs"]
-            return {
+            answer = {
                 "schedules": [{
                     "id": required_text(row.get("id")), "title": required_text(row.get("title")),
                     "enabled": bool(row.get("enabled", False)),
@@ -1344,6 +1374,8 @@ class Adapter:
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
             }
+            _probe_subagents(request.get("config_dir"), self.client, self.config)
+            return answer
         if request["op"] == "delete_task":
             # A write on the shared gateway: one deletion, never retried here.
             # The id is one the schedule listing published, and whether the
