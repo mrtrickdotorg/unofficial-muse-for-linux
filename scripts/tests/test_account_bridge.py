@@ -938,6 +938,45 @@ class WidgetProbeTests(unittest.TestCase):
             self.assertFalse(pathlib.Path(root, "op-timing.log").exists())
 
 
+class SubagentsProbeTests(unittest.TestCase):
+    """The probe learns the subagents.list shape from key paths only."""
+
+    def test_probe_logs_key_paths_once_and_never_values(self):
+        import contextlib
+        import tempfile
+        import time
+        bridge = load_bridge()
+        bridge._SUBAGENTS_PROBED = False
+
+        class Gateway:
+            def call_json(self, route, timeout=None):
+                assert route == "subagents.list"
+                return {"agents": [{"id": "a1", "title": "SENTINEL-TITLE",
+                                    "status": "done"}]}
+
+        class Client:
+            @contextlib.contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        with tempfile.TemporaryDirectory() as root:
+            bridge._probe_subagents(root, Client(), {})
+            bridge._probe_subagents(root, Client(), {})
+            deadline = time.monotonic() + 5
+            log = ""
+            while time.monotonic() < deadline:
+                path = pathlib.Path(root, "op-timing.log")
+                if path.exists():
+                    log = path.read_text()
+                    if "subagents-probe" in log:
+                        break
+                time.sleep(0.02)
+        self.assertIn("subagents-probe keys=", log)
+        self.assertIn("agents[].title", log)
+        self.assertEqual(log.count("subagents-probe"), 1)
+        self.assertNotIn("SENTINEL-TITLE", log)
+
+
 class ApprovalTests(unittest.TestCase):
     def test_approvals_are_projected_in_the_service_vocabulary_only(self):
         bridge = load_bridge()
