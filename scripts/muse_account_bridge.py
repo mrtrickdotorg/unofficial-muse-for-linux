@@ -171,7 +171,47 @@ def timing_log(config_dir, line):
         pass
 
 
-def history_rows(rows):
+_WIDGET_PROBED = set()
+
+
+def _key_paths(value, prefix="", depth=0, out=None):
+    """Every key path in a decoded JSON value, values never included:
+    dict keys joined with dots, a list shown as [] over its first item's
+    shape. The widget probe logs these so an unrecorded payload shape
+    can be learned without logging any content."""
+    if out is None:
+        out = []
+    if depth > 5:
+        return out
+    if isinstance(value, dict):
+        for key in sorted(value.keys()):
+            path = "{}.{}".format(prefix, key) if prefix else str(key)
+            out.append(path)
+            _key_paths(value[key], path, depth + 1, out)
+    elif isinstance(value, list) and value:
+        _key_paths(value[0], prefix + "[]", depth + 1, out)
+    return out
+
+
+def _probe_widget_payload(config_dir, raw):
+    """Reconnaissance for the in-app option buttons (Patrick, Nov 11):
+    the service's route table records no widget route, so the clickable
+    options an assistant message carries must ride inside the history
+    payload, in a field this projection has never read. When a row's
+    text carries a widget token, record the raw event's key structure
+    — keys only, never values; the row is already redacted upstream —
+    once per distinct shape, so the field can be identified from the
+    timing log and read properly afterwards."""
+    if not config_dir:
+        return
+    signature = ",".join(_key_paths(raw))
+    if signature in _WIDGET_PROBED:
+        return
+    _WIDGET_PROBED.add(signature)
+    timing_log(config_dir, "widget-probe keys=" + signature[:1900])
+
+
+def history_rows(rows, config_dir=None):
     rows = object_rows(rows)
     latest = {}
     for row in rows:
@@ -188,6 +228,8 @@ def history_rows(rows):
             "timestamp": optional_text(row.get("timestamp")),
             "status": optional_text(row.get("status") or payload.get("status") or raw.get("status")),
         }
+        if config_dir and "[[hatch_widget" in message["text"] and raw:
+            _probe_widget_payload(config_dir, raw)
         if message_id not in latest or seq >= latest[message_id]["seq"]:
             latest[message_id] = message
     return sorted(latest.values(), key=lambda row: (row["seq"], row["message_id"]))
@@ -1282,7 +1324,7 @@ class Adapter:
             # to prove the saved session still belongs to the same account.
             return session_facts(self.client, self.config)
         if request["op"] == "history":
-            return history_rows(self.client.history(thread=request.get("thread"), limit=request["limit"]))
+            return history_rows(self.client.history(thread=request.get("thread"), limit=request["limit"]), config_dir=request.get("config_dir"))
         if request["op"] == "tasks":
             with self.client._gateway(self.config) as gateway:
                 schedules = gateway.call_json("tasks.list")["schedules"]
@@ -1428,7 +1470,7 @@ class Adapter:
 
             def probe():
                 return history_rows(self.client.history(
-                    thread=request.get("thread"), limit=probe_limit))
+                    thread=request.get("thread"), limit=probe_limit), config_dir=request.get("config_dir"))
 
             full_ms = []
 
@@ -1437,7 +1479,7 @@ class Adapter:
                     return None
                 started = time.monotonic()
                 rows = history_rows(self.client.history(
-                    thread=request.get("thread"), limit=request["limit"]))
+                    thread=request.get("thread"), limit=request["limit"]), config_dir=request.get("config_dir"))
                 full_ms.append(int((time.monotonic() - started) * 1000))
                 return rows
 
@@ -1495,7 +1537,7 @@ class Adapter:
                     raise BridgeFailure("account_changed")
             # Confirming a send only needs the rows around the new message, and
             # on a held connection a read costs ~0.1s.
-            baseline = history_rows(self.client.history(thread=thread, limit=25))
+            baseline = history_rows(self.client.history(thread=thread, limit=25), config_dir=request.get("config_dir"))
             baseline_seq = max((r["seq"] for r in baseline), default=0)
             baseline_ids = {r["message_id"] for r in baseline}
             self.send_started = True
@@ -1505,7 +1547,7 @@ class Adapter:
                 raise BridgeFailure("protocol_error", uncertain=True)
             deadline = time.monotonic() + self.confirmation_window
             while True:
-                rows = history_rows(self.client.history(thread=thread, limit=25))
+                rows = history_rows(self.client.history(thread=thread, limit=25), config_dir=request.get("config_dir"))
                 for row in rows:
                     # The text comparison ignores surrounding whitespace: the
                     # service's stored display text is not guaranteed to be
