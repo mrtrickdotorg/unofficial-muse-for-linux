@@ -74,6 +74,7 @@ scrolledwindow viewport { background-color: transparent; }
 .icon-rail { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 17px 14px; }
 .side-panel-wrap { background-color: #131318; border-right: 1px solid rgba(255, 255, 255, 0.07); padding: 22px 20px; }
 .side-panel { padding: 0 2px; }
+.side-panel-right { background: rgba(255, 255, 255, 0.03); border-left: 1px solid rgba(255, 255, 255, 0.08); padding: 14px; }
 .panel-list { background: transparent; }
 .panel-list row { padding: 15px 20px; border-radius: 14px; background: transparent; color: #d7d7dd; }
 .panel-list row:hover { background-color: rgba(255, 255, 255, 0.05); }
@@ -937,7 +938,15 @@ fn build_ui(app: &gtk::Application) {
 
     main_column.append(&stack);
     shell.set_start_child(Some(&sidebar));
-    shell.set_end_child(Some(&main_column));
+    // The account page's right-hand panel (identity, scheduled tasks,
+    // recent runs) rides beside the page column. It hides itself until
+    // the account links, and the chat column's binder adapts to
+    // whatever room that leaves.
+    let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    main_column.set_hexpand(true);
+    content_row.append(&main_column);
+    content_row.append(&account_page.side_panel);
+    shell.set_end_child(Some(&content_row));
 
     let api_key_for_set = Rc::clone(&api_key);
     let session_for_set = Rc::clone(&session);

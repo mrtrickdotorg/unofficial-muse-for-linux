@@ -1120,6 +1120,9 @@ mod native {
         /// The muse.ai-shaped sidebar content (search, Main chat, Side
         /// chats) for the shell to embed beside the icon rail.
         pub threads_panel: gtk::Box,
+        /// The shell's right-hand panel (identity, schedules, recent
+        /// runs), built and kept current by this page.
+        pub side_panel: gtk::Box,
         /// Focus the sidebar search entry (the rail's Search action).
         pub focus_search: Rc<dyn Fn()>,
         /// Go to the main conversation and focus the composer (the
@@ -1193,6 +1196,11 @@ mod native {
         history_notice: gtk::Label,
         tasks: gtk::Box,
         tasks_notice: gtk::Label,
+        side_panel: gtk::Box,
+        side_identity: gtk::Label,
+        side_status: gtk::Label,
+        side_tasks: gtk::Box,
+        side_runs: gtk::Box,
         send_notice: gtk::Label,
         prompt: gtk::Entry,
         send: gtk::Button,
@@ -2127,6 +2135,33 @@ mod native {
         );
         root.append(&pages);
 
+        // The web client's right-hand panel, fed by this app's own
+        // reads: who the agent is and what it is doing up top, then the
+        // schedules and recent runs. The shell embeds it beside the
+        // page column; render_side_panel keeps it current from the
+        // same state the Tasks page reads, and it stays hidden until
+        // the account links.
+        let side_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        side_panel.add_css_class("side-panel-right");
+        side_panel.set_size_request(330, -1);
+        side_panel.set_visible(false);
+        let side_identity = label("");
+        side_identity.add_css_class("panel-title");
+        side_panel.append(&side_identity);
+        let side_status = label("");
+        side_status.add_css_class("dim-label");
+        side_panel.append(&side_status);
+        let side_tasks_heading = label("Scheduled tasks");
+        side_tasks_heading.add_css_class("panel-title");
+        side_panel.append(&side_tasks_heading);
+        let side_tasks = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        side_panel.append(&side_tasks);
+        let side_runs_heading = label("Recent runs");
+        side_runs_heading.add_css_class("panel-title");
+        side_panel.append(&side_runs_heading);
+        let side_runs = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        side_panel.append(&side_runs);
+
         let ui = Rc::new(Ui {
             state: RefCell::new(State::default()),
             client: RefCell::new(None),
@@ -2182,6 +2217,11 @@ mod native {
             history_notice,
             tasks,
             tasks_notice,
+            side_panel: side_panel.clone(),
+            side_identity,
+            side_status,
+            side_tasks,
+            side_runs,
             send_notice,
             prompt,
             send,
@@ -2381,6 +2421,7 @@ mod native {
         AccountPage {
             root,
             threads_panel,
+            side_panel,
             focus_search,
             new_chat,
             settings,
@@ -3220,6 +3261,68 @@ mod native {
             }
         }
 
+        /// Keep the shell's right-hand panel current: the agent's
+        /// identity and live status, then the schedules and recent runs
+        /// from the same snapshot the Tasks page renders — one read, two
+        /// views, so they can never disagree. Hidden until linked.
+        fn render_side_panel(&self, state: &State) {
+            let Some(account) = &state.account else {
+                self.side_panel.set_visible(false);
+                return;
+            };
+            self.side_panel.set_visible(true);
+            self.side_identity.set_text(&account.identity_name);
+            let status = if state.live_status.is_empty() {
+                "Connected".to_string()
+            } else {
+                friendly_status(&state.live_status)
+            };
+            self.side_status.set_text(&status);
+            super::super::clear_chat(&self.side_tasks);
+            super::super::clear_chat(&self.side_runs);
+            match &state.tasks {
+                Some(tasks) => {
+                    if tasks.schedules.is_empty() {
+                        self.side_tasks.append(&label("No schedules."));
+                    }
+                    for schedule in tasks.schedules.iter().take(6) {
+                        let item = label(&format!(
+                            "{}\nNext: {}",
+                            schedule.title,
+                            utc_time(schedule.next_run_at_utc)
+                        ));
+                        item.add_css_class("card");
+                        self.side_tasks.append(&item);
+                    }
+                    if tasks.schedules.len() > 6 {
+                        self.side_tasks.append(&label(&format!(
+                            "+{} more — see the Tasks page",
+                            tasks.schedules.len() - 6
+                        )));
+                    }
+                    if tasks.runs.is_empty() {
+                        self.side_runs.append(&label("No runs yet."));
+                    }
+                    for run in tasks.runs.iter().take(5) {
+                        let item = label(&format!(
+                            "{} · {}\n{}",
+                            run.status,
+                            utc_time(run.scheduled_for_utc),
+                            run.result_summary
+                                .as_deref()
+                                .unwrap_or("No result summary supplied.")
+                        ));
+                        item.add_css_class("card");
+                        self.side_runs.append(&item);
+                    }
+                }
+                None => {
+                    self.side_tasks.append(&label("Not loaded yet."));
+                    self.side_runs.append(&label("Not loaded yet."));
+                }
+            }
+        }
+
         fn render(&self) {
             self.rendering.set(true);
             let state = self.state.borrow();
@@ -3781,6 +3884,7 @@ mod native {
                     self.tasks.append(&item);
                 }
             }
+            self.render_side_panel(&state);
             // Nothing needs attention, so the setup panel gets out of the way.
             if connected && self.settings.is_expanded() && state.history_notice.is_empty() {
                 self.settings.set_expanded(false);
@@ -4057,6 +4161,66 @@ mod native {
                     .iter()
                     .any(|text| text == "13:38 \u{00b7} shown 08:39:47 AM"),
                 "shown stamp missing from the row tree: {texts:?}"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn side_panel_lists_the_agent_schedules_and_runs() {
+            // The right-hand panel Patrick asked for on Nov 11: the
+            // agent's identity, the scheduled tasks, and the recent
+            // runs, rendered from the same snapshot as the Tasks page.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                state.tasks = Some(TasksSnapshot {
+                    schedules: vec![muse_account::Schedule {
+                        id: "sched-1".into(),
+                        title: "Morning briefing".into(),
+                        enabled: true,
+                        timezone: Some("America/Detroit".into()),
+                        next_run_at_utc: Some(1_794_500_000),
+                    }],
+                    runs: vec![muse_account::TaskRun {
+                        run_id: "run-1".into(),
+                        job_id: "sched-1".into(),
+                        status: "completed".into(),
+                        result_summary: Some("Summary delivered".into()),
+                        error_text: None,
+                        scheduled_for_utc: Some(1_794_400_000),
+                    }],
+                });
+            }
+            page.ui.render();
+            assert!(page.side_panel.is_visible());
+            fn collect_texts(widget: &gtk::Widget, out: &mut Vec<String>) {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    out.push(label.text().to_string());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    collect_texts(&current, out);
+                    child = current.next_sibling();
+                }
+            }
+            let mut texts = Vec::new();
+            collect_texts(page.side_panel.upcast_ref(), &mut texts);
+            let joined = texts.join("\n");
+            assert!(joined.contains("Lotus"), "identity missing: {joined}");
+            assert!(
+                joined.contains("Morning briefing"),
+                "schedule missing: {joined}"
+            );
+            assert!(
+                joined.contains("Summary delivered"),
+                "run missing: {joined}"
             );
         }
 
