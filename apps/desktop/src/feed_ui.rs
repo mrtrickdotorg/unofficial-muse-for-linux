@@ -428,20 +428,14 @@ impl Ui {
             content.append(&picture);
             self.attach_image(picture, url);
         }
-        if let Some(text) = &item.widget_text {
-            // The widget attachment, as the text it carries: the web
-            // renders the same HTML live, and this client has no web
-            // engine — the inset says so once, quietly.
+        if let Some(html) = &item.widget_html {
+            // The widget attachment, rendered live in a locked
+            // frame; the text view below is its fallback.
+            content.append(&widget_frame(item, html));
+        } else if let Some(text) = &item.widget_text {
             let widget = gtk::Box::new(gtk::Orientation::Vertical, 4);
             widget.add_css_class("feed-widget");
-            let caption = label("Widget · text view");
-            caption.add_css_class("dim-label");
-            widget.append(&caption);
-            // One rich label per extracted line, so a line's links
-            // are live links, not dead text.
-            for line in text.lines() {
-                widget.append(&rich_label(line));
-            }
+            fill_widget_text(&widget, text);
             content.append(&widget);
         }
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -578,6 +572,136 @@ impl Ui {
     }
 }
 
+/// The fallback view of a widget attachment: the text the bridge
+/// extracted from its markup, captioned so the degradation is
+/// honest, one rich label per line so its links stay live.
+fn fill_widget_text(area: &gtk::Box, text: &str) {
+    let caption = label("Widget · text view");
+    caption.add_css_class("dim-label");
+    area.append(&caption);
+    for line in text.lines() {
+        area.append(&rich_label(line));
+    }
+}
+
+/// The chrome a widget fragment renders inside: the inset's own
+/// dark surface and the app's font, no margins of ours — the
+/// fragment brings its own layout, exactly as it does on the web.
+fn widget_document(html: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <style>html,body{{margin:0;padding:0;background:transparent;color:#f4f4f6;\
+         font-family:Inter,system-ui,sans-serif;overflow:hidden}}</style>\
+         </head><body>{html}</body></html>"
+    )
+}
+
+/// A widget attachment rendered live: a WebView frame locked down
+/// to a renderer. Navigation never happens inside it — a link the
+/// reader clicks hands its URL to the system browser, and anything
+/// else is dropped — so Discuss stays the native button below the
+/// card and the frame can never become a browser. When the frame
+/// cannot render (load failure, a dead web process), the card
+/// falls back to the extracted text view.
+fn widget_frame(item: &ListingItem, html: &str) -> gtk::Box {
+    use webkit6::prelude::*;
+    use webkit6::{LoadEvent, NavigationPolicyDecision, PolicyDecisionType, WebView};
+
+    let area = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    area.add_css_class("feed-widget");
+    let view = WebView::new();
+    view.set_background_color(&gtk::gdk::RGBA::new(0.063, 0.063, 0.075, 1.0));
+    view.set_hexpand(true);
+    view.set_size_request(-1, 120);
+    if let Some(settings) = WebViewExt::settings(&view) {
+        // JavaScript stays on: countdowns and timelines compute
+        // themselves at display time, like the web's "in 7 days".
+        settings.set_enable_javascript(true);
+        settings.set_enable_developer_extras(false);
+    }
+    view.connect_decide_policy(|_, decision, kind| {
+        if kind != PolicyDecisionType::NavigationAction {
+            return false;
+        }
+        let Some(navigation) = decision.downcast_ref::<NavigationPolicyDecision>() else {
+            return false;
+        };
+        let attempted = navigation.navigation_action().and_then(|mut action| {
+            let gesture = action.is_user_gesture();
+            action
+                .request()
+                .map(|request| (request.uri().unwrap_or_default(), gesture))
+        });
+        if let Some((uri, gesture)) = attempted {
+            if uri == "about:blank" {
+                // The widget document itself (load_html's base):
+                // the one navigation the frame exists for.
+                return false;
+            }
+            if gesture && (uri.starts_with("https://") || uri.starts_with("http://")) {
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    &uri,
+                    None::<&gtk::gio::AppLaunchContext>,
+                );
+            }
+            decision.ignore();
+            return true;
+        }
+        false
+    });
+    let fit = {
+        let view = view.clone();
+        move || {
+            let view = view.clone();
+            let view_for_fit = view.clone();
+            view.evaluate_javascript(
+                "String(Math.max(document.body ? document.body.scrollHeight : 0, \
+                 document.documentElement ? document.documentElement.scrollHeight : 0))",
+                None,
+                None,
+                gtk::gio::Cancellable::NONE,
+                move |result| {
+                    if let Ok(value) = result
+                        && let Ok(height) = value.to_string().parse::<f64>()
+                    {
+                        view_for_fit.set_size_request(-1, height.clamp(48.0, 900.0) as i32);
+                    }
+                },
+            );
+        }
+    };
+    let fallback: Rc<dyn Fn()> = {
+        let area = area.clone();
+        let text = item.widget_text.clone();
+        Rc::new(move || {
+            while let Some(child) = area.first_child() {
+                area.remove(&child);
+            }
+            match &text {
+                Some(text) => fill_widget_text(&area, text),
+                None => area.set_visible(false),
+            }
+        })
+    };
+    view.connect_load_changed(move |_, event| {
+        if matches!(event, LoadEvent::Committed | LoadEvent::Finished) {
+            fit();
+        }
+    });
+    {
+        let fallback = Rc::clone(&fallback);
+        view.connect_load_failed(move |_, _, _, _| {
+            fallback();
+            true
+        });
+    }
+    view.connect_web_process_terminated(move |_, _| fallback());
+    view.load_html(&widget_document(html), None);
+    area.append(&view);
+    area
+}
+
 /// The composer text a Discuss press starts from: the post, quoted
 /// on one line (the composer is a single-line entry), for the reader
 /// to extend with their question or send as-is.
@@ -612,7 +736,7 @@ pub fn feed(context: AccountContext, on_discuss: Rc<dyn Fn(String)>) -> FeedPage
     heading.add_css_class("page-heading");
     column.append(&heading);
     let intro = label(
-        "Briefings and updates your Muse published to the connected account's feed. Links open in your browser, and Discuss starts a chat with the post quoted. Widget attachments render as the text they carry — the interactive version lives on the web. The list loads when you open this page.",
+        "Briefings and updates your Muse published to the connected account's feed. Links open in your browser, and Discuss starts a chat with the post quoted. Widget attachments render live, like the web. The list loads when you open this page.",
     );
     intro.add_css_class("page-subtitle");
     column.append(&intro);
@@ -794,6 +918,7 @@ mod native {
             widget_text: Some(
                 "Decision attempt expected Friday\nUFP Lead SOC offer\nProposal submitted\nSee [the notes](https://example.com/notes) today".into(),
             ),
+            widget_html: None,
         };
         let page = muse_account::ServiceListing {
             total: 1,
@@ -866,6 +991,7 @@ mod native {
             category: None,
             image_url: None,
             widget_text: None,
+            widget_html: None,
         };
         assert_eq!(
             super::discuss_quote(&item),
@@ -876,5 +1002,94 @@ mod native {
             ..item
         };
         assert_eq!(super::discuss_quote(&long).chars().count(), 420);
+    }
+
+    #[test]
+    fn widget_document_wraps_the_fragment_verbatim() {
+        let document = super::widget_document("<div id=\"w\">body</div>");
+        assert!(document.contains("<div id=\"w\">body</div>"));
+        assert!(document.contains("overflow:hidden"), "{document}");
+        assert!(document.contains("background:transparent"), "{document}");
+    }
+
+    #[test]
+    #[ignore = "requires a display and the WebKit runtime; run under Xvfb"]
+    fn feed_widget_frame_renders_markup_and_fits_height() {
+        use gtk4::prelude::*;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use webkit6::prelude::*;
+
+        gtk4::init().expect("gtk init");
+        let html = "<div style=\"font-family:sans-serif;color:#eee\">\
+            <div style=\"font-size:13px\">Decision attempt expected Friday</div>\
+            <div style=\"font-size:20px;font-weight:700\">UFP Lead SOC offer</div>\
+            <div style=\"height:6px;background:#3ddc84;width:50%;margin:12px 0\"></div>\
+            <div id=\"count\" style=\"font-size:18px\"></div>\
+            <a href=\"https://example.com/notes\">Read the offer notes</a>\
+            <script>document.getElementById('count').textContent =\
+             'in 7 days (computed by JS)';</script></div>";
+        let item = muse_account::ListingItem {
+            id: None,
+            title: "UFP Lead SOC offer".into(),
+            body: Some("Decision attempt expected Friday".into()),
+            kind: None,
+            stamp: None,
+            icon: None,
+            kicker: None,
+            category: None,
+            image_url: None,
+            widget_text: Some("UFP Lead SOC offer".into()),
+            widget_html: Some(html.into()),
+        };
+        let frame = super::widget_frame(&item, html);
+        let window = gtk4::Window::builder()
+            .default_width(800)
+            .default_height(600)
+            .child(&frame)
+            .build();
+        window.present();
+        let view = frame
+            .first_child()
+            .and_downcast::<webkit6::WebView>()
+            .expect("the frame's child is the web view");
+
+        let probe: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+        let context = gtk4::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut saw_marker = false;
+        while std::time::Instant::now() < deadline {
+            while context.iteration(false) {}
+            {
+                let view = view.clone();
+                let probe = Rc::clone(&probe);
+                view.evaluate_javascript(
+                    "document.body ? document.body.innerText : ''",
+                    None,
+                    None,
+                    gtk4::gio::Cancellable::NONE,
+                    move |result| {
+                        if let Ok(value) = result {
+                            *probe.borrow_mut() = value.to_string();
+                        }
+                    },
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            if probe.borrow().contains("in 7 days (computed by JS)") {
+                saw_marker = true;
+                break;
+            }
+        }
+        assert!(
+            saw_marker,
+            "the frame never rendered the JS-computed line; last text: {:?}",
+            probe.borrow()
+        );
+        let fitted = view.height_request();
+        assert!(
+            (100..=900).contains(&fitted),
+            "frame height {fitted} is not a plausible fitted content height"
+        );
     }
 }

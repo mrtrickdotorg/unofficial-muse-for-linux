@@ -17,7 +17,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install native GTK dependencies
-      run: sudo apt-get update && sudo apt-get install --yes libgtk-4-dev pkg-config python3 python3-venv xauth xvfb
+      run: sudo apt-get update && sudo apt-get install --yes libgtk-4-dev libwebkitgtk-6.0-dev pkg-config python3 python3-venv xauth xvfb
     - name: Install formatting and lint tools
       run: rustup component add rustfmt clippy
     - name: Check formatting

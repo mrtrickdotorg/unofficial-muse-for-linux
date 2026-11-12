@@ -238,10 +238,15 @@ pub struct ListingItem {
     pub image_url: Option<String>,
     /// Feed only: the readable text of the unit's widget attachment
     /// (the gateway's `attachment.widget_html`, extracted line-wise
-    /// by the bridge — this client has no web engine, so the widget
-    /// renders as the text it carries, in an inset card).
+    /// by the bridge). This is the fallback view, shown when the
+    /// live frame below cannot render.
     #[serde(default)]
     pub widget_text: Option<String>,
+    /// Feed only: the unit's widget attachment markup itself (the
+    /// gateway's `attachment.widget_html`, capped by the bridge),
+    /// rendered live in the card's navigation-locked WebView frame.
+    #[serde(default)]
+    pub widget_html: Option<String>,
 }
 /// One read of an Ideas / Goals / Feed listing.
 ///

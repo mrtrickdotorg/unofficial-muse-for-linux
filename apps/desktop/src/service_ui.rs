@@ -299,6 +299,7 @@ mod tests {
             icon: None,
             image_url: None,
             widget_text: None,
+            widget_html: None,
         }
     }
 

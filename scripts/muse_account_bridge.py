@@ -1302,6 +1302,13 @@ def _feed_extras(unit):
         text = _widget_text(widget_html)
         if text:
             extras["widget_text"] = text
+        if "<" in widget_html[:500]:
+            # The raw markup rides along for the client's live frame:
+            # it renders in a navigation-locked WebView (links hand
+            # off to the browser, nothing navigates), with
+            # widget_text as the fallback view. Capped so one unit
+            # cannot flood the listing.
+            extras["widget_html"] = widget_html[:300_000]
     stamp = _iso_from_epoch(unit.get("created_at_ms"))
     if stamp:
         # Overrides the day-date fallback: the card shows the unit's
