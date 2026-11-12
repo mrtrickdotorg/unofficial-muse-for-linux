@@ -311,8 +311,17 @@ fn decode_texture(bytes: &[u8]) -> Option<gtk::gdk::Texture> {
 fn apply_texture(picture: &gtk::Picture, texture: &gtk::gdk::Texture) {
     let width = f64::from(texture.width().max(1));
     let height = f64::from(texture.height().max(1));
-    let scaled = (IMAGE_COLUMN_PX * height / width) as i32;
-    picture.set_size_request(-1, scaled.clamp(IMAGE_MIN_HEIGHT, IMAGE_MAX_HEIGHT));
+    // The picture is exactly the image's display box: natural size,
+    // capped at the reading column's width, at the image's own
+    // aspect — never stretched across the card with the image
+    // floating centered in a dark field (Patrick's Nov 12 verdict
+    // on the first cut: "black squares, centered giant images").
+    let display_width = width.min(IMAGE_COLUMN_PX);
+    let display_height = (display_width * height / width) as i32;
+    picture.set_size_request(
+        display_width as i32,
+        display_height.clamp(IMAGE_MIN_HEIGHT, IMAGE_MAX_HEIGHT),
+    );
     picture.set_paintable(Some(texture));
     picture.set_visible(true);
 }
@@ -412,7 +421,8 @@ impl Ui {
         if let Some(url) = &item.image_url {
             let picture = gtk::Picture::new();
             picture.add_css_class("feed-image");
-            picture.set_hexpand(true);
+            picture.set_hexpand(false);
+            picture.set_halign(gtk::Align::Start);
             picture.set_visible(false);
             picture.set_size_request(-1, 180);
             content.append(&picture);
@@ -427,7 +437,11 @@ impl Ui {
             let caption = label("Widget · text view");
             caption.add_css_class("dim-label");
             widget.append(&caption);
-            widget.append(&label(text));
+            // One rich label per extracted line, so a line's links
+            // are live links, not dead text.
+            for line in text.lines() {
+                widget.append(&rich_label(line));
+            }
             content.append(&widget);
         }
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -586,14 +600,22 @@ fn discuss_quote(item: &ListingItem) -> String {
 pub fn feed(context: AccountContext, on_discuss: Rc<dyn Fn(String)>) -> FeedPage {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.add_css_class("page-content");
+    // The page reads in the shell's reading column, like Chat: on a
+    // wide window the cards cap at the column instead of stretching
+    // sparse across the whole screen (Patrick's Nov 12 verdict).
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    column.set_halign(gtk::Align::Center);
+    column.set_vexpand(true);
+    column.set_size_request(crate::READING_COLUMN_START_PX, -1);
+    root.append(&column);
     let heading = label("Feed");
     heading.add_css_class("page-heading");
-    root.append(&heading);
+    column.append(&heading);
     let intro = label(
         "Briefings and updates your Muse published to the connected account's feed. Links open in your browser, and Discuss starts a chat with the post quoted. Widget attachments render as the text they carry — the interactive version lives on the web. The list loads when you open this page.",
     );
     intro.add_css_class("page-subtitle");
-    root.append(&intro);
+    column.append(&intro);
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     toolbar.add_css_class("toolbar");
@@ -604,10 +626,10 @@ pub fn feed(context: AccountContext, on_discuss: Rc<dyn Fn(String)>) -> FeedPage
     spinner.set_visible(false);
     toolbar.append(&refresh);
     toolbar.append(&spinner);
-    root.append(&toolbar);
+    column.append(&toolbar);
 
     let notice = label("Nothing read yet.");
-    root.append(&notice);
+    column.append(&notice);
 
     let list = gtk::ListBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
@@ -615,7 +637,9 @@ pub fn feed(context: AccountContext, on_discuss: Rc<dyn Fn(String)>) -> FeedPage
     scroll.set_min_content_height(220);
     scroll.set_vexpand(true);
     scroll.set_child(Some(&list));
-    root.append(&scroll);
+    column.append(&scroll);
+
+    crate::bind_reading_column(root.upcast_ref(), &column);
 
     let (image_tx, image_rx) = mpsc::channel();
     let ui = Rc::new(Ui {
@@ -768,7 +792,7 @@ mod native {
             category: None,
             image_url: None,
             widget_text: Some(
-                "Decision attempt expected Friday\nUFP Lead SOC offer\nProposal submitted".into(),
+                "Decision attempt expected Friday\nUFP Lead SOC offer\nProposal submitted\nSee [the notes](https://example.com/notes) today".into(),
             ),
         };
         let page = muse_account::ServiceListing {
@@ -812,6 +836,10 @@ mod native {
         assert!(
             joined.contains("Widget · text view"),
             "widget caption missing: {joined}"
+        );
+        assert!(
+            joined.contains("See the notes today"),
+            "widget line links render as their text (markup stripped): {joined}"
         );
         let discuss = discuss.expect("the card carries a Discuss button");
         discuss.emit_clicked();

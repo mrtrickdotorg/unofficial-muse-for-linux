@@ -1597,6 +1597,8 @@ class ProbeShapeBuildTests(unittest.TestCase):
             "<h3>UFP Lead SOC offer</h3>"
             "<ul><li>Proposal submitted</li>"
             "<li>On CFO&rsquo;s desk <span>Nov 12</span></li></ul>"
+            "<p>See <a href=\"https://example.com/notes\">the notes</a>"
+            " today</p>"
             "<script>var secret = 1;</script>"
             "<style>.x { color: red; }</style></div>"
         )
@@ -1612,7 +1614,8 @@ class ProbeShapeBuildTests(unittest.TestCase):
         self.assertEqual(
             first["widget_text"],
             "Decision attempt expected Friday\nUFP Lead SOC offer\n"
-            "Proposal submitted\nOn CFO’s desk Nov 12",
+            "Proposal submitted\nOn CFO’s desk Nov 12\n"
+            "See [the notes](https://example.com/notes) today",
         )
         self.assertNotIn("secret", first["widget_text"])
         # A non-markup value is a reference, not text: no projection.
