@@ -1253,6 +1253,44 @@ mod native {
         label
     }
 
+    /// The one-line title a Today item shows for an agent run. The
+    /// service publishes only the run's raw prompt (internal
+    /// scaffolding and all) and its final response, so the title is
+    /// derived: a finished run is best described by what it answered,
+    /// a live one by what it was asked. Either way it is the first
+    /// substantive line — markdown headers and bracketed preambles
+    /// skipped, emphasis stripped — capped so the panel stays a
+    /// glanceable list.
+    fn agent_title(agent: &muse_account::AgentActivity) -> String {
+        let finished = matches!(
+            agent.status.as_deref(),
+            Some("completed") | Some("succeeded")
+        );
+        let source = if finished {
+            agent
+                .final_response
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or(&agent.prompt)
+        } else {
+            &agent.prompt
+        };
+        let line = source
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                line.chars().count() >= 8 && !line.starts_with('#') && !line.starts_with('[')
+            })
+            .or_else(|| source.lines().map(str::trim).find(|line| !line.is_empty()))
+            .unwrap_or("");
+        let clean = line.trim_start_matches('#').trim().replace("**", "");
+        if clean.chars().count() > 110 {
+            format!("{}…", clean.chars().take(109).collect::<String>())
+        } else {
+            clean
+        }
+    }
+
     /// A conversation-list row label. Unlike `label` it is NOT
     /// selectable: a selectable label swallows the click to place a
     /// text cursor, so the row never selects and the conversation
@@ -3254,6 +3292,18 @@ mod native {
             }
         }
 
+        /// A label sized for the side panel's ~283px column. The
+        /// shared `label()` helper caps its natural width at 110
+        /// characters — right for a page, ruinous here: the first
+        /// panel content longer than a few words (an agent's raw
+        /// prompt, Nov 12, 2026) ballooned the panel past 1000px and
+        /// starved the page stack beside it. Panel items cap at 30.
+        fn panel_label(text: &str) -> gtk::Label {
+            let item = label(text);
+            item.set_max_width_chars(30);
+            item
+        }
+
         /// Keep the shell's right-hand panel current: the agent's
         /// identity and live status, its Today activity, then the
         /// schedules and recent runs from the same snapshot the Tasks
@@ -3278,7 +3328,8 @@ mod native {
             match &state.tasks {
                 Some(tasks) => {
                     if tasks.agents.is_empty() {
-                        self.side_agents.append(&label("No agent activity yet."));
+                        self.side_agents
+                            .append(&Self::panel_label("No agent activity yet."));
                     }
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -3296,19 +3347,20 @@ mod native {
                         {
                             meta.push(crate::feed_ui::relative_stamp(when, now));
                         }
+                        let title = agent_title(agent);
                         let item = if meta.is_empty() {
-                            label(&agent.prompt)
+                            Self::panel_label(&title)
                         } else {
-                            label(&format!("{}\n{}", agent.prompt, meta.join(" · ")))
+                            Self::panel_label(&format!("{}\n{}", title, meta.join(" · ")))
                         };
                         item.add_css_class("card");
                         self.side_agents.append(&item);
                     }
                     if tasks.schedules.is_empty() {
-                        self.side_tasks.append(&label("No schedules."));
+                        self.side_tasks.append(&Self::panel_label("No schedules."));
                     }
                     for schedule in tasks.schedules.iter().take(6) {
-                        let item = label(&format!(
+                        let item = Self::panel_label(&format!(
                             "{}\nNext: {}",
                             schedule.title,
                             utc_time(schedule.next_run_at_utc)
@@ -3317,16 +3369,16 @@ mod native {
                         self.side_tasks.append(&item);
                     }
                     if tasks.schedules.len() > 6 {
-                        self.side_tasks.append(&label(&format!(
+                        self.side_tasks.append(&Self::panel_label(&format!(
                             "+{} more — see the Tasks page",
                             tasks.schedules.len() - 6
                         )));
                     }
                     if tasks.runs.is_empty() {
-                        self.side_runs.append(&label("No runs yet."));
+                        self.side_runs.append(&Self::panel_label("No runs yet."));
                     }
                     for run in tasks.runs.iter().take(5) {
-                        let item = label(&format!(
+                        let item = Self::panel_label(&format!(
                             "{} · {}\n{}",
                             run.status,
                             utc_time(run.scheduled_for_utc),
@@ -3339,9 +3391,11 @@ mod native {
                     }
                 }
                 None => {
-                    self.side_agents.append(&label("Not loaded yet."));
-                    self.side_tasks.append(&label("Not loaded yet."));
-                    self.side_runs.append(&label("Not loaded yet."));
+                    self.side_agents
+                        .append(&Self::panel_label("Not loaded yet."));
+                    self.side_tasks
+                        .append(&Self::panel_label("Not loaded yet."));
+                    self.side_runs.append(&Self::panel_label("Not loaded yet."));
                 }
             }
         }
@@ -4230,6 +4284,52 @@ mod native {
         }
 
         #[test]
+        fn agent_titles_come_from_the_answer_for_finished_runs() {
+            let agent = muse_account::AgentActivity {
+                prompt:
+                    "## Task and updates\n\nOpen chatgpt.com and get Patrick to the renewal page."
+                        .into(),
+                status: Some("completed".into()),
+                created_at: None,
+                completed_at: None,
+                final_response: Some("Renewal page is open and ready for him to confirm.".into()),
+            };
+            assert_eq!(
+                agent_title(&agent),
+                "Renewal page is open and ready for him to confirm."
+            );
+            // A live run has no answer yet: the ask, minus its
+            // markdown scaffolding.
+            let live = muse_account::AgentActivity {
+                status: Some("running".into()),
+                final_response: None,
+                ..agent.clone()
+            };
+            assert_eq!(
+                agent_title(&live),
+                "Open chatgpt.com and get Patrick to the renewal page."
+            );
+            // A finished run without an answer falls back to the ask,
+            // and a very long line is capped for the panel.
+            let silent = muse_account::AgentActivity {
+                final_response: None,
+                ..agent
+            };
+            assert_eq!(
+                agent_title(&silent),
+                "Open chatgpt.com and get Patrick to the renewal page."
+            );
+            let wordy = muse_account::AgentActivity {
+                prompt: "x".repeat(200),
+                status: Some("running".into()),
+                created_at: None,
+                completed_at: None,
+                final_response: None,
+            };
+            assert_eq!(agent_title(&wordy).chars().count(), 110);
+        }
+
+        #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn side_panel_lists_the_agent_schedules_and_runs() {
             // The right-hand panel Patrick asked for on Nov 11: the
@@ -4262,11 +4362,15 @@ mod native {
                         scheduled_for_utc: Some(1_794_400_000),
                     }],
                     agents: vec![muse_account::AgentActivity {
-                        prompt: "Sweep the inbox".into(),
+                        // A realistic subagent prompt: multi-line, a
+                        // markdown header first, ~300 chars — the shape
+                        // that ballooned the panel on Patrick's screen
+                        // on Nov 12, 2026 and starved the page stack.
+                        prompt: "## Task and updates\n\nThis history gives the user's goal, choices and constraints. It appears in order, with later updates refining earlier ones. Your assignment below defines your part of the work; the history also includes steps that belong to your caller or may already be complete. Continue from the latest state.".into(),
                         status: Some("completed".into()),
                         created_at: Some("2026-11-12T15:00:00+00:00".into()),
                         completed_at: Some("2026-11-12T15:04:00+00:00".into()),
-                        final_response: Some("Three threads filed.".into()),
+                        final_response: Some("Three threads filed and the drain is quiet.".into()),
                     }],
                 });
             }
@@ -4295,8 +4399,18 @@ mod native {
                 "run missing: {joined}"
             );
             assert!(
-                joined.contains("Sweep the inbox"),
+                joined.contains("Three threads filed"),
                 "agent activity missing from the Today list: {joined}"
+            );
+            // The panel is a ~283px column: its natural width must stay
+            // near that no matter how long an agent's prompt runs, or
+            // the page stack beside it starves (Patrick's Nov 12
+            // screenshot: the Feed page crushed to a sliver).
+            let (_min, natural, _mb, _nb) =
+                page.side_panel.measure(gtk::Orientation::Horizontal, -1);
+            assert!(
+                natural <= 360,
+                "side panel natural width ballooned to {natural}px"
             );
         }
 
