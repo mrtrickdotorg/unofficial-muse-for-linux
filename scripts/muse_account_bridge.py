@@ -11,6 +11,7 @@ import fcntl
 import os
 import re
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from contextlib import contextmanager
 from pathlib import Path
 import secrets
@@ -1180,13 +1181,89 @@ def _iso_from_epoch(value):
         return None
 
 
+class _WidgetTextExtractor(HTMLParser):
+    """Visible text lines from a feed widget's HTML.
+
+    The web renders a widget attachment as live HTML; this client has
+    no web engine, so the bridge extracts what the widget SAYS —
+    block elements break lines, script/style content never surfaces,
+    entities are decoded by the parser. A timeline or countdown
+    widget degrades to its labels in order, which carries the
+    information even without the styling.
+    """
+
+    BLOCK = {"address", "article", "aside", "blockquote", "br", "div",
+             "dl", "dt", "dd", "fieldset", "figcaption", "figure",
+             "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+             "header", "hr", "li", "main", "nav", "ol", "p", "pre",
+             "section", "table", "td", "th", "tr", "ul"}
+    SKIP = {"script", "style", "noscript", "template"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.lines = []
+        self._current = []
+        self._skip = 0
+
+    def _flush(self):
+        text = " ".join("".join(self._current).split())
+        self._current = []
+        if text:
+            self.lines.append(text)
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip += 1
+        elif tag in self.BLOCK:
+            self._flush()
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self._skip:
+            self._skip -= 1
+        elif tag in self.BLOCK:
+            self._flush()
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._current.append(data)
+
+    def text_lines(self):
+        self._flush()
+        return self.lines
+
+
+def _widget_text(html):
+    """The readable lines of a widget attachment's HTML, joined for
+    display — or None when the value is not markup at all (a bare
+    reference this client cannot resolve renders as nothing rather
+    than as a stray token on the card)."""
+    if "<" not in html[:500]:
+        return None
+    parser = _WidgetTextExtractor()
+    try:
+        parser.feed(html[:200_000])
+    except Exception:
+        return None
+    lines = []
+    for line in parser.text_lines():
+        cleaned = content_text(line)
+        if cleaned and (not lines or lines[-1] != cleaned):
+            lines.append(cleaned[:300])
+        if len(lines) >= 40:
+            break
+    if not lines:
+        return None
+    return "\n".join(lines)[:1500]
+
+
 def _feed_extras(unit):
     """The feed-only display fields, under the gateway's own names —
     the shape the feed probe confirmed on Nov 12, 2026: each unit
     carries kicker, category, an `emoji` avatar, a per-unit
-    `created_at_ms`, and an optional `attachment` whose
-    `hero_image_url` is the card's picture. A unit without a field
-    simply projects without it."""
+    `created_at_ms`, and an optional `attachment` holding either a
+    `hero_image_url` (the card's picture) or a `widget_html` (a rich
+    card the web renders live; here its readable text is projected
+    as `widget_text`). A unit without a field projects without it."""
     extras = {}
     kicker = content_text(unit.get("kicker"))
     if kicker:
@@ -1202,6 +1279,11 @@ def _feed_extras(unit):
     hero = optional_text(attachment.get("hero_image_url"))
     if hero and hero.startswith(("https://", "http://")):
         extras["image_url"] = hero[:2000]
+    widget_html = attachment.get("widget_html")
+    if isinstance(widget_html, str) and widget_html.strip():
+        text = _widget_text(widget_html)
+        if text:
+            extras["widget_text"] = text
     stamp = _iso_from_epoch(unit.get("created_at_ms"))
     if stamp:
         # Overrides the day-date fallback: the card shows the unit's

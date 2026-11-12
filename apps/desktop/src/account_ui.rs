@@ -1128,6 +1128,9 @@ mod native {
         /// Go to the main conversation and focus the composer (the
         /// rail's New action).
         pub new_chat: Rc<dyn Fn()>,
+        /// Start a new conversation with text already in the composer
+        /// (the Feed page's Discuss action).
+        pub discuss: Rc<dyn Fn(String)>,
         pub settings: gtk::Expander,
         pub cancel_login: Rc<dyn Fn()>,
         pub host_context: AccountContext,
@@ -2415,6 +2418,23 @@ mod native {
             }
         });
         let weak = Rc::downgrade(&ui);
+        let discuss = Rc::new(move |text: String| {
+            if let Some(ui) = weak.upgrade() {
+                // A discussion is a new conversation about the post:
+                // the same landing as New, with the quote waiting in
+                // the composer for the reader to extend and send
+                // themselves — the press here sends nothing.
+                let changed = ui.state.borrow_mut().select_thread(None);
+                if changed {
+                    ui.render();
+                    ui.read(false, false);
+                }
+                ui.prompt.set_text(&text);
+                ui.prompt.set_position(-1);
+                ui.prompt.grab_focus();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
         let host_context = Rc::new(move || {
             let ui = weak.upgrade()?;
             if ui.state.borrow().account.is_some() && ui.host_verified.get() {
@@ -2429,6 +2449,7 @@ mod native {
             side_panel,
             focus_search,
             new_chat,
+            discuss,
             settings,
             cancel_login,
             host_context,

@@ -169,6 +169,7 @@ list row:selected { background-color: rgba(255, 255, 255, 0.09); }
 .feed-title { font-size: 21px; font-weight: 700; color: #f4f4f6; }
 .feed-icon { font-size: 30px; }
 .feed-image { border-radius: 14px; background-color: #101014; }
+.feed-widget { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 14px; }
 .approval-card { border-left: 3px solid #c98a2b; }
 .approval-icon { color: #d8b25c; font-weight: 700; }
 .approval-heading { font-weight: 700; color: #f4f4f6; }
@@ -822,8 +823,7 @@ fn build_ui(app: &gtk::Application) {
         ),
         Some("create"),
     );
-    let feed_page = feed_ui::feed(account_page.host_context.clone());
-    stack.add_named(&feed_page.root, Some("feed"));
+
     // Pages from the old navigation (mail, calendar, desktop, computer
     // control, reminders, the developer experiment, the files browser)
     // are still built above so their lifecycle stays identical, but
@@ -1393,6 +1393,42 @@ fn build_ui(app: &gtk::Application) {
             );
         }
     });
+
+    // The Feed page is built here rather than with the other pages:
+    // its Discuss action needs the finished navigation — it lands on
+    // the chat page the way the rail's New action does, with the post
+    // quoted in the composer.
+    let feed_page = {
+        let stack = stack.clone();
+        let title = page_title.clone();
+        let chats = chats_nav.clone();
+        let library = library_nav.clone();
+        let ideas = ideas_nav.clone();
+        let goals = goals_nav.clone();
+        let create = create_nav.clone();
+        let feed = feed_nav.clone();
+        let discuss = Rc::clone(&account_page.discuss);
+        feed_ui::feed(
+            account_page.host_context.clone(),
+            Rc::new(move |text: String| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "chats",
+                );
+                discuss(text);
+            }),
+        )
+    };
+    stack.add_named(&feed_page.root, Some("feed"));
 
     // Opening a data tab loads it: the shell fires each page's load
     // hook as its stack page becomes visible, so Ideas, Goals, Feed
