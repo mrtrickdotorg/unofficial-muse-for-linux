@@ -977,6 +977,88 @@ class SubagentsProbeTests(unittest.TestCase):
         self.assertNotIn("SENTINEL-TITLE", log)
 
 
+class FeedVisualTests(unittest.TestCase):
+    """The web-parity Feed build: kicker/category projection and the
+    shape probe that names the emoji / image / prompt fields."""
+
+    def nested_payload(self):
+        return {"days": [{"local_date": "2026-11-12", "editions": [
+            {"kind": "morning", "units": [
+                {"unit_id": "u1", "title": "First post", "content": "Body.",
+                 "kicker": "Both recoveries failed", "category": "Development",
+                 "published_at": "2026-11-12T12:00:00Z"},
+                {"unit_id": "u2", "title": "Second post", "content": "More.",
+                 "attachments": [{"kind": "hero_image",
+                                  "url": "https://example.com/hero.webp"}]},
+            ]}]}]}
+
+    def test_feed_projection_carries_kicker_and_category(self):
+        bridge = load_bridge()
+        result = bridge.feed_rows(self.nested_payload())
+        first, second = result["items"]
+        self.assertEqual(first["kicker"], "Both recoveries failed")
+        self.assertEqual(first["category"], "Development")
+        # A unit without the fields projects neither key.
+        self.assertNotIn("kicker", second)
+        self.assertNotIn("category", second)
+
+    def test_other_listings_gain_no_feed_extras(self):
+        bridge = load_bridge()
+        result = bridge.listing_rows(
+            {"items": [{"title": "x", "kicker": "K", "category": "C"}]},
+            ("items",))
+        self.assertNotIn("kicker", result["items"][0])
+        self.assertNotIn("category", result["items"][0])
+
+    def test_feed_probe_logs_key_paths_once_and_never_values(self):
+        import contextlib
+        import tempfile
+        import time
+        bridge = load_bridge()
+        bridge._FEED_PROBED = False
+
+        class Gateway:
+            def call_json(self, route, timeout=None):
+                if route == "feed.prompt.get":
+                    return {"prompt": {"text": "SENTINEL-PROMPT"}}
+                if route == "feed.status":
+                    return {"state": "SENTINEL-STATE"}
+                raise AssertionError(route)
+
+        class Client:
+            @contextlib.contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        with tempfile.TemporaryDirectory() as root:
+            bridge._probe_feed_shapes(root, Client(), {}, self.nested_payload())
+            bridge._probe_feed_shapes(root, Client(), {}, self.nested_payload())
+            deadline = time.monotonic() + 5
+            log = ""
+            while time.monotonic() < deadline:
+                path = pathlib.Path(root, "op-timing.log")
+                if path.exists():
+                    log = path.read_text()
+                    if "feed-prompt-probe" in log and "feed-status-probe" in log:
+                        break
+                time.sleep(0.02)
+        self.assertIn("feed-probe keys=", log)
+        self.assertIn("days[].editions[].units", log)
+        self.assertIn("kicker", log)
+        # The second unit's distinct shape is probed too: its optional
+        # attachments are exactly what the first unit cannot reveal.
+        self.assertIn("feed-probe unit keys=", log)
+        self.assertIn("attachments[].url", log)
+        self.assertIn("feed-prompt-probe keys=", log)
+        self.assertIn("prompt.text", log)
+        self.assertIn("feed-status-probe keys=", log)
+        self.assertEqual(log.count("feed-probe keys="), 1)
+        self.assertNotIn("SENTINEL-PROMPT", log)
+        self.assertNotIn("SENTINEL-STATE", log)
+        self.assertNotIn("Both recoveries failed", log)
+        self.assertNotIn("hero.webp", log)
+
+
 class ApprovalTests(unittest.TestCase):
     def test_approvals_are_projected_in_the_service_vocabulary_only(self):
         bridge = load_bridge()
