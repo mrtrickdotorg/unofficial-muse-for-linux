@@ -10,6 +10,7 @@ import json
 import fcntl
 import os
 import re
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 import secrets
@@ -308,6 +309,35 @@ def _probe_feed_shapes(config_dir, client, config, payload):
     threading.Thread(target=run, daemon=True).start()
 
 
+def _widget_options(payload):
+    """The options a history row's widget offers, when it offers any.
+
+    Shape confirmed by the widget probe (Nov 12, 2026):
+    payload.widgets[] entries carry data.options (a list of plain
+    strings) and, once the reader has answered, state.data.selectedText.
+    Only the first options-bearing widget projects; other widget kinds
+    stay invisible here rather than guessed at.
+    """
+    widgets = payload.get("widgets")
+    if not isinstance(widgets, list):
+        return None
+    for widget in widgets:
+        if not isinstance(widget, dict):
+            continue
+        data = widget.get("data") if isinstance(widget.get("data"), dict) else {}
+        options = data.get("options")
+        if not isinstance(options, list):
+            continue
+        texts = [text for text in (optional_text(o) for o in options) if text]
+        if not texts:
+            continue
+        state = widget.get("state") if isinstance(widget.get("state"), dict) else {}
+        sdata = state.get("data") if isinstance(state.get("data"), dict) else {}
+        return {"options": texts[:12],
+                "selected": optional_text(sdata.get("selectedText"))}
+    return None
+
+
 def history_rows(rows, config_dir=None):
     rows = object_rows(rows)
     latest = {}
@@ -325,6 +355,11 @@ def history_rows(rows, config_dir=None):
             "timestamp": optional_text(row.get("timestamp")),
             "status": optional_text(row.get("status") or payload.get("status") or raw.get("status")),
         }
+        widget = _widget_options(payload)
+        if widget:
+            message["options"] = widget["options"]
+            if widget["selected"]:
+                message["selected_option"] = widget["selected"]
         if config_dir and "[[hatch_widget" in message["text"] and raw:
             _probe_widget_payload(config_dir, raw)
         if message_id not in latest or seq >= latest[message_id]["seq"]:
@@ -1128,12 +1163,30 @@ def listing_rows(payload, container_keys, extras=None):
     return project_listing_rows(entries, total, extras=extras)
 
 
+def _iso_from_epoch(value):
+    """ISO-8601 (UTC) for a numeric epoch stamp — seconds or
+    milliseconds, told apart by magnitude — or the text itself when
+    it already is a timestamp. Anything else projects as None."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    seconds = value / 1000.0 if value > 10**11 else float(value)
+    if seconds <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _feed_extras(unit):
-    """The feed-only display fields the product itself names: a unit's
-    kicker (its one-line framing) and its category. Read under the
-    product's own vocabulary; the feed shape probe running alongside
-    the feed read confirms the gateway carries them under these names,
-    and a unit without them simply projects neither key."""
+    """The feed-only display fields, under the gateway's own names —
+    the shape the feed probe confirmed on Nov 12, 2026: each unit
+    carries kicker, category, an `emoji` avatar, a per-unit
+    `created_at_ms`, and an optional `attachment` whose
+    `hero_image_url` is the card's picture. A unit without a field
+    simply projects without it."""
     extras = {}
     kicker = content_text(unit.get("kicker"))
     if kicker:
@@ -1141,6 +1194,19 @@ def _feed_extras(unit):
     category = content_text(unit.get("category"))
     if category:
         extras["category"] = category[:80]
+    emoji = content_text(unit.get("emoji"))
+    if emoji:
+        extras["icon"] = emoji[:16]
+    attachment = unit.get("attachment") if isinstance(
+        unit.get("attachment"), dict) else {}
+    hero = optional_text(attachment.get("hero_image_url"))
+    if hero and hero.startswith(("https://", "http://")):
+        extras["image_url"] = hero[:2000]
+    stamp = _iso_from_epoch(unit.get("created_at_ms"))
+    if stamp:
+        # Overrides the day-date fallback: the card shows the unit's
+        # own relative time, like the web feed.
+        extras["stamp"] = stamp
     return extras
 
 
@@ -1209,6 +1275,75 @@ def feed_rows(payload):
         return project_listing_rows(entries, total, extras=_feed_extras)
     return listing_rows(payload, ("units", "items", "results", "data"),
                         extras=_feed_extras)
+
+
+def _feed_prompt_info(gateway):
+    """The feed's prompt card, read on the feed's own pass: what
+    generates the feed (feed.prompt.get) and whether a new edition is
+    being generated right now (feed.status). Both route shapes were
+    confirmed by the feed probe on Nov 12, 2026. Fail-soft by design:
+    a feed that cannot describe its prompt is still a feed, so any
+    failure projects as no card rather than a failed read."""
+    info = {}
+    try:
+        payload = gateway.call_json("feed.prompt.get", timeout=8)
+        prompt = payload.get("prompt") if isinstance(payload, dict) else None
+        if isinstance(prompt, dict):
+            text = content_text(prompt.get("free_text")) or content_text(
+                prompt.get("full_prompt"))
+            info["feed_prompt"] = {
+                "text": text[:2000] if text else None,
+                "enabled": bool(prompt.get("enabled", False)),
+            }
+    except Exception:
+        pass
+    try:
+        payload = gateway.call_json("feed.status", timeout=8)
+        if isinstance(payload, dict):
+            info["feed_status"] = {
+                "refresh_in_progress": bool(
+                    payload.get("refresh_in_progress", False)),
+                "next_edition_kind": optional_text(
+                    payload.get("next_edition_kind")),
+            }
+    except Exception:
+        pass
+    return info
+
+
+def agent_rows(payload):
+    """Project subagents.list for the side panel's Today list.
+
+    Shape confirmed by the subagents probe (Nov 12, 2026):
+    {active: [...], recent: [...], active_count, recent_count}, each
+    run carrying prompt, status, created_at, completed_at and a
+    final_response. Active runs lead; both lists keep the service's
+    own order. Content passes the same redaction and caps as task
+    content."""
+    if not isinstance(payload, dict):
+        return []
+    rows = []
+    for key in ("active", "recent"):
+        entries = payload.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            prompt = content_text(entry.get("prompt"))
+            if not prompt:
+                continue
+            final = content_text(entry.get("final_response"))
+            rows.append({
+                "prompt": prompt[:300],
+                "status": optional_text(entry.get("status")),
+                "created_at": _iso_from_epoch(entry.get("created_at")),
+                "completed_at": _iso_from_epoch(entry.get("completed_at")),
+                "final_response": final[:600] if final else None,
+            })
+            if len(rows) >= 8:
+                return rows
+    return rows
 
 
 def approval_rows(payload):
@@ -1450,6 +1585,14 @@ class Adapter:
             with self.client._gateway(self.config) as gateway:
                 schedules = gateway.call_json("tasks.list")["schedules"]
                 runs = gateway.call_json("tasks.runs")["runs"]
+                # Agent activity rides the same read (one snapshot for
+                # the Tasks page and the side panel), fail-soft: the
+                # schedules must not fail because the activity read did.
+                try:
+                    agents = agent_rows(
+                        gateway.call_json("subagents.list", timeout=20))
+                except Exception:
+                    agents = []
             answer = {
                 "schedules": [{
                     "id": required_text(row.get("id")), "title": required_text(row.get("title")),
@@ -1464,6 +1607,7 @@ class Adapter:
                     "error_text": content_text(row.get("error_text")),
                     "scheduled_for_utc": row.get("scheduled_for_utc"),
                 } for row in runs],
+                "agents": agents,
             }
             _probe_subagents(request.get("config_dir"), self.client, self.config)
             return answer
@@ -1505,9 +1649,12 @@ class Adapter:
             # on the Muse side.
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("feed.list", timeout=20)
+                prompt_info = _feed_prompt_info(gateway)
             _probe_feed_shapes(request.get("config_dir"), self.client,
                                self.config, payload)
-            return feed_rows(payload)
+            rows = feed_rows(payload)
+            rows.update(prompt_info)
+            return rows
         if request["op"] == "approvals":
             # Read-only, and deliberately on its own connection: listing what the
             # agent is asking for must never decide it, and the sentinel service

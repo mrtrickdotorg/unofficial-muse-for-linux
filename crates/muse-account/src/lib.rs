@@ -82,11 +82,42 @@ pub struct HistoryMessage {
     pub text: String,
     pub timestamp: Option<String>,
     pub status: Option<String>,
+    /// Choice buttons the message's widget published, projected by the
+    /// bridge from the confirmed `payload.widgets[].data.options`
+    /// shape (probe, Nov 12, 2026). A press sends the option's text as
+    /// the reader's next message.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// The option already chosen on this widget when the service
+    /// recorded one (`state.data.selectedText`): the buttons then
+    /// render answered and inert, the chosen one marked.
+    #[serde(default)]
+    pub selected_option: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TasksSnapshot {
     pub schedules: Vec<Schedule>,
     pub runs: Vec<TaskRun>,
+    /// Agent (subagent) activity for the side panel's Today list:
+    /// active runs first, then recent ones, projected by the bridge
+    /// from the confirmed `subagents.list` shape (probe, Nov 12, 2026).
+    #[serde(default)]
+    pub agents: Vec<AgentActivity>,
+}
+
+/// One subagent run as the side panel's Today list shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentActivity {
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    #[serde(default)]
+    pub final_response: Option<String>,
 }
 /// What the service answered to a cancel request.
 ///
@@ -190,20 +221,19 @@ pub struct ListingItem {
     #[serde(default)]
     pub stamp: Option<String>,
     /// Feed only: the unit's one-line framing, when the bridge projected
-    /// it. The web feed folds this into its emoji avatar instead; here
-    /// it rides as a quiet meta line until the icon field is confirmed.
+    /// it, shown as a quiet meta line beside the category.
     #[serde(default)]
     pub kicker: Option<String>,
     /// Feed only: the unit's category, when projected.
     #[serde(default)]
     pub category: Option<String>,
-    /// Feed only: the unit's emoji avatar. The bridge fills this once
-    /// the feed shape probe confirms the field's real name; until then
-    /// it stays `None` and the card renders without an avatar column.
+    /// Feed only: the unit's emoji avatar (the gateway's `emoji` field,
+    /// confirmed by the feed probe on Nov 12, 2026).
     #[serde(default)]
     pub icon: Option<String>,
-    /// Feed only: the unit's hero image URL. Same probe-gated story as
-    /// `icon`; the card's image plumbing renders it whenever it lands.
+    /// Feed only: the unit's hero image URL (the gateway's
+    /// `attachment.hero_image_url`, same probe); the card's image
+    /// plumbing renders it whenever it lands.
     #[serde(default)]
     pub image_url: Option<String>,
 }
@@ -219,6 +249,31 @@ pub struct ServiceListing {
     pub skipped: u64,
     #[serde(default)]
     pub items: Vec<ListingItem>,
+    /// Feed only: the prompt that generates the feed, when the bridge
+    /// could read it on the same pass (feed.prompt.get).
+    #[serde(default)]
+    pub feed_prompt: Option<FeedPrompt>,
+    /// Feed only: generation status for the prompt card (feed.status).
+    #[serde(default)]
+    pub feed_status: Option<FeedStatus>,
+}
+
+/// The feed's generating prompt, for the display-only prompt card.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedPrompt {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Whether a feed edition is being generated right now.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedStatus {
+    #[serde(default)]
+    pub refresh_in_progress: bool,
+    #[serde(default)]
+    pub next_edition_kind: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatchReceipt {
@@ -1276,7 +1331,7 @@ fn run_bridge_active(
 
 #[cfg(test)]
 mod deadline_tests {
-    use super::deadline_for;
+    use super::{HistoryMessage, ServiceListing, TasksSnapshot, deadline_for};
     use std::time::Duration;
 
     #[test]
@@ -1298,5 +1353,35 @@ mod deadline_tests {
         assert!(deadline_for(Some("activity")) >= Duration::from_secs(15));
         assert!(deadline_for(Some("watch")) > deadline_for(Some("send")));
         assert!(deadline_for(Some("send")) > deadline_for(Some("activity")));
+    }
+
+    #[test]
+    fn history_messages_without_widget_fields_still_parse() {
+        let message: HistoryMessage = serde_json::from_value(serde_json::json!({
+            "message_id": "m", "seq": 1, "role": "assistant", "text": "hi",
+            "timestamp": null, "status": null
+        }))
+        .expect("pre-widget bridge payloads keep parsing");
+        assert!(message.options.is_empty());
+        assert!(message.selected_option.is_none());
+    }
+
+    #[test]
+    fn tasks_snapshots_without_agents_still_parse() {
+        let snapshot: TasksSnapshot = serde_json::from_value(serde_json::json!({
+            "schedules": [], "runs": []
+        }))
+        .expect("pre-activity bridge payloads keep parsing");
+        assert!(snapshot.agents.is_empty());
+    }
+
+    #[test]
+    fn listings_without_feed_card_fields_still_parse() {
+        let page: ServiceListing = serde_json::from_value(serde_json::json!({
+            "total": 1, "recognized": 1, "skipped": 0, "items": []
+        }))
+        .expect("non-feed listings keep parsing");
+        assert!(page.feed_prompt.is_none());
+        assert!(page.feed_status.is_none());
     }
 }

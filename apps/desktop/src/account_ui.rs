@@ -1196,6 +1196,7 @@ mod native {
         side_panel: gtk::Box,
         side_identity: gtk::Label,
         side_status: gtk::Label,
+        side_agents: gtk::Box,
         side_tasks: gtk::Box,
         side_runs: gtk::Box,
         send_notice: gtk::Label,
@@ -2135,6 +2136,11 @@ mod native {
         let side_status = label("");
         side_status.add_css_class("dim-label");
         side_panel.append(&side_status);
+        let side_agents_heading = label("Today");
+        side_agents_heading.add_css_class("panel-title");
+        side_panel.append(&side_agents_heading);
+        let side_agents = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        side_panel.append(&side_agents);
         let side_tasks_heading = label("Scheduled tasks");
         side_tasks_heading.add_css_class("panel-title");
         side_panel.append(&side_tasks_heading);
@@ -2199,6 +2205,7 @@ mod native {
             side_panel: side_panel.clone(),
             side_identity,
             side_status,
+            side_agents,
             side_tasks,
             side_runs,
             send_notice,
@@ -2814,6 +2821,18 @@ mod native {
         }
 
         fn send_message(self: &Rc<Self>) {
+            let text = self.prompt.text().to_string();
+            self.send_text(text, true);
+        }
+
+        /// An options-button press: the choice IS the message, sent
+        /// through the exact path a typed send takes — same guards,
+        /// same echo, same reply watch.
+        fn send_option(self: &Rc<Self>, text: &str) {
+            self.send_text(text.to_string(), false);
+        }
+
+        fn send_text(self: &Rc<Self>, text: String, from_composer: bool) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
                     "Not connected. Connect your Muse session before sending.".into();
@@ -2826,7 +2845,6 @@ mod native {
                 self.render();
                 return;
             };
-            let text = self.prompt.text().to_string();
             let Some(ticket) = self.state.borrow_mut().begin_send(&text) else {
                 let reason = self.state.borrow().describe_send_block(&text);
                 self.state.borrow_mut().send_notice = reason.into();
@@ -2838,8 +2856,12 @@ mod native {
             // The box empties when the message goes, like muse.ai: the text
             // now lives in the transcript's echo, and a dispatch the service
             // refuses puts it back (see `complete`) rather than leaving the
-            // reader to wonder whether anything was sent at all.
-            self.prompt.set_text("");
+            // reader to wonder whether anything was sent at all. An option
+            // press is not the composer's text, so it leaves any draft
+            // the reader had typed standing.
+            if from_composer {
+                self.prompt.set_text("");
+            }
             let request = ticket.clone();
             let device = self
                 .host_device
@@ -3233,9 +3255,10 @@ mod native {
         }
 
         /// Keep the shell's right-hand panel current: the agent's
-        /// identity and live status, then the schedules and recent runs
-        /// from the same snapshot the Tasks page renders — one read, two
-        /// views, so they can never disagree. Hidden until linked.
+        /// identity and live status, its Today activity, then the
+        /// schedules and recent runs from the same snapshot the Tasks
+        /// page renders — one read, two views, so they can never
+        /// disagree. Hidden until linked.
         fn render_side_panel(&self, state: &State) {
             let Some(account) = &state.account else {
                 self.side_panel.set_visible(false);
@@ -3249,10 +3272,38 @@ mod native {
                 friendly_status(&state.live_status)
             };
             self.side_status.set_text(&status);
+            super::super::clear_chat(&self.side_agents);
             super::super::clear_chat(&self.side_tasks);
             super::super::clear_chat(&self.side_runs);
             match &state.tasks {
                 Some(tasks) => {
+                    if tasks.agents.is_empty() {
+                        self.side_agents.append(&label("No agent activity yet."));
+                    }
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    for agent in tasks.agents.iter().take(5) {
+                        let mut meta: Vec<String> = Vec::new();
+                        if let Some(status) = &agent.status {
+                            meta.push(status.clone());
+                        }
+                        if let Some(when) = agent
+                            .completed_at
+                            .as_deref()
+                            .or(agent.created_at.as_deref())
+                        {
+                            meta.push(crate::feed_ui::relative_stamp(when, now));
+                        }
+                        let item = if meta.is_empty() {
+                            label(&agent.prompt)
+                        } else {
+                            label(&format!("{}\n{}", agent.prompt, meta.join(" · ")))
+                        };
+                        item.add_css_class("card");
+                        self.side_agents.append(&item);
+                    }
                     if tasks.schedules.is_empty() {
                         self.side_tasks.append(&label("No schedules."));
                     }
@@ -3288,10 +3339,54 @@ mod native {
                     }
                 }
                 None => {
+                    self.side_agents.append(&label("Not loaded yet."));
                     self.side_tasks.append(&label("Not loaded yet."));
                     self.side_runs.append(&label("Not loaded yet."));
                 }
             }
+        }
+
+        /// The choice buttons an assistant message's widget published,
+        /// on their own row under the bubble, aligned with the bubble
+        /// column. A press sends the option's text as the reader's next
+        /// message through the ordinary send path. Once the service
+        /// records a choice (selectedText), the row renders answered:
+        /// every button inert, the chosen one marked — the same record
+        /// every other Muse surface reads.
+        fn append_option_buttons(&self, message: &muse_account::HistoryMessage) {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            row.set_margin_top(2);
+            row.set_margin_bottom(6);
+            let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            spacer.set_width_request(50);
+            row.append(&spacer);
+            let buttons = gtk::FlowBox::new();
+            buttons.set_selection_mode(gtk::SelectionMode::None);
+            buttons.set_max_children_per_line(3);
+            buttons.set_hexpand(true);
+            let answered = message.selected_option.is_some();
+            for option in &message.options {
+                let button = gtk::Button::with_label(option);
+                if answered {
+                    button.set_sensitive(false);
+                    if message.selected_option.as_deref() == Some(option.as_str()) {
+                        button.add_css_class("suggested-action");
+                    }
+                } else {
+                    let weak = self.self_weak.borrow().clone();
+                    let text = option.clone();
+                    button.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.send_option(&text);
+                        }
+                    });
+                }
+                buttons.insert(&button, -1);
+            }
+            row.append(&buttons);
+            self.history.append(&row);
         }
 
         fn render(&self) {
@@ -3701,6 +3796,9 @@ mod native {
                     &avatar_initial,
                     grouped,
                 );
+                if role == super::super::ChatRole::Assistant && !message.options.is_empty() {
+                    self.append_option_buttons(message);
+                }
             }
             if !state.history.is_empty() {
                 self.history_primed.set(true);
@@ -3971,6 +4069,8 @@ mod native {
                     text: text.into(),
                     timestamp: None,
                     status: None,
+                    options: Vec::new(),
+                    selected_option: None,
                 }
             }
             fn parked() -> State {
@@ -4161,6 +4261,13 @@ mod native {
                         error_text: None,
                         scheduled_for_utc: Some(1_794_400_000),
                     }],
+                    agents: vec![muse_account::AgentActivity {
+                        prompt: "Sweep the inbox".into(),
+                        status: Some("completed".into()),
+                        created_at: Some("2026-11-12T15:00:00+00:00".into()),
+                        completed_at: Some("2026-11-12T15:04:00+00:00".into()),
+                        final_response: Some("Three threads filed.".into()),
+                    }],
                 });
             }
             page.ui.render();
@@ -4186,6 +4293,10 @@ mod native {
             assert!(
                 joined.contains("Summary delivered"),
                 "run missing: {joined}"
+            );
+            assert!(
+                joined.contains("Sweep the inbox"),
+                "agent activity missing from the Today list: {joined}"
             );
         }
 
@@ -4482,6 +4593,7 @@ print(json.dumps({'ok':True,'data':data}))
                     Ok(TasksSnapshot {
                         schedules: vec![],
                         runs: vec![],
+                        agents: vec![],
                     }),
                 ),
             );
@@ -4504,6 +4616,7 @@ print(json.dumps({'ok':True,'data':data}))
                     Ok(TasksSnapshot {
                         schedules: vec![],
                         runs: vec![],
+                        agents: vec![],
                     }),
                 ),
             );
@@ -4742,6 +4855,8 @@ mod tests {
             text: String::new(),
             timestamp: None,
             status: status.map(str::to_owned),
+            options: Vec::new(),
+            selected_option: None,
         }
     }
 

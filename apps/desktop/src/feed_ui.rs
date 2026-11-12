@@ -10,13 +10,14 @@
 //! reports the service's own totals, so an unrecognized payload shape
 //! reads as a client gap, never as an empty feed.
 //!
-//! Two visual fields reach this page only once the bridge's feed
-//! shape probe confirms their real names on the service payload: the
-//! unit's emoji (`icon`) and its hero image (`image_url`). The card
-//! renders both whenever they arrive; until then there is simply no
-//! avatar column and no picture, and the unit's kicker + category —
-//! the product's own vocabulary, projected by the bridge — carry the
-//! framing as a quiet meta line.
+//! The bridge projects the visual fields under the gateway's own
+//! names, confirmed by the feed shape probe on Nov 12, 2026: the
+//! unit's emoji avatar (`icon`, from `emoji`), its hero image
+//! (`image_url`, from `attachment.hero_image_url`) and its own
+//! relative timestamp (from `created_at_ms`). A prompt card heads
+//! the page when the same read could fetch the feed's generating
+//! prompt: its text, a paused note, and whether an edition is being
+//! generated right now.
 
 use crate::local_host::AccountContext;
 use crate::rich_text;
@@ -233,8 +234,10 @@ fn relative_instant(unix: i64, now: i64) -> String {
 
 /// The web feed's relative timestamp ("1h ago") for a bridge stamp:
 /// a full ISO instant when the unit carries one, else the day date
-/// the bridge fell back to. Anything unparseable is shown as-is —
-/// a raw service stamp beats a guessed one.
+/// the bridge fell back to. A bare epoch (seconds or milliseconds,
+/// the stringified form the bridge's generic stamp keys once produced
+/// for feed units) also resolves. Anything else unparseable is shown
+/// as-is — a raw service stamp beats a guessed one.
 pub(crate) fn relative_stamp(stamp: &str, now: i64) -> String {
     let text = stamp.trim();
     if text.len() == 10
@@ -255,6 +258,17 @@ pub(crate) fn relative_stamp(stamp: &str, now: i64) -> String {
         return month_day(year, month, day);
     }
     if let Some(unix) = parse_iso_unix(text) {
+        return relative_instant(unix, now);
+    }
+    if !text.is_empty()
+        && text.bytes().all(|byte| byte.is_ascii_digit())
+        && let Ok(value) = text.parse::<i64>()
+    {
+        let unix = if value > 100_000_000_000 {
+            value / 1000
+        } else {
+            value
+        };
         return relative_instant(unix, now);
     }
     text.to_string()
@@ -403,14 +417,51 @@ impl Ui {
         card
     }
 
-    fn render(self: &Rc<Self>, items: &[ListingItem]) {
+    /// The prompt card that heads the feed when the bridge read the
+    /// prompt on the same pass: what generates this feed, whether it
+    /// is paused, and whether a new edition is being generated right
+    /// now. Display-only — editing the prompt or asking for a new
+    /// edition are writes and stay on the Muse side.
+    fn prompt_card(&self, page: &ServiceListing) -> Option<gtk::Box> {
+        let prompt = page.feed_prompt.as_ref()?;
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        card.add_css_class("card");
+        let heading = label("Your feed prompt");
+        heading.add_css_class("feed-title");
+        card.append(&heading);
+        if let Some(text) = &prompt.text {
+            card.append(&label(text));
+        }
+        let mut notes: Vec<String> = Vec::new();
+        if !prompt.enabled {
+            notes.push("Paused".to_string());
+        }
+        if let Some(status) = &page.feed_status {
+            if status.refresh_in_progress {
+                notes.push("Generating the next edition…".to_string());
+            } else if let Some(kind) = &status.next_edition_kind {
+                notes.push(format!("Next edition: {kind}"));
+            }
+        }
+        if !notes.is_empty() {
+            let note = label(&notes.join(" · "));
+            note.add_css_class("dim-label");
+            card.append(&note);
+        }
+        Some(card)
+    }
+
+    fn render(self: &Rc<Self>, page: &ServiceListing) {
         while let Some(row) = self.list.first_child() {
             self.list.remove(&row);
         }
         // Pictures from the previous render are gone with their rows;
         // in-flight downloads still land in the texture cache.
         self.waiting.borrow_mut().clear();
-        for item in items {
+        if let Some(card) = self.prompt_card(page) {
+            self.list.append(&card);
+        }
+        for item in &page.items {
             self.list.append(&self.feed_card(item));
         }
     }
@@ -471,7 +522,7 @@ impl Ui {
     fn finish(self: &Rc<Self>, result: Result<ServiceListing, AccountError>) {
         match result {
             Ok(page) => {
-                self.render(&page.items);
+                self.render(&page);
                 self.notice
                     .set_text(&crate::service_ui::summary_text(&page, EMPTY_COPY));
             }
@@ -563,7 +614,7 @@ pub fn feed(context: AccountContext) -> FeedPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, parse_iso_unix, relative_day, relative_instant};
+    use super::{days_from_civil, parse_iso_unix, relative_day, relative_instant, relative_stamp};
 
     #[test]
     fn civil_days_match_the_unix_epoch() {
@@ -587,6 +638,14 @@ mod tests {
         assert_eq!(parse_iso_unix("2026-11-12"), None);
         assert_eq!(parse_iso_unix("not a stamp"), None);
         assert_eq!(parse_iso_unix("2026-13-12T12:00:00Z"), None);
+    }
+
+    #[test]
+    fn epoch_digit_stamps_resolve_instead_of_printing_raw() {
+        let now = 1_794_504_781;
+        assert_eq!(relative_stamp("1794504781613", now), "just now");
+        assert_eq!(relative_stamp("1794501181", now), "1h ago");
+        assert_eq!(relative_stamp("not a stamp", now), "not a stamp");
     }
 
     #[test]
