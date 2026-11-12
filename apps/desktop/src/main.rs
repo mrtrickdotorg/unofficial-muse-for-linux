@@ -578,14 +578,15 @@ fn build_ui(app: &gtk::Application) {
     let chat_page = gtk::Box::new(gtk::Orientation::Vertical, 14);
     chat_page.add_css_class("page-content");
 
-    // Mac-style centered reading column: conversation content clamps to
-    // ~1075px so bubbles keep messenger rhythm on wide windows instead of
-    // stretching edge to edge. Setup stays full width above it.
+    // Mac-style centered reading column: conversation content is capped
+    // at ~1075px so bubbles keep messenger rhythm on wide windows instead
+    // of stretching edge to edge — a cap, never a minimum (see
+    // bind_reading_column). Setup stays full width above it.
     let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 10);
     chat_column.add_css_class("chat-column");
     chat_column.set_halign(gtk::Align::Center);
     chat_column.set_vexpand(true);
-    chat_column.set_size_request(1075, -1);
+    chat_column.set_size_request(READING_COLUMN_START_PX, -1);
 
     let assistant_identity = gtk::Box::new(gtk::Orientation::Vertical, 5);
     assistant_identity.set_halign(gtk::Align::Center);
@@ -690,6 +691,7 @@ fn build_ui(app: &gtk::Application) {
     prompt_row.append(&send_prompt);
     chat_column.append(&prompt_row);
     chat_page.append(&chat_column);
+    bind_reading_column(chat_page.upcast_ref(), &chat_column);
 
     main_column.append(&stack);
     shell.set_start_child(Some(&sidebar));
@@ -1287,13 +1289,49 @@ fn panel_placeholder(title: &str, copy: &str) -> gtk::Box {
     panel
 }
 
+/// The widest a centered reading column may grow, in app px (the
+/// calibrated scale's counterpart of the web's ~768 CSS px column).
+pub(crate) const READING_COLUMN_MAX_PX: i32 = 1075;
+
+/// The width a reading column starts at, before its binder adapts it:
+/// small enough that the shell's static minimum fits a laptop screen.
+pub(crate) const READING_COLUMN_START_PX: i32 = 560;
+
+/// Drive a reading column's width request from its parent's real
+/// allocation: min(parent width, READING_COLUMN_MAX_PX). A bare
+/// set_size_request(1075) made 1075 the column's MINIMUM — rail (106) +
+/// panel (470) + column (1075) + page padding exceeded a 1680px laptop
+/// screen, and the composer's send button and the Connected pill slid
+/// off the right edge (Patrick's Nov 11 screenshot). Every declarative
+/// alternative was tried and measured first: the request poisons the
+/// minimum through any container (a scrolled window's viewport reports
+/// a non-scrollable child's minimum as its own), and a max-content-
+/// width cap alone follows the content's natural width, so an empty
+/// conversation collapsed the column to ~400px on wide screens. The
+/// parent's allocation is truthful in the cases that matter — a
+/// maximised or clamped window, any manual resize — so the request
+/// tracks it: full cap on wide screens, exactly what fits on small
+/// ones. GTK4 has no size-allocate signal; a frame tick watching the
+/// parent's width is the supported way to follow it. Call AFTER
+/// appending the column to the parent.
+pub(crate) fn bind_reading_column(parent: &gtk::Widget, column: &gtk::Box) {
+    let col = column.clone();
+    parent.add_tick_callback(move |widget, _| {
+        let target = widget.width().clamp(320, READING_COLUMN_MAX_PX);
+        if col.width_request() != target {
+            col.set_size_request(target, -1);
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+}
+
 fn placeholder_page(title: &str, copy: &str) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.add_css_class("page-content");
     let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
     column.set_halign(gtk::Align::Center);
-    column.set_size_request(1075, -1);
     column.set_vexpand(true);
+    column.set_size_request(READING_COLUMN_START_PX, -1);
     let heading = gtk::Label::new(Some(title));
     heading.add_css_class("page-heading");
     heading.set_halign(gtk::Align::Start);
@@ -1305,6 +1343,7 @@ fn placeholder_page(title: &str, copy: &str) -> gtk::Box {
     column.append(&heading);
     column.append(&text);
     page.append(&column);
+    bind_reading_column(page.upcast_ref(), &column);
     page
 }
 
