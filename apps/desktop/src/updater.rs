@@ -206,19 +206,40 @@ pub fn note_check_done(now_epoch: u64) {
     }
 }
 
-fn client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent(concat!(
-            "unofficial-muse-for-linux/",
-            env!("CARGO_PKG_VERSION")
-        ))
+fn client_builder() -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder().user_agent(concat!(
+        "unofficial-muse-for-linux/",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
+/// The update check is one small API answer: bound it tightly so a
+/// dead connection fails in seconds, not whenever the OS gives up.
+fn check_client() -> Result<reqwest::blocking::Client, String> {
+    client_builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| "could not start the update check".to_string())
 }
 
+/// The download moves ~37 MB, so its total bound is generous — but
+/// it IS bounded. The first shipped updater had no timeout at all:
+/// when GitHub's file host let a connection go quiet near the end,
+/// the read blocked forever and the dialog sat at a full-looking
+/// progress bar (Nov 12, 2026). Twenty minutes of silence is a
+/// failed download, not a slow one.
+fn download_client() -> Result<reqwest::blocking::Client, String> {
+    client_builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(20 * 60))
+        .build()
+        .map_err(|_| "could not start the update download".to_string())
+}
+
 /// Ask GitHub about the rolling release.
 pub fn fetch_latest() -> Result<ReleaseInfo, String> {
-    let response = client()?
+    let response = check_client()?
         .get(RELEASE_API_URL)
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -235,6 +256,26 @@ pub fn fetch_latest() -> Result<ReleaseInfo, String> {
     parse_release(&json)
 }
 
+/// Remove partial downloads left beside `target` by attempts that
+/// never finished (a killed app, a dialog closed on a stalled
+/// socket). Only files named as this updater names its partials are
+/// touched, and removal is best-effort: a sweep failure must never
+/// block the new attempt.
+fn sweep_stale_parts(target: &Path) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.part", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Download the release over `target` (the running AppImage's path),
 /// verifying the byte count and, when GitHub published one, the sha256
 /// digest before anything is installed. The verified file replaces the
@@ -245,7 +286,7 @@ pub fn download_and_install(
     target: &Path,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), String> {
-    let mut response = client()?
+    let mut response = download_client()?
         .get(&release.download_url)
         .send()
         .map_err(|_| "could not start the update download".to_string())?;
@@ -255,8 +296,15 @@ pub fn download_and_install(
             response.status().as_u16()
         ));
     }
+    // One partial file per attempt, named for this process and try:
+    // an earlier attempt abandoned mid-download (a dialog closed on a
+    // stalled socket, a killed app) must never share the file a retry
+    // is writing, and its leftovers are swept before this one starts.
+    static ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let attempt = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    sweep_stale_parts(target);
     let mut part_os = target.as_os_str().to_owned();
-    part_os.push(".part");
+    part_os.push(format!(".part-{}-{attempt}", std::process::id()));
     let part = PathBuf::from(part_os);
     let outcome = (|| {
         let mut file = std::fs::File::create(&part)

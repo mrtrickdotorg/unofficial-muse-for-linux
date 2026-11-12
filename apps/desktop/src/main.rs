@@ -389,6 +389,11 @@ struct UpdateUi {
     available: bool,
     busy: bool,
     installed: bool,
+    /// A download is in flight, and when its last progress landed —
+    /// the pair the drain needs to tell a slow download from a
+    /// stalled one instead of sitting silent at a full-looking bar.
+    downloading: bool,
+    last_progress: Option<std::time::Instant>,
 }
 
 /// The self-update dialog behind the rail's Download button: check,
@@ -448,6 +453,8 @@ fn show_update_window(parent: &gtk::ApplicationWindow, target: std::path::PathBu
         available: false,
         busy: false,
         installed: false,
+        downloading: false,
+        last_progress: None,
     }));
     let (sender, receiver) = std::sync::mpsc::channel::<UpdateMsg>();
     let alive = std::rc::Rc::new(std::cell::Cell::new(true));
@@ -467,10 +474,15 @@ fn show_update_window(parent: &gtk::ApplicationWindow, target: std::path::PathBu
                 return gtk::glib::ControlFlow::Break;
             }
             let mut latest_progress: Option<(u64, u64)> = None;
+            let mut settled = false;
             while let Ok(msg) = receiver.try_recv() {
                 match msg {
-                    UpdateMsg::Progress(done, total) => latest_progress = Some((done, total)),
+                    UpdateMsg::Progress(done, total) => {
+                        latest_progress = Some((done, total));
+                        state.borrow_mut().last_progress = Some(std::time::Instant::now());
+                    }
                     UpdateMsg::Checked(result) => {
+                        settled = true;
                         let mut state = state.borrow_mut();
                         state.busy = false;
                         progress.set_visible(false);
@@ -494,8 +506,10 @@ fn show_update_window(parent: &gtk::ApplicationWindow, target: std::path::PathBu
                         }
                     }
                     UpdateMsg::Installed(result) => {
+                        settled = true;
                         let mut state = state.borrow_mut();
                         state.busy = false;
+                        state.downloading = false;
                         progress.set_visible(false);
                         match result {
                             Ok(()) => {
@@ -515,15 +529,34 @@ fn show_update_window(parent: &gtk::ApplicationWindow, target: std::path::PathBu
                     }
                 }
             }
-            if let Some((done, total)) = latest_progress
-                && total > 0
-            {
-                progress.set_fraction(done as f64 / total as f64);
-                status.set_text(&format!(
-                    "Downloading the update… {} of {} MB",
-                    done / 1_000_000,
-                    total / 1_000_000
-                ));
+            // A terminal message in this batch owns the status line:
+            // a progress report queued behind it must not paint the
+            // "downloading" text back over "Update installed".
+            if !settled {
+                let (downloading, last_progress) = {
+                    let state = state.borrow();
+                    (state.downloading, state.last_progress)
+                };
+                let stalled = downloading
+                    && last_progress
+                        .map(|at| at.elapsed() > Duration::from_secs(45))
+                        .unwrap_or(false);
+                if stalled {
+                    status.set_text(
+                        "No download data for a while — the connection looks stalled. \
+                         Closing this window is safe: nothing is installed until a \
+                         download finishes and verifies, and you can try again.",
+                    );
+                } else if let Some((done, total)) = latest_progress
+                    && total > 0
+                {
+                    progress.set_fraction(done as f64 / total as f64);
+                    status.set_text(&format!(
+                        "Downloading the update… {:.1} of {:.1} MB",
+                        done as f64 / 1_000_000.0,
+                        total as f64 / 1_000_000.0
+                    ));
+                }
             }
             gtk::glib::ControlFlow::Continue
         });
@@ -577,6 +610,8 @@ fn show_update_window(parent: &gtk::ApplicationWindow, target: std::path::PathBu
                     return;
                 };
                 state.busy = true;
+                state.downloading = true;
+                state.last_progress = Some(std::time::Instant::now());
                 release
             };
             inner.set_sensitive(false);
