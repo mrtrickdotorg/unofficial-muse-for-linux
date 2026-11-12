@@ -710,15 +710,44 @@ mod native {
             "Grant read-only: folders granted while this is on can be read and searched, but Muse can never propose a write in them — the broker refuses mutations before any approval.",
         );
         root.append(&read_only);
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        // A checkbutton's label never wraps on its own, and these two
+        // are sentences: left alone, the read-only one's single line
+        // set this page's minimum width to 1079px. The shell's stack
+        // reports its widest child's minimum, so this settings page —
+        // not the chat page — decided the shell's width, and on
+        // Patrick's 1680px laptop the overflow pushed the right-hand
+        // panel off the screen. Wrap both labels.
+        for check in [&consent, &read_only] {
+            // GtkCheckButton is not a Button in GTK4: its label is
+            // found by walking the widget subtree.
+            let mut pending = vec![check.clone().upcast::<gtk::Widget>()];
+            while let Some(widget) = pending.pop() {
+                if let Some(text) = widget.downcast_ref::<gtk::Label>() {
+                    text.set_wrap(true);
+                    text.set_max_width_chars(80);
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    pending.push(current.clone());
+                    child = current.next_sibling();
+                }
+            }
+        }
+        let toolbar = gtk::FlowBox::new();
         toolbar.add_css_class("toolbar");
+        toolbar.set_selection_mode(gtk::SelectionMode::None);
+        toolbar.set_activate_on_single_click(false);
+        toolbar.set_homogeneous(false);
+        toolbar.set_max_children_per_line(3);
+        toolbar.set_row_spacing(8);
+        toolbar.set_column_spacing(8);
         let choose = gtk::Button::with_label("Grant a folder to Muse…");
         let start = gtk::Button::with_label("Start local host");
         start.add_css_class("suggested-action");
         let stop = gtk::Button::with_label("Stop & revoke all");
         stop.add_css_class("destructive-action");
         for b in [&choose, &start, &stop] {
-            toolbar.append(b);
+            toolbar.insert(b, -1);
         }
         root.append(&toolbar);
         let status = label("");
