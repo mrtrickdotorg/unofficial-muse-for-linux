@@ -189,6 +189,23 @@ pub struct ListingItem {
     pub kind: Option<String>,
     #[serde(default)]
     pub stamp: Option<String>,
+    /// Feed only: the unit's one-line framing, when the bridge projected
+    /// it. The web feed folds this into its emoji avatar instead; here
+    /// it rides as a quiet meta line until the icon field is confirmed.
+    #[serde(default)]
+    pub kicker: Option<String>,
+    /// Feed only: the unit's category, when projected.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Feed only: the unit's emoji avatar. The bridge fills this once
+    /// the feed shape probe confirms the field's real name; until then
+    /// it stays `None` and the card renders without an avatar column.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Feed only: the unit's hero image URL. Same probe-gated story as
+    /// `icon`; the card's image plumbing renders it whenever it lands.
+    #[serde(default)]
+    pub image_url: Option<String>,
 }
 /// One read of an Ideas / Goals / Feed listing.
 ///

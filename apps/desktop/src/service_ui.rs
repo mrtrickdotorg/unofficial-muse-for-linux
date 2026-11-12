@@ -1,12 +1,14 @@
-//! Read-only Ideas, Goals and Feed pages: three muse.ai surfaces, one shape.
+//! Read-only Ideas and Goals pages: two muse.ai surfaces, one shape.
+//! (The Feed page outgrew the shared shape — it renders web-style
+//! cards with rich text and hero images — and lives in `feed_ui`.)
 //!
 //! Each page reads its recorded list route once per explicit refresh, on a
 //! worker thread, and renders the rows the bridge projected. Nothing here
-//! can act on a row: executing an idea card, editing a goal, reacting to a
-//! feed unit are all writes, and they stay on the Muse side. The notice
-//! always reports the service's own total and the bridge's skipped count,
-//! so a payload shape this build does not recognize yet reads as a client
-//! gap, never as an empty surface.
+//! can act on a row: executing an idea card or editing a goal are writes,
+//! and they stay on the Muse side. The notice always reports the
+//! service's own total and the bridge's skipped count, so a payload shape
+//! this build does not recognize yet reads as a client gap, never as an
+//! empty surface.
 
 use crate::local_host::AccountContext;
 use gtk::prelude::*;
@@ -280,19 +282,6 @@ pub fn goals(context: AccountContext) -> ServicePage {
     )
 }
 
-pub fn feed(context: AccountContext) -> ServicePage {
-    build(
-        context,
-        Spec {
-            heading: "Feed",
-            intro: "Briefings and updates your Muse published to the connected account's feed, read-only. Reactions and reordering happen on the Muse side; this page only reads. The list loads when you open this page.",
-            refresh_label: "Refresh Feed",
-            empty_copy: "Nothing in the feed yet — the service reported an empty list.",
-            fetch: AccountClient::feed,
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::summary_text;
@@ -305,6 +294,10 @@ mod tests {
             body: None,
             kind: None,
             stamp: None,
+            kicker: None,
+            category: None,
+            icon: None,
+            image_url: None,
         }
     }
 

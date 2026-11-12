@@ -241,6 +241,73 @@ def _probe_subagents(config_dir, client, config):
     threading.Thread(target=run, daemon=True).start()
 
 
+_FEED_PROBED = False
+
+
+def _feed_units(payload):
+    """Up to a few raw unit dicts from a feed payload, for shape probing."""
+    units = []
+    if isinstance(payload, dict) and isinstance(payload.get("days"), list):
+        for day in payload["days"]:
+            if not isinstance(day, dict):
+                continue
+            editions = day.get("editions")
+            if not isinstance(editions, list):
+                continue
+            for edition in editions:
+                if not isinstance(edition, dict):
+                    continue
+                rows = edition.get("units")
+                if isinstance(rows, list):
+                    units.extend(u for u in rows if isinstance(u, dict))
+    elif isinstance(payload, dict):
+        for key in ("units", "items", "results", "data"):
+            if isinstance(payload.get(key), list):
+                units.extend(u for u in payload[key] if isinstance(u, dict))
+                break
+    elif isinstance(payload, list):
+        units.extend(u for u in payload if isinstance(u, dict))
+    return units[:6]
+
+
+def _probe_feed_shapes(config_dir, client, config, payload):
+    """Reconnaissance for the web-parity Feed page (Patrick, Nov 12):
+    the web feed renders a per-post emoji, a hero image and a prompt
+    card, none of whose field names the community client ever recorded.
+    Log the key paths of the list payload and of the first few units
+    (keys only, never values — later units carry optional fields like
+    attachments that the first may lack), and, on a daemon thread once
+    per host process, the prompt and status payloads' key paths, so
+    the page can be built against the real shapes."""
+    global _FEED_PROBED
+    if _FEED_PROBED or not config_dir:
+        return
+    _FEED_PROBED = True
+    timing_log(config_dir, "feed-probe keys=" + ",".join(_key_paths(payload))[:1900])
+    seen = set()
+    for unit in _feed_units(payload):
+        signature = ",".join(_key_paths(unit))
+        if signature and signature not in seen:
+            seen.add(signature)
+            timing_log(config_dir, "feed-probe unit keys=" + signature[:1900])
+        if len(seen) >= 3:
+            break
+
+    def run():
+        for route, label in (("feed.prompt.get", "feed-prompt-probe"),
+                             ("feed.status", "feed-status-probe")):
+            try:
+                with client._gateway(config) as gateway:
+                    answer = gateway.call_json(route, timeout=20)
+            except Exception:
+                continue
+            signature = ",".join(_key_paths(answer))
+            if signature:
+                timing_log(config_dir, label + " keys=" + signature[:1900])
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def history_rows(rows, config_dir=None):
     rows = object_rows(rows)
     latest = {}
@@ -958,8 +1025,12 @@ LISTING_MAX_ROWS = 200
 LISTING_MAX_CONTAINER = 500
 
 
-def project_listing_rows(entries, total_hint=None):
+def project_listing_rows(entries, total_hint=None, extras=None):
     """Project flattened (row, kind fallback, stamp fallback) entries.
+
+    `extras`, when given, is called with each recognized row's source
+    dict and returns surface-specific display fields to merge in (the
+    feed's kicker and category); it owns its own cleaning and caps.
 
     Every text value passes the credential redaction applied to task
     content and is length-capped here, so nothing unbounded or
@@ -1006,13 +1077,16 @@ def project_listing_rows(entries, total_hint=None):
             stamp = optional_text(row.get(key))
             if stamp:
                 break
-        rows.append({
+        projected = {
             "id": identifier,
             "title": title[:300],
             "body": body[:4000] if body else None,
             "kind": kind or kind_fallback,
             "stamp": stamp or stamp_fallback,
-        })
+        }
+        if extras is not None:
+            projected.update(extras(row))
+        rows.append(projected)
         if len(rows) >= LISTING_MAX_ROWS:
             break
     return {
@@ -1048,10 +1122,26 @@ def listing_container(payload, container_keys):
     return [(entry, None, None) for entry in container], total
 
 
-def listing_rows(payload, container_keys):
+def listing_rows(payload, container_keys, extras=None):
     """Project a flat read-only listing (goals) into display rows."""
     entries, total = listing_container(payload, container_keys)
-    return project_listing_rows(entries, total)
+    return project_listing_rows(entries, total, extras=extras)
+
+
+def _feed_extras(unit):
+    """The feed-only display fields the product itself names: a unit's
+    kicker (its one-line framing) and its category. Read under the
+    product's own vocabulary; the feed shape probe running alongside
+    the feed read confirms the gateway carries them under these names,
+    and a unit without them simply projects neither key."""
+    extras = {}
+    kicker = content_text(unit.get("kicker"))
+    if kicker:
+        extras["kicker"] = kicker[:160]
+    category = content_text(unit.get("category"))
+    if category:
+        extras["category"] = category[:80]
+    return extras
 
 
 def ideas_rows(payload):
@@ -1116,8 +1206,9 @@ def feed_rows(payload):
         reported = payload.get("total_count", payload.get("total"))
         total = reported if isinstance(reported, int) and not isinstance(
             reported, bool) and reported >= 0 else None
-        return project_listing_rows(entries, total)
-    return listing_rows(payload, ("units", "items", "results", "data"))
+        return project_listing_rows(entries, total, extras=_feed_extras)
+    return listing_rows(payload, ("units", "items", "results", "data"),
+                        extras=_feed_extras)
 
 
 def approval_rows(payload):
@@ -1414,6 +1505,8 @@ class Adapter:
             # on the Muse side.
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("feed.list", timeout=20)
+            _probe_feed_shapes(request.get("config_dir"), self.client,
+                               self.config, payload)
             return feed_rows(payload)
         if request["op"] == "approvals":
             # Read-only, and deliberately on its own connection: listing what the

@@ -7,6 +7,7 @@ mod calendar_ui;
 pub mod computer_control;
 mod computer_control_ui;
 mod desktop_ui;
+mod feed_ui;
 mod files_write_ui;
 mod library_ui;
 mod local_host;
@@ -165,6 +166,9 @@ list { background-color: transparent; }
 list row { color: #e9e9ee; padding: 9px 12px; border-radius: 9px; }
 list row:selected { background-color: rgba(255, 255, 255, 0.09); }
 .card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 19px; }
+.feed-title { font-size: 21px; font-weight: 700; color: #f4f4f6; }
+.feed-icon { font-size: 30px; }
+.feed-image { border-radius: 14px; background-color: #101014; }
 .approval-card { border-left: 3px solid #c98a2b; }
 .approval-icon { color: #d8b25c; font-weight: 700; }
 .approval-heading { font-weight: 700; color: #f4f4f6; }
@@ -783,7 +787,7 @@ fn build_ui(app: &gtk::Application) {
         ),
         Some("create"),
     );
-    let feed_page = service_ui::feed(account_page.host_context.clone());
+    let feed_page = feed_ui::feed(account_page.host_context.clone());
     stack.add_named(&feed_page.root, Some("feed"));
     // Pages from the old navigation (mail, calendar, desktop, computer
     // control, reminders, the developer experiment, the files browser)
