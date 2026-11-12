@@ -1392,7 +1392,7 @@ mod native {
     /// Any failure leaves the saved path untouched: a working sign-in in a
     /// bad place beats a broken sign-in in a good one. The user never has
     /// to define or fix the folder by hand.
-    fn effective_saved_config_dir(python: &str, saved: &str) -> String {
+    fn effective_saved_config_dir(python: &str, saved: &str, consent: bool) -> String {
         let saved_path = Path::new(saved);
         if !is_fragile_session_dir(saved_path, &fragile_roots()) {
             return saved.to_string();
@@ -1406,7 +1406,7 @@ mod native {
         match copy_session_dir(saved_path, &app_dir) {
             Ok(()) => {
                 let relocated = app_dir.display().to_string();
-                let _ = save_connection(python, &relocated);
+                let _ = save_connection(python, &relocated, consent);
                 relocated
             }
             Err(_) => saved.to_string(),
@@ -1420,10 +1420,11 @@ mod native {
             && Path::new(value).is_absolute()
     }
 
-    fn saved_connection_text(python: &str, config_dir: &str) -> String {
+    fn saved_connection_text(python: &str, config_dir: &str, consent: bool) -> String {
         serde_json::json!({
             "python": python,
             "config_dir": config_dir,
+            "consent": consent,
         })
         .to_string()
     }
@@ -1433,14 +1434,23 @@ mod native {
     struct SavedConnection {
         python: String,
         config_dir: String,
+        /// The standing grant from an explicitly consented connect.
+        /// When true, later launches reconnect with these same paths
+        /// on their own — the "stay signed in" behaviour whose absence
+        /// made every launch (and therefore every update) demand a
+        /// manual re-link. Files written before the grant was recorded
+        /// carry no such field and read as false: one more manual
+        /// Link press re-saves the connection with the grant set.
+        #[serde(default)]
+        consent: bool,
     }
 
-    fn saved_connection_from_text(text: &str) -> Option<(String, String)> {
+    fn saved_connection_from_text(text: &str) -> Option<(String, String, bool)> {
         let saved: SavedConnection = serde_json::from_str(text).ok()?;
         if !valid_saved_path(&saved.python) || !valid_saved_path(&saved.config_dir) {
             return None;
         }
-        Some((saved.python, saved.config_dir))
+        Some((saved.python, saved.config_dir, saved.consent))
     }
 
     #[cfg(unix)]
@@ -1607,7 +1617,7 @@ mod native {
     }
 
     #[cfg(unix)]
-    fn load_saved_connection() -> Option<(String, String)> {
+    fn load_saved_connection() -> Option<(String, String, bool)> {
         let root = open_directory_path(&persistent_config_home()?, false).ok()?;
         let app = match open_child_directory(root, "unofficial-muse-for-linux", false) {
             Ok(fd) => fd,
@@ -1666,12 +1676,12 @@ mod native {
     }
 
     #[cfg(not(unix))]
-    fn load_saved_connection() -> Option<(String, String)> {
+    fn load_saved_connection() -> Option<(String, String, bool)> {
         None
     }
 
     #[cfg(unix)]
-    fn save_connection(python: &str, config_dir: &str) -> Result<(), String> {
+    fn save_connection(python: &str, config_dir: &str, consent: bool) -> Result<(), String> {
         let root = open_directory_path(
             &persistent_config_home().ok_or("persistent config directory unavailable")?,
             true,
@@ -1708,7 +1718,7 @@ mod native {
         // SAFETY: file_fd is owned here and transferred to File exactly once.
         let mut file = unsafe { fs::File::from_raw_fd(file_fd) };
         let result = (|| {
-            file.write_all(saved_connection_text(python, config_dir).as_bytes())
+            file.write_all(saved_connection_text(python, config_dir, consent).as_bytes())
                 .map_err(|_| "could not write persistent config file")?;
             file.sync_all()
                 .map_err(|_| "could not sync persistent config file")?;
@@ -1735,7 +1745,7 @@ mod native {
     }
 
     #[cfg(not(unix))]
-    fn save_connection(_python: &str, _config_dir: &str) -> Result<(), String> {
+    fn save_connection(_python: &str, _config_dir: &str, _consent: bool) -> Result<(), String> {
         Err("persistent connection preferences are unavailable on this platform".into())
     }
 
@@ -1925,12 +1935,21 @@ mod native {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
         );
-        if let Some((saved_python, saved_config_dir)) = load_saved_connection() {
+        let mut auto_connect = false;
+        if let Some((saved_python, saved_config_dir, saved_consent)) = load_saved_connection() {
             python.set_text(&preferred_saved_python(&saved_python, &default_python()));
             config_dir.set_text(&effective_saved_config_dir(
                 &saved_python,
                 &saved_config_dir,
+                saved_consent,
             ));
+            if saved_consent {
+                // The grant was given once, explicitly, for this saved
+                // connection: show it as given, and let the launch
+                // reconnect on its own once the page is built.
+                consent.set_active(true);
+                auto_connect = true;
+            }
         }
         content.append(&config_dir);
         content.append(&label(
@@ -2318,6 +2337,14 @@ mod native {
             gtk::glib::ControlFlow::Continue
         });
         ui.render();
+        if auto_connect {
+            // "Stay signed in": a saved connection carrying its
+            // standing grant reconnects at launch with the same paths
+            // a Link press would use. A failure lands on the same
+            // welcome card, with its notice — never a trap, and the
+            // manual press remains available right below it.
+            ui.connect_account();
+        }
         let weak = Rc::downgrade(&ui);
         let cancel_login = Rc::new(move || {
             if let Some(ui) = weak.upgrade() {
@@ -2443,9 +2470,10 @@ mod native {
                     return;
                 }
             };
-            let persistence_notice = save_connection(&self.python.text(), &self.config_dir.text())
-                .err()
-                .map(|error| format!(" · Connection paths were not saved locally: {error}."));
+            let persistence_notice =
+                save_connection(&self.python.text(), &self.config_dir.text(), true)
+                    .err()
+                    .map(|error| format!(" · Connection paths were not saved locally: {error}."));
             *self.persistence_warning.borrow_mut() = persistence_notice;
             *self.connected_config.borrow_mut() = Some(config.clone());
             let active = Arc::new(AtomicBool::new(true));
@@ -2496,9 +2524,10 @@ mod native {
                     return;
                 }
             };
-            let persistence_notice = save_connection(&self.python.text(), &self.config_dir.text())
-                .err()
-                .map(|error| format!(" · Connection paths were not saved locally: {error}."));
+            let persistence_notice =
+                save_connection(&self.python.text(), &self.config_dir.text(), true)
+                    .err()
+                    .map(|error| format!(" · Connection paths were not saved locally: {error}."));
             *self.persistence_warning.borrow_mut() = persistence_notice;
             let script = script_path("muse_account_login.py");
             let cancellation = Arc::new(Cancellation::default());
@@ -3016,7 +3045,11 @@ mod native {
                             // Repair the stale preference so the next launch and
                             // every later request use the working interpreter.
                             self.python.set_text(&adopted.python.display().to_string());
-                            let _ = save_connection(&self.python.text(), &self.config_dir.text());
+                            // The repair re-save must carry the standing
+                            // grant with it, or fixing the interpreter
+                            // would silently revoke launch auto-connect.
+                            let _ =
+                                save_connection(&self.python.text(), &self.config_dir.text(), true);
                             if let Some(active) = self.account_active.borrow().clone() {
                                 *self.client.borrow_mut() =
                                     Some(AccountClient::new(adopted.clone()).cancellable(active));
@@ -4501,11 +4534,29 @@ print(json.dumps({'ok':True,'data':data}))
 
         #[test]
         fn saved_connection_profile_round_trips_only_non_secret_paths() {
-            let encoded = saved_connection_text("/usr/bin/python3", "/home/test/.config/muse");
+            let encoded =
+                saved_connection_text("/usr/bin/python3", "/home/test/.config/muse", true);
             assert!(!encoded.contains("password"));
             assert_eq!(
                 saved_connection_from_text(&encoded),
-                Some(("/usr/bin/python3".into(), "/home/test/.config/muse".into()))
+                Some((
+                    "/usr/bin/python3".into(),
+                    "/home/test/.config/muse".into(),
+                    true
+                ))
+            );
+        }
+
+        #[test]
+        fn a_saved_connection_without_a_grant_reads_as_no_grant() {
+            // Files written before the standing grant was recorded
+            // carry no consent field: they load, with no grant, so the
+            // next launch still asks for one explicit Link press.
+            assert_eq!(
+                saved_connection_from_text(
+                    r#"{"python":"/usr/bin/python3","config_dir":"/tmp/muse"}"#
+                ),
+                Some(("/usr/bin/python3".into(), "/tmp/muse".into(), false))
             );
         }
 
