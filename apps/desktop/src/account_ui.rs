@@ -1956,30 +1956,38 @@ mod native {
         let pages = gtk::Notebook::new();
         pages.set_vexpand(true);
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        // The transcript and composer live in a centered ~1075px column, like
-        // the Mac/Windows client: full-width lines on a wide window are the
-        // readability problem, not a feature.
+        // The transcript and composer live in a centered column capped at
+        // ~1075px, like the Mac/Windows client: full-width lines on a wide
+        // window are the readability problem, not a feature. The cap must
+        // never become a minimum (see crate::bind_reading_column).
         let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
         column.set_halign(gtk::Align::Center);
-        column.set_size_request(1075, -1);
         column.set_vexpand(true);
+        column.set_size_request(crate::READING_COLUMN_START_PX, -1);
         chat.append(&column);
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        crate::bind_reading_column(chat.upcast_ref(), &column);
+        let toolbar = gtk::FlowBox::new();
         toolbar.add_css_class("toolbar");
+        toolbar.set_selection_mode(gtk::SelectionMode::None);
+        toolbar.set_activate_on_single_click(false);
+        toolbar.set_homogeneous(false);
+        toolbar.set_max_children_per_line(8);
+        toolbar.set_row_spacing(8);
+        toolbar.set_column_spacing(8);
         let refresh = gtk::Button::with_label("Refresh shared data");
         let older = gtk::Button::with_label("Load older (+50, max 200)");
-        toolbar.append(&refresh);
+        toolbar.insert(&refresh, -1);
         let approvals_refresh = gtk::Button::with_label("Check approvals");
         approvals_refresh.set_tooltip_text(Some(
             "Reads what the agent is currently asking to do. Reading never approves anything; only Allow or Deny does, one request at a time.",
         ));
-        toolbar.append(&older);
-        toolbar.append(&approvals_refresh);
+        toolbar.insert(&older, -1);
+        toolbar.insert(&approvals_refresh, -1);
         let grants_refresh = gtk::Button::with_label("Check allowed sites");
         grants_refresh.set_tooltip_text(Some(
             "Reads the grants the service says are still in force — what an earlier Allow always left behind. Reading never revokes anything; only a grant's own Revoke button does, one grant at a time.",
         ));
-        toolbar.append(&grants_refresh);
+        toolbar.insert(&grants_refresh, -1);
         column.append(&toolbar);
 
         // The sidebar panel, muse.ai-shaped: a search box, the main
@@ -2098,9 +2106,10 @@ mod native {
         let task_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let task_column = gtk::Box::new(gtk::Orientation::Vertical, 8);
         task_column.set_halign(gtk::Align::Center);
-        task_column.set_size_request(1075, -1);
         task_column.set_vexpand(true);
+        task_column.set_size_request(crate::READING_COLUMN_START_PX, -1);
         task_page.append(&task_column);
+        crate::bind_reading_column(task_page.upcast_ref(), &task_column);
         task_column.append(&label("Shared schedules & recent runs · read-only"));
         task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. Use Refresh shared data or wait for the idle 30-second refresh."));
         let tasks_notice = label("");
@@ -4049,6 +4058,136 @@ mod native {
                     .any(|text| text == "13:38 \u{00b7} shown 08:39:47 AM"),
                 "shown stamp missing from the row tree: {texts:?}"
             );
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn connected_account_page_fits_a_laptop_width() {
+            // Regression for Patrick's Nov 11 screenshot: the transcript
+            // column's 1075px was a bare size REQUEST — a minimum — so
+            // rail (106) + panel (470) + column (1075) + padding forced
+            // the shell past his 1680px laptop screen and the Connected
+            // pill and the composer's send button slid off the right
+            // edge. Two assertions carry the proof: the page's static
+            // minimum must be small (a bare GTK window grows to fit its
+            // content, so a window alone cannot reproduce a window
+            // manager's clamp), and inside a hard-clamped allocation —
+            // a Never/Never scrolled window, whose viewport allocates
+            // its size to a non-scrollable child regardless of the
+            // child's minimums, exactly what KWin does to a maximised
+            // window — every control must land inside.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            page.ui.state.borrow_mut().account = Some(AccountSnapshot {
+                identity_name: "fake".into(),
+                vm_id: "fake-vm".into(),
+                threads: vec![],
+            });
+            page.ui.render();
+
+            fn find_with_class(widget: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+                if widget.has_css_class(class) {
+                    return Some(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    if let Some(found) = find_with_class(&current, class) {
+                        return Some(found);
+                    }
+                    child = current.next_sibling();
+                }
+                None
+            }
+            fn pump(ms: u64) {
+                let ctx = gtk::glib::MainContext::default();
+                let start = std::time::Instant::now();
+                while start.elapsed() < Duration::from_millis(ms) {
+                    while ctx.iteration(false) {}
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            fn clamped_window(root: &gtk::Box, width: i32) -> (gtk::Window, gtk::ScrolledWindow) {
+                let clamp = gtk::ScrolledWindow::new();
+                clamp.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+                clamp.set_child(Some(root));
+                let window = gtk::Window::builder()
+                    .title("Clamped fit")
+                    .default_width(width)
+                    .default_height(700)
+                    .build();
+                window.set_child(Some(&clamp));
+                window.present();
+                pump(700);
+                (window, clamp)
+            }
+            fn assert_send_inside(page: &AccountPage, window: &gtk::Window) {
+                let send = find_with_class(page.root.upcast_ref(), "send-round")
+                    .expect("composer send button exists");
+                let bounds = send
+                    .compute_bounds(window)
+                    .expect("send button is laid out");
+                assert!(
+                    bounds.x() + bounds.width() <= window.width() as f32 + 1.0,
+                    "send button ends at {} in a {}px-wide window",
+                    bounds.x() + bounds.width(),
+                    window.width()
+                );
+            }
+
+            // The static minimum: what the window manager is up against.
+            let (minimum, _, _, _) = page.root.measure(gtk::Orientation::Horizontal, -1);
+            assert!(
+                minimum <= 700,
+                "connected page demands {minimum}px minimum width; a 1366px laptop leaves it ~790"
+            );
+
+            // A 1366px screen leaves the page ~790px after rail + panel.
+            let (window, clamp) = clamped_window(&page.root, 790);
+            let composer =
+                find_with_class(page.root.upcast_ref(), "composer").expect("composer exists");
+            assert!(
+                composer.width() <= 790,
+                "composer is {}px wide in a 790px allocation",
+                composer.width()
+            );
+            assert_send_inside(&page, &window);
+            clamp.set_child(None::<&gtk::Widget>);
+            window.close();
+
+            // Patrick's screen exactly: 1680 minus rail and panel leaves
+            // the page 1104px — the allocation his screenshot violated.
+            let (window, clamp) = clamped_window(&page.root, 1104);
+            assert_send_inside(&page, &window);
+            // Screenshot hook for manual verification: with UMFL_FIT_HOLD
+            // set, hold this window so an external capture (scrot under
+            // Xvfb) can record the layout at his width.
+            if std::env::var_os("UMFL_FIT_HOLD").is_some() {
+                pump(20_000);
+            }
+            clamp.set_child(None::<&gtk::Widget>);
+            window.close();
+
+            // On a wide screen the column is capped, not stretched: the
+            // composer is a direct column child, so its width is the
+            // column's — ~1075, not the ~1600 the window offers.
+            let wide = gtk::Window::builder()
+                .title("Wide cap")
+                .default_width(1600)
+                .default_height(700)
+                .build();
+            wide.set_child(Some(&page.root));
+            wide.present();
+            pump(700);
+            let composer =
+                find_with_class(page.root.upcast_ref(), "composer").expect("composer exists");
+            let width = composer.width();
+            assert!(
+                (1000..=1090).contains(&width),
+                "composer is {width}px wide on a 1600px page; the column cap is 1075"
+            );
+            wide.set_child(None::<&gtk::Widget>);
+            wide.close();
         }
 
         #[test]
