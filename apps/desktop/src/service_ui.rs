@@ -298,6 +298,7 @@ mod tests {
             category: None,
             icon: None,
             image_url: None,
+            widget_text: None,
         }
     }
 

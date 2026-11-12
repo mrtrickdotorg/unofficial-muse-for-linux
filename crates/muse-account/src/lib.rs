@@ -236,6 +236,12 @@ pub struct ListingItem {
     /// plumbing renders it whenever it lands.
     #[serde(default)]
     pub image_url: Option<String>,
+    /// Feed only: the readable text of the unit's widget attachment
+    /// (the gateway's `attachment.widget_html`, extracted line-wise
+    /// by the bridge — this client has no web engine, so the widget
+    /// renders as the text it carries, in an inset card).
+    #[serde(default)]
+    pub widget_text: Option<String>,
 }
 /// One read of an Ideas / Goals / Feed listing.
 ///

@@ -1590,6 +1590,34 @@ class ProbeShapeBuildTests(unittest.TestCase):
         self.assertNotIn("image_url", second)
         self.assertNotIn("icon", second)
 
+    def test_widget_attachment_projects_its_readable_text(self):
+        bridge = load_bridge()
+        html = (
+            "<div><p>Decision attempt expected Friday</p>"
+            "<h3>UFP Lead SOC offer</h3>"
+            "<ul><li>Proposal submitted</li>"
+            "<li>On CFO&rsquo;s desk <span>Nov 12</span></li></ul>"
+            "<script>var secret = 1;</script>"
+            "<style>.x { color: red; }</style></div>"
+        )
+        payload = {"days": [{"local_date": "2026-11-12", "editions": [
+            {"kind": "morning", "units": [
+                {"unit_id": "u1", "title": "Post", "content": "Body.",
+                 "attachment": {"kind": "widget", "widget_html": html}},
+                {"unit_id": "u2", "title": "Ref", "content": "More.",
+                 "attachment": {"kind": "widget",
+                                "widget_html": "media-handle-123"}},
+            ]}]}]}
+        first, second = bridge.feed_rows(payload)["items"]
+        self.assertEqual(
+            first["widget_text"],
+            "Decision attempt expected Friday\nUFP Lead SOC offer\n"
+            "Proposal submitted\nOn CFO’s desk Nov 12",
+        )
+        self.assertNotIn("secret", first["widget_text"])
+        # A non-markup value is a reference, not text: no projection.
+        self.assertNotIn("widget_text", second)
+
     def test_widget_options_project_from_history_payload(self):
         bridge = load_bridge()
         rows = [{

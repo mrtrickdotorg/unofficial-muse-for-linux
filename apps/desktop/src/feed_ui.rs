@@ -3,12 +3,14 @@
 //! relative timestamp, the body as rich text whose links actually
 //! open, and the hero image inline when the unit carries one.
 //!
-//! Read-only, like the other parity surfaces: reacting to, discussing
-//! or reordering a unit are writes and stay on the Muse side. The
-//! page reads the recorded `feed.list` route through the bridge when
-//! the shell shows it (and on the Refresh press), and the notice
-//! reports the service's own totals, so an unrecognized payload shape
-//! reads as a client gap, never as an empty feed.
+//! Read-mostly, like the other parity surfaces: reacting to or
+//! reordering a unit are writes and stay on the Muse side, while
+//! Discuss starts a chat with the post quoted (the send itself stays
+//! the reader's own press). The page reads the recorded `feed.list`
+//! route through the bridge when the shell shows it (and on the
+//! Refresh press), and the notice reports the service's own totals,
+//! so an unrecognized payload shape reads as a client gap, never as
+//! an empty feed.
 //!
 //! The bridge projects the visual fields under the gateway's own
 //! names, confirmed by the feed shape probe on Nov 12, 2026: the
@@ -53,6 +55,9 @@ struct Ui {
     epoch: Cell<u64>,
     busy: Cell<bool>,
     context: AccountContext,
+    /// Starts a discussion of a post: the shell switches to the chat
+    /// page with the post quoted in the composer.
+    on_discuss: Rc<dyn Fn(String)>,
     list: gtk::ListBox,
     notice: gtk::Label,
     spinner: gtk::Spinner,
@@ -413,6 +418,29 @@ impl Ui {
             content.append(&picture);
             self.attach_image(picture, url);
         }
+        if let Some(text) = &item.widget_text {
+            // The widget attachment, as the text it carries: the web
+            // renders the same HTML live, and this client has no web
+            // engine — the inset says so once, quietly.
+            let widget = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            widget.add_css_class("feed-widget");
+            let caption = label("Widget · text view");
+            caption.add_css_class("dim-label");
+            widget.append(&caption);
+            widget.append(&label(text));
+            content.append(&widget);
+        }
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let discuss = gtk::Button::with_label("Discuss");
+        {
+            let ui = Rc::clone(self);
+            let item = item.clone();
+            discuss.connect_clicked(move |_| {
+                (ui.on_discuss)(discuss_quote(&item));
+            });
+        }
+        actions.append(&discuss);
+        content.append(&actions);
         card.append(&content);
         card
     }
@@ -536,14 +564,33 @@ impl Ui {
     }
 }
 
-pub fn feed(context: AccountContext) -> FeedPage {
+/// The composer text a Discuss press starts from: the post, quoted
+/// on one line (the composer is a single-line entry), for the reader
+/// to extend with their question or send as-is.
+fn discuss_quote(item: &ListingItem) -> String {
+    let mut quote = format!("About this feed post: \u{201c}{}\u{201d}", item.title);
+    if let Some(body) = &item.body {
+        let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !flat.is_empty() {
+            quote.push_str(" — ");
+            quote.push_str(&flat);
+        }
+    }
+    if quote.chars().count() > 420 {
+        format!("{}…", quote.chars().take(419).collect::<String>())
+    } else {
+        quote
+    }
+}
+
+pub fn feed(context: AccountContext, on_discuss: Rc<dyn Fn(String)>) -> FeedPage {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.add_css_class("page-content");
     let heading = label("Feed");
     heading.add_css_class("page-heading");
     root.append(&heading);
     let intro = label(
-        "Briefings and updates your Muse published to the connected account's feed, read-only. Reacting to or discussing a post happens on the Muse side; this page only reads. The list loads when you open this page.",
+        "Briefings and updates your Muse published to the connected account's feed. Links open in your browser, and Discuss starts a chat with the post quoted. Widget attachments render as the text they carry — the interactive version lives on the web. The list loads when you open this page.",
     );
     intro.add_css_class("page-subtitle");
     root.append(&intro);
@@ -575,6 +622,7 @@ pub fn feed(context: AccountContext) -> FeedPage {
         epoch: Cell::new(0),
         busy: Cell::new(false),
         context,
+        on_discuss,
         list,
         notice,
         spinner,
@@ -677,9 +725,128 @@ mod native {
     #[ignore = "needs a display; run under Xvfb"]
     fn feed_page_builds_and_presents() {
         gtk4::init().unwrap();
-        let page = super::feed(Rc::new(|| None));
+        let page = super::feed(Rc::new(|| None), Rc::new(|_| {}));
         let window = gtk4::Window::new();
         window.set_child(Some(&page.root));
         window.present();
+    }
+
+    #[test]
+    #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+    fn feed_cards_render_widget_text_and_discuss() {
+        // A widget attachment shows as the text it carries, in an
+        // inset card, and every post carries a Discuss button that
+        // hands the shell the post's quote.
+        use gtk4::prelude::*;
+        gtk4::init().unwrap();
+        let (image_tx, image_rx) = std::sync::mpsc::channel();
+        let captured: Rc<std::cell::RefCell<Vec<String>>> =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = Rc::clone(&captured);
+        let ui = Rc::new(super::Ui {
+            epoch: std::cell::Cell::new(0),
+            busy: std::cell::Cell::new(false),
+            context: Rc::new(|| None),
+            on_discuss: Rc::new(move |text| sink.borrow_mut().push(text)),
+            list: gtk4::ListBox::new(),
+            notice: gtk4::Label::new(None),
+            spinner: gtk4::Spinner::new(),
+            textures: std::cell::RefCell::new(std::collections::HashMap::new()),
+            inflight: std::cell::RefCell::new(std::collections::HashSet::new()),
+            waiting: std::cell::RefCell::new(std::collections::HashMap::new()),
+            image_tx,
+            image_rx: std::cell::RefCell::new(image_rx),
+        });
+        let item = muse_account::ListingItem {
+            id: Some("u1".into()),
+            title: "Your UFP proposal is on the CFO's desk".into(),
+            body: Some("Chris emailed that the proposal has reached the CFO.".into()),
+            kind: None,
+            stamp: Some("2026-11-12T14:00:00+00:00".into()),
+            icon: Some("🪑".into()),
+            kicker: None,
+            category: None,
+            image_url: None,
+            widget_text: Some(
+                "Decision attempt expected Friday\nUFP Lead SOC offer\nProposal submitted".into(),
+            ),
+        };
+        let page = muse_account::ServiceListing {
+            total: 1,
+            recognized: 1,
+            skipped: 0,
+            items: vec![item],
+            feed_prompt: None,
+            feed_status: None,
+        };
+        ui.render(&page);
+        let mut texts: Vec<String> = Vec::new();
+        let mut discuss: Option<gtk4::Button> = None;
+        fn walk(
+            widget: &gtk4::Widget,
+            texts: &mut Vec<String>,
+            discuss: &mut Option<gtk4::Button>,
+        ) {
+            if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
+                texts.push(label.text().to_string());
+            }
+            let found = widget
+                .downcast_ref::<gtk4::Button>()
+                .filter(|button| button.label().as_deref() == Some("Discuss"));
+            if let Some(button) = found {
+                *discuss = Some(button.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                let next = current.next_sibling();
+                walk(&current, texts, discuss);
+                child = next;
+            }
+        }
+        walk(ui.list.upcast_ref(), &mut texts, &mut discuss);
+        let joined = texts.join("\n");
+        assert!(
+            joined.contains("UFP Lead SOC offer"),
+            "widget text missing from the card: {joined}"
+        );
+        assert!(
+            joined.contains("Widget · text view"),
+            "widget caption missing: {joined}"
+        );
+        let discuss = discuss.expect("the card carries a Discuss button");
+        discuss.emit_clicked();
+        let captured = captured.borrow();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            captured[0].contains("Your UFP proposal is on the CFO's desk")
+                && captured[0].contains("Chris emailed"),
+            "the discuss quote carries the post: {}",
+            captured[0]
+        );
+    }
+
+    #[test]
+    fn discuss_quotes_are_one_line_and_capped() {
+        let item = muse_account::ListingItem {
+            id: None,
+            title: "A post".into(),
+            body: Some("line one\nline   two".into()),
+            kind: None,
+            stamp: None,
+            icon: None,
+            kicker: None,
+            category: None,
+            image_url: None,
+            widget_text: None,
+        };
+        assert_eq!(
+            super::discuss_quote(&item),
+            "About this feed post: \u{201c}A post\u{201d} — line one line two"
+        );
+        let long = muse_account::ListingItem {
+            body: Some("word ".repeat(300)),
+            ..item
+        };
+        assert_eq!(super::discuss_quote(&long).chars().count(), 420);
     }
 }
