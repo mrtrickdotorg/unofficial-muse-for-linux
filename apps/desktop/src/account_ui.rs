@@ -1180,7 +1180,6 @@ mod native {
         existing: gtk::Button,
         connect: gtk::Button,
         login: gtk::Button,
-        disconnect: gtk::Button,
         connection_notice: gtk::Label,
         identity: gtk::Label,
         chip: gtk::Label,
@@ -1189,8 +1188,6 @@ mod native {
         thread_search: gtk::Entry,
         threads_key: RefCell<String>,
         scope_label: gtk::Label,
-        refresh: gtk::Button,
-        older: gtk::Button,
         history: gtk::Box,
         scroll: gtk::ScrolledWindow,
         history_notice: gtk::Label,
@@ -1210,11 +1207,9 @@ mod native {
         /// Pending approval cards, one per request the service reported.
         approvals_box: gtk::Box,
         approval_notice: gtk::Label,
-        approvals_refresh: gtk::Button,
         /// Grant rows, one per grant the service says is still in force.
         grants_box: gtk::Box,
         grant_notice: gtk::Label,
-        grants_refresh: gtk::Button,
         /// Weak handle so a card built during render can call back into the page.
         self_weak: RefCell<std::rc::Weak<Ui>>,
         /// A watch is bounded: an absent status on an old row must not leave a
@@ -1952,20 +1947,13 @@ mod native {
         let connection_notice = label("");
         connection_notice.set_hexpand(true);
         connection_row.append(&connection_notice);
-        // Kept outside the welcome card: that card is hidden while connected, and
-        // unlinking must stay reachable from a linked account.
-        let disconnect = gtk::Button::with_label("Disconnect");
-        disconnect.set_tooltip_text(Some(
-            "Stops this app from using the session. Other devices and cloud history are unchanged.",
-        ));
-        connection_row.append(&disconnect);
         root.append(&connection_row);
 
         let pages = gtk::Notebook::new();
         pages.set_vexpand(true);
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // The transcript and composer live in a centered column capped at
-        // ~1075px, like the Mac/Windows client: full-width lines on a wide
+        // ~921px, like the Mac/Windows client: full-width lines on a wide
         // window are the readability problem, not a feature. The cap must
         // never become a minimum (see crate::bind_reading_column).
         let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -1974,29 +1962,6 @@ mod native {
         column.set_size_request(crate::READING_COLUMN_START_PX, -1);
         chat.append(&column);
         crate::bind_reading_column(chat.upcast_ref(), &column);
-        let toolbar = gtk::FlowBox::new();
-        toolbar.add_css_class("toolbar");
-        toolbar.set_selection_mode(gtk::SelectionMode::None);
-        toolbar.set_activate_on_single_click(false);
-        toolbar.set_homogeneous(false);
-        toolbar.set_max_children_per_line(8);
-        toolbar.set_row_spacing(8);
-        toolbar.set_column_spacing(8);
-        let refresh = gtk::Button::with_label("Refresh shared data");
-        let older = gtk::Button::with_label("Load older (+50, max 200)");
-        toolbar.insert(&refresh, -1);
-        let approvals_refresh = gtk::Button::with_label("Check approvals");
-        approvals_refresh.set_tooltip_text(Some(
-            "Reads what the agent is currently asking to do. Reading never approves anything; only Allow or Deny does, one request at a time.",
-        ));
-        toolbar.insert(&older, -1);
-        toolbar.insert(&approvals_refresh, -1);
-        let grants_refresh = gtk::Button::with_label("Check allowed sites");
-        grants_refresh.set_tooltip_text(Some(
-            "Reads the grants the service says are still in force — what an earlier Allow always left behind. Reading never revokes anything; only a grant's own Revoke button does, one grant at a time.",
-        ));
-        toolbar.insert(&grants_refresh, -1);
-        column.append(&toolbar);
 
         // The sidebar panel, muse.ai-shaped: a search box, the main
         // conversation, then the service-provided side chats as a list.
@@ -2119,7 +2084,7 @@ mod native {
         task_page.append(&task_column);
         crate::bind_reading_column(task_page.upcast_ref(), &task_column);
         task_column.append(&label("Shared schedules & recent runs · read-only"));
-        task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. Use Refresh shared data or wait for the idle 30-second refresh."));
+        task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. The idle refresh keeps it current."));
         let tasks_notice = label("");
         task_column.append(&tasks_notice);
         let tasks = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -2143,7 +2108,7 @@ mod native {
         // the account links.
         let side_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
         side_panel.add_css_class("side-panel-right");
-        side_panel.set_size_request(330, -1);
+        side_panel.set_size_request(283, -1);
         side_panel.set_visible(false);
         let side_identity = label("");
         side_identity.add_css_class("panel-title");
@@ -2191,7 +2156,6 @@ mod native {
             existing,
             connect,
             login,
-            disconnect,
             connection_notice,
             identity,
             chip: chip.clone(),
@@ -2203,15 +2167,11 @@ mod native {
             live_notice,
             approvals_box,
             approval_notice,
-            approvals_refresh,
             grants_box,
             grant_notice,
-            grants_refresh,
             self_weak: RefCell::new(std::rc::Weak::new()),
             watch_until: std::cell::Cell::new(None),
             live_turn: std::cell::Cell::new(true),
-            refresh,
-            older,
             history,
             scroll,
             history_notice,
@@ -2256,23 +2216,6 @@ mod native {
         {
             let u = Rc::clone(&ui);
             ui.login.connect_clicked(move |_| u.sign_in());
-        }
-        {
-            let u = Rc::clone(&ui);
-            ui.disconnect.connect_clicked(move |_| {
-                u.disconnect_local();
-                u.consent.set_active(false);
-                u.prompt.set_text("");
-                u.render();
-            });
-        }
-        {
-            let u = Rc::clone(&ui);
-            ui.refresh.connect_clicked(move |_| u.read(false, true));
-        }
-        {
-            let u = Rc::clone(&ui);
-            ui.older.connect_clicked(move |_| u.read(true, false));
         }
         {
             // Sidebar selection drives the same scope change the toolbar
@@ -2331,16 +2274,6 @@ mod native {
             entry.connect_changed(move |_| {
                 u.consent.set_active(false);
             });
-        }
-        {
-            let u = Rc::clone(&ui);
-            ui.approvals_refresh
-                .connect_clicked(move |_| u.check_approvals());
-        }
-        {
-            let u = Rc::clone(&ui);
-            ui.grants_refresh
-                .connect_clicked(move |_| u.check_permissions());
         }
         *ui.self_weak.borrow_mut() = Rc::downgrade(&ui);
         let weak = Rc::downgrade(&ui);
@@ -2445,6 +2378,11 @@ mod native {
                 device.active.store(false, Ordering::SeqCst);
             }
         }
+        // The Disconnect button came out of the UI on Patrick's order
+        // (Nov 11); the teardown path itself stays — the host-lifecycle
+        // tests drive it, and unlinking an account remains a capability
+        // the app must have even with no button showing it today.
+        #[allow(dead_code)]
         fn disconnect_local(&self) {
             self.stop_host();
             self.host_verified.set(false);
@@ -3359,10 +3297,6 @@ mod native {
             ] {
                 widget.set_sensitive(settings_enabled);
             }
-            self.disconnect.set_sensitive(connected || !idle);
-            self.refresh.set_sensitive(connected && idle);
-            self.older
-                .set_sensitive(connected && idle && state.limit < 200);
             self.thread_main_list.set_sensitive(connected && idle);
             self.thread_list.set_sensitive(connected && idle);
             self.thread_search.set_sensitive(connected);
@@ -3493,7 +3427,6 @@ mod native {
             self.approval_notice.set_text(&state.approval_notice);
             self.approval_notice
                 .set_visible(!state.approval_notice.is_empty());
-            self.approvals_refresh.set_sensitive(connected && idle);
             super::super::clear_chat(&self.approvals_box);
             for approval in &state.approvals {
                 let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -3562,7 +3495,6 @@ mod native {
             self.grant_notice.set_text(&state.grant_notice);
             self.grant_notice
                 .set_visible(!state.grant_notice.is_empty());
-            self.grants_refresh.set_sensitive(connected && idle);
             super::super::clear_chat(&self.grants_box);
             for grant in &state.grants {
                 let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -4334,7 +4266,7 @@ mod native {
 
             // On a wide screen the column is capped, not stretched: the
             // composer is a direct column child, so its width is the
-            // column's — ~1075, not the ~1600 the window offers.
+            // column's — the cap, not the ~1600 the window offers.
             let wide = gtk::Window::builder()
                 .title("Wide cap")
                 .default_width(1600)
@@ -4346,12 +4278,88 @@ mod native {
             let composer =
                 find_with_class(page.root.upcast_ref(), "composer").expect("composer exists");
             let width = composer.width();
+            let cap = crate::READING_COLUMN_MAX_PX;
             assert!(
-                (1000..=1090).contains(&width),
-                "composer is {width}px wide on a 1600px page; the column cap is 1075"
+                (cap - 170..=cap + 15).contains(&width),
+                "composer is {width}px wide on a 1600px page; the column cap is {cap}"
             );
             wide.set_child(None::<&gtk::Widget>);
             wide.close();
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn side_panel_fits_beside_the_page_at_a_laptop_width() {
+            // Regression for Patrick's Nov 11 evening screenshot of build
+            // 66d2fbd: the right-hand panel shipped but never appeared on
+            // his 1680px screen — the shell's minimums (sidebar + page +
+            // panel) added up past the window, and the panel, last in
+            // its row, is what a clamped window clips. This rebuilds the
+            // shell's geometry at his width — a sidebar stub at the
+            // theme's own minimum (rail 91 + panel 403 at the current
+            // calibration), the connected page, and the panel — inside
+            // the same hard clamp the laptop-fit test uses, and proves
+            // the panel lands fully inside with working width.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            page.ui.state.borrow_mut().account = Some(AccountSnapshot {
+                identity_name: "Lotus".into(),
+                vm_id: "fake-vm".into(),
+                threads: vec![],
+            });
+            page.ui.render();
+            assert!(page.side_panel.is_visible());
+
+            let sidebar_stub = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            sidebar_stub.set_size_request(494, -1);
+            let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            page.root.set_hexpand(true);
+            content_row.append(&page.root);
+            content_row.append(&page.side_panel);
+            let shell_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            shell_row.append(&sidebar_stub);
+            shell_row.append(&content_row);
+
+            let clamp = gtk::ScrolledWindow::new();
+            clamp.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            clamp.set_size_request(1680, 900);
+            clamp.set_child(Some(&shell_row));
+            let window = gtk::Window::builder()
+                .title("Panel fit")
+                .default_width(1680)
+                .default_height(900)
+                .build();
+            window.set_child(Some(&clamp));
+            window.present();
+            let ctx = gtk::glib::MainContext::default();
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(700) {
+                while ctx.iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let (panel_x, _) = page
+                .side_panel
+                .translate_coordinates(&window, 0.0, 0.0)
+                .expect("panel has window coordinates");
+            let panel_width = page.side_panel.width();
+            assert!(
+                panel_width >= 240,
+                "panel squeezed to {panel_width}px at 1680 wide"
+            );
+            assert!(
+                panel_x + panel_width as f64 <= 1680.0,
+                "panel ends at {} — off the 1680 screen",
+                panel_x + panel_width as f64
+            );
+            if std::env::var_os("UMFL_PANEL_HOLD").is_some() {
+                let start = std::time::Instant::now();
+                while start.elapsed() < Duration::from_millis(20_000) {
+                    while ctx.iteration(false) {}
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            window.close();
         }
 
         #[test]
@@ -4483,7 +4491,8 @@ print(json.dumps({'ok':True,'data':data}))
                 )),
             );
             assert_eq!(boundary.get(), 2);
-            page.ui.disconnect.emit_clicked();
+            page.ui.disconnect_local();
+            page.ui.render();
             assert_eq!(boundary.get(), 3);
             assert!((page.host_context)().is_none());
             assert!(page.host_device.borrow().is_none());
@@ -4592,13 +4601,6 @@ print(json.dumps({'ok':True,'data':data}))
                 "Sign in to the Muse account you already use"
             ));
             assert!(page.ui.login.is_sensitive());
-            // Regression: Disconnect once lived in the welcome card, which is
-            // hidden while connected, leaving a linked account with no way out.
-            let mut ancestor = page.ui.disconnect.parent();
-            while let Some(widget) = ancestor {
-                assert_ne!(widget, page.ui.welcome.clone().upcast::<gtk::Widget>());
-                ancestor = widget.parent();
-            }
             // Advanced paths stay collapsed until asked for; GTK builds the
             // expander's child on the first expansion, so open it before counting.
             page.ui.settings.set_expanded(true);
@@ -4656,7 +4658,12 @@ print(json.dumps({'ok':True,'data':data}))
             assert!(entries[0].is_sensitive());
             assert!(!entries[2].is_sensitive());
             button(&page.root, "Link account").emit_clicked();
-            button(&page.root, "Disconnect").emit_clicked();
+            // The Disconnect button is gone from the UI (Patrick, Nov
+            // 11); the teardown it drove is exercised directly.
+            page.ui.disconnect_local();
+            page.ui.consent.set_active(false);
+            page.ui.prompt.set_text("");
+            page.ui.render();
             assert!(has_label(&page.root, "Disconnected locally"));
             assert!(!consent.is_active());
             // Run a local main-context timer to prove the GUI remains responsive after invalidation.
