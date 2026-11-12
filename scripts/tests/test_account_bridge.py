@@ -1618,8 +1618,11 @@ class ProbeShapeBuildTests(unittest.TestCase):
             "See [the notes](https://example.com/notes) today",
         )
         self.assertNotIn("secret", first["widget_text"])
+        # The raw markup rides along for the live frame.
+        self.assertEqual(first["widget_html"], html)
         # A non-markup value is a reference, not text: no projection.
         self.assertNotIn("widget_text", second)
+        self.assertNotIn("widget_html", second)
 
     def test_widget_options_project_from_history_payload(self):
         bridge = load_bridge()

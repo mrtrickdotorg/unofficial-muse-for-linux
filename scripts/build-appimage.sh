@@ -49,6 +49,25 @@ install -m 755 "$ROOT/target/release/unofficial-muse-for-linux" "$APPDIR/usr/bin
 # and install the user service (scripts/install-reminder-service.sh); the
 # image itself cannot register a systemd unit.
 install -m 755 "$ROOT/target/release/muse-reminder-runner" "$APPDIR/usr/bin/muse-reminder-runner"
+
+# WebKit's helper processes are not part of the binary's library
+# closure, so linuxdeploy cannot find them on its own. The engine
+# looks for them beside its library, which inside the AppDir is
+# usr/lib/webkitgtk-6.0/ — copy the directory in explicitly, and
+# fail the build rather than ship frames that can never render.
+webkit_helpers=""
+for candidate in /usr/lib/*/webkitgtk-6.0; do
+    if [[ -d "$candidate" ]]; then
+        webkit_helpers="$candidate"
+        break
+    fi
+done
+if [[ -z "$webkit_helpers" ]]; then
+    printf 'WebKit helper processes not found (is libwebkitgtk-6.0-dev installed?).\n' >&2
+    exit 1
+fi
+mkdir -p "$APPDIR/usr/lib"
+cp -r "$webkit_helpers" "$APPDIR/usr/lib/"
 install -m 644 "$ROOT/resources/unofficial-muse-for-linux.appdata.xml" "$APPDIR/usr/share/metainfo/unofficial-muse-for-linux.appdata.xml"
 # Bundle only this project's typed sidecars, never the external community
 # checkout, Meta-derived protocol assets, Python environment, or account state.
