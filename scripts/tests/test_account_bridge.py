@@ -901,6 +901,43 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn("SECRET", str(response))
 
 
+class WidgetProbeTests(unittest.TestCase):
+    """The probe learns the widget payload's shape from key paths only."""
+
+    def test_widget_rows_log_key_paths_and_never_values(self):
+        import tempfile
+        bridge = load_bridge()
+        rows = [{
+            "message_id": "m1", "seq": 3, "role": "assistant",
+            "text": "Pick one [[hatch_widget:widget-1234]]",
+            "raw": {"event": "chat.message", "payload": {
+                "display_text": "Pick one",
+                "widgets": [{"id": "widget-1234", "kind": "options",
+                             "options": [{"label": "SENTINEL-LABEL",
+                                          "reply": "SENTINEL-REPLY"}]}],
+            }},
+        }]
+        with tempfile.TemporaryDirectory() as root:
+            projected = bridge.history_rows(rows, config_dir=root)
+            self.assertEqual(projected[0]["text"], "Pick one [[hatch_widget:widget-1234]]")
+            log = pathlib.Path(root, "op-timing.log").read_text()
+        self.assertIn("widget-probe keys=", log)
+        self.assertIn("payload.widgets[].options[].label", log)
+        self.assertIn("payload.widgets[].options[].reply", log)
+        self.assertNotIn("SENTINEL-LABEL", log)
+        self.assertNotIn("SENTINEL-REPLY", log)
+        self.assertNotIn("Pick one", log)
+
+    def test_plain_rows_write_no_probe_line(self):
+        import tempfile
+        bridge = load_bridge()
+        rows = [{"message_id": "m2", "seq": 1, "role": "user",
+                 "text": "hello", "raw": {"payload": {"display_text": "hello"}}}]
+        with tempfile.TemporaryDirectory() as root:
+            bridge.history_rows(rows, config_dir=root)
+            self.assertFalse(pathlib.Path(root, "op-timing.log").exists())
+
+
 class ApprovalTests(unittest.TestCase):
     def test_approvals_are_projected_in_the_service_vocabulary_only(self):
         bridge = load_bridge()

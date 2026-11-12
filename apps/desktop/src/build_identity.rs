@@ -7,10 +7,39 @@
 
 /// `v0.1.0 · build 2026-11-03 19:43 UTC`
 pub fn label() -> String {
+    let sha = commit().map(|sha| format!(" · {}", &sha[..sha.len().min(7)]));
     match stamp() {
-        Some(stamp) => format!("v{} · build {stamp}", env!("CARGO_PKG_VERSION")),
+        Some(stamp) => format!(
+            "v{} · build {stamp}{}",
+            env!("CARGO_PKG_VERSION"),
+            sha.unwrap_or_default()
+        ),
         None => format!("v{}", env!("CARGO_PKG_VERSION")),
     }
+}
+
+/// The commit this build was produced from, when the build environment
+/// recorded one. The AppImage workflow passes UMFL_BUILD_SHA into the
+/// builder container; source builds leave it unset, and an unset SHA is
+/// honest — the updater falls back to comparing build times rather than
+/// pretending to know a commit it was never told.
+pub fn commit() -> Option<&'static str> {
+    option_env!("UMFL_BUILD_SHA").filter(|sha| !sha.is_empty())
+}
+
+/// When this binary was built, as seconds since the Unix epoch: the
+/// running executable's own modification time, which the AppImage's
+/// squashfs preserves from the build (the same source as the label's
+/// stamp). The updater's fallback comparison keys on it.
+pub fn built_epoch() -> Option<u64> {
+    let modified = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|meta| meta.modified().ok())?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
 }
 
 fn stamp() -> Option<String> {

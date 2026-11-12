@@ -14,6 +14,7 @@ mod mail_ui;
 mod rich_text;
 mod service_ui;
 mod tasks_ui;
+mod updater;
 use muse_agent_runtime::{AgentResponse, AgentSession, ToolPolicy};
 use muse_linux_core::filesystem::{FileEntry, FilesystemGrant};
 use muse_meta_api::MetaModelClient;
@@ -362,6 +363,247 @@ const DEFAULT_WINDOW_SIZE_PIN: () = {
     assert!(DEFAULT_WINDOW_HEIGHT >= 600);
     assert!(DEFAULT_WINDOW_HEIGHT <= 750);
 };
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+enum UpdateMsg {
+    Checked(Result<(updater::ReleaseInfo, bool), String>),
+    Progress(u64, u64),
+    Installed(Result<(), String>),
+}
+
+struct UpdateUi {
+    release: Option<updater::ReleaseInfo>,
+    available: bool,
+    busy: bool,
+    installed: bool,
+}
+
+/// The self-update dialog behind the rail's Download button: check,
+/// download with progress, install in place, restart. All network and
+/// file work runs on worker threads; this window only ever renders
+/// their reports.
+fn show_update_window(parent: &gtk::ApplicationWindow, target: std::path::PathBuf) {
+    let window = gtk::Window::builder()
+        .title("App updates")
+        .transient_for(parent)
+        .modal(true)
+        .default_width(480)
+        .default_height(300)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    let heading = gtk::Label::new(Some("Update Unofficial Muse for Linux"));
+    heading.add_css_class("panel-title");
+    heading.set_halign(gtk::Align::Start);
+    content.append(&heading);
+    let current = gtk::Label::new(Some(&format!("This build: {}", build_identity::label())));
+    current.add_css_class("panel-copy");
+    current.set_halign(gtk::Align::Start);
+    current.set_wrap(true);
+    content.append(&current);
+    let status = gtk::Label::new(Some(
+        "The app can update itself in place: the new build replaces this \
+         file, and your sign-in and settings are untouched — no fresh \
+         download to find, and no signing in again.",
+    ));
+    status.add_css_class("dim-label");
+    status.set_halign(gtk::Align::Start);
+    status.set_wrap(true);
+    content.append(&status);
+    let progress = gtk::ProgressBar::new();
+    progress.set_visible(false);
+    content.append(&progress);
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let check_button = gtk::Button::with_label("Check for updates");
+    let install_button = gtk::Button::with_label("Download and install");
+    install_button.set_sensitive(false);
+    let restart_button = gtk::Button::with_label("Restart the app");
+    restart_button.set_sensitive(false);
+    let close_button = gtk::Button::with_label("Close");
+    buttons.append(&check_button);
+    buttons.append(&install_button);
+    buttons.append(&restart_button);
+    buttons.append(&close_button);
+    content.append(&buttons);
+    window.set_child(Some(&content));
+
+    let state = std::rc::Rc::new(std::cell::RefCell::new(UpdateUi {
+        release: None,
+        available: false,
+        busy: false,
+        installed: false,
+    }));
+    let (sender, receiver) = std::sync::mpsc::channel::<UpdateMsg>();
+    let alive = std::rc::Rc::new(std::cell::Cell::new(true));
+    {
+        let alive = alive.clone();
+        window.connect_destroy(move |_| alive.set(false));
+    }
+    {
+        let state = state.clone();
+        let status = status.clone();
+        let progress = progress.clone();
+        let check_button = check_button.clone();
+        let install_button = install_button.clone();
+        let restart_button = restart_button.clone();
+        gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+            if !alive.get() {
+                return gtk::glib::ControlFlow::Break;
+            }
+            let mut latest_progress: Option<(u64, u64)> = None;
+            while let Ok(msg) = receiver.try_recv() {
+                match msg {
+                    UpdateMsg::Progress(done, total) => latest_progress = Some((done, total)),
+                    UpdateMsg::Checked(result) => {
+                        let mut state = state.borrow_mut();
+                        state.busy = false;
+                        progress.set_visible(false);
+                        check_button.set_sensitive(true);
+                        match result {
+                            Ok((release, available)) => {
+                                state.available = available;
+                                state.release = Some(release.clone());
+                                if available {
+                                    status.set_text(&format!(
+                                        "A newer build is available (uploaded {}). \
+                                         Downloading replaces this app's file in place.",
+                                        build_identity::utc_stamp(release.updated_epoch)
+                                    ));
+                                    install_button.set_sensitive(true);
+                                } else {
+                                    status.set_text("You're on the latest build.");
+                                }
+                            }
+                            Err(error) => status.set_text(&error),
+                        }
+                    }
+                    UpdateMsg::Installed(result) => {
+                        let mut state = state.borrow_mut();
+                        state.busy = false;
+                        progress.set_visible(false);
+                        match result {
+                            Ok(()) => {
+                                state.installed = true;
+                                status.set_text(
+                                    "Update installed. Restart the app to use it — \
+                                     your sign-in carries over.",
+                                );
+                                restart_button.set_sensitive(true);
+                                install_button.set_sensitive(false);
+                            }
+                            Err(error) => {
+                                status.set_text(&error);
+                                install_button.set_sensitive(state.available);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((done, total)) = latest_progress
+                && total > 0
+            {
+                progress.set_fraction(done as f64 / total as f64);
+                status.set_text(&format!(
+                    "Downloading the update… {} of {} MB",
+                    done / 1_000_000,
+                    total / 1_000_000
+                ));
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
+    {
+        let state = state.clone();
+        let sender = sender.clone();
+        let status = status.clone();
+        let progress = progress.clone();
+        let check_button = check_button.clone();
+        let inner = check_button.clone();
+        check_button.connect_clicked(move |_| {
+            if state.borrow().busy {
+                return;
+            }
+            state.borrow_mut().busy = true;
+            inner.set_sensitive(false);
+            progress.set_visible(true);
+            progress.pulse();
+            status.set_text("Checking GitHub for the latest build…");
+            let sender = sender.clone();
+            std::thread::spawn(move || {
+                let result = updater::fetch_latest().map(|release| {
+                    let available = updater::update_available(
+                        build_identity::commit(),
+                        build_identity::built_epoch(),
+                        &release,
+                    );
+                    (release, available)
+                });
+                updater::note_check_done(now_epoch());
+                let _ = sender.send(UpdateMsg::Checked(result));
+            });
+        });
+    }
+    {
+        let state = state.clone();
+        let sender = sender.clone();
+        let status = status.clone();
+        let progress = progress.clone();
+        let install_button = install_button.clone();
+        let target = target.clone();
+        let inner = install_button.clone();
+        install_button.connect_clicked(move |_| {
+            let release = {
+                let mut state = state.borrow_mut();
+                if state.busy || state.installed {
+                    return;
+                }
+                let Some(release) = state.release.clone() else {
+                    return;
+                };
+                state.busy = true;
+                release
+            };
+            inner.set_sensitive(false);
+            progress.set_visible(true);
+            progress.set_fraction(0.0);
+            status.set_text("Downloading the update…");
+            let sender = sender.clone();
+            let target = target.clone();
+            std::thread::spawn(move || {
+                let progress_sender = sender.clone();
+                let mut report = move |done: u64, total: u64| {
+                    let _ = progress_sender.send(UpdateMsg::Progress(done, total));
+                };
+                let result = updater::download_and_install(&release, &target, &mut report);
+                let _ = sender.send(UpdateMsg::Installed(result));
+            });
+        });
+    }
+    {
+        let target = target.clone();
+        let status = status.clone();
+        restart_button.connect_clicked(move |_| match updater::relaunch(&target) {
+            Ok(()) => std::process::exit(0),
+            Err(error) => status.set_text(&error),
+        });
+    }
+    let window_for_close = window.clone();
+    close_button.connect_clicked(move |_| {
+        window_for_close.close();
+    });
+    window.present();
+    // Open ready to answer: a check starts with the dialog.
+    check_button.emit_clicked();
+}
 
 fn build_ui(app: &gtk::Application) {
     const _: () = DEFAULT_WINDOW_SIZE_PIN;
@@ -1217,14 +1459,23 @@ fn build_ui(app: &gtk::Application) {
             new_chat();
         });
     }
-    download_button.connect_clicked(move |_| {
+    {
         // On the web this icon gets you the app; here it gets the
-        // latest build of this one.
-        let _ = gtk::gio::AppInfo::launch_default_for_uri(
-            "https://github.com/mrtrickdotorg/unofficial-muse-for-linux/releases",
-            None::<&gtk::gio::AppLaunchContext>,
-        );
-    });
+        // latest build of this one. Running from an AppImage, that is
+        // an in-place self-update (see updater.rs); a source build
+        // keeps the releases page.
+        let window_for_download = window.clone();
+        download_button.connect_clicked(move |_| {
+            if let Some(path) = updater::appimage_path() {
+                show_update_window(&window_for_download, path);
+            } else {
+                let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                    updater::RELEASES_PAGE,
+                    None::<&gtk::gio::AppLaunchContext>,
+                );
+            }
+        });
+    }
     {
         // Menu: the account connection, on the Chat page where the
         // sign-in surface lives (the old topbar gear's exact behavior).
@@ -1255,6 +1506,50 @@ fn build_ui(app: &gtk::Application) {
         });
     }
 
+    {
+        // Launch-time update check, at most once per TTL and only for
+        // the AppImage build: a silent GitHub read whose only visible
+        // effect, when a newer build exists, is a note on the panel's
+        // build line and the Download button's tooltip.
+        if updater::appimage_path().is_some() && updater::check_due(now_epoch()) {
+            let (sender, receiver) = std::sync::mpsc::channel::<bool>();
+            std::thread::spawn(move || {
+                let available = updater::fetch_latest()
+                    .map(|release| {
+                        updater::update_available(
+                            build_identity::commit(),
+                            build_identity::built_epoch(),
+                            &release,
+                        )
+                    })
+                    .unwrap_or(false);
+                updater::note_check_done(now_epoch());
+                let _ = sender.send(available);
+            });
+            let build_label = build_label.clone();
+            let download_button = download_button.clone();
+            let mut tries = 0;
+            gtk::glib::timeout_add_local(Duration::from_millis(250), move || {
+                tries += 1;
+                match receiver.try_recv() {
+                    Ok(true) => {
+                        build_label.set_text(&format!(
+                            "{} · update available — use Download",
+                            build_identity::label()
+                        ));
+                        download_button
+                            .set_tooltip_text(Some("An update is available — click to install it"));
+                        gtk::glib::ControlFlow::Break
+                    }
+                    Ok(false) => gtk::glib::ControlFlow::Break,
+                    Err(std::sync::mpsc::TryRecvError::Empty) if tries < 60 => {
+                        gtk::glib::ControlFlow::Continue
+                    }
+                    Err(_) => gtk::glib::ControlFlow::Break,
+                }
+            });
+        }
+    }
     window.set_child(Some(&shell));
     window.present();
 }
