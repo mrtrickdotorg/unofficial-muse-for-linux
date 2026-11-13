@@ -28,6 +28,12 @@ MAX_LINE = 1024 * 1024
 MAX_IDLE = 300.0
 RUNTIME_DIR_NAME = "unofficial-muse-for-linux"
 WAIT_OPS = frozenset({"watch"})
+# Background work: polls nobody is staring at. When one of these is
+# queued behind a request the user is actively waiting for (a history
+# read behind a four-second activity poll), the user's request goes
+# first -- see PriorityGate. An op already running is never
+# interrupted; priority only orders the queue.
+BACKGROUND_OPS = frozenset({"activity"})
 RETRY_CODES = frozenset({"bridge_failure", "timeout", "auth_required"})
 REFUSED = {"ok": False, "error": {"code": "invalid_request", "uncertain": False}}
 
@@ -109,18 +115,60 @@ def op_budget(op):
     return OP_BUDGETS.get(op, DEFAULT_BUDGET)
 
 
+class PriorityGate:
+    """One holder at a time, but the queue is not first-come-first-served.
+
+    A background request (an activity poll) that arrives while a user
+    request is waiting must not take the connection first: the poll's
+    answer is worth nothing until the next poll cycle, while the user
+    is watching a spinner. A background holder is never preempted --
+    priority orders only who goes NEXT. Sustained user traffic can
+    delay background work; that is the intent, and the client's own
+    deadline retires a starved poll cleanly.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition()
+        self._held = False
+        self.user_waiting = 0
+        self.background_waiting = 0
+
+    def acquire(self, background):
+        with self._condition:
+            if background:
+                self.background_waiting += 1
+                try:
+                    while self._held or self.user_waiting > 0:
+                        self._condition.wait()
+                finally:
+                    self.background_waiting -= 1
+            else:
+                self.user_waiting += 1
+                try:
+                    while self._held:
+                        self._condition.wait()
+                finally:
+                    self.user_waiting -= 1
+            self._held = True
+
+    def release(self):
+        with self._condition:
+            self._held = False
+            self._condition.notify_all()
+
+
 class Connection:
     """One held gateway connection; exactly one request uses it at a time.
 
     The upstream transport keeps one frame consumer per connection: two threads
     reading at once split frames and corrupt the stateful Noise decrypt
-    (docs/PROTOCOL.md). The lock is that rule, not an optimisation.
+    (docs/PROTOCOL.md). The gate is that rule, not an optimisation.
     """
 
     def __init__(self, bridge, config_dir):
         self.bridge = bridge
         self.config_dir = config_dir
-        self.lock = threading.Lock()
+        self.gate = PriorityGate()
         self.stack = None
         self.client = None
         self.digest = None
@@ -138,7 +186,8 @@ class Connection:
                 pass
 
     def dispatch(self, request):
-        with self.lock:
+        self.gate.acquire(request.get("op") in BACKGROUND_OPS)
+        try:
             token = object()
             self.active_token = token
             try:
@@ -171,6 +220,8 @@ class Connection:
             finally:
                 if self.active_token is token:
                     self.active_token = None
+        finally:
+            self.gate.release()
 
     def _dispatch_guarded(self, request, token):
         try:
