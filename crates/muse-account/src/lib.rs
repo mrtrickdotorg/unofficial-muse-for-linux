@@ -93,6 +93,34 @@ pub struct HistoryMessage {
     /// render answered and inert, the chosen one marked.
     #[serde(default)]
     pub selected_option: Option<String>,
+    /// Files attached to the message, projected by the bridge from
+    /// `payload.metadata.attachments` (probe harvest, Nov 13, 2026).
+    /// Display fields only: the service-side path and hash never
+    /// cross into the client.
+    #[serde(default)]
+    pub attachments: Vec<MessageAttachment>,
+}
+
+/// One attached file as the transcript shows it: a card with the
+/// name, type, size, and -- for images -- the pixel dimensions,
+/// caption and the service's transcription of the image.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageAttachment {
+    pub filename: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub bytes_len: Option<u64>,
+    #[serde(default)]
+    pub width: Option<u64>,
+    #[serde(default)]
+    pub height: Option<u64>,
+    #[serde(default)]
+    pub caption: Option<String>,
+    #[serde(default)]
+    pub transcription: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TasksSnapshot {
@@ -909,6 +937,16 @@ impl AccountClient {
         append_timing_line(
             &self.config.config_dir,
             &format!("client render rows={} ms={}", rows, elapsed.as_millis()),
+        );
+    }
+    /// The whole render pass, every section (thread list, panel,
+    /// tasks, transcript): the transcript line alone kept clearing
+    /// the render while the switch still crawled (Nov 13, 2026), so
+    /// the pass as the user feels it gets a number too.
+    pub fn log_render_full(&self, elapsed: Duration) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!("client render-full ms={}", elapsed.as_millis()),
         );
     }
     /// One request line to the host, one reply line back.

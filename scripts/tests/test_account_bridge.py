@@ -985,6 +985,49 @@ class HistoryProbeTests(unittest.TestCase):
             self.assertFalse(pathlib.Path(root, "op-timing.log").exists())
 
 
+class AttachmentProjectionTests(unittest.TestCase):
+    """Attachments project from payload.metadata.attachments
+    (probe harvest, Nov 13, 2026); the service path and hash do
+    not cross, and ordinary rows keep their exact wire shape."""
+
+    def test_attachments_project_without_path_or_hash(self):
+        bridge = load_bridge()
+        rows = [{
+            "message_id": "m1", "seq": 3, "role": "user",
+            "text": "see attached",
+            "raw": {"payload": {"metadata": {"attachments": [{
+                "filename": "op-timing-6.log", "mime_type": "text/plain",
+                "kind": "file", "bytes_len": 12345, "width": None,
+                "height": None, "caption": None, "transcription": None,
+                "path": "/secret/service/path", "sha256": "deadbeef",
+            }, {
+                "filename": "shot.png", "mime_type": "image/png",
+                "kind": "image", "bytes_len": 777, "width": 1200,
+                "height": 800, "caption": "the crawl",
+                "transcription": "a screenshot",
+                "path": "/secret/other", "sha256": "cafe",
+            }]}}},
+        }]
+        projected = bridge.history_rows(rows)
+        attachments = projected[0]["attachments"]
+        self.assertEqual(len(attachments), 2)
+        self.assertEqual(attachments[0]["filename"], "op-timing-6.log")
+        self.assertEqual(attachments[0]["bytes_len"], 12345)
+        self.assertIsNone(attachments[0]["width"])
+        self.assertEqual(attachments[1]["width"], 1200)
+        self.assertEqual(attachments[1]["caption"], "the crawl")
+        self.assertNotIn("path", attachments[0])
+        self.assertNotIn("sha256", attachments[0])
+        self.assertNotIn("/secret/service/path", str(projected))
+
+    def test_plain_rows_have_no_attachments_key(self):
+        bridge = load_bridge()
+        rows = [{"message_id": "m2", "seq": 1, "role": "user",
+                 "text": "hello", "raw": {"payload": {}}}]
+        projected = bridge.history_rows(rows)
+        self.assertNotIn("attachments", projected[0])
+
+
 class SubagentsProbeTests(unittest.TestCase):
     """The probe learns the subagents.list shape from key paths only."""
 
