@@ -103,6 +103,24 @@ export PATH="$CACHE_DIR:$PATH"
 
 python3 "$ROOT/scripts/patch-webkit-path.py" "$APPDIR/usr/lib"
 
+# WebKit launches its helper processes with a scrubbed
+# environment — LD_LIBRARY_PATH does not survive — so the helpers
+# must find the bundled libraries through their own RUNPATH:
+# $ORIGIN/.. from usr/lib/webkitgtk-6.0 (and ../.. for the
+# injected bundle). Without this the helpers die on launch with
+# "libwebkitgtk-6.0.so.4: cannot open shared object file" and the
+# first WebView traps the app.
+for helper in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
+    helper_path="$APPDIR/usr/lib/webkitgtk-6.0/$helper"
+    if [[ ! -f "$helper_path" ]]; then
+        printf 'WebKit helper missing from the AppDir: %s\n' "$helper" >&2
+        exit 1
+    fi
+    patchelf --set-rpath '$ORIGIN/..' "$helper_path"
+done
+patchelf --set-rpath '$ORIGIN/../..' \
+    "$APPDIR/usr/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so"
+
 ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$ROOT/target/unofficial-muse-for-linux-x86_64.AppImage"
 
 artifact=""

@@ -14,6 +14,7 @@ RUN apt-get update \
         libglib2.0-bin \
         libgtk-4-dev \
         libwebkitgtk-6.0-dev \
+        patchelf \
         librsvg2-dev \
         pkg-config \
         python3 \
