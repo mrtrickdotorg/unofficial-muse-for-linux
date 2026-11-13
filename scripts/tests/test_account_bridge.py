@@ -1983,6 +1983,65 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class WriteActionTests(unittest.TestCase):
+    """The interactive-parity writes (Patrick, Nov 13, 2026): an
+    idea card's execution and a feed unit's reaction. Both bodies
+    are the recorded consumer's own, sent exactly once."""
+
+    def _client(self, calls, answer):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append((method, kwargs))
+                return answer
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        return bridge, Client()
+
+    def test_idea_execute_sends_the_recorded_body_once(self):
+        calls = []
+        bridge, client = self._client(calls, {"session_id": "s9"})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "idea_execute", "idea_id": "card-7"})
+        self.assertEqual(calls, [(
+            "api.idea-cards.execute",
+            {"path_params": {"ideaCardId": "card-7"},
+             "body": {"ideaCardId": "card-7", "mode": "full"}})])
+        self.assertEqual(result, {"idea_id": "card-7", "accepted": True,
+                                  "session_id": "s9"})
+
+    def test_feed_react_sends_the_recorded_body_once(self):
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "feed_react", "unit_id": "u1", "reaction": "❤"})
+        self.assertEqual(calls, [(
+            "feed.unit.reaction",
+            {"path_params": {"unit_id": "u1"}, "body": {"reaction": "❤"}})])
+        self.assertEqual(result, {"unit_id": "u1", "accepted": True,
+                                  "reaction": "❤"})
+
+    def test_write_ops_refuse_unpublished_shapes(self):
+        bridge = load_bridge()
+        for request in (
+            {"op": "idea_execute", "idea_id": ""},
+            {"op": "idea_execute", "idea_id": "x", "mode": "partial"},
+            {"op": "feed_react", "unit_id": "u1", "reaction": ""},
+            {"op": "feed_react", "unit_id": "u1", "reaction": "x" * 17},
+            {"op": "feed_react", "unit_id": "u1", "reaction": "a\x01b"},
+            {"op": "feed_react", "unit_id": "u1"},
+        ):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.validate_request(dict(request, config_dir="/tmp/x"))
+            self.assertEqual(caught.exception.code, "invalid_request", request)
+
+
 class ListingTests(unittest.TestCase):
     def gateway_client(self, payload, calls):
         from contextlib import contextmanager
