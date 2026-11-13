@@ -905,6 +905,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(response, {"identity_name": "Test User", "vm_id": "vm-1",
             "threads": [{"session_id": "thread-1", "title": "Example",
                          "archived": False, "pinned": False, "is_thread": True,
+                         "unread_count": 0,
                          "updated_at": "2026-10-17T00:00:00Z"}]})
         self.assertNotIn("SECRET", str(response))
 
@@ -1724,6 +1725,33 @@ class SessionOpTests(unittest.TestCase):
         self.assertEqual([row["is_thread"] for row in rows],
                          [True, False, True, True])
 
+    def test_session_rows_project_unread_count_with_a_safe_default(self):
+        # The sidebar badge rides the listing's own unread_count;
+        # anything that is not a plain non-negative int (absent, a
+        # bool, a string, a negative) reads as zero, so a shape
+        # drift dims the badge instead of breaking the list.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                return {"sessions": [
+                    {"session_id": "t1", "title": "Chat", "unread_count": 3},
+                    {"session_id": "t2", "title": "Read chat"},
+                    {"session_id": "t3", "title": "Bool", "unread_count": True},
+                    {"session_id": "t4", "title": "Text", "unread_count": "2"},
+                    {"session_id": "t5", "title": "Negative",
+                     "unread_count": -1}]}
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        rows = bridge.session_rows(Client(), {})
+        self.assertEqual([row["unread_count"] for row in rows],
+                         [3, 0, 0, 0, 0])
+
 
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
@@ -2036,11 +2064,25 @@ class WriteActionTests(unittest.TestCase):
         self.assertEqual(result, {"goal_id": "g1", "accepted": True,
                                   "deleted": True})
 
+    def test_mark_seen_sends_the_recorded_call_once(self):
+        # The recorded consumer's own shape: the thread id as a
+        # path param and no body. One dispatch, one call.
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "mark_seen", "thread_id": "t1"})
+        self.assertEqual(calls, [(
+            "chat.mark_seen", {"path_params": {"thread_id": "t1"}})])
+        self.assertEqual(result, {"thread_id": "t1", "accepted": True})
+
     def test_write_ops_refuse_unpublished_shapes(self):
         bridge = load_bridge()
         for request in (
             {"op": "goal_delete", "goal_id": ""},
             {"op": "goal_delete", "goal_id": "g1", "extra": 1},
+            {"op": "mark_seen", "thread_id": ""},
+            {"op": "mark_seen", "thread_id": "t1", "extra": 1},
+            {"op": "mark_seen"},
             {"op": "idea_execute", "idea_id": ""},
             {"op": "idea_execute", "idea_id": "x", "mode": "partial"},
             {"op": "feed_react", "unit_id": "u1", "reaction": ""},

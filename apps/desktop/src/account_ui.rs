@@ -16,6 +16,7 @@ enum Operation {
     DeleteTask,
     StartSession,
     SessionOp,
+    MarkSeen,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +40,11 @@ struct Controller<A, H, T> {
     /// happened to be running — which mid-turn is most of the time. Interjecting
     /// is the Mac behaviour; two unresolved dispatches at once are not.
     sending: Option<Ticket>,
+    /// Mark-as-read owns its own slot too: it is bookkeeping
+    /// fired by opening a chat, which is exactly when a history
+    /// read holds the shared slot -- sharing it would skip the
+    /// mark nearly every time.
+    marking: Option<Ticket>,
     account: Option<A>,
     history: Vec<H>,
     /// Session cache of the last history the service confirmed for
@@ -115,6 +121,10 @@ struct Controller<A, H, T> {
     /// (a delete of the open chat lands the reader on the main
     /// conversation; everything else just refreshes the listing).
     session_op: Option<(String, String)>,
+    /// The conversation being marked read, in flight from
+    /// opening it: the web marks a chat seen when it is opened,
+    /// and the badge clears when the re-read says so.
+    mark_seen: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -386,6 +396,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             busy: None,
             polling: None,
             sending: None,
+            marking: None,
             account: None,
             history: Vec::new(),
             history_cache: std::collections::HashMap::new(),
@@ -416,6 +427,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             deleting: None,
             confirming_delete: None,
             session_op: None,
+            mark_seen: None,
         }
     }
 }
@@ -654,6 +666,7 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         self.busy.as_ref() == Some(ticket)
             || self.polling.as_ref() == Some(ticket)
             || self.sending.as_ref() == Some(ticket)
+            || self.marking.as_ref() == Some(ticket)
     }
 
     fn finish_history(&mut self, ticket: &Ticket, result: Result<Vec<H>, String>) -> bool {
@@ -904,6 +917,35 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         }
     }
 
+    /// Take the busy slot for one mark-as-read. Opening a chat
+    /// with unread messages is the press; the write is the web's
+    /// own bookkeeping for that same act, in the recorded
+    /// consumer's shape.
+    fn begin_mark_seen(&mut self, thread_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::MarkSeen)?;
+        self.mark_seen = Some(thread_id.to_string());
+        Some(ticket)
+    }
+
+    /// Record a mark-as-read's answer. True only when the
+    /// service took it, which triggers the re-read that proves
+    /// the badge cleared. A failure is silent on purpose: the
+    /// badge simply stays, and the next open retries -- a
+    /// transcript notice about read-state bookkeeping would be
+    /// noise next to the conversation itself.
+    fn finish_mark_seen(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::MarkSeenAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.mark_seen.take();
+        matches!(result, Ok(answer) if answer.accepted)
+    }
+
     /// Record a deletion's answer. True only when the service took it, which
     /// is what triggers the refresh that follows: that re-read is what proves
     /// whether the schedule is actually gone — if it is still scheduled, it
@@ -1140,7 +1182,8 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         let polled = self.polling.as_ref() == Some(ticket);
         let busy = self.busy.as_ref() == Some(ticket);
         let sending = self.sending.as_ref() == Some(ticket);
-        if !polled && !busy && !sending {
+        let marking = self.marking.as_ref() == Some(ticket);
+        if !polled && !busy && !sending && !marking {
             return false;
         }
         // Release the slot in every case: a poll or read that no longer matches
@@ -1154,6 +1197,9 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         }
         if sending {
             self.sending = None;
+        }
+        if marking {
+            self.marking = None;
         }
         current
     }
@@ -1211,6 +1257,8 @@ impl<A, H: Clone, T> Controller<A, H, T> {
     fn slot_mut(&mut self, operation: Operation) -> &mut Option<Ticket> {
         if operation == Operation::Send {
             &mut self.sending
+        } else if operation == Operation::MarkSeen {
+            &mut self.marking
         } else {
             &mut self.busy
         }
@@ -1509,6 +1557,7 @@ mod native {
         DeleteTask(Result<muse_account::DeleteAnswer, String>),
         StartSession(Result<muse_account::StartedSession, String>),
         SessionOp(Result<muse_account::SessionOpAnswer, String>),
+        MarkSeen(Result<muse_account::MarkSeenAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -2748,12 +2797,24 @@ mod native {
                 if let Some(client) = u.client.borrow().as_ref() {
                     client.log_switch();
                 }
-                let changed = u.state.borrow_mut().select_thread(Some(scope));
+                let changed = u.state.borrow_mut().select_thread(Some(scope.clone()));
                 if changed {
                     u.state.borrow_mut().prime_history_from_cache();
                     u.prompt.set_text("");
                     u.render();
                     u.read(false, false);
+                    // Opening a chat marks it read, as on the
+                    // web -- but only when the listing says there
+                    // is anything unread in it.
+                    let unread = u.state.borrow().account.as_ref().is_some_and(|account| {
+                        account
+                            .threads
+                            .iter()
+                            .any(|t| t.session_id == scope && t.unread_count > 0)
+                    });
+                    if unread {
+                        u.mark_seen(&scope);
+                    }
                 }
             });
         }
@@ -3667,6 +3728,29 @@ mod native {
             });
         }
 
+        /// Mark a just-opened conversation read, when the listing
+        /// says it has unread messages: the web's own behavior for
+        /// opening a chat, in the recorded consumer's shape (path
+        /// param, no body). One open, one write; the completion
+        /// re-reads the listing, which is what clears the badge.
+        /// A busy slot or a vanished client skips quietly -- the
+        /// next open retries.
+        fn mark_seen(self: &Rc<Self>, thread_id: &str) {
+            let Some(client) = self.client.borrow().clone() else {
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_mark_seen(thread_id) else {
+                return;
+            };
+            let thread_id = thread_id.to_string();
+            self.launch(ticket, move || match client.mark_seen(&thread_id) {
+                Ok(answer) => Reply::MarkSeen(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::MarkSeen(Err(error.to_string())),
+            });
+        }
+
         /// The three-dot menu on a side chat's row, mirroring the
         /// web's: pin or unpin, rename, archive or unarchive, and
         /// delete behind an explicit confirmation page (deleting
@@ -4071,6 +4155,9 @@ mod native {
                         Operation::SessionOp => {
                             Reply::SessionOp(Err("Session worker stopped unexpectedly.".into()))
                         }
+                        Operation::MarkSeen => {
+                            Reply::MarkSeen(Err("Mark-seen worker stopped unexpectedly.".into()))
+                        }
                     },
                 };
                 let completion_started = std::time::Instant::now();
@@ -4266,6 +4353,15 @@ mod native {
                     }
                     Reply::SessionOp(result) => {
                         session_after = state.finish_session_op(ticket, result);
+                    }
+                    Reply::MarkSeen(result) => {
+                        // Acceptance is not sight: the refresh
+                        // re-reads the listing, and the badge
+                        // clears only when the service's own
+                        // count says the thread is read.
+                        if state.finish_mark_seen(ticket, result) {
+                            refresh_after = true;
+                        }
                     }
                     Reply::Permissions(result) => {
                         // A list is a report: nothing here revokes anything.
@@ -4989,6 +5085,7 @@ mod native {
                     Operation::DeleteTask => " \u{b7} deleting the scheduled task\u{2026}",
                     Operation::StartSession => " \u{b7} starting a new side chat\u{2026}",
                     Operation::SessionOp => " \u{b7} updating the side chat\u{2026}",
+                    Operation::MarkSeen => " \u{b7} marking the chat read\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -5018,9 +5115,10 @@ mod native {
             let threads_started = std::time::Instant::now();
             let mut threads_rebuilt = false;
             // The fingerprint covers what a row shows -- title,
-            // archived, pinned -- not just the count, so a rename
-            // or a pin from the row's own menu rebuilds the list
-            // with the new state instead of looking ignored.
+            // archived, pinned, unread count -- not just the
+            // count, so a rename or a pin from the row's own menu
+            // rebuilds the list with the new state instead of
+            // looking ignored.
             let threads_key = format!(
                 "{:?}",
                 state.account.as_ref().map(|a| {
@@ -5028,7 +5126,16 @@ mod native {
                         &a.identity_name,
                         a.threads
                             .iter()
-                            .map(|t| (&t.session_id, &t.title, t.archived, t.pinned, t.is_thread))
+                            .map(|t| {
+                                (
+                                    &t.session_id,
+                                    &t.title,
+                                    t.archived,
+                                    t.pinned,
+                                    t.is_thread,
+                                    t.unread_count,
+                                )
+                            })
                             .collect::<Vec<_>>(),
                     )
                 })
@@ -5075,6 +5182,18 @@ mod native {
                         row_label.set_widget_name("thread-title");
                         row_label.set_hexpand(true);
                         row_box.append(&row_label);
+                        if thread.unread_count > 0 {
+                            // The web's unread badge: how much of
+                            // this chat has not been seen yet. It
+                            // clears when the listing's own count
+                            // does -- opening the chat marks it
+                            // read and the re-read proves it.
+                            let badge = label(&thread.unread_count.to_string());
+                            badge.add_css_class("unread-badge");
+                            badge.set_widget_name(&format!("thread-unread:{}", thread.session_id));
+                            badge.set_valign(gtk::Align::Center);
+                            row_box.append(&badge);
+                        }
                         let menu_button = gtk::Button::with_label("\u{22EF}");
                         menu_button.add_css_class("flat");
                         menu_button.set_widget_name(&format!("thread-menu:{}", thread.session_id));
@@ -6414,6 +6533,7 @@ mod native {
                             archived: false,
                             pinned: false,
                             is_thread: true,
+                            unread_count: 0,
                             updated_at: Some("2026-11-12T15:00:00+00:00".into()),
                         })
                         .collect(),
@@ -6586,6 +6706,7 @@ mod native {
                 archived: false,
                 pinned: false,
                 is_thread,
+                unread_count: 0,
                 updated_at: None,
             };
             {
@@ -6620,6 +6741,59 @@ mod native {
             page.ui.render();
             assert!(named(&root, "thread:thread-1"), "the guard keeps every row");
             assert!(named(&root, "thread:learn-1"), "the guard keeps every row");
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn an_unread_thread_wears_its_count_and_a_read_one_does_not() {
+            // The web's sidebar badges a chat that has unseen
+            // messages with their count; a read chat wears
+            // nothing. The badge is the listing's own number --
+            // it clears when a re-read says the count is gone
+            // (opening the chat marks it read).
+            gtk::init().unwrap();
+            fn named(widget: &gtk::Widget, name: &str) -> bool {
+                if widget.widget_name() == name {
+                    return true;
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    let next = current.next_sibling();
+                    if named(&current, name) {
+                        return true;
+                    }
+                    child = next;
+                }
+                false
+            }
+            let page = build(&gtk::Label::new(None));
+            let thread = |id: &str, unread_count: u64| muse_account::Thread {
+                session_id: id.into(),
+                title: format!("Chat {id}"),
+                archived: false,
+                pinned: false,
+                is_thread: true,
+                unread_count,
+                updated_at: None,
+            };
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![thread("thread-1", 3), thread("thread-2", 0)],
+                });
+            }
+            page.ui.render();
+            let root = page.threads_panel.upcast_ref::<gtk::Widget>().clone();
+            assert!(
+                named(&root, "thread-unread:thread-1"),
+                "an unread chat wears its badge"
+            );
+            assert!(
+                !named(&root, "thread-unread:thread-2"),
+                "a read chat wears no badge"
+            );
         }
 
         #[test]
@@ -6684,6 +6858,7 @@ mod native {
                     archived: false,
                     pinned: true,
                     is_thread: true,
+                    unread_count: 0,
                     updated_at: None,
                 },
                 muse_account::Thread {
@@ -6692,6 +6867,7 @@ mod native {
                     archived: true,
                     pinned: false,
                     is_thread: true,
+                    unread_count: 0,
                     updated_at: None,
                 },
             ];
@@ -6794,6 +6970,7 @@ mod native {
                                 archived: false,
                                 pinned: false,
                                 is_thread: true,
+                                unread_count: 0,
                                 updated_at: Some("2026-11-12T15:00:00+00:00".into()),
                             })
                             .collect(),
@@ -6999,6 +7176,46 @@ mod native {
             if only.is_empty() || only == "monster-tokens" {
                 run("monster-tokens", reports(tokens(30_000)));
             }
+        }
+
+        #[test]
+        fn mark_seen_takes_its_own_slot_and_only_acceptance_counts() {
+            // Opening a chat starts its history read in the same
+            // gesture; if the mark shared that read's slot it
+            // would be refused on nearly every open and the badge
+            // would never clear.
+            let mut state: State = Controller {
+                account: Some(muse_account::AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "vm".into(),
+                    threads: vec![],
+                }),
+                ..Controller::default()
+            };
+            let _read = state
+                .begin_read(false, false)
+                .expect("the history read takes the shared slot");
+            let ticket = state
+                .begin_mark_seen("thread-1")
+                .expect("the mark takes its own slot beside the read");
+            assert_eq!(state.mark_seen.as_deref(), Some("thread-1"));
+            // A second mark while one is in flight is refused.
+            assert!(state.begin_mark_seen("thread-2").is_none());
+            // An errored mark proves nothing and clears the slot.
+            assert!(!state.finish_mark_seen(&ticket, Err("boom".into())));
+            assert!(state.mark_seen.is_none());
+            // An accepted mark is the only success.
+            let ticket = state.begin_mark_seen("thread-1").expect("slot freed");
+            assert!(state.finish_mark_seen(
+                &ticket,
+                Ok(muse_account::MarkSeenAnswer {
+                    thread_id: "thread-1".into(),
+                    accepted: true,
+                })
+            ));
+            // No account, no mark.
+            let mut signed_out: State = Controller::default();
+            assert!(signed_out.begin_mark_seen("thread-1").is_none());
         }
 
         #[test]
