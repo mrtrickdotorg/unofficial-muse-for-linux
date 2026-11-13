@@ -61,6 +61,22 @@ jobs:
           "$IMAGE" \
           bash -c 'mkdir -p "$TMPDIR" && ./scripts/build-appimage.sh'
 
+    # The layout proofs run against the libraries the AppImage actually
+    # ships (the builder container's bookworm GTK), not the runner's —
+    # and they gate the release: a shell that does not fit does not
+    # publish.
+    - name: Layout gate (bundled GTK, three screen widths)
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          -e CARGO_HOME=/cargo-cache \
+          -e TMPDIR=/root/appimage-scratch \
+          -v "$PWD:/workspace" \
+          -v "$PWD/target/container-cargo:/cargo-cache" \
+          -w /workspace \
+          "$IMAGE" \
+          bash -c 'mkdir -p "$TMPDIR" && ./scripts/layout-gate.sh'
+
     - name: Verify artifact
       run: |
         set -euo pipefail
