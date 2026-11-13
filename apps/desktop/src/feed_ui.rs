@@ -613,7 +613,12 @@ fn widget_frame(item: &ListingItem, html: &str) -> gtk::Box {
     let view = WebView::new();
     view.set_background_color(&gtk::gdk::RGBA::new(0.063, 0.063, 0.075, 1.0));
     view.set_hexpand(true);
-    view.set_size_request(-1, 120);
+    // The width request stays at 1 on purpose, here and in the
+    // height fit below: a WebView's own minimum follows its content,
+    // and a wide widget would otherwise set the whole window's
+    // minimum — the shell blows out past the screen. The frame gets
+    // whatever width the card gives it; the content clips inside.
+    view.set_size_request(1, 120);
     if let Some(settings) = WebViewExt::settings(&view) {
         // JavaScript stays on: countdowns and timelines compute
         // themselves at display time, like the web's "in 7 days".
@@ -665,7 +670,7 @@ fn widget_frame(item: &ListingItem, html: &str) -> gtk::Box {
                     if let Ok(value) = result
                         && let Ok(height) = value.to_string().parse::<f64>()
                     {
-                        view_for_fit.set_size_request(-1, height.clamp(48.0, 900.0) as i32);
+                        view_for_fit.set_size_request(1, height.clamp(48.0, 900.0) as i32);
                     }
                 },
             );
@@ -1021,7 +1026,7 @@ mod native {
         use webkit6::prelude::*;
 
         gtk4::init().expect("gtk init");
-        let html = "<div style=\"font-family:sans-serif;color:#eee\">\
+        let html = "<div style=\"font-family:sans-serif;color:#eee;width:1600px\">\
             <div style=\"font-size:13px\">Decision attempt expected Friday</div>\
             <div style=\"font-size:20px;font-weight:700\">UFP Lead SOC offer</div>\
             <div style=\"height:6px;background:#3ddc84;width:50%;margin:12px 0\"></div>\
@@ -1053,6 +1058,14 @@ mod native {
             .first_child()
             .and_downcast::<webkit6::WebView>()
             .expect("the frame's child is the web view");
+        // A 1600px-wide widget must not set the shell's floor: the
+        // frame's measured minimum stays card-sized regardless of
+        // the content's own width.
+        let (minimum_width, _, _, _) = frame.measure(gtk4::Orientation::Horizontal, -1);
+        assert!(
+            minimum_width <= 420,
+            "frame minimum width {minimum_width} would blow out the window"
+        );
 
         let probe: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
         let context = gtk4::glib::MainContext::default();
