@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -609,6 +609,7 @@ def validate_request(request):
                "idea_execute": {"idea_id"},
                "feed_react": {"unit_id", "reaction"},
                "goal_delete": {"goal_id"},
+               "mark_seen": {"thread_id"},
                "tasks": set(),
                "artifacts": set(),
                "ideas": set(),
@@ -681,6 +682,14 @@ def validate_request(request):
         goal_id = request.get("goal_id")
         if (not isinstance(goal_id, str) or not 1 <= len(goal_id) <= 256
                 or "\x00" in goal_id):
+            raise BridgeFailure("invalid_request")
+    if op == "mark_seen":
+        # The id is the service's own, taken from the sessions
+        # listing it published; anything else would be marking a
+        # guess as read.
+        thread_id = request.get("thread_id")
+        if (not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 256
+                or "\x00" in thread_id):
             raise BridgeFailure("invalid_request")
     if op == "idea_execute":
         # The id is the service's own, taken from the idea-cards
@@ -1513,6 +1522,12 @@ def _probe_ideas_shapes(config_dir, payload):
                     sig = "section:" + ",".join(sorted(section.keys()))
                     if sig not in signatures:
                         signatures.append(sig)
+                    presentation = section.get("presentation")
+                    if isinstance(presentation, dict):
+                        sig = "section-presentation:" + ",".join(
+                            sorted(presentation.keys()))
+                        if sig not in signatures and len(signatures) < 7:
+                            signatures.append(sig)
                     cards = section.get("cards")
                     if not isinstance(cards, list):
                         cards = section.get("ideas")
@@ -1522,8 +1537,20 @@ def _probe_ideas_shapes(config_dir, payload):
                                 continue
                             cards_seen += 1
                             sig = "card:" + ",".join(sorted(card.keys()))
-                            if sig not in signatures and len(signatures) < 5:
+                            if sig not in signatures and len(signatures) < 7:
                                 signatures.append(sig)
+                            # The card's icon, if the payload
+                            # carries one at all, can only live in
+                            # the card's presentation object (the
+                            # top-level keys are settled: no emoji,
+                            # no icon_url -- op-timing-18, Nov 13,
+                            # 2026). Record its key names too.
+                            presentation = card.get("presentation")
+                            if isinstance(presentation, dict):
+                                sig = "card-presentation:" + ",".join(
+                                    sorted(presentation.keys()))
+                                if sig not in signatures and len(signatures) < 7:
+                                    signatures.append(sig)
             signatures.append("cards={}".format(cards_seen))
         timing_log(config_dir, "ideas-probe " + " | ".join(signatures)[:1500])
     except Exception:
@@ -1868,6 +1895,19 @@ def _thread_flag(row):
     return True if value is None else bool(value)
 
 
+def _unread_count(row):
+    """A sessions.list row's unread count, for the sidebar badge.
+
+    The probe-confirmed row shape carries `unread_count`; anything
+    that is not a plain non-negative int (absent, bool, a string)
+    reads as zero, so a shape drift dims the badge instead of
+    breaking the list."""
+    value = row.get("unread_count")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return 0
+
+
 def session_rows(client, config, config_dir=None):
     """Project the conversation list from `sessions.list` itself.
 
@@ -1884,6 +1924,7 @@ def session_rows(client, config, config_dir=None):
             "archived": bool(row.get("archived", False)),
             "pinned": bool(row.get("pinned", False)),
             "is_thread": _thread_flag(row),
+            "unread_count": _unread_count(row),
             "updated_at": optional_text(row.get("updated_at")),
         } for row in object_rows(client.threads(include_archived=True))]
     with gateway_scope(config) as gateway:
@@ -1910,6 +1951,7 @@ def session_rows(client, config, config_dir=None):
             "archived": bool(session.get("archived", False)),
             "pinned": bool(session.get("pinned", False)),
             "is_thread": _thread_flag(session),
+            "unread_count": _unread_count(session),
             "updated_at": updated_at_text(session),
         })
     return rows
@@ -2096,6 +2138,19 @@ class Adapter:
             deleted = answer.get("deleted")
             return {"goal_id": request["goal_id"], "accepted": True,
                     "deleted": deleted if isinstance(deleted, bool) else None}
+        if request["op"] == "mark_seen":
+            # A write on the shared gateway: mark one conversation
+            # read, once, in the recorded consumer's own shape --
+            # the thread id as a path param and no body. The
+            # answer's shape is not recorded, so acceptance is the
+            # call not failing; whether the thread now reads as
+            # seen is proven by re-reading the sessions listing.
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(
+                    "chat.mark_seen",
+                    path_params={"thread_id": request["thread_id"]},
+                )
+            return {"thread_id": request["thread_id"], "accepted": True}
         if request["op"] == "idea_execute":
             # A write on the shared gateway: one execution, never
             # retried here -- a retry could start the card's work

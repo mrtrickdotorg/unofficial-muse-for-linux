@@ -83,6 +83,7 @@ scrolledwindow viewport { background-color: transparent; }
 .panel-list row:hover { background-color: rgba(255, 255, 255, 0.05); }
 .panel-list row:selected { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; }
 .panel-item-label { font-size: 19px; }
+.unread-badge { background-color: #5b8cff; color: #ffffff; border-radius: 999px; padding: 1px 8px; font-size: 14px; font-weight: 700; }
 .panel-heading { color: #9a9aa5; font-size: 16px; font-weight: 600; padding: 19px 15px 7px; }
 button.panel-toggle { min-width: 30px; min-height: 30px; padding: 2px 7px; font-size: 16px; }
 .panel-title { color: #f4f4f6; font-size: 19px; font-weight: 700; padding: 3px 6px 6px; }

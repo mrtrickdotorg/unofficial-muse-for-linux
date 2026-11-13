@@ -83,6 +83,10 @@ pub struct Thread {
     /// can never empty the sidebar.
     #[serde(default = "default_thread")]
     pub is_thread: bool,
+    /// Unread messages in the thread, as the listing reports
+    /// them; drives the sidebar badge. Absent reads as zero.
+    #[serde(default)]
+    pub unread_count: u64,
     pub updated_at: Option<String>,
 }
 
@@ -516,6 +520,17 @@ pub struct GoalDeleteAnswer {
     pub deleted: Option<bool>,
 }
 
+/// What the service said about a mark-as-read it took.
+///
+/// Acceptance only: whether the thread now reads as seen is
+/// proven by re-reading the sessions listing, never by this
+/// answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkSeenAnswer {
+    pub thread_id: String,
+    pub accepted: bool,
+}
+
 /// What the service said about a feed reaction it took.
 ///
 /// Acceptance only: whether the unit now shows the reaction is
@@ -856,6 +871,22 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "goal_delete", "goal_id": goal_id}),
+            false,
+        )
+    }
+    /// Mark exactly one conversation read, once.
+    ///
+    /// The id must be one the sessions listing published, and the
+    /// bridge makes a single request in the recorded consumer's
+    /// shape (the id as a path param, no body), so opening a chat
+    /// maps to one write. Whether the thread then reads as seen
+    /// is proven by re-reading the listing, never by this answer.
+    pub fn mark_seen(&self, thread_id: &str) -> Result<MarkSeenAnswer, AccountError> {
+        if thread_id.is_empty() || thread_id.len() > 256 || thread_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "mark_seen", "thread_id": thread_id}),
             false,
         )
     }
