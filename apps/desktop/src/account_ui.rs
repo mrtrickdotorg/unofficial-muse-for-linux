@@ -3824,6 +3824,40 @@ mod native {
         /// records a choice (selectedText), the row renders answered:
         /// every button inert, the chosen one marked — the same record
         /// every other Muse surface reads.
+        /// The message's attachment cards, in the web's arrangement:
+        /// the files sit with the message, above its text -- a card
+        /// per file with its name, type, size and, for an image, its
+        /// dimensions, caption and the service's transcription. The
+        /// bytes themselves do not cross yet (the descriptor's path
+        /// is service-side), so an image shows as a card, not a
+        /// thumbnail; that is stated plainly rather than faked.
+        fn append_attachment_cards(
+            &self,
+            message: &muse_account::HistoryMessage,
+            role: super::super::ChatRole,
+        ) {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.set_margin_start(12);
+            row.set_margin_end(12);
+            row.set_margin_top(4);
+            row.set_margin_bottom(1);
+            let cards = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            for attachment in &message.attachments {
+                cards.append(&attachment_card(attachment));
+            }
+            if role == super::super::ChatRole::User {
+                let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                spacer.set_hexpand(true);
+                row.append(&spacer);
+            } else {
+                let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                spacer.set_width_request(50);
+                row.append(&spacer);
+            }
+            row.append(&cards);
+            self.history.append(&row);
+        }
+
         fn append_option_buttons(&self, message: &muse_account::HistoryMessage) {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
             row.set_margin_start(12);
@@ -3919,8 +3953,50 @@ mod native {
             }
         }
 
+        /// Selection follows the scope in place: the row set only
+        /// changes when the service's thread list does, so a switch
+        /// is a highlight move, never a 150-row rebuild. Runs inside
+        /// render(), where the `rendering` guard keeps the selection
+        /// handlers from treating the sync as a user click.
+        fn sync_thread_selection(&self, state: &State) {
+            match &state.scope {
+                None => {
+                    if let Some(main_row) = self.thread_main_list.row_at_index(0)
+                        && self.thread_main_list.selected_row().as_ref() != Some(&main_row)
+                    {
+                        self.thread_main_list.select_row(Some(&main_row));
+                    }
+                    if self.thread_list.selected_row().is_some() {
+                        self.thread_list.unselect_all();
+                    }
+                }
+                Some(scope) => {
+                    if self.thread_main_list.selected_row().is_some() {
+                        self.thread_main_list.unselect_all();
+                    }
+                    let target = format!("thread:{scope}");
+                    let mut index = 0;
+                    let mut found = false;
+                    while let Some(row) = self.thread_list.row_at_index(index) {
+                        if row.widget_name().as_str() == target.as_str() {
+                            if self.thread_list.selected_row().as_ref() != Some(&row) {
+                                self.thread_list.select_row(Some(&row));
+                            }
+                            found = true;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    if !found && self.thread_list.selected_row().is_some() {
+                        self.thread_list.unselect_all();
+                    }
+                }
+            }
+        }
+
         fn render(&self) {
             self.rendering.set(true);
+            let render_started = std::time::Instant::now();
             let state = self.state.borrow();
             let connected = state.account.is_some();
             let idle = state.busy.is_none();
@@ -4006,21 +4082,23 @@ mod native {
             } else {
                 "Not connected"
             });
+            // The row set is keyed on the thread list itself, NOT on
+            // the selection: the key used to include the scope, so
+            // every switch tore down and rebuilt all ~150 rows just
+            // to move the highlight (op-timing-7 review, Nov 13,
+            // 2026). Selection is synced in place below instead.
             let threads_key = format!(
-                "{:?}|{:?}|{}",
-                state.scope,
+                "{:?}",
                 state
                     .account
                     .as_ref()
-                    .map(|a| (&a.identity_name, a.threads.len())),
-                state.limit
+                    .map(|a| (&a.identity_name, a.threads.len()))
             );
             if self.threads_key.borrow().as_str() != threads_key {
                 *self.threads_key.borrow_mut() = threads_key;
                 while let Some(row) = self.thread_list.row_at_index(0) {
                     self.thread_list.remove(&row);
                 }
-                let mut selected_row: Option<gtk::ListBoxRow> = None;
                 if let Some(account) = &state.account {
                     for thread in &account.threads {
                         let archived = if thread.archived { " [archived]" } else { "" };
@@ -4033,16 +4111,21 @@ mod native {
                         let row_label = row_label(&format!("{}{archived}", thread.title));
                         row_label.add_css_class("panel-item-label");
                         row.set_child(Some(&row_label));
-                        if state.scope.as_deref() == Some(thread.session_id.as_str()) {
-                            selected_row = Some(row.clone());
-                        }
                         self.thread_list.append(&row);
                     }
                 }
                 // A disappearing service thread keeps its exact scope;
                 // never silently fall back to the main conversation.
+                let scope_listed = state.account.as_ref().is_some_and(|account| {
+                    state.scope.as_ref().is_some_and(|scope| {
+                        account
+                            .threads
+                            .iter()
+                            .any(|thread| &thread.session_id == scope)
+                    })
+                });
                 if let Some(scope) = &state.scope
-                    && selected_row.is_none()
+                    && !scope_listed
                 {
                     let row = gtk::ListBoxRow::new();
                     row.set_widget_name(&format!("thread:{scope}"));
@@ -4050,24 +4133,11 @@ mod native {
                         row_label("Selected conversation (not in current service thread list)");
                     row_label.add_css_class("panel-item-label");
                     row.set_child(Some(&row_label));
-                    selected_row = Some(row.clone());
                     self.thread_list.append(&row);
-                }
-                match (&state.scope, &selected_row) {
-                    (None, _) => {
-                        if let Some(main_row) = self.thread_main_list.row_at_index(0) {
-                            self.thread_main_list.select_row(Some(&main_row));
-                        }
-                        self.thread_list.unselect_all();
-                    }
-                    (Some(_), Some(row)) => {
-                        self.thread_main_list.unselect_all();
-                        self.thread_list.select_row(Some(row));
-                    }
-                    _ => {}
                 }
                 self.thread_list.invalidate_filter();
             }
+            self.sync_thread_selection(&state);
             self.scope_label.set_text(&format!(
                 "Conversation scope: {} · latest {} service events",
                 state.scope.as_deref().unwrap_or("Main conversation"),
@@ -4326,6 +4396,9 @@ mod native {
                     (None, Some(shown)) => Some(format!("shown {shown}")),
                     (None, None) => None,
                 };
+                if !message.attachments.is_empty() {
+                    self.append_attachment_cards(message, role);
+                }
                 super::super::append_chat_grouped(
                     &self.history,
                     role,
@@ -4502,6 +4575,9 @@ mod native {
             if connected && self.settings.is_expanded() && state.history_notice.is_empty() {
                 self.settings.set_expanded(false);
             }
+            if let Some(client) = self.client.borrow().as_ref() {
+                client.log_render_full(render_started.elapsed());
+            }
             self.rendering.set(false);
         }
     }
@@ -4514,6 +4590,97 @@ mod native {
     /// compared at a glance, in the reader's timezone, at second precision
     /// (the service stamps slice HH:MM out of a UTC string, which hides
     /// exactly the lag being measured).
+    /// "12 KB" / "1.2 MB" for an attachment card's meta line.
+    fn human_bytes(bytes: u64) -> String {
+        if bytes < 1024 {
+            format!("{bytes} B")
+        } else if bytes < 1024 * 1024 {
+            format!("{} KB", (bytes + 512) / 1024)
+        } else {
+            format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+        }
+    }
+
+    fn attachment_icon(attachment: &muse_account::MessageAttachment) -> &'static str {
+        let mime = attachment.mime_type.as_deref().unwrap_or("");
+        let kind = attachment.kind.as_deref().unwrap_or("");
+        if kind == "image" || mime.starts_with("image/") {
+            "\u{1f5bc}\u{fe0f}"
+        } else if mime.starts_with("audio/") {
+            "\u{1f3b5}"
+        } else if mime.starts_with("video/") {
+            "\u{1f3ac}"
+        } else if mime == "application/pdf" {
+            "\u{1f4d5}"
+        } else if mime.starts_with("text/") || kind == "file" {
+            "\u{1f4c4}"
+        } else {
+            "\u{1f4ce}"
+        }
+    }
+
+    /// The card's dim line: type, size, and pixel dimensions when
+    /// the service recorded them, joined the way the web joins them.
+    fn attachment_meta(attachment: &muse_account::MessageAttachment) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(kind) = &attachment.kind {
+            parts.push(kind.clone());
+        } else if let Some(mime) = &attachment.mime_type {
+            parts.push(mime.clone());
+        }
+        if let Some(bytes) = attachment.bytes_len {
+            parts.push(human_bytes(bytes));
+        }
+        if let (Some(width), Some(height)) = (attachment.width, attachment.height) {
+            parts.push(format!("{width} \u{00d7} {height}"));
+        }
+        parts.join(" \u{00b7} ")
+    }
+
+    fn attachment_card(attachment: &muse_account::MessageAttachment) -> gtk::Box {
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        card.add_css_class("attachment-card");
+        let icon = gtk::Label::new(Some(attachment_icon(attachment)));
+        icon.add_css_class("attachment-icon");
+        icon.set_valign(gtk::Align::Start);
+        card.append(&icon);
+        let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let name = gtk::Label::new(Some(&attachment.filename));
+        name.add_css_class("attachment-name");
+        name.set_halign(gtk::Align::Start);
+        name.set_wrap(true);
+        name.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        name.set_max_width_chars(48);
+        texts.append(&name);
+        let meta = attachment_meta(attachment);
+        if !meta.is_empty() {
+            let meta_label = gtk::Label::new(Some(&meta));
+            meta_label.add_css_class("attachment-meta");
+            meta_label.set_halign(gtk::Align::Start);
+            texts.append(&meta_label);
+        }
+        if let Some(caption) = &attachment.caption {
+            let caption_label = gtk::Label::new(Some(caption));
+            caption_label.add_css_class("attachment-note");
+            caption_label.set_halign(gtk::Align::Start);
+            caption_label.set_wrap(true);
+            caption_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            caption_label.set_max_width_chars(56);
+            texts.append(&caption_label);
+        }
+        if let Some(transcription) = &attachment.transcription {
+            let label = gtk::Label::new(Some(transcription));
+            label.add_css_class("attachment-meta");
+            label.set_halign(gtk::Align::Start);
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+            label.set_max_width_chars(56);
+            texts.append(&label);
+        }
+        card.append(&texts);
+        card
+    }
+
     fn local_clock_stamp() -> String {
         gtk::glib::DateTime::now_local()
             .and_then(|now| now.format("%I:%M:%S %p"))
@@ -4557,6 +4724,33 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn attachment_meta_joins_type_size_and_dimensions() {
+            let mut attachment = muse_account::MessageAttachment {
+                filename: "shot.png".into(),
+                mime_type: Some("image/png".into()),
+                kind: Some("image".into()),
+                bytes_len: Some(2048),
+                width: Some(1200),
+                height: Some(800),
+                caption: None,
+                transcription: None,
+            };
+            assert_eq!(
+                attachment_meta(&attachment),
+                "image \u{00b7} 2 KB \u{00b7} 1200 \u{00d7} 800"
+            );
+            assert_eq!(human_bytes(512), "512 B");
+            assert_eq!(human_bytes(1024 * 1024 * 3 / 2), "1.5 MB");
+            attachment.kind = None;
+            attachment.bytes_len = None;
+            attachment.width = None;
+            assert_eq!(attachment_meta(&attachment), "image/png");
+            assert_eq!(attachment_icon(&attachment), "\u{1f5bc}\u{fe0f}");
+            attachment.mime_type = Some("text/plain".into());
+            assert_eq!(attachment_icon(&attachment), "\u{1f4c4}");
+        }
+
         #[test]
         fn short_stamp_extracts_hh_mm_and_refuses_noise() {
             assert_eq!(
@@ -4621,6 +4815,7 @@ mod native {
                     status: None,
                     options: Vec::new(),
                     selected_option: None,
+                    attachments: Vec::new(),
                 }
             }
             fn parked() -> State {
@@ -4864,6 +5059,7 @@ mod native {
                         status: Some("completed".into()),
                         options: vec![],
                         selected_option: None,
+                        attachments: Vec::new(),
                     })
                     .collect();
                 state.tasks = Some(TasksSnapshot {
@@ -4964,6 +5160,7 @@ mod native {
                         status: Some("completed".into()),
                         options: vec![],
                         selected_option: None,
+                        attachments: Vec::new(),
                     })
                     .collect::<Vec<_>>()
             };
@@ -6004,6 +6201,7 @@ mod tests {
             status: status.map(str::to_owned),
             options: Vec::new(),
             selected_option: None,
+            attachments: Vec::new(),
         }
     }
 
