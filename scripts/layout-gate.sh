@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Layout gate: the shell-fit proofs, run against the GTK this
 # environment provides. In CI this runs inside the AppImage builder
-# container — bookworm GTK 4.8, the libraries the AppImage actually
+# container — Ubuntu 24.04 GTK 4.14, the libraries the AppImage actually
 # ships; a proof against a newer host GTK is how the Nov 12, 2026
 # panel blowout shipped green. Locally it runs against the host
 # GTK, which still catches budget regressions.

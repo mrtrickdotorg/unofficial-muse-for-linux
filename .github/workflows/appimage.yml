@@ -62,7 +62,7 @@ jobs:
           bash -c 'mkdir -p "$TMPDIR" && ./scripts/build-appimage.sh'
 
     # The layout proofs run against the libraries the AppImage actually
-    # ships (the builder container's bookworm GTK), not the runner's —
+    # ships (the builder container's GTK 4.14), not the runner's —
     # and they gate the release: a shell that does not fit does not
     # publish.
     - name: Layout gate (bundled GTK, both screens, both dimensions)

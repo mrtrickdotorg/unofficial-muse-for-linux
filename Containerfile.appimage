@@ -1,8 +1,17 @@
-FROM docker.io/library/rust:1.99-bookworm
+FROM docker.io/library/ubuntu:24.04
+
+# Ubuntu 24.04 is the builder base on purpose (Patrick's call,
+# Nov 13, 2026): the AppImage bundles this container's GTK, and
+# bookworm's GTK 4.8 measured conversations so much slower than
+# 4.14 that chat switches locked the app for seconds on the
+# reader's laptop while a throttled VM on 4.14 settled the same
+# shapes in a fraction of the time. The cost is the glibc floor:
+# binaries built here need a host glibc >= 2.39.
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         ca-certificates \
         curl \
         dbus \
@@ -10,7 +19,7 @@ RUN apt-get update \
         dpkg-dev \
         file \
         git \
-        libfuse2 \
+        libfuse2t64 \
         libgdk-pixbuf2.0-bin \
         libglib2.0-bin \
         libgtk-4-dev \
@@ -27,7 +36,16 @@ RUN apt-get update \
         zsync \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add rustfmt clippy
+# The Rust toolchain stays pinned at 1.99, as the old rust: base
+# pinned it; Ubuntu's repositories do not carry it, so rustup
+# installs it. CI overrides CARGO_HOME with its cache mount at
+# run time; RUSTUP_HOME is not overridden, so the toolchain the
+# shims resolve stays this one.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain 1.99 --profile minimal \
+    && /usr/local/cargo/bin/rustup component add rustfmt clippy
+ENV PATH=/usr/local/cargo/bin:$PATH
 
 # Test-only pinned community runtime: real protobuf contracts, fake network IO.
 # This builder dependency is never copied into the distributable AppImage.
