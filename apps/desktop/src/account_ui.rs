@@ -15,6 +15,7 @@ enum Operation {
     Revoke,
     DeleteTask,
     StartSession,
+    SessionOp,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +110,11 @@ struct Controller<A, H, T> {
     /// is permanent and has no undo, so the press that arms and the press
     /// that sends are two different presses.
     confirming_delete: Option<String>,
+    /// The side chat and mutation kind in flight from its row's
+    /// menu, so the completion knows what was asked of the service
+    /// (a delete of the open chat lands the reader on the main
+    /// conversation; everything else just refreshes the listing).
+    session_op: Option<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,6 +415,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             revoking: None,
             deleting: None,
             confirming_delete: None,
+            session_op: None,
         }
     }
 }
@@ -851,6 +858,47 @@ impl<A, H: Clone, T> Controller<A, H, T> {
             }
             Err(error) => {
                 self.history_notice = format!("Could not start a new side chat: {error}");
+                None
+            }
+        }
+    }
+
+    /// Take the busy slot for one session mutation from a row's
+    /// menu. The press that confirms (for a delete, the popover's
+    /// second press) is the press that calls this, so one
+    /// confirmation maps to exactly one write.
+    fn begin_session_op(&mut self, session_id: &str, kind: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::SessionOp)?;
+        self.session_op = Some((session_id.to_string(), kind.to_string()));
+        Some(ticket)
+    }
+
+    /// Record a session mutation's answer: the (session, kind) it
+    /// concerned when the service took it, which drives the
+    /// completion's follow-up. A failure keeps every row as it was
+    /// and says so in the transcript notice.
+    fn finish_session_op(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::SessionOpAnswer, String>,
+    ) -> Option<(String, String)> {
+        if !self.accept(ticket) {
+            return None;
+        }
+        let pending = self.session_op.take();
+        match result {
+            Ok(answer) if answer.accepted => {
+                self.history_notice.clear();
+                pending
+            }
+            Ok(_) => {
+                self.history_notice =
+                    "The service did not accept that change to the side chat.".into();
+                None
+            }
+            Err(error) => {
+                self.history_notice = format!("Could not update the side chat: {error}");
                 None
             }
         }
@@ -1459,6 +1507,7 @@ mod native {
         Revoke(Result<muse_account::RevokeAnswer, String>),
         DeleteTask(Result<muse_account::DeleteAnswer, String>),
         StartSession(Result<muse_account::StartedSession, String>),
+        SessionOp(Result<muse_account::SessionOpAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -1524,6 +1573,36 @@ mod native {
     /// text cursor, so the row never selects and the conversation
     /// never switches — the list must behave like muse.ai, where one
     /// click on a chat opens it.
+    /// The first label carrying `name` in the widget's subtree,
+    /// itself included: rows find their title this way now that a
+    /// row carries more than the title.
+    fn find_named_label(widget: &gtk::Widget, name: &str) -> Option<gtk::Label> {
+        if widget.widget_name() == name
+            && let Some(label) = widget.downcast_ref::<gtk::Label>()
+        {
+            return Some(label.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            let next = current.next_sibling();
+            if let Some(found) = find_named_label(&current, name) {
+                return Some(found);
+            }
+            child = next;
+        }
+        None
+    }
+
+    /// One left-aligned item button for a row menu popover.
+    fn menu_item(text: &str) -> gtk::Button {
+        let button = gtk::Button::with_label(text);
+        button.add_css_class("flat");
+        if let Some(label) = button.child().and_downcast::<gtk::Label>() {
+            label.set_xalign(0.0);
+        }
+        button
+    }
+
     fn row_label(text: &str) -> gtk::Label {
         let label = gtk::Label::new(Some(text));
         label.set_xalign(0.0);
@@ -2344,9 +2423,10 @@ mod native {
                 if query.is_empty() {
                     return true;
                 }
-                let title = row
-                    .child()
-                    .and_downcast::<gtk::Label>()
+                // Rows carry furniture now (pin marker, menu
+                // button), so the title is found by its name inside
+                // the row rather than being the row's only child.
+                let title = find_named_label(row.upcast_ref(), "thread-title")
                     .map(|label| label.text().to_string().to_lowercase())
                     .unwrap_or_default();
                 title.contains(&query)
@@ -3519,6 +3599,211 @@ mod native {
         /// heading, as on the web. One press sends exactly one
         /// session.start; the completion lands the reader in the
         /// fresh chat with the composer focused.
+        /// Apply one session mutation from a row's menu -- the
+        /// pin, archive and rename actions, and a delete once its
+        /// popover confirmation is pressed. One call, one write;
+        /// the completion refreshes the listing, which is what
+        /// proves the new state.
+        fn session_op(self: &Rc<Self>, session_id: &str, kind: &str, title: Option<String>) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().history_notice =
+                    "Not connected. Connect your Muse session before changing a side chat.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_session_op(session_id, kind) else {
+                return;
+            };
+            let session_id = session_id.to_string();
+            let kind_owned = kind.to_string();
+            self.launch(ticket, move || {
+                match client.session_op(&session_id, &kind_owned, title.as_deref()) {
+                    Ok(answer) => Reply::SessionOp(Ok(answer)),
+                    Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    Err(error) => Reply::SessionOp(Err(error.to_string())),
+                }
+            });
+        }
+
+        /// The three-dot menu on a side chat's row, mirroring the
+        /// web's: pin or unpin, rename, archive or unarchive, and
+        /// delete behind an explicit confirmation page (deleting
+        /// is permanent; the arm and the send are two presses).
+        /// "Move up" is absent on purpose: no recorded route
+        /// carries a reorder, and an unrecorded write shape is
+        /// never guessed.
+        fn open_session_menu(self: &Rc<Self>, anchor: &gtk::Button, thread: &muse_account::Thread) {
+            let popover = self.build_session_menu(anchor, thread);
+            popover.popup();
+        }
+
+        /// Build a row's menu popover without presenting it, so
+        /// the menu's contents can be inspected (and exercised)
+        /// without a toplevel window.
+        fn build_session_menu(
+            self: &Rc<Self>,
+            anchor: &gtk::Button,
+            thread: &muse_account::Thread,
+        ) -> gtk::Popover {
+            let popover = gtk::Popover::new();
+            popover.set_parent(anchor);
+            popover.set_has_arrow(false);
+            popover.set_widget_name(&format!("session-menu:{}", thread.session_id));
+            popover.connect_closed(|popover| popover.unparent());
+
+            let main_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            main_page.set_margin_top(6);
+            main_page.set_margin_bottom(6);
+            main_page.set_margin_start(6);
+            main_page.set_margin_end(6);
+            let pin_item = menu_item(if thread.pinned { "Unpin" } else { "Pin" });
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let session_id = thread.session_id.clone();
+                let kind = if thread.pinned { "unpin" } else { "pin" };
+                pin_item.connect_clicked(move |_| {
+                    popover.popdown();
+                    ui.session_op(&session_id, kind, None);
+                });
+            }
+            main_page.append(&pin_item);
+            let rename_item = menu_item("Rename");
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let thread = thread.clone();
+                rename_item.connect_clicked(move |_| {
+                    ui.show_rename_page(&popover, &thread);
+                });
+            }
+            main_page.append(&rename_item);
+            let archive_item = menu_item(if thread.archived {
+                "Unarchive"
+            } else {
+                "Archive"
+            });
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let session_id = thread.session_id.clone();
+                let kind = if thread.archived {
+                    "unarchive"
+                } else {
+                    "archive"
+                };
+                archive_item.connect_clicked(move |_| {
+                    popover.popdown();
+                    ui.session_op(&session_id, kind, None);
+                });
+            }
+            main_page.append(&archive_item);
+            let delete_item = menu_item("Delete");
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let thread = thread.clone();
+                delete_item.connect_clicked(move |_| {
+                    ui.show_delete_page(&popover, &thread);
+                });
+            }
+            main_page.append(&delete_item);
+            popover.set_child(Some(&main_page));
+            popover
+        }
+
+        /// The menu's rename page: the current title in an entry,
+        /// and the rename fires only from its button, and only when
+        /// the text actually changed.
+        fn show_rename_page(
+            self: &Rc<Self>,
+            popover: &gtk::Popover,
+            thread: &muse_account::Thread,
+        ) {
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            page.set_margin_top(8);
+            page.set_margin_bottom(8);
+            page.set_margin_start(8);
+            page.set_margin_end(8);
+            let entry = gtk::Entry::new();
+            entry.set_text(&thread.title);
+            entry.set_width_chars(28);
+            entry.select_region(0, -1);
+            page.append(&entry);
+            let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            buttons.set_halign(gtk::Align::End);
+            let cancel = gtk::Button::with_label("Cancel");
+            {
+                let popover = popover.clone();
+                cancel.connect_clicked(move |_| popover.popdown());
+            }
+            buttons.append(&cancel);
+            let confirm = gtk::Button::with_label("Rename");
+            confirm.add_css_class("suggested-action");
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let session_id = thread.session_id.clone();
+                let original = thread.title.clone();
+                let entry = entry.clone();
+                confirm.connect_clicked(move |_| {
+                    let title = entry.text().trim().to_string();
+                    popover.popdown();
+                    if !title.is_empty() && title != original {
+                        ui.session_op(&session_id, "rename", Some(title));
+                    }
+                });
+            }
+            buttons.append(&confirm);
+            page.append(&buttons);
+            popover.set_child(Some(&page));
+            entry.grab_focus();
+        }
+
+        /// The menu's delete page: naming what will be lost, with
+        /// the destructive press kept separate from the press that
+        /// opened the menu.
+        fn show_delete_page(
+            self: &Rc<Self>,
+            popover: &gtk::Popover,
+            thread: &muse_account::Thread,
+        ) {
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            page.set_margin_top(8);
+            page.set_margin_bottom(8);
+            page.set_margin_start(8);
+            page.set_margin_end(8);
+            let warning = label(&format!(
+                "Permanently delete \u{201C}{}\u{201D}? This cannot be undone.",
+                thread.title
+            ));
+            warning.set_max_width_chars(36);
+            page.append(&warning);
+            let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            buttons.set_halign(gtk::Align::End);
+            let cancel = gtk::Button::with_label("Cancel");
+            {
+                let popover = popover.clone();
+                cancel.connect_clicked(move |_| popover.popdown());
+            }
+            buttons.append(&cancel);
+            let confirm = gtk::Button::with_label("Delete");
+            confirm.add_css_class("destructive-action");
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let session_id = thread.session_id.clone();
+                confirm.connect_clicked(move |_| {
+                    popover.popdown();
+                    ui.session_op(&session_id, "delete", None);
+                });
+            }
+            buttons.append(&confirm);
+            page.append(&buttons);
+            popover.set_child(Some(&page));
+        }
+
         fn start_session(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().history_notice =
@@ -3742,6 +4027,9 @@ mod native {
                         Operation::StartSession => Reply::StartSession(Err(
                             "Session-start worker stopped unexpectedly.".into(),
                         )),
+                        Operation::SessionOp => {
+                            Reply::SessionOp(Err("Session worker stopped unexpectedly.".into()))
+                        }
                     },
                 };
                 let completion_started = std::time::Instant::now();
@@ -3765,6 +4053,7 @@ mod native {
             let mut reread_grants = false;
             let mut approvals_after = false;
             let mut start_after: Option<String> = None;
+            let mut session_after: Option<(String, String)> = None;
             let auth_expired = matches!(&reply, Reply::AuthExpired);
             // A dispatch the service accepted starts the reply fast-path
             // whether or not the bridge could confirm it in scoped history:
@@ -3912,6 +4201,9 @@ mod native {
                         // once this completion's state borrow closes.
                         start_after = state.finish_start_session(ticket, result);
                     }
+                    Reply::SessionOp(result) => {
+                        session_after = state.finish_session_op(ticket, result);
+                    }
                     Reply::Permissions(result) => {
                         // A list is a report: nothing here revokes anything.
                         state.finish_permissions(ticket, result);
@@ -4014,6 +4306,20 @@ mod native {
             }
             if reread_grants {
                 self.check_permissions();
+            }
+            if let Some((session_id, kind)) = session_after {
+                // The listing re-read below is the proof of the new
+                // state. A delete of the chat being read takes the
+                // reader back to the main conversation first: the
+                // scope they were in no longer exists.
+                if kind == "delete"
+                    && self.state.borrow().scope.as_deref() == Some(session_id.as_str())
+                {
+                    self.state.borrow_mut().select_thread(None);
+                    self.prompt.set_text("");
+                }
+                self.render();
+                self.read(false, true);
             }
             if let Some(session_id) = start_after {
                 // Land in the chat the press just started. The
@@ -4557,6 +4863,7 @@ mod native {
                     Operation::Revoke => " \u{b7} sending your revocation\u{2026}",
                     Operation::DeleteTask => " \u{b7} deleting the scheduled task\u{2026}",
                     Operation::StartSession => " \u{b7} starting a new side chat\u{2026}",
+                    Operation::SessionOp => " \u{b7} updating the side chat\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -4585,12 +4892,21 @@ mod native {
             // 2026). Selection is synced in place below instead.
             let threads_started = std::time::Instant::now();
             let mut threads_rebuilt = false;
+            // The fingerprint covers what a row shows -- title,
+            // archived, pinned -- not just the count, so a rename
+            // or a pin from the row's own menu rebuilds the list
+            // with the new state instead of looking ignored.
             let threads_key = format!(
                 "{:?}",
-                state
-                    .account
-                    .as_ref()
-                    .map(|a| (&a.identity_name, a.threads.len()))
+                state.account.as_ref().map(|a| {
+                    (
+                        &a.identity_name,
+                        a.threads
+                            .iter()
+                            .map(|t| (&t.session_id, &t.title, t.archived, t.pinned))
+                            .collect::<Vec<_>>(),
+                    )
+                })
             );
             if self.threads_key.borrow().as_str() != threads_key {
                 threads_rebuilt = true;
@@ -4607,9 +4923,38 @@ mod native {
                         // updated-at string that used to trail the title
                         // wrapped rows onto two lines and matched nothing
                         // on the web (Patrick's Nov 10 side-by-side).
+                        // The row carries the web's furniture: a pin
+                        // marker on pinned chats and, at the end, the
+                        // three-dot menu button.
+                        let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                        if thread.pinned {
+                            let pin = label("\u{1F4CC}");
+                            pin.add_css_class("dim-label");
+                            pin.set_valign(gtk::Align::Center);
+                            row_box.append(&pin);
+                        }
                         let row_label = row_label(&format!("{}{archived}", thread.title));
                         row_label.add_css_class("panel-item-label");
-                        row.set_child(Some(&row_label));
+                        row_label.set_widget_name("thread-title");
+                        row_label.set_hexpand(true);
+                        row_box.append(&row_label);
+                        let menu_button = gtk::Button::with_label("\u{22EF}");
+                        menu_button.add_css_class("flat");
+                        menu_button.set_widget_name(&format!("thread-menu:{}", thread.session_id));
+                        menu_button.set_valign(gtk::Align::Center);
+                        menu_button.set_tooltip_text(Some("Side chat actions"));
+                        {
+                            let weak = self.self_weak.borrow().clone();
+                            let thread = thread.clone();
+                            let anchor = menu_button.clone();
+                            menu_button.connect_clicked(move |_| {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.open_session_menu(&anchor, &thread);
+                                }
+                            });
+                        }
+                        row_box.append(&menu_button);
+                        row.set_child(Some(&row_box));
                         self.thread_list.append(&row);
                     }
                 }
@@ -4631,6 +4976,7 @@ mod native {
                     let row_label =
                         row_label("Selected conversation (not in current service thread list)");
                     row_label.add_css_class("panel-item-label");
+                    row_label.set_widget_name("thread-title");
                     row.set_child(Some(&row_label));
                     self.thread_list.append(&row);
                 }
@@ -5785,6 +6131,7 @@ mod native {
                                 "Project chat {i} -- a realistic conversation title with several words"
                             ),
                             archived: false,
+                            pinned: false,
                             updated_at: Some("2026-11-12T15:00:00+00:00".into()),
                         })
                         .collect(),
@@ -5928,6 +6275,125 @@ mod native {
 
         #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn side_chat_rows_carry_the_web_menu() {
+            // Patrick's screenshot of the web (Nov 13, 2026): every
+            // side chat row has a three-dot menu -- pin/unpin,
+            // rename, archive, delete. The rows here must carry the
+            // button, pinned rows their marker, and the menu the
+            // same items; delete stays two presses, and with no
+            // account linked the confirming press explains itself
+            // instead of sending anything.
+            gtk::init().unwrap();
+            fn walk(widget: &gtk::Widget, visit: &mut impl FnMut(&gtk::Widget)) {
+                visit(widget);
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    let next = current.next_sibling();
+                    walk(&current, visit);
+                    child = next;
+                }
+            }
+            fn button_with_text(root: &gtk::Widget, text: &str) -> Option<gtk::Button> {
+                let mut found = None;
+                walk(root, &mut |widget| {
+                    if let Some(button) = widget.downcast_ref::<gtk::Button>()
+                        && button
+                            .child()
+                            .and_downcast::<gtk::Label>()
+                            .is_some_and(|label| label.text() == text)
+                    {
+                        found = Some(button.clone());
+                    }
+                });
+                found
+            }
+            fn label_contains(root: &gtk::Widget, needle: &str) -> bool {
+                let mut found = false;
+                walk(root, &mut |widget| {
+                    if let Some(label) = widget.downcast_ref::<gtk::Label>()
+                        && label.text().contains(needle)
+                    {
+                        found = true;
+                    }
+                });
+                found
+            }
+            fn named(root: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+                let mut found = None;
+                walk(root, &mut |widget| {
+                    if widget.widget_name() == name {
+                        found = Some(widget.clone());
+                    }
+                });
+                found
+            }
+            let page = build(&gtk::Label::new(None));
+            let threads = vec![
+                muse_account::Thread {
+                    session_id: "thread-1".into(),
+                    title: "Pinned chat".into(),
+                    archived: false,
+                    pinned: true,
+                    updated_at: None,
+                },
+                muse_account::Thread {
+                    session_id: "thread-2".into(),
+                    title: "Plain chat".into(),
+                    archived: true,
+                    pinned: false,
+                    updated_at: None,
+                },
+            ];
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(muse_account::AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: threads.clone(),
+                });
+            }
+            page.ui.render();
+            let root = page.threads_panel.upcast_ref::<gtk::Widget>().clone();
+            let menu_button = named(&root, "thread-menu:thread-1")
+                .expect("the pinned row carries its menu button")
+                .downcast::<gtk::Button>()
+                .expect("the menu widget is a button");
+            assert!(named(&root, "thread-menu:thread-2").is_some());
+            let first_row = named(&root, "thread:thread-1").expect("first row");
+            assert!(label_contains(&first_row, "\u{1F4CC}"));
+            let second_row = named(&root, "thread:thread-2").expect("second row");
+            assert!(!label_contains(&second_row, "\u{1F4CC}"));
+            assert!(label_contains(&second_row, "Plain chat [archived]"));
+            let popover = page
+                .ui
+                .build_session_menu(&menu_button, &threads[0])
+                .upcast::<gtk::Widget>();
+            for item in ["Unpin", "Rename", "Archive", "Delete"] {
+                assert!(
+                    button_with_text(&popover, item).is_some(),
+                    "the pinned chat's menu offers {item}"
+                );
+            }
+            button_with_text(&popover, "Delete")
+                .expect("delete item")
+                .emit_clicked();
+            assert!(label_contains(&popover, "Permanently delete"));
+            assert!(label_contains(&popover, "Pinned chat"));
+            button_with_text(&popover, "Delete")
+                .expect("delete confirmation")
+                .emit_clicked();
+            assert!(
+                page.ui
+                    .state
+                    .borrow()
+                    .history_notice
+                    .contains("Not connected"),
+                "a disconnected delete must say why nothing was sent"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn bench_transcript_first_frame() {
             gtk::init().unwrap();
             // A/B toggles for attributing the frame cost (Nov 13,
@@ -5975,6 +6441,7 @@ mod native {
                                     "Project chat {i} -- a realistic conversation title with several words"
                                 ),
                                 archived: false,
+                                pinned: false,
                                 updated_at: Some("2026-11-12T15:00:00+00:00".into()),
                             })
                             .collect(),
@@ -7906,6 +8373,70 @@ mod tests {
         );
         assert_eq!(started.as_deref(), Some("thread-9"));
         assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn a_session_op_records_its_target_until_the_answer_lands() {
+        let mut state: State = Controller::default();
+        // No account linked: no ticket, nothing reaches the service.
+        assert!(state.begin_session_op("thread-1", "pin").is_none());
+        state.account = Some("account".into());
+        let ticket = state.begin_session_op("thread-1", "pin").expect("ticket");
+        // One mutation in flight at a time.
+        assert!(state.begin_session_op("thread-2", "archive").is_none());
+        let done = state.finish_session_op(
+            &ticket,
+            Ok(muse_account::SessionOpAnswer {
+                session_id: "thread-1".into(),
+                kind: "pin".into(),
+                accepted: true,
+            }),
+        );
+        assert_eq!(
+            done,
+            Some(("thread-1".to_string(), "pin".to_string())),
+            "the completion must learn what was done, to follow up"
+        );
+        assert!(state.session_op.is_none());
+        assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn a_failed_session_op_reports_and_clears() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        let ticket = state
+            .begin_session_op("thread-1", "delete")
+            .expect("ticket");
+        assert!(
+            state
+                .finish_session_op(&ticket, Err("timeout".into()))
+                .is_none()
+        );
+        assert!(
+            state
+                .history_notice
+                .contains("Could not update the side chat")
+        );
+        assert!(state.session_op.is_none());
+        let ticket = state
+            .begin_session_op("thread-1", "archive")
+            .expect("ticket");
+        assert!(
+            state
+                .finish_session_op(
+                    &ticket,
+                    Ok(muse_account::SessionOpAnswer {
+                        session_id: "thread-1".into(),
+                        kind: "archive".into(),
+                        accepted: false,
+                    }),
+                )
+                .is_none()
+        );
+        assert!(state.history_notice.contains("did not accept"));
     }
 
     #[test]

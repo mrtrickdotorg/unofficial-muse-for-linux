@@ -72,6 +72,10 @@ pub struct Thread {
     pub session_id: String,
     pub title: String,
     pub archived: bool,
+    /// The listing's own pin flag; older answers without it read
+    /// as unpinned rather than failing the whole snapshot.
+    #[serde(default)]
+    pub pinned: bool,
     pub updated_at: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +466,19 @@ pub struct StartedSession {
     pub session_id: String,
 }
 
+/// What the service said about a session mutation it took.
+///
+/// `accepted` means the service accepted the request; it does not
+/// mean the listing already shows the new state. Only a fresh read
+/// of the listing proves that, so callers re-read rather than
+/// trusting this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOpAnswer {
+    pub session_id: String,
+    pub kind: String,
+    pub accepted: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -752,6 +769,32 @@ impl AccountClient {
     /// the session listing, not merely echoed from the start call.
     pub fn start_session(&self) -> Result<StartedSession, AccountError> {
         self.request(serde_json::json!({"op": "start_session"}), false)
+    }
+    /// Apply exactly one session mutation, once: pin, unpin,
+    /// archive, unarchive, delete, or rename (with its title).
+    ///
+    /// The id must be one the session listing published and the
+    /// bridge makes a single request, so one confirmed press maps
+    /// to one write. Whether the listing then shows the new state
+    /// is proven by re-reading it, never by this answer alone.
+    pub fn session_op(
+        &self,
+        session_id: &str,
+        kind: &str,
+        title: Option<&str>,
+    ) -> Result<SessionOpAnswer, AccountError> {
+        if session_id.is_empty() || session_id.len() > 256 || session_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let mut body = serde_json::json!({
+            "op": "session_op",
+            "session_id": session_id,
+            "kind": kind,
+        });
+        if let Some(title) = title {
+            body["title"] = title.into();
+        }
+        self.request(body, false)
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.
