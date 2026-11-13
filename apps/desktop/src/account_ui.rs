@@ -1271,6 +1271,8 @@ mod native {
         /// keeps settling.
         follow_bottom: Cell<bool>,
         start_logged: Cell<bool>,
+        settle_changes: Cell<u32>,
+        settle_snaps: Cell<u32>,
         stall_watch_armed: Cell<bool>,
         last_render_scope: RefCell<Option<Option<String>>>,
         /// A bottom snap is inside set_value: the value-changed it
@@ -2415,6 +2417,8 @@ mod native {
             scroll_to_bottom: Cell::new(false),
             follow_bottom: Cell::new(false),
             start_logged: Cell::new(false),
+            settle_changes: Cell::new(0),
+            settle_snaps: Cell::new(0),
             stall_watch_armed: Cell::new(false),
             last_render_scope: RefCell::new(None),
             snapping_bottom: Cell::new(false),
@@ -2577,13 +2581,23 @@ mod native {
             // final retry, and the view stopped short of the newest
             // messages (Nov 13, 2026). An adjustment reports every
             // geometry change -- fresh rows laid out, the viewport
-            // resized -- so snap from its changed signal instead:
-            // the snap repeats for exactly as long as the geometry
-            // keeps moving and lands on the true bottom.
+            // resized. The first version snapped from inside this
+            // signal, inside the layout cascade itself: every snap
+            // moved the value, the move forced another allocation
+            // pass over the whole transcript, and the passes chained
+            // until the main thread had been inside layout for
+            // seconds at a time -- a switch on a heavy thread locked
+            // the app solid (op-timing-9, Nov 13, 2026: the fetched
+            // render waited 5.6s behind the primed transcript's
+            // settle). Now the signal only counts the change and
+            // arms the idle settle: one snap per main-loop turn,
+            // input processed between passes, the bottom still
+            // exact when the geometry stops moving.
             let u = Rc::clone(&ui);
-            ui.scroll.vadjustment().connect_changed(move |adjustment| {
+            ui.scroll.vadjustment().connect_changed(move |_adjustment| {
                 if u.follow_bottom.get() {
-                    u.snap_to_bottom(adjustment);
+                    u.settle_changes.set(u.settle_changes.get() + 1);
+                    u.arm_bottom_settle();
                 }
             });
             // Enforcement alone misses one mover: during a
@@ -3908,13 +3922,15 @@ mod native {
 
         /// Put the transcript on its newest message, at the bottom
         /// the adjustment's CURRENT geometry reports. Layout may
-        /// still be settling; the changed handler wired in build()
-        /// re-runs this on every later geometry change while the
-        /// reader follows the bottom, so the final snap lands on
-        /// the final geometry whenever it arrives.
+        /// still be settling; the idle settle pass re-runs this as
+        /// geometry keeps moving while the reader follows the
+        /// bottom, so the final snap lands on the final geometry
+        /// whenever it arrives -- one snap per main-loop turn,
+        /// never inside the layout cascade itself.
         fn snap_to_bottom(&self, adjustment: &gtk::Adjustment) {
             let target = (adjustment.upper() - adjustment.page_size()).max(0.0);
             if (adjustment.value() - target).abs() > 0.5 {
+                self.settle_snaps.set(self.settle_snaps.get() + 1);
                 self.snapping_bottom.set(true);
                 adjustment.set_value(target);
                 self.snapping_bottom.set(false);
@@ -3959,9 +3975,28 @@ mod native {
                 let adjustment = self.scroll.vadjustment();
                 self.follow_bottom
                     .set(adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0);
+                if !self.follow_bottom.get() {
+                    self.settle_changes.set(0);
+                    self.settle_snaps.set(0);
+                }
             }
             if self.follow_bottom.get() {
+                let snaps_before = self.settle_snaps.get();
                 self.snap_to_bottom(&self.scroll.vadjustment());
+                if self.settle_snaps.get() == snaps_before {
+                    // A settle pass that needed no snap: the
+                    // geometry has stopped moving and the episode
+                    // is over. Report a busy one -- how many
+                    // geometry changes and snaps one landing took
+                    // is the number that sizes the settle loop.
+                    let changes = self.settle_changes.replace(0);
+                    let snaps = self.settle_snaps.replace(0);
+                    if (changes > 3 || snaps > 2)
+                        && let Some(client) = self.client.borrow().as_ref()
+                    {
+                        client.log_settle(changes, snaps);
+                    }
+                }
             }
         }
 
@@ -3990,7 +4025,7 @@ mod native {
                 }
                 if let Some(previous) = *last_tick.borrow() {
                     let gap = now.duration_since(previous);
-                    if gap.as_millis() > 300 && gap.as_secs() < 5 {
+                    if gap.as_millis() > 300 && gap.as_secs() < 30 {
                         let due = last_logged
                             .borrow()
                             .is_none_or(|logged| now.duration_since(logged).as_secs() >= 5);

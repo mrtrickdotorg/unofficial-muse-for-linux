@@ -964,6 +964,16 @@ impl AccountClient {
     pub fn log_switch(&self) {
         append_timing_line(&self.config.config_dir, "client switch");
     }
+    /// A bottom-settle episode as it closes: how many geometry
+    /// changes the transcript's adjustment reported and how many
+    /// snaps the landing took. A quiet landing is 1-2 of each; a
+    /// layout feedback loop is dozens.
+    pub fn log_settle(&self, changes: u32, snaps: u32) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!("client settle changes={changes} snaps={snaps}"),
+        );
+    }
     /// One frame in an actively-drawing window took this long:
     /// layout, paint, or a blocked main thread -- the phase no op
     /// or render line can see.
