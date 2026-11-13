@@ -4633,18 +4633,20 @@ mod native {
             // assistant row in the transcript while the newest service row is
             // still the reader's own message. It carries the streamed reply
             // text as fragments land; before the first fragment it carries
-            // the working status, or "Thinking\u{2026}". An in-flight
-            // assistant row already in the transcript IS that bubble, so no
-            // second one is added over it, and the finished row replaces the
-            // bubble the moment the turn closes.
+            // the working status when the run reports one, and the web's
+            // animated three-dot thinking bubble when it does not (Patrick,
+            // Nov 13, 2026). An in-flight assistant row already in the
+            // transcript IS that bubble, so no second one is added over it,
+            // and the finished row replaces the bubble the moment the turn
+            // closes.
             let newest_in_flight = state
                 .history
                 .last()
                 .is_some_and(|row| row.role == "assistant" && row.status.is_none());
             // The bubble earns its shown stamp when the first streamed
             // words print -- the moment the reply itself reached the
-            // screen, before history settles it. "Thinking..." before that
-            // carries no stamp: it printed at send time and would only
+            // screen, before history settles it. The dots before that
+            // carry no stamp: they printed at send time and would only
             // duplicate the echo's sent stamp.
             let bubble_stamp = if !state.live_draft.is_empty() {
                 let mut slot = self.draft_stamp.borrow_mut();
@@ -4657,21 +4659,31 @@ mod native {
                 None
             };
             if (state.watching_run || state.sending.is_some()) && !newest_in_flight {
-                let working = if !state.live_draft.is_empty() {
-                    state.live_draft.clone()
+                if !state.live_draft.is_empty() {
+                    super::super::append_chat_grouped(
+                        &self.history,
+                        super::super::ChatRole::Assistant,
+                        &super::presentation_text(&state.live_draft),
+                        bubble_stamp,
+                        &avatar_initial,
+                        false,
+                    );
                 } else if let Some(status) = state.live_status.strip_prefix("Agent \u{00b7} ") {
-                    status.to_owned()
+                    super::super::append_chat_grouped(
+                        &self.history,
+                        super::super::ChatRole::Assistant,
+                        &super::presentation_text(status),
+                        bubble_stamp,
+                        &avatar_initial,
+                        false,
+                    );
                 } else {
-                    "Thinking\u{2026}".to_owned()
-                };
-                super::super::append_chat_grouped(
-                    &self.history,
-                    super::super::ChatRole::Assistant,
-                    &super::presentation_text(&working),
-                    bubble_stamp,
-                    &avatar_initial,
-                    false,
-                );
+                    super::super::append_thinking_grouped(
+                        &self.history,
+                        bubble_stamp,
+                        &avatar_initial,
+                    );
+                }
             }
             // One timing line per changed transcript: every fetch
             // stage already writes one, and this closes the last
@@ -5588,6 +5600,96 @@ mod native {
             );
             clamp.set_child(None::<&gtk::Widget>);
             window.close();
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn thinking_bubble_shows_three_dots_until_words_arrive() {
+            // Patrick, Nov 13, 2026: the web's thinking bubble --
+            // three dots pulsing in turn -- in the app, replacing
+            // the literal "Thinking..." label. The bubble's three
+            // states: dots while nothing has landed, the working
+            // status when the run reports one, and the streamed
+            // text the moment words arrive.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            fn collect(widget: &gtk::Widget, labels: &mut Vec<gtk::Label>) {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    labels.push(label.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    collect(&current, labels);
+                    child = current.next_sibling();
+                }
+            }
+            let labels = |page: &AccountPage| {
+                let mut found = Vec::new();
+                collect(page.ui.history.upcast_ref(), &mut found);
+                found
+            };
+            let dot_count = |page: &AccountPage| {
+                labels(page)
+                    .iter()
+                    .filter(|label| {
+                        label
+                            .css_classes()
+                            .iter()
+                            .any(|class| class.as_str() == "think-dot")
+                    })
+                    .count()
+            };
+            let has_text = |page: &AccountPage, needle: &str| {
+                labels(page)
+                    .iter()
+                    .any(|label| label.text().contains(needle))
+            };
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                state.scope = Some("thread-1".into());
+                state.history = vec![muse_account::HistoryMessage {
+                    message_id: "m0".into(),
+                    seq: 0,
+                    role: "user".into(),
+                    text: "Are you there?".into(),
+                    timestamp: Some("2026-11-13T07:00:00+00:00".into()),
+                    status: Some("completed".into()),
+                    options: vec![],
+                    selected_option: None,
+                    attachments: Vec::new(),
+                }];
+                state.watching_run = true;
+            }
+            page.ui.render();
+            assert_eq!(
+                dot_count(&page),
+                3,
+                "a watched run with no words yet should show the three-dot bubble"
+            );
+            assert!(
+                !has_text(&page, "Thinking\u{2026}"),
+                "the literal Thinking label should be gone"
+            );
+            page.ui.state.borrow_mut().live_status = "Agent \u{00b7} Running a command".into();
+            page.ui.render();
+            assert_eq!(dot_count(&page), 0, "a reported status replaces the dots");
+            assert!(
+                has_text(&page, "Running a command"),
+                "the status text should be the bubble's content"
+            );
+            page.ui.state.borrow_mut().live_draft = "Partial reply".into();
+            page.ui.render();
+            assert_eq!(dot_count(&page), 0, "streamed words replace the dots");
+            assert!(
+                has_text(&page, "Partial reply"),
+                "the draft should be the bubble's content"
+            );
         }
 
         #[test]
