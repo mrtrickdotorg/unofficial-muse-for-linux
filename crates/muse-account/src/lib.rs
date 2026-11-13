@@ -76,7 +76,18 @@ pub struct Thread {
     /// as unpinned rather than failing the whole snapshot.
     #[serde(default)]
     pub pinned: bool,
+    /// Whether the session is a conversation thread at all. The
+    /// service seeds non-thread sessions (the "Learn about ..."
+    /// walkthrough) into the same listing; the web sidebar shows
+    /// threads only. Absent reads as a thread, so an older answer
+    /// can never empty the sidebar.
+    #[serde(default = "default_thread")]
+    pub is_thread: bool,
     pub updated_at: Option<String>,
+}
+
+fn default_thread() -> bool {
+    true
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryMessage {

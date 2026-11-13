@@ -1757,7 +1757,24 @@ def updated_at_text(session):
     return optional_text(session.get("updated_at"))
 
 
-def session_rows(client, config):
+_SESSIONS_PROBED = False
+
+
+def _thread_flag(row):
+    """Whether a sessions.list row is a conversation thread.
+
+    The recorded consumer reads `is_thread` off each row; the web
+    sidebar lists threads, and seeded surfaces that ride the same
+    list (the "Learn about ..." walkthrough) are not threads --
+    the app listed them as chats until it read this flag (Patrick,
+    Nov 13, 2026). Absent or null reads as a thread: the sidebar
+    showed every row before the flag was read, and a missing flag
+    must not be able to empty it."""
+    value = row.get("is_thread")
+    return True if value is None else bool(value)
+
+
+def session_rows(client, config, config_dir=None):
     """Project the conversation list from `sessions.list` itself.
 
     `status()` also runs `chat.unread_count` and `vm.health`, and a failing
@@ -1772,6 +1789,7 @@ def session_rows(client, config):
             "title": required_text(row.get("title")),
             "archived": bool(row.get("archived", False)),
             "pinned": bool(row.get("pinned", False)),
+            "is_thread": _thread_flag(row),
             "updated_at": optional_text(row.get("updated_at")),
         } for row in object_rows(client.threads(include_archived=True))]
     with gateway_scope(config) as gateway:
@@ -1779,6 +1797,15 @@ def session_rows(client, config):
     sessions = data.get("sessions", []) if isinstance(data, dict) else None
     if not isinstance(sessions, list):
         raise BridgeFailure("protocol_error")
+    global _SESSIONS_PROBED
+    if not _SESSIONS_PROBED and config_dir:
+        _SESSIONS_PROBED = True
+        nonthread = sum(1 for s in sessions
+                        if isinstance(s, dict) and not _thread_flag(s))
+        keys = ",".join(sorted(sessions[0].keys())) if sessions and isinstance(
+            sessions[0], dict) else ""
+        timing_log(config_dir, "sessions-shape rows={} nonthread={} keys={}".format(
+            len(sessions), nonthread, keys)[:600])
     rows = []
     for session in sessions:
         if not isinstance(session, dict):
@@ -1788,6 +1815,7 @@ def session_rows(client, config):
             "title": required_text(session.get("title")),
             "archived": bool(session.get("archived", False)),
             "pinned": bool(session.get("pinned", False)),
+            "is_thread": _thread_flag(session),
             "updated_at": updated_at_text(session),
         })
     return rows
@@ -1839,7 +1867,8 @@ class Adapter:
             return {
                 "identity_name": facts["identity_name"],
                 "vm_id": facts["vm_id"],
-                "threads": session_rows(self.client, self.config),
+                "threads": session_rows(self.client, self.config,
+                                        request.get("config_dir")),
             }
         if request["op"] == "identity":
             # The same verification as `connect` minus `sessions.list`, which the
