@@ -949,6 +949,30 @@ impl AccountClient {
             &format!("client render-full ms={}", elapsed.as_millis()),
         );
     }
+    /// Which build wrote the lines that follow: sessions from
+    /// different builds share one log, and more than one diagnosis
+    /// has chased a symptom the running build had already fixed.
+    pub fn log_start(&self, build: &str) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!("client start build={build}"),
+        );
+    }
+    /// A chat-switch click, so the log brackets click -> render ->
+    /// frame: which of the three legs eats the time is the whole
+    /// question when a switch feels slow.
+    pub fn log_switch(&self) {
+        append_timing_line(&self.config.config_dir, "client switch");
+    }
+    /// One frame in an actively-drawing window took this long:
+    /// layout, paint, or a blocked main thread -- the phase no op
+    /// or render line can see.
+    pub fn log_frame_stall(&self, elapsed: Duration) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!("client frame-stall ms={}", elapsed.as_millis()),
+        );
+    }
     /// One request line to the host, one reply line back.
     ///
     /// `Ok(None)` means no host is available, so the caller keeps its original
