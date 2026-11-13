@@ -1131,6 +1131,9 @@ mod native {
         /// Start a new conversation with text already in the composer
         /// (the Feed page's Discuss action).
         pub discuss: Rc<dyn Fn(String)>,
+        /// Re-evaluate the side panel (the shell calls this when the
+        /// window crosses the responsive breakpoint).
+        pub refresh_side_panel: Rc<dyn Fn()>,
         pub settings: gtk::Expander,
         pub cancel_login: Rc<dyn Fn()>,
         pub host_context: AccountContext,
@@ -1251,6 +1254,11 @@ mod native {
         let label = gtk::Label::new(Some(text));
         label.set_xalign(0.0);
         label.set_wrap(true);
+        // WordChar everywhere prose is set: a label's minimum under
+        // plain word wrap is its longest unbreakable token, and
+        // service text carries tokens (ids, URLs, paths) that must
+        // never be allowed to set a page's — or the shell's — width.
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_selectable(true);
         label.set_max_width_chars(110);
         label
@@ -1303,8 +1311,11 @@ mod native {
         let label = gtk::Label::new(Some(text));
         label.set_xalign(0.0);
         label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_selectable(false);
-        label.set_max_width_chars(110);
+        // The sidebar column is ~403px; a row's natural width must
+        // live inside it, not at the page-wide 110-char cap.
+        label.set_max_width_chars(48);
         label
     }
 
@@ -2171,10 +2182,10 @@ mod native {
         side_panel.add_css_class("side-panel-right");
         side_panel.set_size_request(283, -1);
         side_panel.set_visible(false);
-        let side_identity = label("");
+        let side_identity = Ui::panel_label("");
         side_identity.add_css_class("panel-title");
         side_panel.append(&side_identity);
-        let side_status = label("");
+        let side_status = Ui::panel_label("");
         side_status.add_css_class("dim-label");
         side_panel.append(&side_status);
         let side_agents_heading = label("Today");
@@ -2406,6 +2417,13 @@ mod native {
             }
         });
         let weak = Rc::downgrade(&ui);
+        let refresh_side_panel = Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                let state = ui.state.borrow();
+                ui.render_side_panel(&state);
+            }
+        });
+        let weak = Rc::downgrade(&ui);
         let new_chat = Rc::new(move || {
             if let Some(ui) = weak.upgrade() {
                 let changed = ui.state.borrow_mut().select_thread(None);
@@ -2450,6 +2468,7 @@ mod native {
             focus_search,
             new_chat,
             discuss,
+            refresh_side_panel,
             settings,
             cancel_login,
             host_context,
@@ -3344,7 +3363,19 @@ mod native {
                 self.side_panel.set_visible(false);
                 return;
             };
-            self.side_panel.set_visible(true);
+            // The responsive breakpoint: below the shell's minimum
+            // comfortable width the panel steps aside rather than
+            // starving the page (Patrick, Nov 12, 2026: "I just want
+            // this to fit whether it's on a laptop screen or a large
+            // monitor"). The shell nudges a re-render when the window
+            // crosses the line; renders also recur on every poll.
+            let wide_enough = self
+                .side_panel
+                .root()
+                .and_then(|root| root.downcast::<gtk::Window>().ok())
+                .map(|window| window.width() >= crate::SIDE_PANEL_MIN_WINDOW_PX)
+                .unwrap_or(true);
+            self.side_panel.set_visible(wide_enough);
             self.side_identity.set_text(&account.identity_name);
             let status = if state.live_status.is_empty() {
                 "Connected".to_string()
@@ -4672,6 +4703,153 @@ mod native {
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
+            window.close();
+        }
+
+        /// The production-shaped worst cases for the shell-fit
+        /// gates: a token-bearing prompt, a prose prompt, a long
+        /// schedule title carrying an id, a run summary carrying a
+        /// URL — the shapes Patrick's account actually produces,
+        /// which prose-only fixtures kept missing (Nov 12, 2026).
+        fn adversarial_shell_row() -> (super::AccountPage, gtk::Box) {
+            let page = build(&gtk::Label::new(None));
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                state.tasks = Some(TasksSnapshot {
+                    schedules: vec![muse_account::Schedule {
+                        id: "sched-1".into(),
+                        title: "Weekly digest for artifact_9f63a611cb8effd5a207c91b394e88d1f0a4b6c5e7d8091a2b3c4d5e6f708192a3b4c5d6".into(),
+                        enabled: true,
+                        timezone: Some("America/Detroit".into()),
+                        next_run_at_utc: Some(1_794_500_000),
+                    }],
+                    runs: vec![muse_account::TaskRun {
+                        run_id: "run-1".into(),
+                        job_id: "sched-1".into(),
+                        status: "completed".into(),
+                        result_summary: Some("Posted https://chaosco.app/share/9f63a611cb8effd5a207c91b394e88d1f0a4b6c5e7d8091a2b3c4d5e6f708192a3b4 and filed the rest".into()),
+                        error_text: None,
+                        scheduled_for_utc: Some(1_794_400_000),
+                    }],
+                    agents: vec![
+                        muse_account::AgentActivity {
+                            prompt: "Process artifact_9f63a611cb8effd5a207c91b394e88d1f0a4b6c5e7d8091a2b3c4d5e6f708192a3b4c5d6 when it lands".into(),
+                            status: Some("running".into()),
+                            created_at: Some("2026-11-12T23:00:00+00:00".into()),
+                            completed_at: None,
+                            final_response: None,
+                        },
+                        muse_account::AgentActivity {
+                            prompt: "## Task and updates\n\nThis history gives the user's goal, choices and constraints. It appears in order, with later updates refining earlier ones.".into(),
+                            status: Some("completed".into()),
+                            created_at: Some("2026-11-12T20:00:00+00:00".into()),
+                            completed_at: Some("2026-11-12T20:04:00+00:00".into()),
+                            final_response: Some("Three threads filed and the drain is quiet.".into()),
+                        },
+                    ],
+                });
+            }
+            page.ui.render();
+            let sidebar_stub = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            sidebar_stub.set_size_request(494, -1);
+            let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            page.root.set_hexpand(true);
+            content_row.append(&page.root);
+            content_row.append(&page.side_panel);
+            let shell_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            shell_row.append(&sidebar_stub);
+            shell_row.append(&content_row);
+            (page, shell_row)
+        }
+
+        fn pump_main(ms: u64) {
+            let ctx = gtk::glib::MainContext::default();
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(ms) {
+                while ctx.iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under an Xvfb screen 2560 wide (DISPLAY=:97) --test-threads=1"]
+        fn shell_row_fits_at_monitor_width() {
+            // The large-monitor half of the fit-once-and-for-all
+            // gate (Patrick, Nov 12, 2026: "I just want this to fit
+            // whether it's on a laptop screen or a large monitor").
+            // The screen itself is the constraint — a window-manager-
+            // less Xvfb sizes windows to their content, so the
+            // display must be the size being proven.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let (page, shell_row) = adversarial_shell_row();
+            let clamp = gtk::ScrolledWindow::new();
+            clamp.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            clamp.set_size_request(2560, 1100);
+            clamp.set_child(Some(&shell_row));
+            let window = gtk::Window::builder()
+                .title("Monitor fit")
+                .default_width(2560)
+                .default_height(1100)
+                .build();
+            window.set_child(Some(&clamp));
+            window.present();
+            pump_main(700);
+            assert!(
+                page.side_panel.is_visible(),
+                "panel should show at monitor width"
+            );
+            let panel_width = page.side_panel.width();
+            assert!(
+                panel_width <= 360,
+                "panel ballooned to {panel_width}px at 2560 with worst-case data"
+            );
+            let root_width = page.root.width();
+            assert!(
+                root_width >= 1400,
+                "page starved to {root_width}px at monitor width"
+            );
+            clamp.set_child(None::<&gtk::Widget>);
+            window.close();
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under an Xvfb screen 1280 wide (DISPLAY=:98) --test-threads=1"]
+        fn side_panel_steps_aside_in_a_narrow_window() {
+            // The narrow half: at 1280 the responsive breakpoint
+            // hides the side panel and the page keeps the room.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let (page, shell_row) = adversarial_shell_row();
+            let clamp = gtk::ScrolledWindow::new();
+            clamp.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            clamp.set_size_request(1280, 800);
+            clamp.set_child(Some(&shell_row));
+            let window = gtk::Window::builder()
+                .title("Narrow fit")
+                .default_width(1280)
+                .default_height(800)
+                .build();
+            window.set_child(Some(&clamp));
+            window.present();
+            pump_main(300);
+            page.ui.render();
+            pump_main(700);
+            assert!(
+                !page.side_panel.is_visible(),
+                "panel should step aside at 1280 wide"
+            );
+            let root_width = page.root.width();
+            assert!(
+                root_width >= 640,
+                "page starved to {root_width}px at 1280 with the panel aside"
+            );
+            clamp.set_child(None::<&gtk::Widget>);
             window.close();
         }
 

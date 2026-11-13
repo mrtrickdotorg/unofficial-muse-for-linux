@@ -1685,6 +1685,25 @@ fn build_ui(app: &gtk::Application) {
             });
         }
     }
+    // The responsive breakpoint's other half: when the window
+    // crosses the side-panel line in either direction, nudge the
+    // account page to re-evaluate the panel's visibility against
+    // the new width. (Renders also recur on every poll; the tick
+    // makes a resize feel instant instead of up-to-a-poll late.)
+    {
+        let refresh = Rc::clone(&account_page.refresh_side_panel);
+        let was_wide = Rc::new(Cell::new(
+            window.default_width() >= SIDE_PANEL_MIN_WINDOW_PX,
+        ));
+        window.add_tick_callback(move |window, _clock| {
+            let wide = window.width() >= SIDE_PANEL_MIN_WINDOW_PX;
+            if wide != was_wide.get() {
+                was_wide.set(wide);
+                refresh();
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
     window.set_child(Some(&shell));
     window.present();
 }
@@ -1726,6 +1745,13 @@ pub(crate) const READING_COLUMN_MAX_PX: i32 = 921;
 /// The width a reading column starts at, before its binder adapts it:
 /// small enough that the shell's static minimum fits a laptop screen.
 pub(crate) const READING_COLUMN_START_PX: i32 = 480;
+
+/// Below this window width the right-hand panel steps aside: rail
+/// (91) + sidebar (403) + panel (283) are fixed costs, and under
+/// ~1440 what remains cannot hold a readable page column beside
+/// the panel. The panel is company, not content — the page wins,
+/// and the panel returns when the window widens past the line.
+pub(crate) const SIDE_PANEL_MIN_WINDOW_PX: i32 = 1440;
 
 /// Drive a reading column's width request from its parent's real
 /// allocation: min(parent width, READING_COLUMN_MAX_PX). A bare
@@ -1912,6 +1938,7 @@ fn append_chat_grouped(
         let label = gtk::Label::new(Some(message));
         label.set_xalign(0.0);
         label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_selectable(true);
         label.set_max_width_chars(88);
         bubble.append(&label);
@@ -1965,6 +1992,7 @@ fn markup_label(markup: &str) -> gtk::Label {
     label.set_markup(markup);
     label.set_xalign(0.0);
     label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     label.set_selectable(true);
     label.set_max_width_chars(88);
     label

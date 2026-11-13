@@ -49,7 +49,9 @@ fn label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_xalign(0.0);
     label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
     label.set_selectable(true);
+    label.set_max_width_chars(110);
     label
 }
 

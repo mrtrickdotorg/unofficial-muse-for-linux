@@ -724,6 +724,7 @@ mod native {
             while let Some(widget) = pending.pop() {
                 if let Some(text) = widget.downcast_ref::<gtk::Label>() {
                     text.set_wrap(true);
+                    text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                     text.set_max_width_chars(80);
                 }
                 let mut child = widget.first_child();
