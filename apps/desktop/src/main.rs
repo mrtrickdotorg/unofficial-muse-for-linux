@@ -370,10 +370,42 @@ fn main() {
             std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
+        if !stage_webkit_helpers() {
+            // Without its helper processes a WebView is fatal, not
+            // degraded — the feed keeps its text view instead.
+            feed_ui::WIDGET_FRAMES_ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     let app = gtk::Application::builder().application_id(APP_ID).build();
     app.connect_activate(build_ui);
     app.run();
+}
+
+/// Point WebKit's staging path at this AppImage's helper
+/// processes. The bundled library's compiled-in helper directory
+/// is patched at packaging time to /tmp/.webkitgtk-6.0-umfl (see
+/// scripts/patch-webkit-path.py); the mount's location changes on
+/// every launch, so the symlink is re-pointed on every launch too.
+/// Returns false when the helpers cannot be staged.
+fn stage_webkit_helpers() -> bool {
+    use std::os::unix::fs::symlink;
+    let Some(appdir) = std::env::var_os("APPDIR") else {
+        return false;
+    };
+    let target = std::path::Path::new(&appdir).join("usr/lib/webkitgtk-6.0");
+    if !target.join("WebKitNetworkProcess").is_file() {
+        return false;
+    }
+    let link = std::path::Path::new("/tmp/.webkitgtk-6.0-umfl");
+    if std::fs::read_link(link).ok().as_deref() != Some(target.as_path()) {
+        // A stale link is replaced; a real directory in the way is
+        // not ours to remove, and staging simply fails.
+        let _ = std::fs::remove_file(link);
+        if symlink(&target, link).is_err() {
+            return false;
+        }
+    }
+    link.join("WebKitNetworkProcess").is_file()
 }
 
 /// Default window size. Kept inside a 1366x768 laptop work area: a larger

@@ -25,6 +25,13 @@ use crate::local_host::AccountContext;
 use crate::rich_text;
 use gtk::prelude::*;
 use gtk4 as gtk;
+
+/// Widget frames (the WebView renderer) can be switched off for
+/// the whole process by main() when the AppImage's WebKit helper
+/// processes could not be staged: without them a WebView traps
+/// the app instead of degrading, so cards use the text view.
+pub static WIDGET_FRAMES_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
 use muse_account::{AccountClient, AccountError, ListingItem, ServiceListing};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -428,7 +435,11 @@ impl Ui {
             content.append(&picture);
             self.attach_image(picture, url);
         }
-        if let Some(html) = &item.widget_html {
+        let live_html = item
+            .widget_html
+            .as_deref()
+            .filter(|_| WIDGET_FRAMES_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
+        if let Some(html) = live_html {
             // The widget attachment, rendered live in a locked
             // frame; the text view below is its fallback.
             content.append(&widget_frame(item, html));
