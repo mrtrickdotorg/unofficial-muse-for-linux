@@ -1344,19 +1344,31 @@ mod native {
         history: gtk::Box,
         /// The two children of the transcript column: the history
         /// rows proper and the working bubble. They rebuild on
-        /// separate fingerprints (see built_rows_key), so a draft
-        /// growing during a live run replaces one bubble row
-        /// instead of re-laying out the whole transcript -- the
-        /// per-render full rebuild was the main-thread CPU burn
-        /// the freeze sampler caught (Nov 13, 2026).
-        history_rows: gtk::Box,
+        /// separate fingerprints, so a draft growing during a live
+        /// run replaces one bubble row instead of re-laying out
+        /// the whole transcript -- the per-render full rebuild was
+        /// the main-thread CPU burn the freeze sampler caught
+        /// (Nov 13, 2026).
+        history_rows: RefCell<gtk::Box>,
         bubble_box: gtk::Box,
-        /// Fingerprints of what the transcript rows, the working
-        /// bubble, the tasks list and the panel lists currently
-        /// show. render() rebuilds a surface only when its
-        /// fingerprint changes; 0 means never built (real keys
-        /// are forced odd).
-        built_rows_key: Cell<u64>,
+        /// The slot inside the transcript column that holds the
+        /// attached conversation's rows box, and the per-scope
+        /// widget cache behind it: up to four visited
+        /// conversations keep their built row trees (with their
+        /// layout caches) and swap in whole on a switch, because
+        /// even ONE fresh layout of a conversation costs seconds
+        /// on the reader's laptop (frame-phase bench, Nov 13,
+        /// 2026). Each entry carries the fingerprint its tree was
+        /// built with; a revisit whose data changed while away
+        /// rebuilds in place.
+        rows_slot: gtk::Box,
+        transcript_cache: RefCell<std::collections::HashMap<String, (gtk::Box, u64)>>,
+        transcript_lru: RefCell<Vec<String>>,
+        attached_scope: RefCell<Option<String>>,
+        /// Fingerprints of what the working bubble, the tasks
+        /// list and the panel lists currently show. render()
+        /// rebuilds a surface only when its fingerprint changes;
+        /// 0 means never built (real keys are forced odd).
         built_bubble_key: Cell<u64>,
         built_tasks_key: Cell<u64>,
         built_panel_key: Cell<u64>,
@@ -2313,8 +2325,10 @@ mod native {
         column.append(&grant_notice);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
         let history_rows = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        let rows_slot = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        rows_slot.append(&history_rows);
         let bubble_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        history.append(&history_rows);
+        history.append(&rows_slot);
         history.append(&bubble_box);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
@@ -2501,9 +2515,12 @@ mod native {
             watch_until: std::cell::Cell::new(None),
             live_turn: std::cell::Cell::new(true),
             history,
-            history_rows,
+            history_rows: RefCell::new(history_rows),
             bubble_box,
-            built_rows_key: Cell::new(0),
+            rows_slot,
+            transcript_cache: RefCell::new(std::collections::HashMap::new()),
+            transcript_lru: RefCell::new(Vec::new()),
+            attached_scope: RefCell::new(None),
             built_bubble_key: Cell::new(0),
             built_tasks_key: Cell::new(0),
             built_panel_key: Cell::new(0),
@@ -4146,7 +4163,7 @@ mod native {
                 row.append(&spacer);
             }
             row.append(&cards);
-            self.history_rows.append(&row);
+            self.history_rows.borrow().append(&row);
         }
 
         fn append_option_buttons(&self, message: &muse_account::HistoryMessage) {
@@ -4182,7 +4199,7 @@ mod native {
                 buttons.insert(&button, -1);
             }
             row.append(&buttons);
-            self.history_rows.append(&row);
+            self.history_rows.borrow().append(&row);
         }
 
         /// Put the transcript on its newest message, at the bottom
@@ -4839,12 +4856,60 @@ mod native {
                 }
                 echo.hash(h);
             });
-            let rebuild_rows = rows_key != self.built_rows_key.get();
+            // The conversation widget cache: when the scope
+            // changes, swap the attached rows box for the target
+            // scope's cached one (an empty box on a first visit).
+            // A revisited scope whose rows are unchanged gets its
+            // tree back whole -- the rebuild below is skipped, and
+            // GTK keeps the tree's layout caches, so the switch
+            // costs a repaint instead of a layout.
+            if *self.attached_scope.borrow() != state.scope {
+                let new_key = state.scope.clone().unwrap_or_default();
+                if let Some(current) = self.rows_slot.first_child() {
+                    self.rows_slot.remove(&current);
+                }
+                let rows_box = {
+                    let mut cache = self.transcript_cache.borrow_mut();
+                    cache
+                        .entry(new_key.clone())
+                        .or_insert_with(|| (gtk::Box::new(gtk::Orientation::Vertical, 10), 0))
+                        .0
+                        .clone()
+                };
+                {
+                    let mut lru = self.transcript_lru.borrow_mut();
+                    lru.retain(|scope| scope != &new_key);
+                    lru.push(new_key.clone());
+                    let mut cache = self.transcript_cache.borrow_mut();
+                    while lru.len() > 4 {
+                        let victim = lru[0].clone();
+                        if victim == new_key {
+                            break;
+                        }
+                        lru.remove(0);
+                        cache.remove(&victim);
+                    }
+                }
+                self.rows_slot.append(&rows_box);
+                *self.history_rows.borrow_mut() = rows_box;
+                *self.attached_scope.borrow_mut() = state.scope.clone();
+            }
+            let scope_key = state.scope.clone().unwrap_or_default();
+            let rows_box = self.history_rows.borrow().clone();
+            let built_key = self
+                .transcript_cache
+                .borrow()
+                .get(&scope_key)
+                .map(|(_, key)| *key)
+                .unwrap_or(0);
+            let rebuild_rows = rows_key != built_key;
             if rebuild_rows {
-                self.built_rows_key.set(rows_key);
-                super::super::clear_chat(&self.history_rows);
+                if let Some(entry) = self.transcript_cache.borrow_mut().get_mut(&scope_key) {
+                    entry.1 = rows_key;
+                }
+                super::super::clear_chat(&rows_box);
                 if !state.history.is_empty() {
-                    super::super::append_day_divider(&self.history_rows);
+                    super::super::append_day_divider(&rows_box);
                 }
             }
             let mut previous_role: Option<super::super::ChatRole> = if floor > 0 {
@@ -4861,7 +4926,7 @@ mod native {
             };
             if rebuild_rows && floor > 0 {
                 super::super::append_chat_grouped(
-                    &self.history_rows,
+                    &rows_box,
                     super::super::ChatRole::Notice,
                     &format!(
                         "{floor} earlier loaded messages are above -- Load older reveals them."
@@ -4894,7 +4959,7 @@ mod native {
                     self.append_attachment_cards(message, role);
                 }
                 super::super::append_chat_grouped(
-                    &self.history_rows,
+                    &rows_box,
                     role,
                     &super::presentation_text(&message.text),
                     stamp,
@@ -4916,7 +4981,7 @@ mod native {
             // so the two never appear side by side).
             if rebuild_rows && let Some((text, stamp)) = &echo {
                 super::super::append_chat_stamped(
-                    &self.history_rows,
+                    &rows_box,
                     super::super::ChatRole::User,
                     &super::presentation_text(text),
                     Some(stamp.clone()),
@@ -5787,13 +5852,46 @@ mod native {
                 let started = std::time::Instant::now();
                 let frames = std::rc::Rc::new(std::cell::Cell::new(0usize));
                 let widths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(u128, i32)>::new()));
+                // Frame-phase attribution (Nov 13, 2026 freeze
+                // hunt): the frame clock's own phase signals time
+                // where a frame's seconds go -- update, layout
+                // (measure/allocate) or paint (snapshot/render).
+                let phases = std::rc::Rc::new(std::cell::RefCell::new([0u128; 4]));
+                let phase_mark = std::rc::Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+                let clock_hooked = std::rc::Rc::new(std::cell::Cell::new(false));
                 {
                     let frames = frames.clone();
                     let widths = widths.clone();
                     let history_box = page.ui.history.clone();
                     let begun = started;
-                    window.add_tick_callback(move |_window, _clock| {
+                    let phases_in_tick = phases.clone();
+                    let mark_in_tick = phase_mark.clone();
+                    let hooked_in_tick = clock_hooked.clone();
+                    window.add_tick_callback(move |_window, clock| {
                         frames.set(frames.get() + 1);
+                        if !hooked_in_tick.get() {
+                            hooked_in_tick.set(true);
+                            let mark = mark_in_tick.clone();
+                            clock.connect_before_paint(move |_| {
+                                mark.set(Some(std::time::Instant::now()));
+                            });
+                            let stamp = |index: usize| {
+                                let phases = phases_in_tick.clone();
+                                let mark = mark_in_tick.clone();
+                                move |_: &gtk::gdk::FrameClock| {
+                                    let now = std::time::Instant::now();
+                                    if let Some(prev) = mark.get() {
+                                        phases.borrow_mut()[index] +=
+                                            now.duration_since(prev).as_millis();
+                                    }
+                                    mark.set(Some(now));
+                                }
+                            };
+                            clock.connect_update(stamp(0));
+                            clock.connect_layout(stamp(1));
+                            clock.connect_paint(stamp(2));
+                            clock.connect_after_paint(stamp(3));
+                        }
                         let width = history_box.width();
                         let mut seen = widths.borrow_mut();
                         if seen.last().map(|&(_, w)| w) != Some(width) {
@@ -5808,9 +5906,16 @@ mod native {
                 let mut last_upper = -1.0;
                 let mut stable_reads = 0;
                 let mut iterations = 0usize;
+                let mut slowest_iterations: Vec<(u128, usize)> = Vec::new();
                 while started.elapsed() < std::time::Duration::from_secs(40) {
+                    let iteration_started = std::time::Instant::now();
+                    let frames_before = frames.get();
                     context.iteration(false);
                     iterations += 1;
+                    let took = iteration_started.elapsed().as_millis();
+                    if took > 100 {
+                        slowest_iterations.push((took, frames.get() - frames_before));
+                    }
                     let upper = adjustment.upper();
                     if upper > 0.0 && (upper - last_upper).abs() < 0.5 {
                         stable_reads += 1;
@@ -5824,11 +5929,12 @@ mod native {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 println!(
-                    "BENCH frame {label}: settled in {:?} ({iterations} iterations, upper={:.0}, frames={}, widths={:?})",
+                    "BENCH frame {label}: settled in {:?} ({iterations} iterations, upper={:.0}, frames={}, widths={:?}, phases[before/update/layout/paint ms]={:?}, slow iterations (ms, frames)={slowest_iterations:?})",
                     started.elapsed(),
                     adjustment.upper(),
                     frames.get(),
-                    widths.borrow()
+                    widths.borrow(),
+                    phases.borrow()
                 );
                 // The incremental-render proof (Nov 13, 2026): a
                 // second render of the UNCHANGED state must settle
@@ -6143,21 +6249,31 @@ mod native {
                 ];
             }
             page.ui.render();
-            let first_row = page.ui.history_rows.first_child().expect("rows built");
+            let first_row = page
+                .ui
+                .history_rows
+                .borrow()
+                .first_child()
+                .expect("rows built");
             page.ui.render();
             assert_eq!(
-                page.ui.history_rows.first_child().as_ref(),
+                page.ui.history_rows.borrow().first_child().as_ref(),
                 Some(&first_row),
                 "an unchanged re-render must not rebuild the transcript rows"
             );
             page.ui.state.borrow_mut().history[1] = message("m2", "Second answer, edited.");
             page.ui.render();
             assert_ne!(
-                page.ui.history_rows.first_child().as_ref(),
+                page.ui.history_rows.borrow().first_child().as_ref(),
                 Some(&first_row),
                 "a changed row set must rebuild"
             );
-            let standing_row = page.ui.history_rows.first_child().expect("rows rebuilt");
+            let standing_row = page
+                .ui
+                .history_rows
+                .borrow()
+                .first_child()
+                .expect("rows rebuilt");
             {
                 let mut state = page.ui.state.borrow_mut();
                 state.watching_run = true;
@@ -6165,13 +6281,46 @@ mod native {
             }
             page.ui.render();
             assert_eq!(
-                page.ui.history_rows.first_child().as_ref(),
+                page.ui.history_rows.borrow().first_child().as_ref(),
                 Some(&standing_row),
                 "a draft update must not rebuild the transcript rows"
             );
             assert!(
                 page.ui.bubble_box.first_child().is_some(),
                 "the draft bubble must be showing"
+            );
+            // The per-scope widget cache: leave for another
+            // conversation, return to unchanged data, and the very
+            // same widgets come back -- no rebuild, no layout.
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.scope = Some("other".into());
+                state.watching_run = false;
+                state.live_draft = String::new();
+                state.history = vec![message("x1", "Another chat entirely.")];
+            }
+            page.ui.render();
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.scope = Some("chat".into());
+                state.history = vec![
+                    message("m1", "First answer."),
+                    message("m2", "Second answer, edited."),
+                ];
+            }
+            page.ui.render();
+            assert_eq!(
+                page.ui.history_rows.borrow().first_child().as_ref(),
+                Some(&standing_row),
+                "returning to an unchanged conversation must restore its widgets, not rebuild them"
+            );
+            // Rows that changed while away rebuild in place.
+            page.ui.state.borrow_mut().history[0] = message("m1", "First answer, updated.");
+            page.ui.render();
+            assert_ne!(
+                page.ui.history_rows.borrow().first_child().as_ref(),
+                Some(&standing_row),
+                "a conversation whose rows changed must rebuild"
             );
         }
 
