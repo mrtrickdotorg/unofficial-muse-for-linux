@@ -126,6 +126,32 @@ class HostTests(unittest.TestCase):
         host.handle_line(json.dumps({"op": "watch", "limit": 20, "timeout": 1}).encode())
         self.assertEqual(fake.clients, 2)
 
+    def test_a_background_poll_gets_its_own_connection_so_a_click_never_queues_behind_it(self):
+        # op-timing-7 (Nov 13, 2026): an activity answer holds the
+        # gateway ~4.1s and a running call is never preempted, so on
+        # the shared connection every history read queued behind the
+        # poll in flight. The poll now opens a second held
+        # connection of its own, and the timing line names it.
+        import pathlib
+        _module, host, fake, _jar, root = self.host()
+
+        class OkAdapter:
+            def __init__(self, client, config):
+                pass
+
+            def dispatch(self, request):
+                return {"ok": True}
+
+        fake.Adapter = OkAdapter
+        host.handle_line(json.dumps({"op": "history", "limit": 20}).encode())
+        self.assertEqual(fake.clients, 1)
+        reply = host.handle_line(json.dumps({"op": "activity", "timeout": 1000}).encode())
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(fake.clients, 2)
+        log = pathlib.Path(root, "op-timing.log").read_text()
+        self.assertIn("host op=activity conn=background", log)
+        self.assertIn("host op=history conn=control", log)
+
     def test_a_pre_dispatch_failure_reconnects_and_dispatches_exactly_once(self):
         # A held connection that has gone stale must not cost the message: the
         # baseline read fails before anything is dispatched, so one retry on a

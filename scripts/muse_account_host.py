@@ -273,6 +273,7 @@ class Host:
         self.config_dir = config_dir
         self.control = Connection(self.bridge, config_dir)
         self.waiting = Connection(self.bridge, config_dir)
+        self.background = Connection(self.bridge, config_dir)
         self.touched = time.monotonic()
 
     def touch(self):
@@ -283,7 +284,27 @@ class Host:
 
     def connection(self, op):
         # A long wait must not queue a send behind it.
-        return self.waiting if op in WAIT_OPS else self.control
+        if op in WAIT_OPS:
+            return self.waiting
+        # A background poll must not queue a click behind it either.
+        # An activity answer takes ~4s of gateway time (op-timing-7,
+        # Nov 13, 2026) and a running call is never preempted, so on
+        # the shared connection every history read waited behind
+        # whichever poll was in flight -- the crawl felt switching
+        # chats while a run was live, with identity's median wait
+        # tripling in the same log. Background work gets its own
+        # held connection, the way the wait already does; the gate
+        # stays as the one-holder rule on each connection.
+        if op in BACKGROUND_OPS:
+            return self.background
+        return self.control
+
+    def connection_name(self, connection):
+        if connection is self.waiting:
+            return "waiting"
+        if connection is self.background:
+            return "background"
+        return "control"
 
     def handle_line(self, line):
         self.touch()
@@ -310,14 +331,14 @@ class Host:
                     self.config_dir,
                     "host op={} conn={} ms={} ok=0 code={}".format(
                         request["op"],
-                        "waiting" if connection is self.waiting else "control",
+                        self.connection_name(connection),
                         int((time.monotonic() - began) * 1000), error.code))
                 raise
             self.bridge.timing_log(
                 self.config_dir,
                 "host op={} conn={} ms={} ok=1".format(
                     request["op"],
-                    "waiting" if connection is self.waiting else "control",
+                    self.connection_name(connection),
                     int((time.monotonic() - began) * 1000)))
             return {"ok": True, "data": data}
         except Exception as exc:
@@ -326,6 +347,7 @@ class Host:
     def close(self):
         self.control.close()
         self.waiting.close()
+        self.background.close()
 
 
 def encode(reply):
