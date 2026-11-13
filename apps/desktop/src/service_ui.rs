@@ -32,6 +32,10 @@ struct Spec {
     intro: &'static str,
     refresh_label: &'static str,
     empty_copy: &'static str,
+    /// Group the rows under their kind as section headings, the
+    /// way the web's Ideas page does (its cards arrive in named
+    /// sections). Off for Goals, whose kind is a per-row status.
+    group_by_kind: bool,
     fetch: fn(&AccountClient) -> Result<ServiceListing, AccountError>,
 }
 
@@ -85,28 +89,58 @@ pub(super) fn summary_text(page: &ServiceListing, empty_copy: &str) -> String {
     summary
 }
 
-fn row_card(item: &ListingItem) -> gtk::Box {
+fn row_card(item: &ListingItem, show_kind: bool) -> gtk::Box {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
     card.add_css_class("card");
+    // The web draws an icon at the card's left edge; when the
+    // listing carries one, the text column sits beside it.
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let title = label(&item.title);
-    card.append(&title);
+    text.append(&title);
     if let Some(body) = &item.body
         && body != &item.title
     {
         let body_label = label(body);
         body_label.add_css_class("dim-label");
-        card.append(&body_label);
+        text.append(&body_label);
     }
-    let meta: Vec<&str> = [item.kind.as_deref(), item.stamp.as_deref()]
-        .into_iter()
-        .flatten()
-        .collect();
+    let meta: Vec<&str> = [
+        if show_kind {
+            item.kind.as_deref()
+        } else {
+            None
+        },
+        item.stamp.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if !meta.is_empty() {
         let meta_label = label(&meta.join(" · "));
         meta_label.add_css_class("dim-label");
-        card.append(&meta_label);
+        text.append(&meta_label);
+    }
+    if let Some(icon) = &item.icon {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let icon_label = gtk::Label::new(Some(icon));
+        icon_label.set_widget_name("item-icon");
+        icon_label.set_valign(gtk::Align::Start);
+        icon_label.add_css_class("feed-icon");
+        row.append(&icon_label);
+        text.set_hexpand(true);
+        row.append(&text);
+        card.append(&row);
+    } else {
+        card.append(&text);
     }
     card
+}
+
+fn section_heading(kind: &str) -> gtk::Label {
+    let heading = label(kind);
+    heading.set_widget_name(&format!("section-heading:{kind}"));
+    heading.add_css_class("section-heading");
+    heading
 }
 
 impl Ui {
@@ -120,8 +154,17 @@ impl Ui {
         while let Some(row) = self.list.first_child() {
             self.list.remove(&row);
         }
+        let grouped = self.spec.group_by_kind;
+        let mut last_kind: Option<&str> = None;
         for item in items {
-            self.list.append(&row_card(item));
+            if grouped
+                && let Some(kind) = item.kind.as_deref()
+                && last_kind != Some(kind)
+            {
+                self.list.append(&section_heading(kind));
+                last_kind = Some(kind);
+            }
+            self.list.append(&row_card(item, !grouped));
         }
     }
 
@@ -266,6 +309,7 @@ pub fn ideas(context: AccountContext) -> ServicePage {
             intro: "The idea cards your Muse saved for the connected account, read-only. Trying a card or rating it happens on the Muse side; this page only reads. The list loads when you open this page.",
             refresh_label: "Refresh Ideas",
             empty_copy: "No idea cards yet — the service reported an empty list.",
+            group_by_kind: true,
             fetch: AccountClient::ideas,
         },
     )
@@ -279,6 +323,7 @@ pub fn goals(context: AccountContext) -> ServicePage {
             intro: "The goals attached to the connected Muse account, read-only. Creating, editing or completing a goal happens on the Muse side; this page only reads. The list loads when you open this page.",
             refresh_label: "Refresh Goals",
             empty_copy: "No goals yet — the service reported an empty list.",
+            group_by_kind: false,
             fetch: AccountClient::goals,
         },
     )
@@ -286,8 +331,12 @@ pub fn goals(context: AccountContext) -> ServicePage {
 
 #[cfg(test)]
 mod tests {
-    use super::summary_text;
+    use super::{Ui, row_card, section_heading, summary_text};
+    use gtk::prelude::*;
+    use gtk4 as gtk;
     use muse_account::{ListingItem, ServiceListing};
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     fn item(title: &str) -> ListingItem {
         ListingItem {
@@ -323,6 +372,70 @@ mod tests {
         let text = summary_text(&page, "EMPTY");
         assert!(text.contains("client gap"), "{text}");
         assert!(text.contains('5'), "{text}");
+    }
+
+    #[test]
+    #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+    fn ideas_render_groups_cards_under_section_headings() {
+        // The web's Ideas page (Patrick, Nov 13, 2026): cards sit
+        // under their section's heading with an icon at the left
+        // edge, not in one flat list repeating the section name on
+        // every card.
+        gtk::init().unwrap();
+        fn named(root: &gtk::Widget, name: &str) -> bool {
+            if root.widget_name() == name {
+                return true;
+            }
+            let mut child = root.first_child();
+            while let Some(current) = child {
+                let next = current.next_sibling();
+                if named(&current, name) {
+                    return true;
+                }
+                child = next;
+            }
+            false
+        }
+        let ui = Rc::new(Ui {
+            epoch: Cell::new(0),
+            busy: Cell::new(false),
+            context: Rc::new(|| None),
+            spec: crate::service_ui::Spec {
+                heading: "Ideas",
+                intro: "",
+                refresh_label: "",
+                empty_copy: "",
+                group_by_kind: true,
+                fetch: muse_account::AccountClient::ideas,
+            },
+            list: gtk::ListBox::new(),
+            notice: gtk::Label::new(None),
+            spinner: gtk::Spinner::new(),
+        });
+        let mut first = item("Score the offer");
+        first.kind = Some("This week's big calls".into());
+        first.icon = Some("💡".into());
+        let mut second = item("Flip the calendars");
+        second.kind = Some("This week's big calls".into());
+        let mut third = item("Recover the email");
+        third.kind = Some("Productivity".into());
+        ui.render(&[first, second, third]);
+        let root = ui.list.clone().upcast::<gtk::Widget>();
+        assert!(named(&root, "section-heading:This week's big calls"));
+        assert!(named(&root, "section-heading:Productivity"));
+        assert!(named(&root, "item-icon"), "the card icon renders");
+        // Two sections, three cards: exactly five rows, headings
+        // counted once each.
+        let mut rows = 0;
+        let mut child = ui.list.first_child();
+        while let Some(current) = child {
+            rows += 1;
+            child = current.next_sibling();
+        }
+        assert_eq!(rows, 5);
+        // The heading building block names itself for the walk.
+        assert_eq!(section_heading("S").widget_name(), "section-heading:S");
+        let _ = row_card(&item("x"), true);
     }
 
     #[test]
