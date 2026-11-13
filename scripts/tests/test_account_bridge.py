@@ -2027,9 +2027,20 @@ class WriteActionTests(unittest.TestCase):
         self.assertEqual(result, {"unit_id": "u1", "accepted": True,
                                   "reaction": "❤"})
 
+    def test_goal_delete_sends_the_path_only_delete_once(self):
+        calls = []
+        bridge, client = self._client(calls, {"deleted": True})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "goal_delete", "goal_id": "g1"})
+        self.assertEqual(calls, [("goals.delete", {"path_params": {"id": "g1"}})])
+        self.assertEqual(result, {"goal_id": "g1", "accepted": True,
+                                  "deleted": True})
+
     def test_write_ops_refuse_unpublished_shapes(self):
         bridge = load_bridge()
         for request in (
+            {"op": "goal_delete", "goal_id": ""},
+            {"op": "goal_delete", "goal_id": "g1", "extra": 1},
             {"op": "idea_execute", "idea_id": ""},
             {"op": "idea_execute", "idea_id": "x", "mode": "partial"},
             {"op": "feed_react", "unit_id": "u1", "reaction": ""},

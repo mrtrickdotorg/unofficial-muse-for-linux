@@ -503,6 +503,19 @@ pub struct IdeaExecuteAnswer {
     pub session_id: Option<String>,
 }
 
+/// What the service said about a goal deletion it took.
+///
+/// Acceptance only, with the service's own `deleted` word when it
+/// supplied one; whether the goal is actually gone is proven by
+/// re-reading the goals listing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalDeleteAnswer {
+    pub goal_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub deleted: Option<bool>,
+}
+
 /// What the service said about a feed reaction it took.
 ///
 /// Acceptance only: whether the unit now shows the reaction is
@@ -830,6 +843,21 @@ impl AccountClient {
             body["title"] = title.into();
         }
         self.request(body, false)
+    }
+    /// Delete exactly one goal, once.
+    ///
+    /// The id must be one the goals listing published, and the
+    /// bridge makes a single request, so one confirmed press maps
+    /// to one write. Whether the goal is actually gone afterwards
+    /// is proven by re-reading the list, never by this answer.
+    pub fn goal_delete(&self, goal_id: &str) -> Result<GoalDeleteAnswer, AccountError> {
+        if goal_id.is_empty() || goal_id.len() > 256 || goal_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "goal_delete", "goal_id": goal_id}),
+            false,
+        )
     }
     /// Execute exactly one idea card, once (its "Try it").
     ///
