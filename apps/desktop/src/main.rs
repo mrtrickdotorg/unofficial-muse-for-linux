@@ -171,6 +171,11 @@ list row:selected { background-color: rgba(255, 255, 255, 0.09); }
 .feed-icon { font-size: 27px; }
 .feed-image { border-radius: 14px; background-color: #101014; }
 .feed-widget { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 14px; }
+.attachment-card { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 10px; padding: 8px 10px; }
+.attachment-icon { font-size: 22px; }
+.attachment-name { font-weight: 600; color: #f4f4f6; }
+.attachment-meta { color: #8e8e99; font-size: 14px; }
+.attachment-note { color: #b3b3bc; font-size: 16px; }
 .approval-card { border-left: 3px solid #c98a2b; }
 .approval-icon { color: #d8b25c; font-weight: 700; }
 .approval-heading { font-weight: 700; color: #f4f4f6; }
