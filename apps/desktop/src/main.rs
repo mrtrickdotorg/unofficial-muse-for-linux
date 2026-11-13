@@ -355,16 +355,20 @@ impl<T> DialogLease<T> {
 }
 
 fn main() {
-    // WebKit's bubblewrap sandbox cannot run inside an AppImage, so
-    // from one, opt out before any WebView can exist. The feed's
-    // widget frames stay navigation-locked either way; outside an
-    // AppImage the sandbox stands.
+    // WebKit inside an AppImage needs two accommodations, set
+    // before any WebView can exist: its bubblewrap sandbox cannot
+    // run there, and its DMABUF compositing path crashes the web
+    // process on a range of Wayland GPU drivers — small widget
+    // frames lose nothing on the safer renderer. The feed's frames
+    // stay navigation-locked either way; outside an AppImage,
+    // neither accommodation applies.
     if std::env::var_os("APPIMAGE").is_some() {
         // SAFETY: this runs before the application object exists —
         // no other thread has started, so nothing can be reading
         // the environment concurrently.
         unsafe {
             std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1");
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
         }
     }
     let app = gtk::Application::builder().application_id(APP_ID).build();
