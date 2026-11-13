@@ -2356,7 +2356,7 @@ mod native {
         pages.set_vexpand(true);
         let chat = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // The transcript and composer live in a centered column capped at
-        // ~921px, like the Mac/Windows client: full-width lines on a wide
+        // ~1056px, like the Mac/Windows client: full-width lines on a wide
         // window are the readability problem, not a feature. The cap must
         // never become a minimum (see crate::bind_reading_column).
         let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -2460,10 +2460,18 @@ mod native {
         let bubble_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
         history.append(&rows_slot);
         history.append(&bubble_box);
+        // No visible scroll bars, like the web. The policy for
+        // that is EXTERNAL, not NEVER: NEVER tells GTK there is
+        // no scrolling at all and the view sizes itself to its
+        // whole content, while EXTERNAL keeps the viewport and
+        // every scrolling path (wheel, touchpad, keyboard, the
+        // page-level forwarder below) and simply draws no bar.
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
             .vexpand(true)
             .min_content_height(160)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .hscrollbar_policy(gtk::PolicyType::External)
             .build();
         scroll.set_child(Some(&history));
         column.append(&scroll);
@@ -2861,6 +2869,26 @@ mod native {
                 }
             });
             ui.scroll.add_controller(motion);
+            // The web's middle column scrolls from anywhere over
+            // it, and this page now does the same (Patrick,
+            // Nov 13, 2026): a capture-phase wheel controller on
+            // the whole chat page forwards every delta to the
+            // transcript and stops the event, so the scrolled
+            // window's own controller never double-scrolls when
+            // the pointer happens to be over the transcript. The
+            // page holds no other scroll consumer -- the composer
+            // is a single-line entry, the cards are buttons and
+            // labels -- and the controller lives on this page
+            // alone, so the Tasks page keeps its own scrolling.
+            let page_wheel =
+                gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            page_wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let u = Rc::clone(&ui);
+            page_wheel.connect_scroll(move |_, _dx, dy| {
+                u.scroll_transcript_by(dy);
+                gtk::glib::Propagation::Stop
+            });
+            chat.add_controller(page_wheel);
         }
         // The heartbeat: a 250ms timer that reports how late it
         // fired. GLib wakes an idle loop for a timer on time, so a
@@ -3160,6 +3188,17 @@ mod native {
                 }
             }
         });
+    }
+
+    /// Where one wheel/touchpad delta lands the transcript: the
+    /// delta scaled by a step of a sixth of the viewport (at
+    /// least 20px), clamped to the scrollable range. Smooth
+    /// deltas arrive as fractions and stay proportional; a
+    /// discrete notch is one step.
+    fn wheel_scroll_target(adjustment: &gtk::Adjustment, dy: f64) -> f64 {
+        let unit = (adjustment.page_size() / 6.0).max(20.0);
+        let max = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+        (adjustment.value() + dy * unit).clamp(adjustment.lower(), max)
     }
 
     impl Ui {
@@ -4684,6 +4723,17 @@ mod native {
         fn note_scroll_gesture(&self) {
             self.scroll_gesture.set(true);
             self.arm_bottom_settle();
+        }
+
+        /// Move the transcript by one wheel/touchpad delta, the
+        /// way the web's middle column scrolls from anywhere over
+        /// it. The gesture is recorded first, so the position this
+        /// leaves becomes the follow intent exactly as if the
+        /// scrolled window's own controller had moved it.
+        fn scroll_transcript_by(&self, dy: f64) {
+            self.note_scroll_gesture();
+            let adjustment = self.scroll.vadjustment();
+            adjustment.set_value(wheel_scroll_target(&adjustment, dy));
         }
 
         /// Arm the one-idle settle pass (coalesced across callers):
@@ -6927,6 +6977,46 @@ mod native {
             if only.is_empty() || only == "monster-tokens" {
                 run("monster-tokens", reports(tokens(30_000)));
             }
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn the_transcript_hides_its_bar_and_the_page_wheel_moves_it() {
+            // Patrick, Nov 13, 2026: on the web you can park the
+            // mouse anywhere in the middle window and scroll the
+            // history, and there is no scroll bar. The transcript
+            // hides both bars (scrolling itself untouched), and a
+            // capture-phase controller on the chat page forwards
+            // every wheel delta to the transcript.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            assert_eq!(
+                page.ui.scroll.vscrollbar_policy(),
+                gtk::PolicyType::External,
+                "no vertical bar, like the web (EXTERNAL, not NEVER: \
+                 NEVER would size the view to its whole content)"
+            );
+            assert_eq!(
+                page.ui.scroll.hscrollbar_policy(),
+                gtk::PolicyType::External
+            );
+            // The delta math: a sixth of the viewport per notch,
+            // smooth fractions proportional, clamped to the range.
+            let adj = gtk::Adjustment::new(100.0, 0.0, 1000.0, 10.0, 100.0, 600.0);
+            assert_eq!(wheel_scroll_target(&adj, 1.0), 200.0);
+            assert_eq!(wheel_scroll_target(&adj, -1.0), 0.0);
+            assert_eq!(wheel_scroll_target(&adj, 0.5), 150.0);
+            assert_eq!(wheel_scroll_target(&adj, 99.0), 400.0);
+            // The page-level path moves the real adjustment.
+            let real = page.ui.scroll.vadjustment();
+            real.set_upper(5000.0);
+            real.set_page_size(500.0);
+            real.set_value(1000.0);
+            page.ui.scroll_transcript_by(1.0);
+            assert!(real.value() > 1000.0, "a forwarded notch scrolls down");
+            page.ui.scroll_transcript_by(-99.0);
+            assert_eq!(real.value(), 0.0, "and clamps at the top");
         }
 
         #[test]

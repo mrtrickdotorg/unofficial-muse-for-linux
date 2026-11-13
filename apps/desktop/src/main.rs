@@ -949,7 +949,7 @@ fn build_ui(app: &gtk::Application) {
     chat_page.add_css_class("page-content");
 
     // Mac-style centered reading column: conversation content is capped
-    // at ~921px so bubbles keep messenger rhythm on wide windows instead
+    // at ~1056px so bubbles keep messenger rhythm on wide windows instead
     // of stretching edge to edge — a cap, never a minimum (see
     // bind_reading_column). Setup stays full width above it.
     let chat_column = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -1789,8 +1789,11 @@ fn panel_placeholder(title: &str, copy: &str) -> gtk::Box {
 }
 
 /// The widest a centered reading column may grow, in app px (the
-/// calibrated scale's counterpart of the web's ~768 CSS px column).
-pub(crate) const READING_COLUMN_MAX_PX: i32 = 921;
+/// calibrated scale's counterpart of the web's ~768 CSS px column;
+/// widened from 921 on Nov 13, 2026 at Patrick's request -- "make
+/// the chat window a little bit wider" -- as one consistent
+/// reading width across Chat, Tasks and Feed).
+pub(crate) const READING_COLUMN_MAX_PX: i32 = 1056;
 
 /// The width a reading column starts at, before its binder adapts it:
 /// small enough that the shell's static minimum fits a laptop screen.
