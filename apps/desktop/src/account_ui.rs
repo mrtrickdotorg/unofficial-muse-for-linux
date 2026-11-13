@@ -1273,6 +1273,8 @@ mod native {
         start_logged: Cell<bool>,
         settle_changes: Cell<u32>,
         settle_snaps: Cell<u32>,
+        display_floor: Cell<usize>,
+        backfill_armed: Cell<bool>,
         stall_watch_armed: Cell<bool>,
         last_render_scope: RefCell<Option<Option<String>>>,
         /// A bottom snap is inside set_value: the value-changed it
@@ -2419,6 +2421,8 @@ mod native {
             start_logged: Cell::new(false),
             settle_changes: Cell::new(0),
             settle_snaps: Cell::new(0),
+            display_floor: Cell::new(0),
+            backfill_armed: Cell::new(false),
             stall_watch_armed: Cell::new(false),
             last_render_scope: RefCell::new(None),
             snapping_bottom: Cell::new(false),
@@ -4000,6 +4004,48 @@ mod native {
             }
         }
 
+        /// How much of a loaded transcript a switch builds before
+        /// the first frame, and the chunk the idle backfill adds
+        /// per step (Nov 13, 2026 frame bench: one frame shaping a
+        /// whole 50-row report-sized transcript is the switch cost;
+        /// fifteen rows are a fraction of it).
+        const TRANSCRIPT_SLICE: usize = 15;
+        const TRANSCRIPT_BACKFILL: usize = 12;
+
+        /// Backfill the transcript slice on idle: each step builds
+        /// one more chunk of older rows while the reader follows
+        /// the bottom, so the switch's first frame stays small and
+        /// the rest spreads over interruptible frames. Pauses the
+        /// moment the reader scrolls away -- the rows wait above
+        /// the slice notice, and Load older (a prepend) reveals
+        /// them all at once.
+        fn arm_backfill(&self) {
+            if self.backfill_armed.replace(true) {
+                return;
+            }
+            let weak = self.self_weak.borrow().clone();
+            gtk::glib::idle_add_local_once(move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                ui.backfill_armed.set(false);
+                ui.backfill_step();
+            });
+        }
+
+        fn backfill_step(&self) {
+            let floor = self.display_floor.get();
+            if floor == 0 || !self.follow_bottom.get() {
+                return;
+            }
+            self.display_floor
+                .set(floor.saturating_sub(Self::TRANSCRIPT_BACKFILL));
+            self.render();
+            if self.display_floor.get() > 0 {
+                self.arm_backfill();
+            }
+        }
+
         /// Watch the frame clock for 20s after a scope change: if
         /// frames were flowing and one frame then takes over 300ms,
         /// the stall (layout, paint, or a blocked main thread) is
@@ -4419,9 +4465,11 @@ mod native {
             // every old message "shown 08:56:51 AM". The backlog is now
             // recorded as seen-without-a-stamp (None) on the render that
             // first displays it, and only genuinely new rows earn a stamp.
+            let mut scope_changed = false;
             {
                 let mut shown_scope = self.shown_scope.borrow_mut();
                 if *shown_scope != state.scope {
+                    scope_changed = true;
                     *shown_scope = state.scope.clone();
                     self.shown_stamps.borrow_mut().clear();
                     self.history_primed.set(false);
@@ -4437,13 +4485,14 @@ mod native {
                 let prev = self.history_edges.borrow();
                 prev.0 != cur_first || prev.1 != cur_last
             };
+            let mut prepended = false;
             {
                 let mut shown = self.shown_stamps.borrow_mut();
                 if self.history_primed.get() {
                     // A pure prepend (Load older) grows the front while the
                     // tail stands still: those rows are backlog, not news.
                     let (prev_first, prev_last) = self.history_edges.borrow().clone();
-                    let prepended =
+                    prepended =
                         prev_first.is_some() && prev_first != cur_first && prev_last == cur_last;
                     let now = local_clock_stamp();
                     for message in &state.history {
@@ -4457,6 +4506,22 @@ mod native {
                     }
                 }
             }
+            // The display slice (see TRANSCRIPT_SLICE): a switch
+            // starts at the newest rows, a Load-older prepend opens
+            // the whole set, anything else keeps the floor the
+            // backfill has reached. Stamp bookkeeping above always
+            // covers the full set, so rows the backfill reveals
+            // later are already recorded as backlog and earn no
+            // shown stamp.
+            let total_rows = state.history.len();
+            if scope_changed {
+                self.display_floor
+                    .set(total_rows.saturating_sub(Self::TRANSCRIPT_SLICE));
+            } else if prepended {
+                self.display_floor.set(0);
+            }
+            let floor = self.display_floor.get().min(total_rows);
+            self.display_floor.set(floor);
             // The assistant's circle carries the identity's own initial
             // (his agent is "Lotus", not a generic M), and consecutive rows
             // of one turn group tightly without repeating the avatar.
@@ -4466,8 +4531,31 @@ mod native {
                 .and_then(|account| account.identity_name.chars().next())
                 .map(|initial| initial.to_uppercase().collect::<String>())
                 .unwrap_or_else(|| "M".to_string());
-            let mut previous_role: Option<super::super::ChatRole> = None;
-            for message in &state.history {
+            let mut previous_role: Option<super::super::ChatRole> = if floor > 0 {
+                state
+                    .history
+                    .get(floor - 1)
+                    .map(|row| match row.role.as_str() {
+                        "user" => super::super::ChatRole::User,
+                        "assistant" => super::super::ChatRole::Assistant,
+                        _ => super::super::ChatRole::Notice,
+                    })
+            } else {
+                None
+            };
+            if floor > 0 {
+                super::super::append_chat_grouped(
+                    &self.history,
+                    super::super::ChatRole::Notice,
+                    &format!(
+                        "{floor} earlier loaded messages are above -- they fill in while you stay at the bottom, or all at once with Load older."
+                    ),
+                    None,
+                    &avatar_initial,
+                    false,
+                );
+            }
+            for message in &state.history[floor..] {
                 let role = match message.role.as_str() {
                     "user" => super::super::ChatRole::User,
                     "assistant" => super::super::ChatRole::Assistant,
@@ -4591,7 +4679,7 @@ mod native {
                 && !state.history.is_empty()
                 && let Some(client) = self.client.borrow().as_ref()
             {
-                client.log_render(state.history.len(), transcript_started.elapsed());
+                client.log_render(total_rows - floor, transcript_started.elapsed());
             }
             // Newest messages are at the bottom. A pin, or a reader
             // who was already there, follows them: snap to the
@@ -4604,6 +4692,9 @@ mod native {
             }
             if self.follow_bottom.get() {
                 self.snap_to_bottom(&self.scroll.vadjustment());
+            }
+            if floor > 0 && self.follow_bottom.get() {
+                self.arm_backfill();
             }
             super::super::clear_chat(&self.tasks);
             if let Some(tasks) = &state.tasks {
@@ -5230,6 +5321,134 @@ mod native {
             );
         }
 
+        /// First-frame cost by transcript shape (Nov 13, 2026):
+        /// Patrick's build-262b3f5 log showed per-switch frame
+        /// stalls of 0.3-0.45s and one of 8s, with construction
+        /// and fetches all fast -- the cost is the first frame's
+        /// layout of the loaded transcript, and it must be
+        /// attributed to a content shape before it can be fixed:
+        /// many rows, large rows, or one monster row of prose vs
+        /// one of unbroken tokens (command output).
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn bench_transcript_first_frame() {
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            fn prose(chars: usize) -> String {
+                let sentence = "The quick brown fox jumps over the lazy dog while the report explains itself in plain words. ";
+                let mut out = String::new();
+                while out.len() < chars {
+                    out.push_str(sentence);
+                }
+                out.truncate(chars);
+                out
+            }
+            fn tokens(chars: usize) -> String {
+                let chunk = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+                let mut out = String::new();
+                while out.len() < chars {
+                    out.push_str(chunk);
+                    out.push(' ');
+                }
+                out.truncate(chars);
+                out
+            }
+            fn run(label: &str, texts: Vec<String>) {
+                let page = build(&gtk::Label::new(None));
+                {
+                    let mut state = page.ui.state.borrow_mut();
+                    state.account = Some(AccountSnapshot {
+                        identity_name: "Lotus".into(),
+                        vm_id: "fake-vm".into(),
+                        threads: vec![],
+                    });
+                    state.scope = Some("bench".into());
+                    state.history = texts
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, text)| muse_account::HistoryMessage {
+                            message_id: format!("m{i}"),
+                            seq: i as u64,
+                            role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                            text,
+                            timestamp: Some("2026-11-12T15:00:00+00:00".into()),
+                            status: Some("completed".into()),
+                            options: vec![],
+                            selected_option: None,
+                            attachments: Vec::new(),
+                        })
+                        .collect();
+                }
+                page.ui.render();
+                // The bench measures the unsliced worst case on
+                // purpose: clear the slice the switch path set,
+                // render whole, then present.
+                page.ui.display_floor.set(0);
+                page.ui.render();
+                let window = gtk::Window::new();
+                window.set_default_size(1500, 950);
+                window.set_child(Some(&page.root));
+                let started = std::time::Instant::now();
+                let frames = std::rc::Rc::new(std::cell::Cell::new(0usize));
+                let widths = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(u128, i32)>::new()));
+                {
+                    let frames = frames.clone();
+                    let widths = widths.clone();
+                    let history_box = page.ui.history.clone();
+                    let begun = started;
+                    window.add_tick_callback(move |_window, _clock| {
+                        frames.set(frames.get() + 1);
+                        let width = history_box.width();
+                        let mut seen = widths.borrow_mut();
+                        if seen.last().map(|&(_, w)| w) != Some(width) {
+                            seen.push((begun.elapsed().as_millis(), width));
+                        }
+                        gtk::glib::ControlFlow::Continue
+                    });
+                }
+                window.present();
+                let context = gtk::glib::MainContext::default();
+                let adjustment = page.ui.scroll.vadjustment();
+                let mut last_upper = -1.0;
+                let mut stable_reads = 0;
+                let mut iterations = 0usize;
+                while started.elapsed() < std::time::Duration::from_secs(40) {
+                    context.iteration(false);
+                    iterations += 1;
+                    let upper = adjustment.upper();
+                    if upper > 0.0 && (upper - last_upper).abs() < 0.5 {
+                        stable_reads += 1;
+                        if stable_reads >= 3 && started.elapsed().as_millis() > 300 {
+                            break;
+                        }
+                    } else {
+                        stable_reads = 0;
+                        last_upper = upper;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                println!(
+                    "BENCH frame {label}: settled in {:?} ({iterations} iterations, upper={:.0}, frames={}, widths={:?})",
+                    started.elapsed(),
+                    adjustment.upper(),
+                    frames.get(),
+                    widths.borrow()
+                );
+                window.destroy();
+            }
+            let reports = |last: String| -> Vec<String> {
+                let mut texts: Vec<String> = (0..49)
+                    .map(|i| if i % 2 == 0 { prose(200) } else { prose(4500) })
+                    .collect();
+                texts.push(last);
+                texts
+            };
+            run("short", (0..50).map(|_| prose(200)).collect());
+            run("reports", reports(prose(4500)));
+            run("monster-prose", reports(prose(30_000)));
+            run("monster-tokens", reports(tokens(30_000)));
+        }
+
         #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn opened_chat_lands_and_stays_on_the_newest_message() {
@@ -5300,6 +5519,11 @@ mod native {
                 gap(&adjustment) < 2.0,
                 "opened chat should land on its newest message; gap to bottom is {}px",
                 gap(&adjustment)
+            );
+            assert_eq!(
+                page.ui.display_floor.get(),
+                0,
+                "the switch slice (15 of 40 rows) should backfill to the full backlog while following"
             );
 
             // The viewport grows after the open (the window reaching
