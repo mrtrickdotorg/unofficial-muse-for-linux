@@ -134,6 +134,11 @@ button.panel-toggle { min-width: 30px; min-height: 30px; padding: 2px 7px; font-
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
 .chat-status { color: #b3b3bc; padding: 2px 6px; }
+@keyframes think-pulse { 0% { opacity: 0.25; } 40% { opacity: 1; } 80% { opacity: 0.25; } 100% { opacity: 0.25; } }
+.think-dots { padding: 5px 2px; }
+.think-dot { font-size: 11px; color: #ececf1; opacity: 0.3; animation-name: think-pulse; animation-duration: 1.25s; animation-timing-function: ease-in-out; animation-iteration-count: infinite; }
+.think-dot.d2 { animation-delay: 0.18s; }
+.think-dot.d3 { animation-delay: 0.36s; }
 .code-block { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 12px; padding: 13px 15px; font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 16px; color: #d7d7dd; }
 .quote-block { border-left: 4px solid rgba(255, 255, 255, 0.22); padding-left: 15px; color: #c9c9d1; }
 selection { background-color: rgba(110, 168, 255, 0.35); color: #ffffff; }
@@ -1994,6 +1999,53 @@ fn append_chat_grouped(
             BubbleAlignment::Start => gtk::Align::Start,
             BubbleAlignment::End => gtk::Align::End,
         });
+        stamp.add_css_class("message-meta");
+        bubble.append(&stamp);
+    }
+    row.append(&bubble);
+    container.append(&row);
+}
+
+/// The thinking bubble: the web's animated three-dot row in an
+/// assistant bubble, shown while a turn is in flight and no words
+/// have landed yet. Same row geometry as a text bubble (avatar,
+/// margins, bubble chrome) so the transcript does not jump when
+/// the first words replace the dots. The pulse is pure CSS
+/// (`.think-dot` keyframes, staggered delays), so the animation
+/// costs no main-loop work -- and a frozen frame would freeze the
+/// dots visibly rather than hide a stall.
+fn append_thinking_grouped(container: &gtk::Box, stamp: Option<String>, avatar_initial: &str) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_hexpand(true);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.set_margin_top(6);
+    row.set_margin_bottom(6);
+
+    let avatar = gtk::Label::new(Some(avatar_initial));
+    avatar.add_css_class("message-avatar");
+    avatar.set_valign(gtk::Align::Start);
+    row.append(&avatar);
+
+    let bubble = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    bubble.set_halign(gtk::Align::Start);
+    bubble.add_css_class("chat-bubble");
+    bubble.add_css_class("assistant");
+
+    let dots = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+    dots.add_css_class("think-dots");
+    dots.set_valign(gtk::Align::Center);
+    for delay_class in ["d1", "d2", "d3"] {
+        let dot = gtk::Label::new(Some("\u{25cf}"));
+        dot.add_css_class("think-dot");
+        dot.add_css_class(delay_class);
+        dots.append(&dot);
+    }
+    bubble.append(&dots);
+    if let Some(stamp_text) = stamp {
+        let stamp = gtk::Label::new(Some(&stamp_text));
+        stamp.set_xalign(0.0);
+        stamp.set_halign(gtk::Align::Start);
         stamp.add_css_class("message-meta");
         bubble.append(&stamp);
     }
