@@ -70,7 +70,7 @@ const DARK_THEME_CSS: &str = r#"
    little too large" — stepped it back one notch to ~1.2 over the
    first pass (base text 21px), proportions unchanged. His eye is the
    calibration instrument; do not "correct" these back to nominal. */
-window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", "Cantarell", "Noto Sans", system-ui, sans-serif; font-size: 21px; }
+window, .app-shell { background-color: #0d0d10; color: #f4f4f6; font-family: "Inter", "Segoe UI", "Cantarell", "Noto Sans", system-ui, sans-serif; font-size: 19px; }
 window.dark-window { background-color: #0d0d10; }
 scrolledwindow viewport { background-color: transparent; }
 .app-sidebar { background-color: #131318; }
@@ -82,11 +82,12 @@ scrolledwindow viewport { background-color: transparent; }
 .panel-list row { padding: 13px 17px; border-radius: 12px; background: transparent; color: #d7d7dd; }
 .panel-list row:hover { background-color: rgba(255, 255, 255, 0.05); }
 .panel-list row:selected { background-color: rgba(255, 255, 255, 0.10); color: #ffffff; }
-.panel-item-label { font-size: 21px; }
-.panel-heading { color: #9a9aa5; font-size: 17px; font-weight: 600; padding: 19px 15px 7px; }
-.panel-title { color: #f4f4f6; font-size: 21px; font-weight: 700; padding: 3px 6px 6px; }
-.panel-copy { color: #b3b3bc; font-size: 17px; padding: 0 6px; }
-.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 27px; min-height: 53px; padding: 0 17px; font-size: 20px; color: #f4f4f6; }
+.panel-item-label { font-size: 19px; }
+.panel-heading { color: #9a9aa5; font-size: 16px; font-weight: 600; padding: 19px 15px 7px; }
+button.panel-toggle { min-width: 30px; min-height: 30px; padding: 2px 7px; font-size: 16px; }
+.panel-title { color: #f4f4f6; font-size: 19px; font-weight: 700; padding: 3px 6px 6px; }
+.panel-copy { color: #b3b3bc; font-size: 16px; padding: 0 6px; }
+.search-pill { background-color: #26262d; border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 24px; min-height: 48px; padding: 0 17px; font-size: 18px; color: #f4f4f6; }
 .search-pill:focus { border-color: rgba(255, 255, 255, 0.25); }
 .rail-separator { background-color: rgba(255, 255, 255, 0.08); min-height: 1px; margin: 6px 8px; }
 .brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 13px; font-weight: 700; min-width: 48px; min-height: 48px; }
@@ -103,10 +104,10 @@ scrolledwindow viewport { background-color: transparent; }
 .topbar { padding: 15px 27px; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
 .topbar-button { min-width: 48px; min-height: 48px; padding: 0; border-radius: 24px; background: transparent; border-color: transparent; box-shadow: none; }
 .topbar-button:hover { background-color: rgba(255, 255, 255, 0.06); }
-.page-title { background-color: transparent; border-radius: 0; padding: 6px 3px; font-size: 21px; font-weight: 600; color: #f4f4f6; }
-.status-chip { color: #a7a7b1; background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 18px; padding: 7px 15px; font-size: 16px; }
+.page-title { background-color: transparent; border-radius: 0; padding: 6px 3px; font-size: 19px; font-weight: 600; color: #f4f4f6; }
+.status-chip { color: #a7a7b1; background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 18px; padding: 7px 15px; font-size: 15px; }
 .page-content { padding: 31px 39px; }
-.page-heading { font-size: 29px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
+.page-heading { font-size: 26px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
 .page-subtitle { color: #b3b3bc; }
 .chat-column { }
 .chat-scroll { background: transparent; }
@@ -114,60 +115,60 @@ scrolledwindow viewport { background-color: transparent; }
 .assistant-avatar { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 27px; min-width: 53px; min-height: 53px; font-weight: 700; }
 .message-avatar { background-color: #26262d; color: #d7d7de; border-radius: 21px; min-width: 43px; min-height: 43px; font-weight: 700; margin-top: 3px; }
 .assistant-name { font-weight: 600; }
-.message-meta { color: #8e8e99; font-size: 15px; padding: 3px 8px; }
+.message-meta { color: #8e8e99; font-size: 14px; padding: 3px 8px; }
 .day-divider { color: #6f6f7a; font-size: smaller; padding: 8px 0 2px; }
-.section-heading { font-weight: 600; font-size: 19px; color: #f4f4f6; padding-top: 11px; }
-.title-2 { font-weight: 600; font-size: 19px; color: #f4f4f6; }
+.section-heading { font-weight: 600; font-size: 18px; color: #f4f4f6; padding-top: 11px; }
+.title-2 { font-weight: 600; font-size: 18px; color: #f4f4f6; }
 .settings-disclosure { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 12px 17px; }
 .welcome-card { background-image: linear-gradient(180deg, #1e1e28, #17171d); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 19px; padding: 24px; }
-.welcome-title { color: #f4f4f6; font-size: 30px; font-weight: 700; }
+.welcome-title { color: #f4f4f6; font-size: 27px; font-weight: 700; }
 .welcome-copy { color: #c9c9d1; }
 .settings-content { padding: 10px 2px 4px; }
 .toolbar { padding: 2px 0 0; }
-.toolbar button { font-size: 17px; min-height: 39px; padding: 4px 13px; }
+.toolbar button { font-size: 16px; min-height: 39px; padding: 4px 13px; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action) { background-color: transparent; background-image: none; border-color: transparent; box-shadow: none; }
 .toolbar button:not(.destructive-action):not(.suggested-action):not(.primary-action):hover { background-color: rgba(255, 255, 255, 0.06); }
-.chat-bubble { padding: 15px 21px; border-radius: 21px; font-size: 21px; }
+.chat-bubble { padding: 15px 21px; border-radius: 21px; font-size: 19px; }
 .chat-bubble.user { background-color: #0a84ff; color: #ffffff; }
 .chat-bubble.user .message-meta { color: #dbeeff; }
 .chat-bubble.assistant { background-color: transparent; color: #ececf1; padding-left: 2px; padding-right: 2px; }
 .chat-bubble.notice { background-color: #2e2716; color: #f4d99b; }
 .chat-status { color: #b3b3bc; padding: 2px 6px; }
-.code-block { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 12px; padding: 13px 15px; font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 17px; color: #d7d7dd; }
+.code-block { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 12px; padding: 13px 15px; font-family: "JetBrains Mono", "Cascadia Code", "DejaVu Sans Mono", monospace; font-size: 16px; color: #d7d7dd; }
 .quote-block { border-left: 4px solid rgba(255, 255, 255, 0.22); padding-left: 15px; color: #c9c9d1; }
 selection { background-color: rgba(110, 168, 255, 0.35); color: #ffffff; }
 .composer { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 29px; padding: 9px 9px 9px 17px; }
 .composer:focus-within { border-color: rgba(255, 255, 255, 0.28); }
-.composer entry { background: transparent; border: 0; box-shadow: none; font-size: 21px; }
+.composer entry { background: transparent; border: 0; box-shadow: none; font-size: 19px; }
 .composer button.suggested-action { border-radius: 25px; padding: 9px 21px; font-weight: 600; }
 .composer-pill { background-color: #1e1e24; }
-.send-round { min-width: 48px; min-height: 48px; padding: 0; border-radius: 24px; background-color: #f4f4f6; background-image: none; color: #131316; font-size: 23px; font-weight: 700; border-color: transparent; box-shadow: none; }
+.send-round { min-width: 44px; min-height: 44px; padding: 0; border-radius: 22px; background-color: #f4f4f6; background-image: none; color: #131316; font-size: 21px; font-weight: 700; border-color: transparent; box-shadow: none; }
 .send-round:hover { background-color: #ffffff; }
 .send-round:disabled { background-color: rgba(255, 255, 255, 0.14); color: rgba(244, 244, 246, 0.45); }
-entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; padding: 9px 15px; font-size: 19px; }
+entry, searchentry, textview { color: #f4f4f6; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; padding: 9px 15px; font-size: 18px; }
 entry:focus, searchentry:focus, textview:focus { border-color: rgba(255, 255, 255, 0.28); }
-button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; padding: 9px 17px; box-shadow: none; font-size: 18px; }
+button { color: #e9e9ee; background-color: #1d1d23; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; padding: 9px 17px; box-shadow: none; font-size: 17px; }
 button:hover { background-color: #26262e; }
 button.suggested-action, button.primary-action { color: #101014; background-color: #f4f4f6; background-image: none; border-color: transparent; }
 button.suggested-action:hover, button.primary-action:hover { background-color: #ffffff; background-image: none; }
 button.destructive-action { color: #ffb4ab; background-color: #332024; border-color: rgba(255, 180, 171, 0.25); }
 button.destructive-action:hover { background-color: #42262a; }
 .dim-label { color: #b3b3bc; }
-.build-identity { color: #6f6f7a; font-size: 15px; padding: 14px 8px 3px; }
+.build-identity { color: #6f6f7a; font-size: 14px; padding: 14px 8px 3px; }
 notebook header { background-color: #0d0d10; border-bottom: 1px solid rgba(255, 255, 255, 0.07); }
-notebook tab { color: #a7a7b1; background-color: transparent; border-radius: 9px; padding: 11px 17px; font-size: 19px; }
+notebook tab { color: #a7a7b1; background-color: transparent; border-radius: 9px; padding: 11px 17px; font-size: 18px; }
 notebook tab:checked { color: #f4f4f6; background-color: rgba(255, 255, 255, 0.08); }
 notebook stack { background-color: #0d0d10; }
 combobox box, combobox cellview { color: #f4f4f6; }
 popover contents { background-color: #1a1a20; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; }
-popover modelbutton { color: #e9e9ee; font-size: 19px; padding: 7px 12px; }
+popover modelbutton { color: #e9e9ee; font-size: 18px; padding: 7px 12px; }
 popover modelbutton:hover { background-color: rgba(255, 255, 255, 0.06); }
 list { background-color: transparent; }
 list row { color: #e9e9ee; padding: 9px 12px; border-radius: 9px; }
 list row:selected { background-color: rgba(255, 255, 255, 0.09); }
 .card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 19px; }
-.feed-title { font-size: 21px; font-weight: 700; color: #f4f4f6; }
-.feed-icon { font-size: 30px; }
+.feed-title { font-size: 19px; font-weight: 700; color: #f4f4f6; }
+.feed-icon { font-size: 27px; }
 .feed-image { border-radius: 14px; background-color: #101014; }
 .feed-widget { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 14px; }
 .approval-card { border-left: 3px solid #c98a2b; }
@@ -1032,10 +1033,23 @@ fn build_ui(app: &gtk::Application) {
     // recent runs) rides beside the page column. It hides itself until
     // the account links, and the chat column's binder adapts to
     // whatever room that leaves.
-    let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    //
+    // The row is a Paned, not a Box, on purpose: a GtkBox distributes
+    // surplus width by rules that let a fixed panel drift (measured
+    // 633px at 2560 wide on Nov 12, 2026, against a 252px request),
+    // while a Paned's end child is allocated its measured width and
+    // the start child absorbs every change in the total. The panel's
+    // width is a budget, not a negotiation.
+    let panel_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    panel_slot.append(&account_page.side_panel);
+    panel_slot.append(&account_page.side_panel_strip);
+    let content_row = gtk::Paned::new(gtk::Orientation::Horizontal);
+    content_row.set_resize_end_child(false);
+    content_row.set_shrink_end_child(false);
+    content_row.set_wide_handle(false);
     main_column.set_hexpand(true);
-    content_row.append(&main_column);
-    content_row.append(&account_page.side_panel);
+    content_row.set_start_child(Some(&main_column));
+    content_row.set_end_child(Some(&panel_slot));
     shell.set_end_child(Some(&content_row));
 
     let api_key_for_set = Rc::clone(&api_key);
@@ -1747,7 +1761,7 @@ pub(crate) const READING_COLUMN_MAX_PX: i32 = 921;
 pub(crate) const READING_COLUMN_START_PX: i32 = 480;
 
 /// Below this window width the right-hand panel steps aside: rail
-/// (91) + sidebar (403) + panel (283) are fixed costs, and under
+/// (91) + sidebar (403) + panel (252) are fixed costs, and under
 /// ~1440 what remains cannot hold a readable page column beside
 /// the panel. The panel is company, not content — the page wins,
 /// and the panel returns when the window widens past the line.
