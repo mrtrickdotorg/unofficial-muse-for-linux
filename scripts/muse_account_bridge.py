@@ -220,8 +220,20 @@ _HISTORY_PROBED = set()
 # at the raw-event level and inside its payload. A shape probe that
 # fired on these would log every ordinary conversation's shape and
 # bury the one it exists to find.
-_HISTORY_RAW_KNOWN = {"event", "payload", "status"}
-_HISTORY_PAYLOAD_KNOWN = {"display_text", "status", "widgets"}
+_HISTORY_RAW_KNOWN = {
+    "agent_id", "chat_context", "display_text", "display_text_ready",
+    "display_text_updated_at_ms", "event", "event_name", "message_id",
+    "occurred_at_ms", "parent_agent_id", "parent_message_id", "payload",
+    "status",
+}
+_HISTORY_PAYLOAD_KNOWN = {
+    "agent_id", "chat_context", "chat_event_seq", "content", "data",
+    "display_text", "display_text_ready", "display_text_updated_at_ms",
+    "fallback_text", "host_message_id", "id", "is_thread", "kind",
+    "message_id", "metadata", "parent_agent_id", "reply_to_message_id",
+    "reply_to_text", "role", "seq", "session_id", "source", "state",
+    "status", "transcript_surface", "visibility", "widgets",
+}
 
 
 def _probe_history_shape(config_dir, raw, payload):
@@ -376,6 +388,50 @@ def _widget_options(payload):
     return None
 
 
+def _nonneg_int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) \
+        and value >= 0 else None
+
+
+def _message_attachments(payload):
+    """Project a message's attachments (probe, Nov 13, 2026: they
+    ride in `payload.metadata.attachments` with filename, mime_type,
+    kind, bytes_len, width/height for images, caption, transcription,
+    a service-side path and a sha256). The path and the hash stay
+    behind -- the card shows what the reader needs (name, type,
+    size, dimensions, caption) -- and strings pass the content
+    redactor like every other display string. A row with no
+    attachments projects nothing, keeping the wire shape unchanged
+    for ordinary messages."""
+    metadata = payload.get("metadata") if isinstance(
+        payload.get("metadata"), dict) else {}
+    raw_list = metadata.get("attachments") if isinstance(
+        metadata.get("attachments"), list) else []
+    attachments = []
+    for item in raw_list[:8]:
+        if not isinstance(item, dict):
+            continue
+        filename = content_text(item.get("filename"))
+        if not filename:
+            continue
+        attachment = {
+            "filename": filename,
+            "mime_type": optional_text(item.get("mime_type")),
+            "kind": optional_text(item.get("kind")),
+            "bytes_len": _nonneg_int(item.get("bytes_len")),
+            "width": _nonneg_int(item.get("width")),
+            "height": _nonneg_int(item.get("height")),
+            "caption": content_text(item.get("caption")),
+        }
+        transcription = content_text(item.get("transcription"))
+        if transcription:
+            attachment["transcription"] = transcription[:500]
+        if attachment["caption"]:
+            attachment["caption"] = attachment["caption"][:500]
+        attachments.append(attachment)
+    return attachments
+
+
 def history_rows(rows, config_dir=None):
     rows = object_rows(rows)
     latest = {}
@@ -398,6 +454,9 @@ def history_rows(rows, config_dir=None):
             message["options"] = widget["options"]
             if widget["selected"]:
                 message["selected_option"] = widget["selected"]
+        attachments = _message_attachments(payload)
+        if attachments:
+            message["attachments"] = attachments
         if config_dir and "[[hatch_widget" in message["text"] and raw:
             _probe_widget_payload(config_dir, raw)
         if config_dir and raw:
