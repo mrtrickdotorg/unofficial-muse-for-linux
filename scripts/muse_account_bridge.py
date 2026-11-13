@@ -1453,6 +1453,68 @@ def _feed_extras(unit):
     return extras
 
 
+_IDEAS_PROBED = False
+
+
+def _probe_ideas_shapes(config_dir, payload):
+    """One-shot reconnaissance for the idea-card icon (Patrick,
+    Nov 13, 2026): the web draws an icon on every card; the recorded
+    consumer reads only id/title/section off the list rows, so the
+    field carrying the icon -- if the list payload carries one at
+    all -- is unknown. Record the key structure only -- sections'
+    and cards' key names, never values -- once per process, so the
+    next look at his timing log names the field from evidence."""
+    global _IDEAS_PROBED
+    if _IDEAS_PROBED or not config_dir:
+        return
+    _IDEAS_PROBED = True
+    try:
+        signatures = []
+        if isinstance(payload, dict):
+            signatures.append("top:" + ",".join(sorted(payload.keys())))
+            sections = payload.get("sections")
+            cards_seen = 0
+            if isinstance(sections, list):
+                for section in sections:
+                    if not isinstance(section, dict):
+                        continue
+                    sig = "section:" + ",".join(sorted(section.keys()))
+                    if sig not in signatures:
+                        signatures.append(sig)
+                    cards = section.get("cards")
+                    if not isinstance(cards, list):
+                        cards = section.get("ideas")
+                    if isinstance(cards, list):
+                        for card in cards:
+                            if not isinstance(card, dict):
+                                continue
+                            cards_seen += 1
+                            sig = "card:" + ",".join(sorted(card.keys()))
+                            if sig not in signatures and len(signatures) < 5:
+                                signatures.append(sig)
+            signatures.append("cards={}".format(cards_seen))
+        timing_log(config_dir, "ideas-probe " + " | ".join(signatures)[:1500])
+    except Exception:
+        pass
+
+
+def _ideas_extras(row):
+    """Display fields for an idea card beyond the shared shape --
+    the icon the web draws at the card's left edge, under the same
+    two names the feed payload carries them by (an `emoji` and an
+    `icon_url`): the shared listing shape has slots for both.
+    Unknown until the shape probe names the fields from a live
+    payload; absent fields simply leave the slots empty."""
+    extras = {}
+    icon = row.get("emoji")
+    if isinstance(icon, str) and icon.strip():
+        extras["icon"] = icon.strip()[:16]
+    image = row.get("icon_url")
+    if isinstance(image, str) and image.startswith(("https://", "http://")):
+        extras["image_url"] = image.strip()[:2000]
+    return extras
+
+
 def ideas_rows(payload):
     """Project the idea-cards listing: cards nest inside sections.
 
@@ -1479,7 +1541,7 @@ def ideas_rows(payload):
         reported = payload.get("total_count", payload.get("total"))
         total = reported if isinstance(reported, int) and not isinstance(
             reported, bool) and reported >= 0 else None
-        return project_listing_rows(entries, total)
+        return project_listing_rows(entries, total, _ideas_extras)
     return listing_rows(payload, ("cards", "idea_cards", "items", "results", "data"))
 
 
@@ -1977,6 +2039,7 @@ class Adapter:
             # this client until it gets its own explicit press.
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("api.idea-cards.list", timeout=20)
+            _probe_ideas_shapes(request.get("config_dir"), payload)
             return ideas_rows(payload)
         if request["op"] == "goals":
             # Read-only: the account's goals as the recorded list route

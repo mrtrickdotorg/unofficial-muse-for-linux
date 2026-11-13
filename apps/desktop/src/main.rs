@@ -109,6 +109,7 @@ button.panel-toggle { min-width: 30px; min-height: 30px; padding: 2px 7px; font-
 .page-content { padding: 31px 39px; }
 .page-heading { font-size: 26px; font-weight: 700; color: #f4f4f6; padding-bottom: 2px; }
 .page-subtitle { color: #b3b3bc; }
+.section-heading { font-size: 21px; font-weight: 600; color: #f4f4f6; padding: 12px 4px 0; }
 .chat-column { }
 .chat-scroll { background: transparent; }
 .assistant-identity { padding: 0 0 6px; }

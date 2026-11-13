@@ -2085,6 +2085,28 @@ class ListingTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["kind"], "For your family")
         self.assertEqual(result["items"][2]["kind"], "New")
 
+    def test_ideas_cards_carry_their_icon_fields(self):
+        # The web draws an icon at each card's left edge. Under the
+        # names the feed payload carries them by, the projection
+        # fills the listing's icon and image slots; a card without
+        # them leaves both empty.
+        bridge = load_bridge()
+        client = self.gateway_client({
+            "sections": [
+                {"title": "S", "cards": [
+                    {"id": "c1", "title": "With icon", "emoji": "💡",
+                     "icon_url": "https://example.com/i.png"},
+                    {"id": "c2", "title": "Bare"},
+                ]},
+            ]
+        }, [])
+        result = bridge.Adapter(client, {}).dispatch({"op": "ideas"})
+        self.assertEqual(result["items"][0]["icon"], "💡")
+        self.assertEqual(result["items"][0]["image_url"],
+                         "https://example.com/i.png")
+        self.assertIsNone(result["items"][1].get("icon"))
+        self.assertIsNone(result["items"][1].get("image_url"))
+
     def test_feed_days_shape_projects_the_nested_units(self):
         # The production shape the community client itself reads: units
         # nest inside editions inside days.
