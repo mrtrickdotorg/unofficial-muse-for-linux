@@ -1174,8 +1174,8 @@ mod native {
     use std::os::fd::{FromRawFd, RawFd};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, mpsc};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
     #[cfg(test)]
     use std::time::Instant;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1249,6 +1249,15 @@ mod native {
     struct Ui {
         state: RefCell<State>,
         client: RefCell<Option<AccountClient>>,
+        /// Freeze sampler plumbing (Nov 13, 2026): the heartbeat
+        /// stamps `beat_millis` on every beat; a watchdog thread
+        /// spawned in build() watches for a beat gone stale and
+        /// samples what the main thread is doing with the freeze
+        /// (burning CPU, or parked in which syscall on which peer),
+        /// so a block names its mechanism instead of its size.
+        /// `freeze_probe` holds a client clone as the log path.
+        beat_millis: Arc<AtomicU64>,
+        freeze_probe: Arc<Mutex<Option<AccountClient>>>,
         connected_config: RefCell<Option<BridgeConfig>>,
         account_active: RefCell<Option<Arc<AtomicBool>>>,
         host_verified: Cell<bool>,
@@ -2412,6 +2421,8 @@ mod native {
         let ui = Rc::new(Ui {
             state: RefCell::new(State::default()),
             client: RefCell::new(None),
+            beat_millis: Arc::new(AtomicU64::new(0)),
+            freeze_probe: Arc::new(Mutex::new(None)),
             connected_config: RefCell::new(None),
             account_active: RefCell::new(None),
             host_verified: Cell::new(false),
@@ -2675,9 +2686,13 @@ mod native {
         // gaps). Paired with the self-reporting work units, a
         // freeze now names its layer: a unit, or the frame
         // machinery under the app (heartbeat alone), or nothing
-        // in the app at all (neither).
+        // in the app at all (neither). Every beat also stamps
+        // beat_millis for the freeze sampler below, which catches
+        // the main thread in the act when a beat goes stale.
         let beat_weak = Rc::downgrade(&ui);
         let last_beat = std::cell::Cell::new(std::time::Instant::now());
+        let beat_millis = ui.beat_millis.clone();
+        let probe_epoch = std::time::Instant::now();
         gtk::glib::timeout_add_local(Duration::from_millis(250), move || {
             let Some(ui) = beat_weak.upgrade() else {
                 return gtk::glib::ControlFlow::Break;
@@ -2685,6 +2700,7 @@ mod native {
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(last_beat.get());
             last_beat.set(now);
+            beat_millis.store(probe_epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
             if elapsed.as_millis() > 1000
                 && elapsed.as_secs() < 120
                 && let Some(client) = ui.client.borrow().as_ref()
@@ -2693,6 +2709,7 @@ mod native {
             }
             gtk::glib::ControlFlow::Continue
         });
+        spawn_freeze_sampler(ui.beat_millis.clone(), ui.freeze_probe.clone(), probe_epoch);
         let weak = Rc::downgrade(&ui);
         let last_refresh = std::cell::Cell::new(std::time::Instant::now());
         gtk::glib::timeout_add_local(Duration::from_millis(1000), move || {
@@ -2837,6 +2854,129 @@ mod native {
         }
     }
 
+    /// One sample of the main thread, from /proc: how much CPU it
+    /// has burned in total (ms) and what it is doing right now.
+    /// The main thread's tid is the process id.
+    fn sample_main_thread(tid: u32) -> (u64, String) {
+        let cpu_ms = std::fs::read_to_string(format!("/proc/{tid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let after_comm = stat.rsplit(')').next()?;
+                let fields: Vec<&str> = after_comm.split_whitespace().collect();
+                // fields[0] is state (stat field 3); utime and
+                // stime are fields 14 and 15 -- indexes 11 and 12.
+                let ticks: u64 = fields.get(11).and_then(|v| v.parse().ok()).unwrap_or(0)
+                    + fields.get(12).and_then(|v| v.parse().ok()).unwrap_or(0);
+                let tck = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+                let tck = if tck > 0 { tck as u64 } else { 100 };
+                Some(ticks * 1000 / tck)
+            })
+            .unwrap_or(0);
+        (cpu_ms, describe_main_syscall(tid))
+    }
+
+    /// The main thread's current syscall, named; when it sits in a
+    /// read on a unix socket, the socket's peer path comes along --
+    /// the difference between "parked on the compositor" and
+    /// "parked on a D-Bus call" is the whole diagnosis.
+    fn describe_main_syscall(tid: u32) -> String {
+        let raw = std::fs::read_to_string(format!("/proc/{tid}/syscall")).unwrap_or_default();
+        let mut parts = raw.split_whitespace();
+        let number: i64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(-2);
+        let name = match number {
+            0 => "read",
+            1 => "write",
+            7 => "poll",
+            17 => "pread",
+            202 => "futex",
+            230 => "clock_nanosleep",
+            232 => "epoll_wait",
+            257 => "openat",
+            271 => "ppoll",
+            281 => "epoll_pwait",
+            -1 => "running",
+            _ => return format!("syscall{number}"),
+        };
+        if number == 0
+            && let Some(fd_text) = parts.next()
+            && let Ok(fd) = i64::from_str_radix(fd_text.trim_start_matches("0x"), 16)
+            && let Ok(target) = std::fs::read_link(format!("/proc/{tid}/fd/{fd}"))
+        {
+            let target = target.to_string_lossy();
+            if let Some(inode) = target
+                .strip_prefix("socket:[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                && let Some(peer) = unix_socket_peer(inode)
+            {
+                return format!("read {peer}");
+            }
+            let short: String = target.chars().take(48).collect();
+            return format!("read {short}");
+        }
+        name.to_string()
+    }
+
+    /// The path bound to a unix socket inode, from /proc/net/unix:
+    /// the session bus, the display socket and the account host's
+    /// socket all carry their paths there.
+    fn unix_socket_peer(inode: &str) -> Option<String> {
+        let table = std::fs::read_to_string("/proc/net/unix").ok()?;
+        for line in table.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.get(6) == Some(&inode) {
+                return fields.get(7).map(|path| path.chars().take(48).collect());
+            }
+        }
+        None
+    }
+
+    /// The freeze sampler. While the heartbeat is fresh this
+    /// thread only sleeps; when a beat goes more than 2s stale it
+    /// samples the main thread twice, 600ms apart, and logs one
+    /// line per freeze episode: how stale the beat was, whether
+    /// the main thread burned CPU across the sample window
+    /// (in-process work -- layout, style, paint) or sat parked (a
+    /// wait -- a lock, the compositor, a synchronous call), and
+    /// the syscall it sat in. The bisect that motivated it
+    /// (Nov 13, 2026): the ~5s blocks survived GTK_A11Y=none,
+    /// GDK_BACKEND=x11, and got worse under cairo, which rules
+    /// the wait down to the app process and GTK core themselves.
+    /// An episode closes when a beat lands within 500ms of
+    /// schedule, so a long freeze still logs exactly once.
+    fn spawn_freeze_sampler(
+        beat_millis: Arc<AtomicU64>,
+        freeze_probe: Arc<Mutex<Option<AccountClient>>>,
+        epoch: std::time::Instant,
+    ) {
+        std::thread::spawn(move || {
+            let main_tid = std::process::id();
+            let mut episode = false;
+            loop {
+                std::thread::sleep(Duration::from_millis(300));
+                let age = epoch
+                    .elapsed()
+                    .as_millis()
+                    .saturating_sub(u128::from(beat_millis.load(Ordering::Relaxed)));
+                if age > 2000 && !episode {
+                    episode = true;
+                    let client = freeze_probe.lock().ok().and_then(|slot| slot.clone());
+                    if let Some(client) = client {
+                        let (cpu_before, syscall) = sample_main_thread(main_tid);
+                        std::thread::sleep(Duration::from_millis(600));
+                        let (cpu_after, _) = sample_main_thread(main_tid);
+                        client.log_freeze(
+                            age as u64,
+                            cpu_after.saturating_sub(cpu_before),
+                            &syscall,
+                        );
+                    }
+                } else if age <= 500 {
+                    episode = false;
+                }
+            }
+        });
+    }
+
     impl Ui {
         fn stop_host(&self) {
             // The registered host owns transport-stop-before-broker-revoke ordering.
@@ -2923,6 +3063,9 @@ mod native {
             *self.account_active.borrow_mut() = Some(active.clone());
             let client = AccountClient::new(config.clone()).cancellable(active.clone());
             *self.client.borrow_mut() = Some(client.clone());
+            if let Ok(mut probe) = self.freeze_probe.lock() {
+                *probe = Some(client.clone());
+            }
             self.state.borrow_mut().connection_notice =
                 "Connecting to the explicitly selected Muse session…".into();
             self.launch(ticket, move || {
