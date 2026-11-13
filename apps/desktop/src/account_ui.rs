@@ -39,6 +39,18 @@ struct Controller<A, H, T> {
     sending: Option<Ticket>,
     account: Option<A>,
     history: Vec<H>,
+    /// Session cache of the last history the service confirmed for
+    /// each conversation, keyed by scope: switching back to a
+    /// conversation renders these rows instantly while the fresh
+    /// read lands behind them. The service takes about a second to
+    /// answer a history read (op-timing-6.log, Nov 13, 2026:
+    /// median 921ms) while the transcript it replaces rebuilds in
+    /// about 7ms -- the switch wait was never the drawing, it was
+    /// the amnesia. Only a successful read writes here, and the
+    /// read that lands always replaces what the cache showed.
+    history_cache: std::collections::HashMap<Option<String>, (usize, Vec<H>)>,
+    /// Cache keys in first-cached order, for FIFO eviction.
+    history_cache_order: std::collections::VecDeque<Option<String>>,
     tasks: Option<T>,
     scope: Option<String>,
     limit: usize,
@@ -369,6 +381,8 @@ impl<A, H, T> Default for Controller<A, H, T> {
             sending: None,
             account: None,
             history: Vec::new(),
+            history_cache: std::collections::HashMap::new(),
+            history_cache_order: std::collections::VecDeque::new(),
             tasks: None,
             scope: None,
             limit: 50,
@@ -398,7 +412,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
     }
 }
 
-impl<A, H, T> Controller<A, H, T> {
+impl<A, H: Clone, T> Controller<A, H, T> {
     fn begin_login(&mut self, consent: bool) -> Option<Ticket> {
         if !consent || self.account.is_some() {
             self.connection_notice = "Consent to session access before opening sign-in. Disconnect first if already linked.".into();
@@ -961,6 +975,48 @@ impl<A, H, T> Controller<A, H, T> {
         true
     }
 
+    /// Remember the just-applied history under the current scope
+    /// (see the field). Bounded at two dozen conversations, FIFO.
+    fn cache_history(&mut self) {
+        let key = self.scope.clone();
+        if !self.history_cache.contains_key(&key) {
+            self.history_cache_order.push_back(key.clone());
+        }
+        self.history_cache
+            .insert(key, (self.limit, self.history.clone()));
+        while self.history_cache.len() > 24 {
+            let Some(oldest) = self.history_cache_order.pop_front() else {
+                break;
+            };
+            self.history_cache.remove(&oldest);
+        }
+    }
+
+    /// Put the cached rows for the current scope back on screen --
+    /// a switch has just cleared them: the render that follows
+    /// shows the conversation as it was when last read, and the
+    /// read already in flight replaces them with the service's
+    /// latest. False when this conversation was never read this
+    /// session.
+    fn prime_history_from_cache(&mut self) -> bool {
+        let Some((limit, rows)) = self.history_cache.get(&self.scope).cloned() else {
+            return false;
+        };
+        self.limit = limit;
+        self.history_detail = format!(
+            "{} messages from the latest {} service events (bounded window, not a full export), shown from this session's cache while the latest load lands.",
+            rows.len(),
+            limit
+        );
+        self.history = rows;
+        true
+    }
+
+    fn clear_history_cache(&mut self) {
+        self.history_cache.clear();
+        self.history_cache_order.clear();
+    }
+
     fn apply_history(&mut self, result: Result<Vec<H>, String>) {
         match result {
             Ok(history) => {
@@ -971,6 +1027,7 @@ impl<A, H, T> Controller<A, H, T> {
                 );
                 self.history_notice.clear();
                 self.history = history;
+                self.cache_history();
             }
             Err(error) => {
                 self.history_notice = format!(
@@ -986,6 +1043,7 @@ impl<A, H, T> Controller<A, H, T> {
         }
         match result {
             Ok(account) => {
+                self.clear_history_cache();
                 self.account = Some(account);
                 self.connection_notice =
                     "Account linked. Your chats and scheduled tasks now load from this Muse account."
@@ -2448,6 +2506,7 @@ mod native {
                     }
                     let changed = u.state.borrow_mut().select_thread(None);
                     if changed {
+                        u.state.borrow_mut().prime_history_from_cache();
                         u.prompt.set_text("");
                         u.render();
                         u.read(false, false);
@@ -2469,6 +2528,7 @@ mod native {
                 };
                 let changed = u.state.borrow_mut().select_thread(Some(scope));
                 if changed {
+                    u.state.borrow_mut().prime_history_from_cache();
                     u.prompt.set_text("");
                     u.render();
                     u.read(false, false);
@@ -6743,6 +6803,34 @@ mod tests {
         assert!(state.begin_read(true, false).is_none());
         assert!(state.begin_send("must not leave this device").is_none());
         assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn a_switch_back_primes_from_the_session_cache() {
+        let mut state = connected();
+        // Read the main conversation and a thread, the way two
+        // clicks would land them.
+        let ticket = state.begin_read(false, false).unwrap();
+        state.finish_history(&ticket, Ok(vec!["main rows".into()]));
+        assert!(state.select_thread(Some("thread".into())));
+        let ticket = state.begin_read(false, false).unwrap();
+        state.finish_history(&ticket, Ok(vec!["thread rows".into()]));
+
+        // Switching back clears, then primes from the cache --
+        // the render between the click and the fetch shows the
+        // rows instead of an empty transcript.
+        assert!(state.select_thread(None));
+        assert!(state.history.is_empty());
+        assert!(state.prime_history_from_cache());
+        assert_eq!(state.history, vec!["main rows"]);
+        assert!(state.select_thread(Some("thread".into())));
+        assert!(state.prime_history_from_cache());
+        assert_eq!(state.history, vec!["thread rows"]);
+
+        // Disconnect resets the whole state, cache included: a
+        // later session must never prime with these rows.
+        state.disconnect();
+        assert!(!state.prime_history_from_cache());
     }
 
     #[test]
