@@ -1270,6 +1270,9 @@ mod native {
         /// change, so the follow lasts exactly as long as layout
         /// keeps settling.
         follow_bottom: Cell<bool>,
+        start_logged: Cell<bool>,
+        stall_watch_armed: Cell<bool>,
+        last_render_scope: RefCell<Option<Option<String>>>,
         /// A bottom snap is inside set_value: the value-changed it
         /// emits is ours, not the reader's.
         snapping_bottom: Cell<bool>,
@@ -2411,6 +2414,9 @@ mod native {
             rendering: Cell::new(false),
             scroll_to_bottom: Cell::new(false),
             follow_bottom: Cell::new(false),
+            start_logged: Cell::new(false),
+            stall_watch_armed: Cell::new(false),
+            last_render_scope: RefCell::new(None),
             snapping_bottom: Cell::new(false),
             scroll_gesture: Cell::new(false),
             bottom_settle_armed: Cell::new(false),
@@ -2504,6 +2510,9 @@ mod native {
                     if u.rendering.get() || list.selected_row().is_none() {
                         return;
                     }
+                    if let Some(client) = u.client.borrow().as_ref() {
+                        client.log_switch();
+                    }
                     let changed = u.state.borrow_mut().select_thread(None);
                     if changed {
                         u.state.borrow_mut().prime_history_from_cache();
@@ -2526,6 +2535,9 @@ mod native {
                 let Some(scope) = name.strip_prefix("thread:").map(str::to_string) else {
                     return;
                 };
+                if let Some(client) = u.client.borrow().as_ref() {
+                    client.log_switch();
+                }
                 let changed = u.state.borrow_mut().select_thread(Some(scope));
                 if changed {
                     u.state.borrow_mut().prime_history_from_cache();
@@ -3953,6 +3965,50 @@ mod native {
             }
         }
 
+        /// Watch the frame clock for 20s after a scope change: if
+        /// frames were flowing and one frame then takes over 300ms,
+        /// the stall (layout, paint, or a blocked main thread) is
+        /// logged with its size. The watch removes itself -- a
+        /// permanent tick callback would keep the frame clock, and
+        /// the fan, running at idle.
+        fn arm_frame_stall_watch(&self) {
+            if self.stall_watch_armed.get() {
+                return;
+            }
+            self.stall_watch_armed.set(true);
+            let weak = self.self_weak.borrow().clone();
+            let last_tick: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
+            let last_logged: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            self.scroll.add_tick_callback(move |_widget, _clock| {
+                let now = std::time::Instant::now();
+                if now > deadline {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.stall_watch_armed.set(false);
+                    }
+                    return gtk::glib::ControlFlow::Break;
+                }
+                if let Some(previous) = *last_tick.borrow() {
+                    let gap = now.duration_since(previous);
+                    if gap.as_millis() > 300 && gap.as_secs() < 5 {
+                        let due = last_logged
+                            .borrow()
+                            .is_none_or(|logged| now.duration_since(logged).as_secs() >= 5);
+                        if due {
+                            *last_logged.borrow_mut() = Some(now);
+                            if let Some(ui) = weak.upgrade()
+                                && let Some(client) = ui.client.borrow().as_ref()
+                            {
+                                client.log_frame_stall(gap);
+                            }
+                        }
+                    }
+                }
+                *last_tick.borrow_mut() = Some(now);
+                gtk::glib::ControlFlow::Continue
+            });
+        }
+
         /// Selection follows the scope in place: the row set only
         /// changes when the service's thread list does, so a switch
         /// is a highlight move, never a 150-row rebuild. Runs inside
@@ -3998,6 +4054,16 @@ mod native {
             self.rendering.set(true);
             let render_started = std::time::Instant::now();
             let state = self.state.borrow();
+            if !self.start_logged.get()
+                && let Some(client) = self.client.borrow().as_ref()
+            {
+                self.start_logged.set(true);
+                client.log_start(super::super::build_identity::commit().unwrap_or("unknown"));
+            }
+            if *self.last_render_scope.borrow() != Some(state.scope.clone()) {
+                *self.last_render_scope.borrow_mut() = Some(state.scope.clone());
+                self.arm_frame_stall_watch();
+            }
             let connected = state.account.is_some();
             let idle = state.busy.is_none();
             let background = match state.busy.as_ref() {
