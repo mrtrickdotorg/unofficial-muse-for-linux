@@ -1204,6 +1204,26 @@ mod native {
         /// read (an open or a switch) and after the user's own send.
         /// Consumed by the first render that finds no operation in flight.
         scroll_to_bottom: Cell<bool>,
+        /// The reader is following the newest message: set by a pin
+        /// or by being at the bottom, cleared when a scroll gesture
+        /// leaves the reader away from the bottom. While it holds,
+        /// the scroll adjustment's changed handler (wired in
+        /// build()) snaps the view to the bottom on every geometry
+        /// change, so the follow lasts exactly as long as layout
+        /// keeps settling.
+        follow_bottom: Cell<bool>,
+        /// A bottom snap is inside set_value: the value-changed it
+        /// emits is ours, not the reader's.
+        snapping_bottom: Cell<bool>,
+        /// A scroll gesture (wheel, touchpad, scrollbar drag) has
+        /// been seen since the last settle pass: at the pass, the
+        /// position it left becomes the follow intent. Programmatic
+        /// value moves -- including the viewport's own re-anchor of
+        /// the position during a rebuild's allocation -- never set
+        /// this, so they never read as the reader scrolling away.
+        scroll_gesture: Cell<bool>,
+        /// A settle pass (one idle callback) is already armed.
+        bottom_settle_armed: Cell<bool>,
         /// First-shown local stamps per service message id, this session:
         /// the moment a row first printed, recorded by the render that
         /// printed it. Backlog rows from the first load of a conversation
@@ -2332,6 +2352,10 @@ mod native {
             persistence_warning: RefCell::new(None),
             rendering: Cell::new(false),
             scroll_to_bottom: Cell::new(false),
+            follow_bottom: Cell::new(false),
+            snapping_bottom: Cell::new(false),
+            scroll_gesture: Cell::new(false),
+            bottom_settle_armed: Cell::new(false),
             shown_stamps: RefCell::new(std::collections::HashMap::new()),
             shown_scope: RefCell::new(None),
             history_primed: Cell::new(false),
@@ -2472,6 +2496,84 @@ mod native {
             });
         }
         *ui.self_weak.borrow_mut() = Rc::downgrade(&ui);
+        {
+            // Follow the transcript's bottom geometrically. The old
+            // mechanism scheduled scrolls 0/60/250ms after a render
+            // and hoped layout had settled by the last one; on
+            // Patrick's laptop an opened chat could still be laying
+            // out (or the window still reaching its size) after the
+            // final retry, and the view stopped short of the newest
+            // messages (Nov 13, 2026). An adjustment reports every
+            // geometry change -- fresh rows laid out, the viewport
+            // resized -- so snap from its changed signal instead:
+            // the snap repeats for exactly as long as the geometry
+            // keeps moving and lands on the true bottom.
+            let u = Rc::clone(&ui);
+            ui.scroll.vadjustment().connect_changed(move |adjustment| {
+                if u.follow_bottom.get() {
+                    u.snap_to_bottom(adjustment);
+                }
+            });
+            // Enforcement alone misses one mover: during a
+            // rebuild's allocation the viewport re-anchors the
+            // scroll position once -- a gtk_adjustment_configure
+            // with a preserved-ish value near the top, traced under
+            // gdb on Nov 13, 2026 -- with no geometry change for the
+            // changed handler to answer. A value move that is
+            // neither ours nor a gesture arms one settle pass to be
+            // corrected by (settle_bottom).
+            let u = Rc::clone(&ui);
+            ui.scroll
+                .vadjustment()
+                .connect_value_changed(move |adjustment| {
+                    if u.snapping_bottom.get() || !u.follow_bottom.get() {
+                        return;
+                    }
+                    if adjustment.upper() - adjustment.page_size() - adjustment.value() > 0.5 {
+                        u.arm_bottom_settle();
+                    }
+                });
+            // Intent comes only from gestures, never from value
+            // moves. Two claim-free observers record them: a wheel
+            // or touchpad scroll anywhere over the transcript
+            // (capture phase, ahead of the scrolled window's own
+            // controller; the scrollbar is a descendant, so wheel
+            // over the bar is seen too), and pointer motion with
+            // the button held over the scrollbar -- a drag. (A
+            // GtkScrollbar is not a range in GTK4 and offers no
+            // user-input signal of its own; a competing drag
+            // gesture could starve the bar's own, so motion it is.)
+            // Recording only: settle_bottom reads the position the
+            // gesture left and makes it the follow intent.
+            let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+            wheel.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let u = Rc::clone(&ui);
+            wheel.connect_scroll(move |_, _, _| {
+                u.note_scroll_gesture();
+                gtk::glib::Propagation::Proceed
+            });
+            ui.scroll.add_controller(wheel);
+            let motion = gtk::EventControllerMotion::new();
+            motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let u = Rc::clone(&ui);
+            let bar = ui.scroll.vscrollbar();
+            motion.connect_motion(move |controller, x, y| {
+                let pressed = controller.current_event().is_some_and(|event| {
+                    event
+                        .modifier_state()
+                        .contains(gtk::gdk::ModifierType::BUTTON1_MASK)
+                });
+                if !pressed {
+                    return;
+                }
+                if let Some(picked) = u.scroll.pick(x, y, gtk::PickFlags::DEFAULT)
+                    && (picked == bar || picked.is_ancestor(&bar))
+                {
+                    u.note_scroll_gesture();
+                }
+            });
+            ui.scroll.add_controller(motion);
+        }
         let weak = Rc::downgrade(&ui);
         let last_refresh = std::cell::Cell::new(std::time::Instant::now());
         gtk::glib::timeout_add_local(Duration::from_millis(1000), move || {
@@ -3698,6 +3800,65 @@ mod native {
             self.history.append(&row);
         }
 
+        /// Put the transcript on its newest message, at the bottom
+        /// the adjustment's CURRENT geometry reports. Layout may
+        /// still be settling; the changed handler wired in build()
+        /// re-runs this on every later geometry change while the
+        /// reader follows the bottom, so the final snap lands on
+        /// the final geometry whenever it arrives.
+        fn snap_to_bottom(&self, adjustment: &gtk::Adjustment) {
+            let target = (adjustment.upper() - adjustment.page_size()).max(0.0);
+            if (adjustment.value() - target).abs() > 0.5 {
+                self.snapping_bottom.set(true);
+                adjustment.set_value(target);
+                self.snapping_bottom.set(false);
+            }
+        }
+
+        /// A scroll gesture (wheel, touchpad, scrollbar drag) was
+        /// seen: record it and arm the settle pass that turns the
+        /// position it leaves into the follow intent.
+        fn note_scroll_gesture(&self) {
+            self.scroll_gesture.set(true);
+            self.arm_bottom_settle();
+        }
+
+        /// Arm the one-idle settle pass (coalesced across callers):
+        /// when the main context next drains -- after the current
+        /// events and the frame's allocation have landed -- a
+        /// pending gesture's resting position becomes the follow
+        /// intent, and a view that is still following is snapped
+        /// back onto the bottom: the correction for value moves
+        /// nothing else answers, like the viewport's re-anchor
+        /// during a rebuild's allocation. (A frame-clock tick was
+        /// tried first and starved: with no redraw scheduled, no
+        /// frame runs and the correction never fires. An idle
+        /// cannot starve.)
+        fn arm_bottom_settle(&self) {
+            if self.bottom_settle_armed.replace(true) {
+                return;
+            }
+            let weak = self.self_weak.borrow().clone();
+            gtk::glib::idle_add_local_once(move || {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                ui.settle_bottom();
+            });
+        }
+
+        fn settle_bottom(&self) {
+            self.bottom_settle_armed.set(false);
+            if self.scroll_gesture.replace(false) {
+                let adjustment = self.scroll.vadjustment();
+                self.follow_bottom
+                    .set(adjustment.upper() - adjustment.page_size() - adjustment.value() < 48.0);
+            }
+            if self.follow_bottom.get() {
+                self.snap_to_bottom(&self.scroll.vadjustment());
+            }
+        }
+
         fn render(&self) {
             self.rendering.set(true);
             let state = self.state.borrow();
@@ -4198,19 +4359,17 @@ mod native {
             {
                 client.log_render(state.history.len(), transcript_started.elapsed());
             }
-            // Newest messages are at the bottom. Follow them when the reader
-            // was already there or the pin demands it, and repeat after
-            // allocation: a fresh row only enlarges the adjustment once it
-            // has been laid out.
+            // Newest messages are at the bottom. A pin, or a reader
+            // who was already there, follows them: snap to the
+            // bottom the current geometry reports, and the scroll
+            // adjustment's changed handler (wired in build()) keeps
+            // snapping as the fresh rows lay out and the geometry
+            // settles -- for however long that takes.
             if was_at_bottom || pin_to_bottom {
-                for delay in [0u64, 60, 250] {
-                    let scroll = self.scroll.clone();
-                    gtk::glib::timeout_add_local_once(Duration::from_millis(delay), move || {
-                        let adjustment = scroll.vadjustment();
-                        adjustment
-                            .set_value((adjustment.upper() - adjustment.page_size()).max(0.0));
-                    });
-                }
+                self.follow_bottom.set(true);
+            }
+            if self.follow_bottom.get() {
+                self.snap_to_bottom(&self.scroll.vadjustment());
             }
             super::super::clear_chat(&self.tasks);
             if let Some(tasks) = &state.tasks {
@@ -4712,6 +4871,133 @@ mod native {
                 window.width(),
                 window.height()
             );
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn opened_chat_lands_and_stays_on_the_newest_message() {
+            // Patrick, Nov 13, 2026: "When chats are opening, they
+            // are not scrolling to the bottom and showing the most
+            // recent parts of the chat." The old mechanism fired
+            // its scrolls on fixed 0/60/250ms timers after a
+            // render; geometry that settled later -- the last rows
+            // laying out, the window reaching its size -- left the
+            // view short of the bottom with nothing left to correct
+            // it. The follow is geometric now. This proof opens a
+            // chat the way read() does (pin set on a scope change),
+            // then grows the viewport, lands a later same-scope
+            // render, and finally checks that the reader's own
+            // scroll away from the bottom is respected.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            let rows = |to: u64| {
+                (0..to)
+                    .map(|i| muse_account::HistoryMessage {
+                        message_id: format!("m{i}"),
+                        seq: i,
+                        role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                        text: format!(
+                            "Message {i} with enough prose to wrap across a couple of lines in the transcript, the way a real message reads."
+                        ),
+                        timestamp: Some("2026-11-13T07:00:00+00:00".into()),
+                        status: Some("completed".into()),
+                        options: vec![],
+                        selected_option: None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                state.scope = Some("thread-1".into());
+                state.history = rows(40);
+            }
+            // The pin an open or switch sets (read(), on scope change).
+            page.ui.scroll_to_bottom.set(true);
+            page.ui.render();
+
+            let clamp = gtk::ScrolledWindow::new();
+            clamp.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            clamp.set_size_request(900, 500);
+            clamp.set_child(Some(&page.root));
+            let window = gtk::Window::builder().title("Scroll follow").build();
+            window.set_child(Some(&clamp));
+            window.present();
+            pump_main(600);
+
+            let adjustment = page.ui.scroll.vadjustment();
+            let gap = |a: &gtk::Adjustment| a.upper() - a.page_size() - a.value();
+            assert!(
+                adjustment.upper() > adjustment.page_size() + 100.0,
+                "fixture must overflow its viewport (upper {}, page {})",
+                adjustment.upper(),
+                adjustment.page_size()
+            );
+            assert!(
+                gap(&adjustment) < 2.0,
+                "opened chat should land on its newest message; gap to bottom is {}px",
+                gap(&adjustment)
+            );
+
+            // The viewport grows after the open (the window reaching
+            // its size): the follow must re-snap with no new render.
+            clamp.set_size_request(900, 760);
+            pump_main(400);
+            assert!(
+                gap(&adjustment) < 2.0,
+                "after the viewport grew, the view drifted {}px short of the bottom",
+                gap(&adjustment)
+            );
+
+            // A later same-scope render (a poll landing, a reply
+            // arriving) rebuilds the transcript: still on the bottom.
+            page.ui.state.borrow_mut().history = rows(41);
+            page.ui.render();
+            pump_main(400);
+            assert!(
+                gap(&adjustment) < 2.0,
+                "a later render left the view {}px short of the bottom",
+                gap(&adjustment)
+            );
+
+            // The reader scrolls up to re-read: the follow ends, and
+            // the next render must not yank them back down. The
+            // gesture goes through note_scroll_gesture -- the entry
+            // point the wheel and drag observers call -- with the
+            // value moved the way the scrollbar's own machinery
+            // moves it; a bare set_value without the gesture is
+            // indistinguishable from the viewport's re-anchor and
+            // is corrected on purpose.
+            page.ui.note_scroll_gesture();
+            adjustment.set_value(0.0);
+            pump_main(200);
+            page.ui.state.borrow_mut().history = rows(42);
+            page.ui.render();
+            pump_main(400);
+            assert!(
+                gap(&adjustment) > 100.0,
+                "the reader scrolled up but a render yanked the view to the bottom"
+            );
+
+            // Scrolling back to the bottom resumes the follow.
+            page.ui.note_scroll_gesture();
+            adjustment.set_value(f64::MAX);
+            pump_main(200);
+            page.ui.state.borrow_mut().history = rows(43);
+            page.ui.render();
+            pump_main(400);
+            assert!(
+                gap(&adjustment) < 2.0,
+                "after scrolling back, a render should land on the newest message again; gap is {}px",
+                gap(&adjustment)
+            );
+            clamp.set_child(None::<&gtk::Widget>);
+            window.close();
         }
 
         #[test]
