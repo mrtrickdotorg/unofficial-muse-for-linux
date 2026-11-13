@@ -151,7 +151,7 @@ fn parse_ymd(text: &str) -> Option<(i64, i64, i64)> {
 /// into unix seconds. A missing offset reads as UTC, which is what
 /// the service stamps. Date-only text returns `None` here; the caller
 /// handles it as a day, not an instant.
-fn parse_iso_unix(text: &str) -> Option<i64> {
+pub(crate) fn parse_iso_unix(text: &str) -> Option<i64> {
     let (year, month, day) = parse_ymd(text)?;
     let rest = text.get(10..)?;
     if rest.is_empty() {
