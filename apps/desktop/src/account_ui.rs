@@ -1468,6 +1468,7 @@ mod native {
         side_status: gtk::Label,
         side_agents: gtk::Box,
         side_tasks: gtk::Box,
+        side_tasks_heading: gtk::Label,
         side_runs: gtk::Box,
         send_notice: gtk::Label,
         prompt: gtk::Entry,
@@ -2665,6 +2666,7 @@ mod native {
             side_status,
             side_agents,
             side_tasks,
+            side_tasks_heading,
             side_runs,
             send_notice,
             prompt,
@@ -4424,11 +4426,12 @@ mod native {
                 match &state.tasks {
                     Some(tasks) => {
                         tasks.agents.len().hash(h);
-                        for agent in tasks.agents.iter().take(5) {
+                        for agent in tasks.agents.iter().take(8) {
                             agent_title(agent).hash(h);
                             agent.status.hash(h);
                             agent.completed_at.hash(h);
                             agent.created_at.hash(h);
+                            agent.final_response.hash(h);
                         }
                         tasks.schedules.len().hash(h);
                         for schedule in tasks.schedules.iter().take(6) {
@@ -4447,6 +4450,18 @@ mod native {
                     }
                 }
             });
+            // The web's heading carries the count itself ("26
+            // scheduled tasks"); ours does the same once the
+            // schedules are loaded.
+            let tasks_heading = match &state.tasks {
+                Some(tasks) if !tasks.schedules.is_empty() => {
+                    format!("{} scheduled tasks", tasks.schedules.len())
+                }
+                _ => "Scheduled tasks".to_string(),
+            };
+            if self.side_tasks_heading.text() != tasks_heading {
+                self.side_tasks_heading.set_text(&tasks_heading);
+            }
             let rebuild_panel = panel_key != self.built_panel_key.get();
             if rebuild_panel {
                 self.built_panel_key.set(panel_key);
@@ -4465,7 +4480,27 @@ mod native {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
-                    for agent in tasks.agents.iter().take(5) {
+                    for agent in tasks.agents.iter().take(8) {
+                        // The web's row shape: a status icon, the
+                        // title, the run's own summary line, and
+                        // the time in the reader's clock -- not a
+                        // raw instruction string with a UTC stamp.
+                        let card = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                        card.add_css_class("card");
+                        let icon = label(agent_status_icon(agent.status.as_deref()));
+                        icon.set_valign(gtk::Align::Start);
+                        card.append(&icon);
+                        let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                        texts.set_hexpand(true);
+                        texts.append(&Self::panel_label(&agent_title(agent)));
+                        if let Some(summary) = agent.final_response.as_deref() {
+                            let flat = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+                            if !flat.is_empty() {
+                                let summary_label = Self::panel_label(&flat);
+                                summary_label.add_css_class("dim-label");
+                                texts.append(&summary_label);
+                            }
+                        }
                         let mut meta: Vec<String> = Vec::new();
                         if let Some(status) = &agent.status {
                             meta.push(status.clone());
@@ -4475,16 +4510,18 @@ mod native {
                             .as_deref()
                             .or(agent.created_at.as_deref())
                         {
-                            meta.push(crate::feed_ui::relative_stamp(when, now));
+                            meta.push(match crate::feed_ui::parse_iso_unix(when) {
+                                Some(epoch) => local_time(Some(epoch)),
+                                None => crate::feed_ui::relative_stamp(when, now),
+                            });
                         }
-                        let title = agent_title(agent);
-                        let item = if meta.is_empty() {
-                            Self::panel_label(&title)
-                        } else {
-                            Self::panel_label(&format!("{}\n{}", title, meta.join(" · ")))
-                        };
-                        item.add_css_class("card");
-                        self.side_agents.append(&item);
+                        if !meta.is_empty() {
+                            let meta_label = Self::panel_label(&meta.join(" · "));
+                            meta_label.add_css_class("dim-label");
+                            texts.append(&meta_label);
+                        }
+                        card.append(&texts);
+                        self.side_agents.append(&card);
                     }
                     if tasks.schedules.is_empty() {
                         self.side_tasks.append(&Self::panel_label("No schedules."));
@@ -4493,7 +4530,7 @@ mod native {
                         let item = Self::panel_label(&format!(
                             "{}\nNext: {}",
                             schedule.title,
-                            utc_time(schedule.next_run_at_utc)
+                            local_time(schedule.next_run_at_utc)
                         ));
                         item.add_css_class("card");
                         self.side_tasks.append(&item);
@@ -4508,14 +4545,30 @@ mod native {
                         self.side_runs.append(&Self::panel_label("No runs yet."));
                     }
                     for run in tasks.runs.iter().take(5) {
-                        let item = Self::panel_label(&format!(
-                            "{} · {}\n{}",
-                            run.status,
-                            utc_time(run.scheduled_for_utc),
-                            run.result_summary
-                                .as_deref()
-                                .unwrap_or("No result summary supplied.")
-                        ));
+                        // A run with nothing to report shows its
+                        // status line alone -- the web never pads a
+                        // card with "no summary supplied" filler.
+                        let detail = run
+                            .result_summary
+                            .as_deref()
+                            .filter(|text| !text.trim().is_empty())
+                            .or_else(|| {
+                                run.error_text
+                                    .as_deref()
+                                    .filter(|text| !text.trim().is_empty())
+                            });
+                        let text = match detail {
+                            Some(detail) => format!(
+                                "{} · {}\n{}",
+                                run.status,
+                                local_time(run.scheduled_for_utc),
+                                detail
+                            ),
+                            None => {
+                                format!("{} · {}", run.status, local_time(run.scheduled_for_utc))
+                            }
+                        };
+                        let item = Self::panel_label(&text);
                         item.add_css_class("card");
                         self.side_runs.append(&item);
                     }
@@ -5814,6 +5867,33 @@ mod native {
             .unwrap_or_else(|| "not supplied".into())
     }
 
+    /// The same instant in the reader's own clock time, the way
+    /// the web panel shows it ("Nov 13, 1:28 PM"): the panel is a
+    /// glanceable surface, and raw UTC strings made Patrick read
+    /// timestamps like log lines (his Nov 13 side-by-side).
+    fn local_time(timestamp: Option<i64>) -> String {
+        timestamp
+            .map(|value| {
+                gtk::glib::DateTime::from_unix_local(value)
+                    .and_then(|date| date.format("%b %d, %I:%M %p"))
+                    .map(|date| date.to_string().replace(" 0", " "))
+                    .unwrap_or_else(|_| format!("Unix {value}"))
+            })
+            .unwrap_or_else(|| "not supplied".into())
+    }
+
+    /// The side panel's status glyph for one agent run, matching
+    /// the web's icon column: a check for a finished run, a play
+    /// mark for a live one, a cross for a failed one.
+    fn agent_status_icon(status: Option<&str>) -> &'static str {
+        match status {
+            Some("completed") | Some("succeeded") => "\u{2713}",
+            Some("running") | Some("active") | Some("in_progress") => "\u{25B6}",
+            Some("failed") | Some("error") => "\u{2715}",
+            _ => "\u{2022}",
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -6111,6 +6191,123 @@ mod native {
                 final_response: None,
             };
             assert_eq!(agent_title(&wordy).chars().count(), 110);
+        }
+
+        #[test]
+        fn panel_status_icons_match_the_web_vocabulary() {
+            assert_eq!(agent_status_icon(Some("completed")), "\u{2713}");
+            assert_eq!(agent_status_icon(Some("succeeded")), "\u{2713}");
+            assert_eq!(agent_status_icon(Some("running")), "\u{25B6}");
+            assert_eq!(agent_status_icon(Some("failed")), "\u{2715}");
+            assert_eq!(agent_status_icon(Some("queued")), "\u{2022}");
+            assert_eq!(agent_status_icon(None), "\u{2022}");
+        }
+
+        #[test]
+        fn panel_times_are_local_clock_not_utc_log_lines() {
+            // 2026-11-13 18:28:00 UTC: whatever zone the reader is
+            // in, the panel form names a month and a clock time and
+            // never carries the UTC log-line shape.
+            let text = local_time(Some(1_794_594_480));
+            assert!(
+                !text.contains("UTC"),
+                "panel time stayed a log line: {text}"
+            );
+            assert!(text.contains(":28"), "panel time lost its clock: {text}");
+            assert!(
+                text.contains("AM") || text.contains("PM"),
+                "panel time lost its meridiem: {text}"
+            );
+            assert_eq!(local_time(None), "not supplied");
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn side_panel_rows_read_like_the_web_panel() {
+            // Patrick's side-by-side (Nov 13, 2026): the web panel
+            // heads its schedules with the count, gives each Today
+            // run an icon, a summary line and a local time, and
+            // never pads a run with "no summary" filler.
+            gtk::init().unwrap();
+            fn text_of(widget: &gtk::Widget) -> String {
+                let mut out = String::new();
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    out.push_str(&label.text());
+                    out.push('\n');
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    let next = current.next_sibling();
+                    out.push_str(&text_of(&current));
+                    child = next;
+                }
+                out
+            }
+            let page = build(&gtk::Label::new(None));
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: Vec::new(),
+                });
+                state.tasks = Some(muse_account::TasksSnapshot {
+                    schedules: vec![
+                        muse_account::Schedule {
+                            id: "s1".into(),
+                            title: "Weekly digest".into(),
+                            enabled: true,
+                            timezone: Some("America/Detroit".into()),
+                            next_run_at_utc: Some(1_794_523_680),
+                        },
+                        muse_account::Schedule {
+                            id: "s2".into(),
+                            title: "Inbox summary".into(),
+                            enabled: true,
+                            timezone: Some("America/Detroit".into()),
+                            next_run_at_utc: Some(1_794_610_080),
+                        },
+                    ],
+                    runs: vec![muse_account::TaskRun {
+                        run_id: "r1".into(),
+                        job_id: "s1".into(),
+                        status: "running".into(),
+                        result_summary: None,
+                        error_text: None,
+                        scheduled_for_utc: Some(1_794_523_680),
+                    }],
+                    agents: vec![muse_account::AgentActivity {
+                        prompt: "Update the work list with the side chat tasks.".into(),
+                        status: Some("completed".into()),
+                        created_at: Some("2026-11-13T18:20:00+00:00".into()),
+                        completed_at: Some("2026-11-13T18:28:00+00:00".into()),
+                        final_response: Some(
+                            "Updated the work list.\nAdded two tasks and closed one.".into(),
+                        ),
+                    }],
+                });
+            }
+            page.ui.render();
+            assert_eq!(page.ui.side_tasks_heading.text(), "2 scheduled tasks");
+            let agents_text = text_of(page.ui.side_agents.upcast_ref());
+            assert!(
+                agents_text.contains('\u{2713}'),
+                "no status icon: {agents_text}"
+            );
+            assert!(
+                agents_text.contains("Updated the work list"),
+                "no summary line: {agents_text}"
+            );
+            assert!(agents_text.contains(":28"), "no local time: {agents_text}");
+            assert!(!agents_text.contains("UTC"), "UTC leaked: {agents_text}");
+            let tasks_text = text_of(page.ui.side_tasks.upcast_ref());
+            assert!(tasks_text.contains("Next:"), "no next run: {tasks_text}");
+            assert!(!tasks_text.contains("UTC"), "UTC leaked: {tasks_text}");
+            let runs_text = text_of(page.ui.side_runs.upcast_ref());
+            assert!(
+                !runs_text.contains("No result summary supplied"),
+                "filler text survived: {runs_text}"
+            );
         }
 
         #[test]
