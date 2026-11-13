@@ -3322,6 +3322,15 @@ mod native {
         fn panel_label(text: &str) -> gtk::Label {
             let item = label(text);
             item.set_max_width_chars(30);
+            // Word wrapping alone leaves a label's minimum at its
+            // longest unbreakable token — a URL, path, or id in a
+            // prompt or summary measures ~770px and seizes the row
+            // (Patrick's screenshot, Nov 12, 2026: the panel took
+            // 770px of his 1680 and the feed column starved to 360).
+            // WordChar breaks a token only when the token itself
+            // overflows the line, so prose wraps as prose and a
+            // token can no longer set the panel's floor.
+            item.set_wrap_mode(gtk::pango::WrapMode::WordChar);
             item
         }
 
@@ -4582,11 +4591,32 @@ mod native {
             gtk::init().unwrap();
             crate::install_dark_theme();
             let page = build(&gtk::Label::new(None));
-            page.ui.state.borrow_mut().account = Some(AccountSnapshot {
-                identity_name: "Lotus".into(),
-                vm_id: "fake-vm".into(),
-                threads: vec![],
-            });
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                // Patrick's real panel data, Nov 12, 2026 evening:
+                // alongside prose prompts, a run whose first line
+                // carries a long unbreakable token (an artifact id).
+                // Under plain word wrapping that token alone set the
+                // panel's minimum to ~770px and the feed column
+                // starved to ~360 — the panel must stay a panel with
+                // this data in it, not just when it is empty.
+                state.tasks = Some(TasksSnapshot {
+                    schedules: vec![],
+                    runs: vec![],
+                    agents: vec![muse_account::AgentActivity {
+                        prompt: "Process artifact_9f63a611cb8effd5a207c91b394e88d1f0a4b6c5e7d8091a2b3c4d5e6f708192a3b4c5d6 when it lands".into(),
+                        status: Some("running".into()),
+                        created_at: Some("2026-11-12T23:00:00+00:00".into()),
+                        completed_at: None,
+                        final_response: None,
+                    }],
+                });
+            }
             page.ui.render();
             assert!(page.side_panel.is_visible());
 
@@ -4630,6 +4660,10 @@ mod native {
                 panel_x + panel_width as f64 <= 1680.0,
                 "panel ends at {} — off the 1680 screen",
                 panel_x + panel_width as f64
+            );
+            assert!(
+                panel_width <= 360,
+                "panel ballooned to {panel_width}px with a token-bearing prompt in it"
             );
             if std::env::var_os("UMFL_PANEL_HOLD").is_some() {
                 let start = std::time::Instant::now();
