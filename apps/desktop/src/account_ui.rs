@@ -1123,6 +1123,9 @@ mod native {
         /// The shell's right-hand panel (identity, schedules, recent
         /// runs), built and kept current by this page.
         pub side_panel: gtk::Box,
+        /// The slim strip shown in the side panel's place while it
+        /// is collapsed, carrying the button that brings it back.
+        pub side_panel_strip: gtk::Box,
         /// Focus the sidebar search entry (the rail's Search action).
         pub focus_search: Rc<dyn Fn()>,
         /// Go to the main conversation and focus the composer (the
@@ -1200,6 +1203,8 @@ mod native {
         tasks: gtk::Box,
         tasks_notice: gtk::Label,
         side_panel: gtk::Box,
+        side_panel_strip: gtk::Box,
+        panel_collapsed: Cell<bool>,
         side_identity: gtk::Label,
         side_status: gtk::Label,
         side_agents: gtk::Box,
@@ -1340,6 +1345,40 @@ mod native {
 
     fn persistent_config_home() -> Option<PathBuf> {
         config_home()
+    }
+
+    /// The side panel's collapsed preference is the app's own UI
+    /// state, not account data: a small JSON file beside the
+    /// connection file, read and written best-effort.
+    fn ui_state_path() -> Option<PathBuf> {
+        config_home().map(|home| home.join("unofficial-muse-for-linux").join("ui-state.json"))
+    }
+
+    fn load_panel_collapsed() -> bool {
+        let Some(path) = ui_state_path() else {
+            return false;
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return false;
+        };
+        value
+            .get("side_panel_collapsed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn save_panel_collapsed(collapsed: bool) {
+        let Some(path) = ui_state_path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let text = serde_json::json!({ "side_panel_collapsed": collapsed }).to_string();
+        let _ = std::fs::write(path, text);
     }
 
     /// App-owned folder used by browser sign-in.
@@ -2180,29 +2219,64 @@ mod native {
         // the account links.
         let side_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
         side_panel.add_css_class("side-panel-right");
-        side_panel.set_size_request(283, -1);
+        side_panel.set_size_request(252, -1);
         side_panel.set_visible(false);
+        // Header row: who the agent is, and the collapse toggle
+        // Patrick asked for (Nov 12, 2026) — the panel is company,
+        // and reading sometimes wants the whole width.
+        let panel_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let side_identity = Ui::panel_label("");
         side_identity.add_css_class("panel-title");
-        side_panel.append(&side_identity);
+        side_identity.set_hexpand(true);
+        panel_header.append(&side_identity);
+        let hide_panel_button = gtk::Button::with_label("»");
+        hide_panel_button.set_tooltip_text(Some("Hide the side panel"));
+        hide_panel_button.add_css_class("panel-toggle");
+        panel_header.append(&hide_panel_button);
+        side_panel.append(&panel_header);
         let side_status = Ui::panel_label("");
         side_status.add_css_class("dim-label");
         side_panel.append(&side_status);
+        // The sections scroll inside the panel. Unscrolled, a full
+        // panel (5 agents, 6 schedules, 5 runs) measured 1944px of
+        // minimum height — it pushed the whole window off the
+        // bottom of Patrick's 1050px laptop screen, rail buttons
+        // and all. The panelScroll bounds it: the panel is exactly
+        // as tall as its slot, never taller.
+        let panel_sections = gtk::Box::new(gtk::Orientation::Vertical, 8);
         let side_agents_heading = label("Today");
         side_agents_heading.add_css_class("panel-title");
-        side_panel.append(&side_agents_heading);
+        panel_sections.append(&side_agents_heading);
         let side_agents = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        side_panel.append(&side_agents);
+        panel_sections.append(&side_agents);
         let side_tasks_heading = label("Scheduled tasks");
         side_tasks_heading.add_css_class("panel-title");
-        side_panel.append(&side_tasks_heading);
+        panel_sections.append(&side_tasks_heading);
         let side_tasks = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        side_panel.append(&side_tasks);
+        panel_sections.append(&side_tasks);
         let side_runs_heading = label("Recent runs");
         side_runs_heading.add_css_class("panel-title");
-        side_panel.append(&side_runs_heading);
+        panel_sections.append(&side_runs_heading);
         let side_runs = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        side_panel.append(&side_runs);
+        panel_sections.append(&side_runs);
+        let panel_scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .min_content_height(160)
+            .build();
+        panel_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        panel_scroll.set_propagate_natural_width(false);
+        panel_scroll.set_propagate_natural_height(false);
+        panel_scroll.set_child(Some(&panel_sections));
+        side_panel.append(&panel_scroll);
+        // The collapsed state's footprint: a slim strip with the
+        // way back. The shell appends it beside the panel.
+        let side_panel_strip = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        side_panel_strip.set_size_request(36, -1);
+        side_panel_strip.set_visible(false);
+        let show_panel_button = gtk::Button::with_label("«");
+        show_panel_button.set_tooltip_text(Some("Show the side panel"));
+        show_panel_button.add_css_class("panel-toggle");
+        side_panel_strip.append(&show_panel_button);
 
         let ui = Rc::new(Ui {
             state: RefCell::new(State::default()),
@@ -2255,6 +2329,8 @@ mod native {
             tasks,
             tasks_notice,
             side_panel: side_panel.clone(),
+            side_panel_strip: side_panel_strip.clone(),
+            panel_collapsed: Cell::new(load_panel_collapsed()),
             side_identity,
             side_status,
             side_agents,
@@ -2424,6 +2500,24 @@ mod native {
             }
         });
         let weak = Rc::downgrade(&ui);
+        hide_panel_button.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.panel_collapsed.set(true);
+                save_panel_collapsed(true);
+                let state = ui.state.borrow();
+                ui.render_side_panel(&state);
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        show_panel_button.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.panel_collapsed.set(false);
+                save_panel_collapsed(false);
+                let state = ui.state.borrow();
+                ui.render_side_panel(&state);
+            }
+        });
+        let weak = Rc::downgrade(&ui);
         let new_chat = Rc::new(move || {
             if let Some(ui) = weak.upgrade() {
                 let changed = ui.state.borrow_mut().select_thread(None);
@@ -2465,6 +2559,7 @@ mod native {
             root,
             threads_panel,
             side_panel,
+            side_panel_strip,
             focus_search,
             new_chat,
             discuss,
@@ -3332,7 +3427,7 @@ mod native {
             }
         }
 
-        /// A label sized for the side panel's ~283px column. The
+        /// A label sized for the side panel's ~252px column. The
         /// shared `label()` helper caps its natural width at 110
         /// characters — right for a page, ruinous here: the first
         /// panel content longer than a few words (an agent's raw
@@ -3340,7 +3435,14 @@ mod native {
         /// starved the page stack beside it. Panel items cap at 30.
         fn panel_label(text: &str) -> gtk::Label {
             let item = label(text);
-            item.set_max_width_chars(30);
+            // The cap is in Pango character units — the font's
+            // WIDEST glyph — not average characters: 30 units
+            // measures ~400px, which is how a "30-char" panel
+            // allocated 633px once the panel could fit its height
+            // (Nov 12, 2026). 17 units measures ~250px: the
+            // panel's real budget, showing ~32 average characters
+            // per line like the web's panel.
+            item.set_max_width_chars(17);
             // Word wrapping alone leaves a label's minimum at its
             // longest unbreakable token — a URL, path, or id in a
             // prompt or summary measures ~770px and seizes the row
@@ -3361,6 +3463,7 @@ mod native {
         fn render_side_panel(&self, state: &State) {
             let Some(account) = &state.account else {
                 self.side_panel.set_visible(false);
+                self.side_panel_strip.set_visible(false);
                 return;
             };
             // The responsive breakpoint: below the shell's minimum
@@ -3375,7 +3478,9 @@ mod native {
                 .and_then(|root| root.downcast::<gtk::Window>().ok())
                 .map(|window| window.width() >= crate::SIDE_PANEL_MIN_WINDOW_PX)
                 .unwrap_or(true);
-            self.side_panel.set_visible(wide_enough);
+            let collapsed = self.panel_collapsed.get();
+            self.side_panel.set_visible(wide_enough && !collapsed);
+            self.side_panel_strip.set_visible(wide_enough && collapsed);
             self.side_identity.set_text(&account.identity_name);
             let status = if state.live_status.is_empty() {
                 "Connected".to_string()
@@ -4463,7 +4568,7 @@ mod native {
                 joined.contains("Three threads filed"),
                 "agent activity missing from the Today list: {joined}"
             );
-            // The panel is a ~283px column: its natural width must stay
+            // The panel is a ~252px column: its natural width must stay
             // near that no matter how long an agent's prompt runs, or
             // the page stack beside it starves (Patrick's Nov 12
             // screenshot: the Feed page crushed to a sliver).
@@ -4653,10 +4758,15 @@ mod native {
 
             let sidebar_stub = gtk::Box::new(gtk::Orientation::Vertical, 0);
             sidebar_stub.set_size_request(494, -1);
-            let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            let panel_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            panel_slot.append(&page.side_panel);
+            let content_row = gtk::Paned::new(gtk::Orientation::Horizontal);
+            content_row.set_resize_end_child(false);
+            content_row.set_shrink_end_child(false);
+            content_row.set_wide_handle(false);
             page.root.set_hexpand(true);
-            content_row.append(&page.root);
-            content_row.append(&page.side_panel);
+            content_row.set_start_child(Some(&page.root));
+            content_row.set_end_child(Some(&panel_slot));
             let shell_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             shell_row.append(&sidebar_stub);
             shell_row.append(&content_row);
@@ -4684,7 +4794,7 @@ mod native {
                 .expect("panel has window coordinates");
             let panel_width = page.side_panel.width();
             assert!(
-                panel_width >= 240,
+                panel_width >= 220,
                 "panel squeezed to {panel_width}px at 1680 wide"
             );
             assert!(
@@ -4757,10 +4867,18 @@ mod native {
             page.ui.render();
             let sidebar_stub = gtk::Box::new(gtk::Orientation::Vertical, 0);
             sidebar_stub.set_size_request(494, -1);
-            let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            // Mirrors the production shell (main.rs): the page and
+            // the panel ride a Paned, whose end child is allocated
+            // its measured width — a Box let the panel drift.
+            let panel_slot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            panel_slot.append(&page.side_panel);
+            let content_row = gtk::Paned::new(gtk::Orientation::Horizontal);
+            content_row.set_resize_end_child(false);
+            content_row.set_shrink_end_child(false);
+            content_row.set_wide_handle(false);
             page.root.set_hexpand(true);
-            content_row.append(&page.root);
-            content_row.append(&page.side_panel);
+            content_row.set_start_child(Some(&page.root));
+            content_row.set_end_child(Some(&panel_slot));
             let shell_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
             shell_row.append(&sidebar_stub);
             shell_row.append(&content_row);
@@ -4814,6 +4932,28 @@ mod native {
                 root_width >= 1400,
                 "page starved to {root_width}px at monitor width"
             );
+            // The collapse toggle Patrick asked for: collapsed,
+            // the panel hands its width to the page and the strip
+            // shows the way back; expanded, both revert.
+            page.ui.panel_collapsed.set(true);
+            page.ui.render();
+            pump_main(300);
+            assert!(!page.side_panel.is_visible(), "collapsed panel should hide");
+            assert!(
+                page.side_panel_strip.is_visible(),
+                "collapsed panel should leave its strip visible"
+            );
+            page.ui.panel_collapsed.set(false);
+            page.ui.render();
+            pump_main(300);
+            assert!(
+                page.side_panel.is_visible(),
+                "expanded panel should show again"
+            );
+            assert!(
+                !page.side_panel_strip.is_visible(),
+                "expanded panel should hide its strip"
+            );
             clamp.set_child(None::<&gtk::Widget>);
             window.close();
         }
@@ -4848,6 +4988,101 @@ mod native {
             assert!(
                 root_width >= 640,
                 "page starved to {root_width}px at 1280 with the panel aside"
+            );
+            clamp.set_child(None::<&gtk::Widget>);
+            window.close();
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn side_panel_scrolls_instead_of_pushing_the_window() {
+            // Patrick, Nov 12, 2026 evening: on the working build
+            // the app "runs off the bottom of the page — I can't
+            // update or see the bottom left icons." The side
+            // panel's lists were not scrolled, so a full panel
+            // (5 agents, 6 schedules, 5 runs) set a minimum height
+            // past his laptop's 1050px screen and the window —
+            // rail bottom buttons and all — went with it. The
+            // panel must scroll internally: at a 1680x1050 clamp
+            // the panel and the whole shell row stay inside.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                let agents = (0..5)
+                    .map(|i| muse_account::AgentActivity {
+                        prompt: format!("Background task number {i} with a reasonably long prompt line to wrap over two lines in the panel"),
+                        status: Some("completed".into()),
+                        created_at: Some("2026-11-12T20:00:00+00:00".into()),
+                        completed_at: Some("2026-11-12T20:04:00+00:00".into()),
+                        final_response: Some(format!("Finished task number {i} and filed the result summary here")),
+                    })
+                    .collect();
+                let schedules = (0..6)
+                    .map(|i| muse_account::Schedule {
+                        id: format!("sched-{i}"),
+                        title: format!("Scheduled task number {i} with a long title"),
+                        enabled: true,
+                        timezone: Some("America/Detroit".into()),
+                        next_run_at_utc: Some(1_794_500_000),
+                    })
+                    .collect();
+                let runs = (0..5)
+                    .map(|i| muse_account::TaskRun {
+                        run_id: format!("run-{i}"),
+                        job_id: "sched-1".into(),
+                        status: "completed".into(),
+                        result_summary: Some(format!("Run number {i} delivered its summary")),
+                        error_text: None,
+                        scheduled_for_utc: Some(1_794_400_000),
+                    })
+                    .collect();
+                state.tasks = Some(TasksSnapshot {
+                    schedules,
+                    runs,
+                    agents,
+                });
+            }
+            page.ui.render();
+            assert!(page.side_panel.is_visible());
+
+            let sidebar_stub = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            sidebar_stub.set_size_request(494, -1);
+            let content_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            page.root.set_hexpand(true);
+            content_row.append(&page.root);
+            content_row.append(&page.side_panel);
+            let shell_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            shell_row.append(&sidebar_stub);
+            shell_row.append(&content_row);
+
+            let clamp = gtk::ScrolledWindow::new();
+            clamp.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Never);
+            clamp.set_size_request(1680, 1050);
+            clamp.set_child(Some(&shell_row));
+            let window = gtk::Window::builder()
+                .title("Vertical fit")
+                .default_width(1680)
+                .default_height(1050)
+                .build();
+            window.set_child(Some(&clamp));
+            window.present();
+            pump_main(700);
+            let panel_height = page.side_panel.height();
+            assert!(
+                panel_height <= 1050,
+                "stuffed panel is {panel_height}px tall on a 1050 screen — it must scroll, not push"
+            );
+            let row_height = shell_row.height();
+            assert!(
+                row_height <= 1050,
+                "shell row is {row_height}px tall on a 1050 screen"
             );
             clamp.set_child(None::<&gtk::Widget>);
             window.close();

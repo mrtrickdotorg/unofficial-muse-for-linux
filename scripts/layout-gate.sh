@@ -36,4 +36,5 @@ run_one() {
 run_one :97 2560x1200x24 account_ui::native::tests::shell_row_fits_at_monitor_width
 run_one :98 1280x800x24 account_ui::native::tests::side_panel_steps_aside_in_a_narrow_window
 run_one :99 1920x1200x24 account_ui::native::tests::side_panel_fits_beside_the_page_at_a_laptop_width
-printf 'layout gate: all three widths fit\n'
+run_one :99 1920x1200x24 account_ui::native::tests::side_panel_scrolls_instead_of_pushing_the_window
+printf 'layout gate: all widths and heights fit\n'
