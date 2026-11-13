@@ -975,9 +975,9 @@ impl AccountClient {
         );
     }
     /// A named main-loop work unit (render, transcript, panel,
-    /// threads, completion, backfill) that ran over 300ms: the
-    /// unit reports itself, so a freeze inside the app's own code
-    /// carries its name.
+    /// threads, completion) that ran over 300ms: the unit reports
+    /// itself, so a freeze inside the app's own code carries its
+    /// name.
     pub fn log_work(&self, unit: &str, elapsed: Duration) {
         append_timing_line(
             &self.config.config_dir,

@@ -1273,8 +1273,13 @@ mod native {
         start_logged: Cell<bool>,
         settle_changes: Cell<u32>,
         settle_snaps: Cell<u32>,
-        display_floor: Cell<usize>,
-        backfill_armed: Cell<bool>,
+        /// Whether the reader has revealed the whole loaded
+        /// transcript (a Load-older prepend) for the current
+        /// scope. Until then every render builds only the slice
+        /// (see transcript_slice_floor): the frame that shapes a
+        /// full heavy transcript is the multi-second block the
+        /// heartbeat caught in op-timing-12.
+        slice_revealed: Cell<bool>,
 
         /// A bottom snap is inside set_value: the value-changed it
         /// emits is ours, not the reader's.
@@ -2420,8 +2425,7 @@ mod native {
             start_logged: Cell::new(false),
             settle_changes: Cell::new(0),
             settle_snaps: Cell::new(0),
-            display_floor: Cell::new(0),
-            backfill_armed: Cell::new(false),
+            slice_revealed: Cell::new(false),
 
             snapping_bottom: Cell::new(false),
             scroll_gesture: Cell::new(false),
@@ -4033,48 +4037,34 @@ mod native {
             }
         }
 
-        /// How much of a loaded transcript a switch builds before
-        /// the first frame, and the chunk the idle backfill adds
-        /// per step (Nov 13, 2026 frame bench: one frame shaping a
-        /// whole 50-row report-sized transcript is the switch cost;
-        /// fifteen rows are a fraction of it).
-        const TRANSCRIPT_SLICE: usize = 15;
-        const TRANSCRIPT_BACKFILL: usize = 12;
+        /// The transcript slice budget (Nov 13, 2026). The frame
+        /// that shapes a built transcript prices by AGGREGATE
+        /// content, not row count: op-timing-12's heartbeat proved
+        /// 50 report-sized rows block the main loop for 5-18s on
+        /// the laptop while a 15-row slice does not move it. A
+        /// slice therefore fills from the newest row backwards
+        /// until it holds at least MIN_ROWS and either MAX_ROWS or
+        /// TEXT_BUDGET characters -- enough to fill a screen of
+        /// short messages, a fraction of a heavy thread.
+        const TRANSCRIPT_SLICE_MIN_ROWS: usize = 12;
+        const TRANSCRIPT_SLICE_MAX_ROWS: usize = 40;
+        const TRANSCRIPT_SLICE_TEXT_BUDGET: usize = 48_000;
 
-        /// Backfill the transcript slice on idle: each step builds
-        /// one more chunk of older rows while the reader follows
-        /// the bottom, so the switch's first frame stays small and
-        /// the rest spreads over interruptible frames. Pauses the
-        /// moment the reader scrolls away -- the rows wait above
-        /// the slice notice, and Load older (a prepend) reveals
-        /// them all at once.
-        fn arm_backfill(&self) {
-            if self.backfill_armed.replace(true) {
-                return;
+        /// Where a sliced view of `history` starts: the index of
+        /// the oldest row the slice builds. Pure, so the budget is
+        /// testable without a display.
+        fn transcript_slice_floor(history: &[muse_account::HistoryMessage]) -> usize {
+            let mut chars = 0usize;
+            for (built, message) in history.iter().rev().enumerate() {
+                if built >= Self::TRANSCRIPT_SLICE_MIN_ROWS
+                    && (built >= Self::TRANSCRIPT_SLICE_MAX_ROWS
+                        || chars >= Self::TRANSCRIPT_SLICE_TEXT_BUDGET)
+                {
+                    return history.len() - built;
+                }
+                chars += message.text.chars().count() + 128;
             }
-            let weak = self.self_weak.borrow().clone();
-            gtk::glib::idle_add_local_once(move || {
-                let Some(ui) = weak.upgrade() else {
-                    return;
-                };
-                ui.backfill_armed.set(false);
-                ui.backfill_step();
-            });
-        }
-
-        fn backfill_step(&self) {
-            let floor = self.display_floor.get();
-            if floor == 0 || !self.follow_bottom.get() {
-                return;
-            }
-            let backfill_started = std::time::Instant::now();
-            self.display_floor
-                .set(floor.saturating_sub(Self::TRANSCRIPT_BACKFILL));
-            self.render();
-            self.report_slow_work("backfill", backfill_started);
-            if self.display_floor.get() > 0 {
-                self.arm_backfill();
-            }
+            0
         }
 
         /// A named main-loop work unit that ran long: units over
@@ -4512,22 +4502,33 @@ mod native {
                     }
                 }
             }
-            // The display slice (see TRANSCRIPT_SLICE): a switch
-            // starts at the newest rows, a Load-older prepend opens
-            // the whole set, anything else keeps the floor the
-            // backfill has reached. Stamp bookkeeping above always
-            // covers the full set, so rows the backfill reveals
-            // later are already recorded as backlog and earn no
-            // shown stamp.
+            // The display slice: until the reader reveals the
+            // whole loaded set (a Load-older prepend), every
+            // render builds only the newest budget of rows -- the
+            // first build of a scope included, startup included.
+            // Letting the slice refill on idle (the Nov 13 backfill)
+            // rebuilt the full transcript during the switch's own
+            // fetch, so the fetched render shaped all 50 rows and
+            // its frame blocked the loop for 5-18s (op-timing-12
+            // heartbeat). The slice is therefore persistent per
+            // scope visit: it recomputes over the current row set
+            // each render, so a growing tail keeps the newest
+            // budget built and nothing else. Stamp bookkeeping
+            // above always covers the full set, so rows above the
+            // slice are already recorded as backlog and earn no
+            // shown stamp when revealed.
             let total_rows = state.history.len();
             if scope_changed {
-                self.display_floor
-                    .set(total_rows.saturating_sub(Self::TRANSCRIPT_SLICE));
-            } else if prepended {
-                self.display_floor.set(0);
+                self.slice_revealed.set(false);
             }
-            let floor = self.display_floor.get().min(total_rows);
-            self.display_floor.set(floor);
+            if prepended {
+                self.slice_revealed.set(true);
+            }
+            let floor = if self.slice_revealed.get() {
+                0
+            } else {
+                Self::transcript_slice_floor(&state.history)
+            };
             // The assistant's circle carries the identity's own initial
             // (his agent is "Lotus", not a generic M), and consecutive rows
             // of one turn group tightly without repeating the avatar.
@@ -4554,7 +4555,7 @@ mod native {
                     &self.history,
                     super::super::ChatRole::Notice,
                     &format!(
-                        "{floor} earlier loaded messages are above -- they fill in while you stay at the bottom, or all at once with Load older."
+                        "{floor} earlier loaded messages are above -- Load older reveals them."
                     ),
                     None,
                     &avatar_initial,
@@ -4711,9 +4712,6 @@ mod native {
             }
             if self.follow_bottom.get() {
                 self.snap_to_bottom(&self.scroll.vadjustment());
-            }
-            if floor > 0 && self.follow_bottom.get() {
-                self.arm_backfill();
             }
             super::super::clear_chat(&self.tasks);
             if let Some(tasks) = &state.tasks {
@@ -5401,9 +5399,9 @@ mod native {
                 }
                 page.ui.render();
                 // The bench measures the unsliced worst case on
-                // purpose: clear the slice the switch path set,
-                // render whole, then present.
-                page.ui.display_floor.set(0);
+                // purpose: reveal the whole set the way a Load-older
+                // prepend does, render whole, then present.
+                page.ui.slice_revealed.set(true);
                 page.ui.render();
                 let window = gtk::Window::new();
                 window.set_default_size(1500, 950);
@@ -5541,9 +5539,9 @@ mod native {
                 gap(&adjustment)
             );
             assert_eq!(
-                page.ui.display_floor.get(),
+                Ui::transcript_slice_floor(&page.ui.state.borrow().history),
                 0,
-                "the switch slice (15 of 40 rows) should backfill to the full backlog while following"
+                "40 short rows fit inside the slice budget, so the whole backlog is built at once"
             );
 
             // The viewport grows after the open (the window reaching
@@ -5689,6 +5687,40 @@ mod native {
             assert!(
                 has_text(&page, "Partial reply"),
                 "the draft should be the bubble's content"
+            );
+        }
+
+        #[test]
+        fn transcript_slice_floor_prices_the_slice_by_aggregate_text() {
+            // The budget the heartbeat bought (op-timing-12): a
+            // heavy thread slices to about a screen of its newest
+            // rows, a light thread builds whole or up to the row
+            // cap, and an empty or short history never slices.
+            let row = |text: String| muse_account::HistoryMessage {
+                message_id: "m".into(),
+                seq: 0,
+                role: "assistant".into(),
+                text,
+                timestamp: None,
+                status: Some("completed".into()),
+                options: vec![],
+                selected_option: None,
+                attachments: Vec::new(),
+            };
+            assert_eq!(Ui::transcript_slice_floor(&[]), 0);
+            let light: Vec<_> = (0..30).map(|_| row("short reply".into())).collect();
+            assert_eq!(Ui::transcript_slice_floor(&light), 0);
+            let many_light: Vec<_> = (0..80).map(|_| row("short reply".into())).collect();
+            assert_eq!(
+                Ui::transcript_slice_floor(&many_light),
+                40,
+                "the row cap holds back the older half of a long light thread"
+            );
+            let heavy: Vec<_> = (0..50).map(|_| row("x".repeat(4_500))).collect();
+            let floor = Ui::transcript_slice_floor(&heavy);
+            assert!(
+                (35..=40).contains(&floor),
+                "50 report-sized rows should slice to the newest ~12-15, floor was {floor}"
             );
         }
 
