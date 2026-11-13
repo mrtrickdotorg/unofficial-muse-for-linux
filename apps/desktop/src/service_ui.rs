@@ -42,6 +42,11 @@ struct Spec {
     /// what shows afterwards is the service's state, not the
     /// answer's claim.
     action: Option<SpecAction>,
+    /// A destructive row action (Goals: Delete). It renders as a
+    /// two-press button -- the first press arms it in place, the
+    /// second sends -- mirroring the confirmation discipline the
+    /// session menu and the schedule deletion use.
+    destructive: Option<SpecAction>,
     fetch: fn(&AccountClient) -> Result<ServiceListing, AccountError>,
 }
 
@@ -109,7 +114,12 @@ pub(super) fn summary_text(page: &ServiceListing, empty_copy: &str) -> String {
     summary
 }
 
-fn row_card(item: &ListingItem, show_kind: bool, action: RowAction<'_>) -> gtk::Box {
+fn row_card(
+    item: &ListingItem,
+    show_kind: bool,
+    action: RowAction<'_>,
+    destructive: RowAction<'_>,
+) -> gtk::Box {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
     card.add_css_class("card");
     // The web draws an icon at the card's left edge; when the
@@ -162,6 +172,29 @@ fn row_card(item: &ListingItem, show_kind: bool, action: RowAction<'_>) -> gtk::
         button.connect_clicked(move |_| run(id.clone()));
         card.append(&button);
     }
+    if let (Some((label, run)), Some(id)) = (destructive, &item.id) {
+        // Two presses, arm in place: the first press relabels the
+        // button and sends nothing; the second sends. A re-render
+        // rebuilds the card disarmed, so an armed button can never
+        // linger into a different listing.
+        let button = gtk::Button::with_label(label);
+        button.add_css_class("destructive-action");
+        button.set_widget_name(&format!("item-delete:{id}"));
+        button.set_halign(gtk::Align::Start);
+        let armed = Rc::new(Cell::new(false));
+        let confirm = format!("Confirm {}", label.to_lowercase());
+        let run = Rc::clone(run);
+        let id = id.clone();
+        button.connect_clicked(move |button| {
+            if armed.get() {
+                run(id.clone());
+            } else {
+                armed.set(true);
+                button.set_label(&confirm);
+            }
+        });
+        card.append(&button);
+    }
     card
 }
 
@@ -179,12 +212,19 @@ impl Ui {
         self.spinner.set_visible(busy);
     }
 
-    fn render(&self, items: &[ListingItem], action: Option<Rc<dyn Fn(String)>>) {
+    fn render(
+        &self,
+        items: &[ListingItem],
+        action: Option<Rc<dyn Fn(String)>>,
+        destructive: Option<Rc<dyn Fn(String)>>,
+    ) {
         while let Some(row) = self.list.first_child() {
             self.list.remove(&row);
         }
         let grouped = self.spec.group_by_kind;
         let action = action.map(|run| (self.spec.action.map(|a| a.label).unwrap_or(""), run));
+        let destructive =
+            destructive.map(|run| (self.spec.destructive.map(|a| a.label).unwrap_or(""), run));
         let mut last_kind: Option<&str> = None;
         for item in items {
             if grouped
@@ -198,17 +238,15 @@ impl Ui {
                 item,
                 !grouped,
                 action.as_ref().map(|(label, run)| (*label, run)),
+                destructive.as_ref().map(|(label, run)| (*label, run)),
             ));
         }
     }
 
-    /// Run the page's row action once for one row id, on a worker
-    /// thread; the notice reports the outcome and the page re-reads
-    /// so the rows show the service's state afterwards.
-    fn run_action(&self, ui: &Rc<Ui>, id: String) {
-        let Some(action) = self.spec.action else {
-            return;
-        };
+    /// Run one of the page's row actions once for one row id, on a
+    /// worker thread; the notice reports the outcome and the page
+    /// re-reads so the rows show the service's state afterwards.
+    fn run_action(&self, ui: &Rc<Ui>, id: String, action: SpecAction) {
         if self.busy.get() {
             self.notice
                 .set_text("A read is already running. Wait for it to finish.");
@@ -330,15 +368,17 @@ impl Ui {
     fn finish(&self, ui: &Rc<Ui>, result: Result<ServiceListing, AccountError>) {
         match result {
             Ok(page) => {
-                let action: Option<Rc<dyn Fn(String)>> = self.spec.action.map(|_| {
+                let build_runner = |spec_action: SpecAction| -> Rc<dyn Fn(String)> {
                     let weak = Rc::downgrade(ui);
                     Rc::new(move |id: String| {
                         if let Some(ui) = weak.upgrade() {
-                            ui.run_action(&ui, id);
+                            ui.run_action(&ui, id, spec_action);
                         }
-                    }) as Rc<dyn Fn(String)>
-                });
-                self.render(&page.items, action);
+                    })
+                };
+                let action = self.spec.action.map(build_runner);
+                let destructive = self.spec.destructive.map(build_runner);
+                self.render(&page.items, action, destructive);
                 if let Some(message) = self.after_read.borrow_mut().take() {
                     self.notice.set_text(&message);
                 } else {
@@ -427,6 +467,19 @@ fn idea_execute_action(client: &AccountClient, id: &str) -> Result<String, Accou
     })
 }
 
+/// The Goals page's destructive action: delete the goal. The
+/// bridge sends the path-only DELETE the route table records;
+/// the re-read that follows is what proves the goal is gone.
+fn goal_delete_action(client: &AccountClient, id: &str) -> Result<String, AccountError> {
+    let answer = client.goal_delete(id)?;
+    Ok(match answer.deleted {
+        Some(true) => {
+            "Deleted — the service confirms it, and the list above has been re-read.".to_string()
+        }
+        _ => "Deletion accepted. The list above has been re-read, so what you see is the service's current state.".to_string(),
+    })
+}
+
 pub fn ideas(context: AccountContext) -> ServicePage {
     build(
         context,
@@ -440,6 +493,7 @@ pub fn ideas(context: AccountContext) -> ServicePage {
                 label: "Try it",
                 run: idea_execute_action,
             }),
+            destructive: None,
             fetch: AccountClient::ideas,
         },
     )
@@ -450,11 +504,15 @@ pub fn goals(context: AccountContext) -> ServicePage {
         context,
         Spec {
             heading: "Goals",
-            intro: "The goals attached to the connected Muse account, read-only. Creating, editing or completing a goal happens on the Muse side; this page only reads. The list loads when you open this page.",
+            intro: "The goals attached to the connected Muse account. Delete removes one here (two presses, and the list re-reads to prove it); creating or editing a goal still happens on the Muse side. The list loads when you open this page.",
             refresh_label: "Refresh Goals",
             empty_copy: "No goals yet — the service reported an empty list.",
             group_by_kind: false,
             action: None,
+            destructive: Some(SpecAction {
+                label: "Delete",
+                run: goal_delete_action,
+            }),
             fetch: AccountClient::goals,
         },
     )
@@ -541,6 +599,7 @@ mod tests {
                     label: "Try it",
                     run: |_, _| Ok(String::new()),
                 }),
+                destructive: None,
                 fetch: muse_account::AccountClient::ideas,
             },
             list: gtk::ListBox::new(),
@@ -555,7 +614,7 @@ mod tests {
         second.kind = Some("This week's big calls".into());
         let mut third = item("Recover the email");
         third.kind = Some("Productivity".into());
-        ui.render(&[first, second, third], None);
+        ui.render(&[first, second, third], None, None);
         let root = ui.list.clone().upcast::<gtk::Widget>();
         assert!(named(&root, "section-heading:This week's big calls"));
         assert!(named(&root, "section-heading:Productivity"));
@@ -579,7 +638,7 @@ mod tests {
         let run: Rc<dyn Fn(String)> = Rc::new(move |id| sink.borrow_mut().push(id));
         let mut with_id = item("Executable");
         with_id.id = Some("c1".into());
-        let card = row_card(&with_id, true, Some(("Try it", &run)));
+        let card = row_card(&with_id, true, Some(("Try it", &run)), None);
         fn find_button(root: &gtk::Widget, name: &str) -> Option<gtk::Button> {
             if root.widget_name() == name {
                 return root.downcast_ref::<gtk::Button>().cloned();
@@ -600,8 +659,20 @@ mod tests {
         assert_eq!(pressed.borrow().as_slice(), ["c1"]);
         // A card without an id offers no button: there is nothing
         // honest to act on.
-        let bare = row_card(&item("x"), true, Some(("Try it", &run)));
+        let bare = row_card(&item("x"), true, Some(("Try it", &run)), None);
         assert!(find_button(bare.upcast_ref(), "item-action:c1").is_none());
+        // The destructive button arms in place: the first press
+        // sends nothing and relabels; the second sends the id.
+        let card = row_card(&with_id, true, None, Some(("Delete", &run)));
+        let delete = find_button(card.upcast_ref(), "item-delete:c1")
+            .expect("the card carries its delete button");
+        let before = pressed.borrow().len();
+        delete.emit_clicked();
+        assert_eq!(pressed.borrow().len(), before, "the first press only arms");
+        assert_eq!(delete.label().as_deref(), Some("Confirm delete"));
+        delete.emit_clicked();
+        assert_eq!(pressed.borrow().len(), before + 1, "the second press sends");
+        assert_eq!(pressed.borrow().last().map(String::as_str), Some("c1"));
     }
 
     #[test]
