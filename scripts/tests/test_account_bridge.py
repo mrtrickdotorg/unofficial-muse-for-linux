@@ -1739,6 +1739,33 @@ class ProbeShapeBuildTests(unittest.TestCase):
         self.assertNotIn("image_url", second)
         self.assertNotIn("icon", second)
 
+    def test_feed_units_project_body_md_as_the_body_with_links_intact(self):
+        # The production shape the feed probe recorded: the
+        # description rides as `body_md` (markdown), a key the
+        # generic listing projection does not know -- cards showed
+        # titles and pictures but no descriptions until the feed
+        # extras carried it. The markdown, link syntax included,
+        # must survive: the app's rich label renders it live.
+        bridge = load_bridge()
+        body = ("Starting October 30, attackers [exploited the portal]"
+                "(https://example.com/story) for initial access.")
+        payload = {"days": [{"local_date": "2026-11-13", "editions": [
+            {"kind": "midday", "units": [
+                {"unit_id": "u1", "title": "Gateways wiped",
+                 "body_md": body, "kicker": "From portal to wiper",
+                 "category": "Cybersecurity", "emoji": "\U0001F6E1",
+                 "created_at_ms": 1794504781613,
+                 "attachment": {"kind": "image",
+                                "hero_image_url": "https://example.com/h.webp"}},
+                {"unit_id": "u2", "title": "No description",
+                 "created_at_ms": 1794504781613},
+            ]}]}]}
+        first, second = bridge.feed_rows(payload)["items"]
+        self.assertEqual(first["body"], body)
+        self.assertIn("[exploited the portal](https://example.com/story)",
+                      first["body"])
+        self.assertIsNone(second["body"])
+
     def test_widget_attachment_projects_its_readable_text(self):
         bridge = load_bridge()
         html = (
