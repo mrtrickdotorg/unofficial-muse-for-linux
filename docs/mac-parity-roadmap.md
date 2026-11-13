@@ -4,6 +4,47 @@ The acceptance contract is [the full-port goal](full-port-goal.md); the row-leve
 [the feature matrix](feature-parity.md). This page decides **ordering**: what to build next, why it
 comes before the rest, and what proves it done.
 
+## State of play — Nov 13, 2026
+
+This document's phase sections record the Nov 9 state and the recon evidence behind it; that
+evidence stands. Two programs have landed on top of it since, and the open work is re-grouped
+at the end of this page.
+
+**The parity target reframed itself.** The Mac app literally shows the web app inside a Mac
+window and there is no native Windows app, so the web menu *is* the canonical desktop menu.
+The app's navigation is therefore exactly the muse.ai menu in web order — Chat, Search,
+Library, Ideas, Goals, Create, Feed, with New, Download and Menu along the bottom — and
+nothing else is reachable; built-but-unshown pages stay unshown, and the Local host page
+alone stays stacked for folder-grant management. Computer control stays unsurfaced until
+Patrick says so.
+
+**Web parity batch (Nov 12–13).** Feed posts render their widget attachments in a
+navigation-locked WebView with a text fallback, with native Discuss; the right panel mirrors
+the web's Today (status glyphs, the run's own final_response as its summary, local clock
+times); side chats gained the + new-chat button and the per-row three-dot menu (pin, rename,
+archive, delete — "Move up" does not exist because no recorded route carries a reorder);
+seeded non-thread sessions (the "Learn about ..." walkthrough) are filtered by the listing's
+own `is_thread` flag, proven on the real list (5 rows, exactly 1 non-thread); Ideas groups
+its cards under the service's section titles; chat attachments render as web-style cards
+(display fields only — the service-side path and hash never cross the bridge); the transcript
+scrolls from anywhere over the middle column with no visible bar, across a wider reading
+column; a working turn shows the web's three-dot thought bubble until its words arrive.
+
+**Interactive parity (Patrick's direction, Nov 13).** "The app shouldn't be read only — we
+should be able to interact with it the same way we do the web." The standing constraint is
+reframed accordingly: the bar is *evidence*, not read-only-ness. A write ships when its
+request shape is recorded in the pinned source; unrecorded shapes are never guessed, though
+probing to *learn* a shape is sanctioned. The discipline is unchanged: one explicit press is
+one write, never retried; ids come only from the service's own listings; answers claim
+acceptance, never end state; state is proven by re-reading. Shipped writes: `tasks.delete`,
+`session.start` and the session ops, `api.idea-cards.execute` (Ideas "Try it"),
+`feed.unit.reaction` (the Feed ❤), `goals.delete` (two-press arm), and `chat.mark_seen`
+with the listing's unread badges (opening a chat marks it read, as on the web; the mark owns
+a dedicated ticket slot because opening a chat is exactly when its history read holds the
+shared one). A connection-gate bug found the same day — the data pages' shared "verified"
+flag latched off on any single error and never recovered while chats self-healed — is fixed:
+the flag now follows what a reply actually proves about the account.
+
 ## What "mimic Muse for Mac" actually decomposes into
 
 The Mac client is not one thing. It is two layers, and only one of them is ours to build.
@@ -441,6 +482,13 @@ a URL-less reply makes previewable. A preview was not wired. A space does advert
 `can_download_html: true`, which names a separate export route rather than this one; that route is
 unprobed. This is a service-side block, not a missing client feature, so the page stays a list.
 
+*State (Nov 13, 2026).* The Library page now loads when it becomes visible, like the other
+data pages. Still open here: pagination (the list shows the first 50 of 76 and says so);
+Spaces actions — `spaces.delete` and `spaces.unshare` are path-only DELETEs, the same
+evidence class as `goals.delete`, and are the next buildable pair in this phase, while
+`spaces.save` (POST) has no recorded body and waits; preview remains blocked service-side
+per the `fetch_url` finding above, with the `spaces.export_html` read the one unprobed lead.
+
 *Work:* probe workspace/artifact routes; list and preview the supported types (PDF, DOCX, TXT, MD,
 XLSX, CSV, PNG/JPEG/GIF/WebP), open-in-app, upload, download; sharing off until explicitly approved per
 artifact; Upcoming as a merged view of schedules and pending approvals.
@@ -458,6 +506,11 @@ status in P1's status area.
 
 *Gate:* the user can list, correct and delete remembered facts, and the deletion is verified through a
 fresh read rather than assumed.
+
+*State (Nov 13, 2026).* The Goals half of this surface shipped (the Goals page lists, and
+deletes under the interactive-parity discipline). Memory itself is untouched: `memory.get`
+answers only when given a `memory_uri` body, `memory.search` has never been probed, and no
+memory UI exists. The search probe is this phase's first step.
 
 ### P7 — Connector framework (L)
 
@@ -496,12 +549,23 @@ alongside the AppImage, and a real native-Wayland check rather than XWayland-onl
 *Gate:* the app is usable with a screen reader, updates itself, warns before the usage cap, and passes
 its scenario checks on both native Wayland and XWayland.
 
+*State (Nov 13, 2026).* Self-update shipped: the rolling AppImage release, an in-app checker
+(12-hour recheck), and launch auto-connect once a Link press has recorded the grant. The
+usage warning is impossible rather than unbuilt — no usage route exists, so there is no
+meter and no reset time to surface. The model picker waits on evidence: `model.get` answers
+(`auto`/`auto`) but `model.set`'s body is recorded nowhere. Voice is half-probed:
+`voice.available_voices` answers; calls and dictation are unbuilt. Still open: the AT-SPI
+accessibility pass, a Flatpak beside the AppImage, and a native-Wayland verification (the
+AppImage currently forces X11 through its GTK hook).
+
 ### P10 — Not ours to mimic
 
 Record these as boundaries instead of backlog: Sentinel (server-side, outside the model),
 Secure Credentials Store, Confidential VM, usage metering internals, phone calls, the iOS/Android
-companion apps. **Model choice** does not appear to exist as a Muse feature at all, and **desktop
-voice** is unconfirmed for the Mac build — both need evidence before they earn a phase.
+companion apps. Two corrections from the route table: **model choice** does exist
+(`model.get`/`model.set`) — the picker is a P9 item blocked on the set body's evidence, not a
+non-feature — and **desktop voice** is partly confirmed (`voice.available_voices` answers),
+with calls and dictation unbuilt rather than unconfirmed.
 
 ## Ordering rules
 
@@ -514,19 +578,59 @@ voice** is unconfirmed for the Mac build — both need evidence before they earn
 5. **One route probe per phase, first.** A missing gateway route is a documented block, not a mock,
    and not a reason to substitute the developer API.
 
-## Next three actions
+## Open work — Nov 13, 2026
 
-_The previous three actions — fresh packaged sign-in with recorded states, live local-host
-registration with a `files.read_text` invocation, and route reconnaissance for streaming, artifacts
-and memory — are done; their evidence is in P0, P1, P5 and the route table above._
+_The previous "next three actions" are folded into the groups below: the P2 and P3 live
+presses are in the live-proof group, and the P5 export probe is in the buildable group._
 
-1. **P2, live:** press one real approval decision when one is pending, and one real revocation
-   from *Check allowed sites* (neither has ever been pressed live; the listing, the cards and the
-   revoke path are wired and tested, so only the live presses remain). The durable policy store,
-   per-connector reset and the settings PATCH are the policy-model work that follows.
-2. **P3, live:** have the real agent perform an approval-gated `files.create_text` on a scratch
-   file (exercised so far only by tests), and prove revocation during an in-flight invocation
-   against the live service.
-3. **P5, probe:** probe the space export route that `can_download_html: true` advertises, since
-   `artifacts.fetch_url` yields no URL for any artifact kind; if it answers, a space preview has a
-   path and the list-only Library page can grow one.
+**Buildable now (shapes recorded; no new evidence needed).**
+- P5: Library pagination (past the first 50 of 76), and Spaces delete/unshare.
+- P5 probe: the space export route `can_download_html: true` advertises
+  (`spaces.export_html`), since `artifacts.fetch_url` yields no URL for any artifact kind;
+  if it answers, a space preview has a path and the list-only Library page can grow one.
+- Search page wiring: `chat.search` is a recorded GET; its query parameters need one read
+  probe to ground, then the (currently unwired) Search page can read through it.
+- P6: probe `memory.search`, then build the memory surface to this phase's gate.
+- P8: the agent-browser page — `browser_task.get` answers (an idle task rather than a
+  missing route); take-control and stop are unbuilt.
+- P2 policy model: the durable policy store, per-connector reset, and the settings PATCH.
+- P9 remainder: the AT-SPI accessibility pass and a Flatpak beside the AppImage.
+
+**Blocked on an unrecorded write shape (a probe needs Patrick's go; the shape is never
+guessed).**
+- Feed prompt editing: `feed.prompt.update` exists, and `feed.prompt.get` shows the prompt
+  as `free_text`/`full_prompt` plus `enabled`, but no consumer anywhere records the PATCH
+  body. The same gap, smaller: `feed.regenerate`, `feed.unit.tap` (native Discuss already
+  covers the reader's need).
+- Idea feedback and engagement (`api.ideas.feedback`, `api.ideas.engagement` bodies
+  unrecorded) and with them the web's per-card menu and built-state display; `api.idea-cards.detail`
+  is the recorded GET to ground the state half.
+- Goal creation and editing: `goal_prompt` and `goals.update` bodies unrecorded.
+- The model picker: `model.set`'s body unrecorded.
+- Drag-and-drop file sending: the plausible path (an `fs.write` plus a send referencing the
+  service-side path) is a write shape; the standing proposal is a one-message probe in a
+  scratch conversation Patrick designates.
+
+**Blocked service-side (nothing to build until the service moves).**
+- P7 connectors: `connectors.list` answers 500 `internal_error`. Retry it before building
+  any connector UI.
+- Library preview: `artifacts.fetch_url` returns `url: null` for every accepted shape.
+- P3 screen capture: a decoded application frame is capped at 256 KiB and results are JSON,
+  so an image cannot travel the result channel.
+- Usage surface: no usage route exists, so no meter, cap warning or reset time can be shown.
+
+**Live proofs only Patrick can give (wired and tested; never pressed live).**
+- P2: one real approval decision, and one real revocation from *Check allowed sites*.
+- P3: an approval-gated `files.create_text` by the real agent, and revocation during an
+  in-flight invocation.
+- P4: a local reminder firing with the window closed and across a reboot (the runner and
+  the user service are installed by script; the gate is a real desktop).
+- First presses of the Nov 12–13 batch on his laptop: the + button and row menus, Ideas
+  "Try it", the Feed ❤, Goals delete, and an unread badge clearing on open.
+
+**Deferred or parked, by Patrick's word.**
+- Computer control: built surfaces stay unshown until he says so.
+- The transcript freeze work (fresh-build layout cost): the tightened slice budget is
+  "good enough for now"; a virtualized list view is the recorded next step if it reopens.
+- Formatting and restyle: round one landed Nov 9 ("still not a great UI, but better");
+  further formatting work resumes when he returns to it.
