@@ -1382,6 +1382,16 @@ def _feed_extras(unit):
     card the web renders live; here its readable text is projected
     as `widget_text`). A unit without a field projects without it."""
     extras = {}
+    body_md = content_text(unit.get("body_md"))
+    if body_md:
+        # The unit's description, in markdown: the web renders it
+        # above the card's image with its links live, and the app's
+        # rich label does the same from this text. It rides as the
+        # row's body -- the generic listing keys do not know the
+        # feed's `body_md` name, which is why cards showed titles
+        # and pictures but no descriptions until now -- capped like
+        # every projected body.
+        extras["body"] = body_md[:4000]
     kicker = content_text(unit.get("kicker"))
     if kicker:
         extras["kicker"] = kicker[:160]
