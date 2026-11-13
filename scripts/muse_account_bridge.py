@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session"})
 
 
 ERROR_CODES = frozenset({"auth_required", "account_changed", "vm_unavailable", "timeout", "invalid_request",
@@ -598,6 +598,7 @@ def validate_request(request):
                "permissions": set(),
                "revoke": {"permission_id"},
                "delete_task": {"job_id"},
+               "start_session": set(),
                "tasks": set(),
                "artifacts": set(),
                "ideas": set(),
@@ -1689,6 +1690,28 @@ def delete_answer(job_id, answer):
     }
 
 
+def started_session_id(answer):
+    """The id a `session.start` answer carries, when it carries one.
+
+    The start route's answer shape is the service's own; the id is
+    read from the places such an answer puts it (flat, or nested
+    under its session row) and nowhere else. None means the answer
+    did not name the chat it started -- the caller then proves the
+    id against the session listing instead of guessing.
+    """
+    if not isinstance(answer, dict):
+        return None
+    for candidate in (answer.get("session_id"), answer.get("id")):
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    session = answer.get("session")
+    if isinstance(session, dict):
+        for candidate in (session.get("session_id"), session.get("id")):
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return None
+
+
 def updated_at_text(session):
     millis = session.get("updated_at_ms")
     if isinstance(millis, (int, float)) and not isinstance(millis, bool):
@@ -1827,6 +1850,34 @@ class Adapter:
                     path_params={"job_id": request["job_id"]},
                 )
             return delete_answer(request["job_id"], answer)
+        if request["op"] == "start_session":
+            # One press, one new side chat, never retried here. The
+            # body is the shape the recorded route table's own
+            # consumer sends: a fresh, persistent session with no
+            # title -- the service names the chat from its first
+            # message, as it does on the web. The id the caller
+            # lands in is proven, not echoed: the start answer's own
+            # id when it carries one, otherwise the single session
+            # the listing gained across the call.
+            before = {row["session_id"]
+                      for row in session_rows(self.client, self.config)}
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "session.start",
+                    body={"method": "/api/session/start",
+                          "params": {"origin": "fresh",
+                                     "lifecycle": "persistent"}},
+                )
+            session_id = started_session_id(answer)
+            if session_id is None:
+                fresh = [row["session_id"]
+                         for row in session_rows(self.client, self.config)
+                         if row["session_id"] not in before]
+                if len(fresh) == 1:
+                    session_id = fresh[0]
+            if session_id is None:
+                raise BridgeFailure("protocol_error")
+            return {"session_id": session_id}
         if request["op"] == "artifacts":
             # One read of the Library listing. Listing is never consent: nothing
             # here opens, shares or deletes, and the projection keeps the cursor

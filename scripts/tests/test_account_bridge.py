@@ -1555,6 +1555,72 @@ class DeleteTaskTests(unittest.TestCase):
             bridge.validate_request({"op": "delete_task", "config_dir": "/tmp"})
 
 
+class StartSessionTests(unittest.TestCase):
+    def _dispatch(self, start_answer, listings):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        self._bridge = bridge
+        seen = {"starts": [], "lists": 0}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                if method == "sessions.list":
+                    index = min(seen["lists"], len(listings) - 1)
+                    seen["lists"] += 1
+                    return {"sessions": listings[index]}
+                if method == "session.start":
+                    seen["starts"].append(kwargs)
+                    return start_answer
+                raise AssertionError(f"unexpected route {method}")
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        result = bridge.Adapter(Client(), {}).dispatch({"op": "start_session"})
+        return result, seen
+
+    def test_a_start_sends_the_recorded_shape_once_and_returns_its_id(self):
+        existing = [{"session_id": "thread-1", "title": "Example",
+                     "archived": False, "updated_at": "2026-10-17T00:00:00Z"}]
+        result, seen = self._dispatch(
+            {"session_id": "thread-2", "access_token": "SECRET"}, [existing])
+        self.assertEqual(result, {"session_id": "thread-2"})
+        self.assertNotIn("SECRET", str(result))
+        self.assertEqual(len(seen["starts"]), 1)
+        self.assertEqual(seen["starts"][0]["body"], {
+            "method": "/api/session/start",
+            "params": {"origin": "fresh", "lifecycle": "persistent"}})
+
+    def test_an_idless_start_answer_is_proven_against_the_listing(self):
+        existing = [{"session_id": "thread-1", "title": "Example",
+                     "archived": False, "updated_at": "2026-10-17T00:00:00Z"}]
+        grown = existing + [{"session_id": "thread-2", "title": "New chat",
+                             "archived": False,
+                             "updated_at": "2026-10-17T00:01:00Z"}]
+        result, _seen = self._dispatch({"ok": True}, [existing, grown])
+        self.assertEqual(result, {"session_id": "thread-2"})
+
+    def test_an_unprovable_start_is_a_protocol_error(self):
+        existing = [{"session_id": "thread-1", "title": "Example",
+                     "archived": False, "updated_at": "2026-10-17T00:00:00Z"}]
+        with self.assertRaises(Exception) as caught:
+            self._dispatch({"ok": True}, [existing, existing])
+        # The module instance _dispatch loaded owns the exception
+        # class; a second load would be a different class object.
+        self.assertIsInstance(caught.exception, self._bridge.BridgeFailure)
+        self.assertEqual(caught.exception.code, "protocol_error")
+
+    def test_validation_accepts_a_bare_start_and_nothing_extra(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "start_session", "config_dir": "/tmp"})
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.validate_request({"op": "start_session", "config_dir": "/tmp",
+                                     "title": "surprise"})
+        self.assertEqual(caught.exception.code, "invalid_request")
+
+
 class CancelTests(unittest.TestCase):
     def _dispatch(self, answer):
         bridge = load_bridge()
