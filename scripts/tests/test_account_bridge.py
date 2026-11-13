@@ -945,6 +945,46 @@ class WidgetProbeTests(unittest.TestCase):
             self.assertFalse(pathlib.Path(root, "op-timing.log").exists())
 
 
+class HistoryProbeTests(unittest.TestCase):
+    """The history probe learns the attachment payload's shape
+    from key paths only, and stays silent for known envelopes."""
+
+    def test_attachment_rows_log_key_paths_and_never_values(self):
+        import tempfile
+        bridge = load_bridge()
+        rows = [{
+            "message_id": "m1", "seq": 3, "role": "user",
+            "text": "see attached",
+            "raw": {"event": "chat.message", "payload": {
+                "display_text": "see attached",
+                "attachments": [{"name": "SENTINEL-NAME",
+                                 "mime": "text/plain",
+                                 "size": 42,
+                                 "ref": "SENTINEL-REF"}],
+            }},
+        }]
+        with tempfile.TemporaryDirectory() as root:
+            bridge.history_rows(rows, config_dir=root)
+            log = pathlib.Path(root, "op-timing.log").read_text()
+        self.assertIn("history-probe keys=", log)
+        self.assertIn("payload.attachments[].name", log)
+        self.assertIn("payload.attachments[].ref", log)
+        self.assertNotIn("SENTINEL-NAME", log)
+        self.assertNotIn("SENTINEL-REF", log)
+        self.assertNotIn("see attached", log)
+
+    def test_known_envelope_rows_write_no_probe_line(self):
+        import tempfile
+        bridge = load_bridge()
+        rows = [{"message_id": "m2", "seq": 1, "role": "user",
+                 "text": "hello",
+                 "raw": {"event": "chat.message",
+                         "payload": {"display_text": "hello"}}}]
+        with tempfile.TemporaryDirectory() as root:
+            bridge.history_rows(rows, config_dir=root)
+            self.assertFalse(pathlib.Path(root, "op-timing.log").exists())
+
+
 class SubagentsProbeTests(unittest.TestCase):
     """The probe learns the subagents.list shape from key paths only."""
 

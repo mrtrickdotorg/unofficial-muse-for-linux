@@ -214,6 +214,43 @@ def _probe_widget_payload(config_dir, raw):
     timing_log(config_dir, "widget-probe keys=" + signature[:1900])
 
 
+_HISTORY_PROBED = set()
+
+# Keys the history projection already consumes (or knows are envelope),
+# at the raw-event level and inside its payload. A shape probe that
+# fired on these would log every ordinary conversation's shape and
+# bury the one it exists to find.
+_HISTORY_RAW_KNOWN = {"event", "payload", "status"}
+_HISTORY_PAYLOAD_KNOWN = {"display_text", "status", "widgets"}
+
+
+def _probe_history_shape(config_dir, raw, payload):
+    """Reconnaissance for message attachments (Patrick, Nov 13,
+    2026): the route table records no upload or attachment route,
+    and the history projection reads only text, status and widget
+    options out of a row, so whatever an attached file looks like
+    on the service rides inside the raw event unread -- the app
+    today shows an attachment as nothing at all. When a row's raw
+    event carries a key outside the known envelope, record its key
+    structure -- keys only, never values -- once per distinct
+    shape, so the attachment fields can be identified from the
+    timing log and projected properly afterwards, the same way
+    the widget options were found."""
+    if not config_dir:
+        return
+    interesting = (
+        any(key not in _HISTORY_RAW_KNOWN for key in raw)
+        or any(key not in _HISTORY_PAYLOAD_KNOWN for key in payload)
+    )
+    if not interesting or len(_HISTORY_PROBED) > 12:
+        return
+    signature = ",".join(_key_paths(raw))
+    if signature in _HISTORY_PROBED:
+        return
+    _HISTORY_PROBED.add(signature)
+    timing_log(config_dir, "history-probe keys=" + signature[:1900])
+
+
 _SUBAGENTS_PROBED = False
 
 
@@ -363,6 +400,8 @@ def history_rows(rows, config_dir=None):
                 message["selected_option"] = widget["selected"]
         if config_dir and "[[hatch_widget" in message["text"] and raw:
             _probe_widget_payload(config_dir, raw)
+        if config_dir and raw:
+            _probe_history_shape(config_dir, raw, payload)
         if message_id not in latest or seq >= latest[message_id]["seq"]:
             latest[message_id] = message
     return sorted(latest.values(), key=lambda row: (row["seq"], row["message_id"]))
