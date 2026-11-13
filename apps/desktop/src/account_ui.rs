@@ -1275,8 +1275,7 @@ mod native {
         settle_snaps: Cell<u32>,
         display_floor: Cell<usize>,
         backfill_armed: Cell<bool>,
-        stall_watch_armed: Cell<bool>,
-        last_render_scope: RefCell<Option<Option<String>>>,
+
         /// A bottom snap is inside set_value: the value-changed it
         /// emits is ours, not the reader's.
         snapping_bottom: Cell<bool>,
@@ -2423,8 +2422,7 @@ mod native {
             settle_snaps: Cell::new(0),
             display_floor: Cell::new(0),
             backfill_armed: Cell::new(false),
-            stall_watch_armed: Cell::new(false),
-            last_render_scope: RefCell::new(None),
+
             snapping_bottom: Cell::new(false),
             scroll_gesture: Cell::new(false),
             bottom_settle_armed: Cell::new(false),
@@ -2664,6 +2662,33 @@ mod native {
             });
             ui.scroll.add_controller(motion);
         }
+        // The heartbeat: a 250ms timer that reports how late it
+        // fired. GLib wakes an idle loop for a timer on time, so a
+        // late beat means the main thread itself was blocked for
+        // the difference -- the truth the frame-tick watch could
+        // not tell apart from an idle window (its multi-second
+        // "stalls" in op-timing-11, Nov 13, 2026, included idle
+        // gaps). Paired with the self-reporting work units, a
+        // freeze now names its layer: a unit, or the frame
+        // machinery under the app (heartbeat alone), or nothing
+        // in the app at all (neither).
+        let beat_weak = Rc::downgrade(&ui);
+        let last_beat = std::cell::Cell::new(std::time::Instant::now());
+        gtk::glib::timeout_add_local(Duration::from_millis(250), move || {
+            let Some(ui) = beat_weak.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(last_beat.get());
+            last_beat.set(now);
+            if elapsed.as_millis() > 1000
+                && elapsed.as_secs() < 120
+                && let Some(client) = ui.client.borrow().as_ref()
+            {
+                client.log_heartbeat(elapsed - Duration::from_millis(250));
+            }
+            gtk::glib::ControlFlow::Continue
+        });
         let weak = Rc::downgrade(&ui);
         let last_refresh = std::cell::Cell::new(std::time::Instant::now());
         gtk::glib::timeout_add_local(Duration::from_millis(1000), move || {
@@ -3444,7 +3469,9 @@ mod native {
                         }
                     },
                 };
+                let completion_started = std::time::Instant::now();
                 ui.complete(&ticket, reply);
+                ui.report_slow_work("completion", completion_started);
                 gtk::glib::ControlFlow::Break
             });
         }
@@ -3747,6 +3774,7 @@ mod native {
                 self.side_panel_strip.set_visible(false);
                 return;
             };
+            let panel_started = std::time::Instant::now();
             // The responsive breakpoint: below the shell's minimum
             // comfortable width the panel steps aside rather than
             // starving the page (Patrick, Nov 12, 2026: "I just want
@@ -3845,6 +3873,7 @@ mod native {
                     self.side_runs.append(&Self::panel_label("Not loaded yet."));
                 }
             }
+            self.report_slow_work("panel", panel_started);
         }
 
         /// The choice buttons an assistant message's widget published,
@@ -4038,56 +4067,27 @@ mod native {
             if floor == 0 || !self.follow_bottom.get() {
                 return;
             }
+            let backfill_started = std::time::Instant::now();
             self.display_floor
                 .set(floor.saturating_sub(Self::TRANSCRIPT_BACKFILL));
             self.render();
+            self.report_slow_work("backfill", backfill_started);
             if self.display_floor.get() > 0 {
                 self.arm_backfill();
             }
         }
 
-        /// Watch the frame clock for 20s after a scope change: if
-        /// frames were flowing and one frame then takes over 300ms,
-        /// the stall (layout, paint, or a blocked main thread) is
-        /// logged with its size. The watch removes itself -- a
-        /// permanent tick callback would keep the frame clock, and
-        /// the fan, running at idle.
-        fn arm_frame_stall_watch(&self) {
-            if self.stall_watch_armed.get() {
-                return;
+        /// A named main-loop work unit that ran long: units over
+        /// 300ms report themselves with their size, so the timing
+        /// log can tell a slow unit (named) from a block in GTK's
+        /// own frame machinery (no unit, only the heartbeat).
+        fn report_slow_work(&self, unit: &'static str, started: std::time::Instant) {
+            let elapsed = started.elapsed();
+            if elapsed.as_millis() > 300
+                && let Some(client) = self.client.borrow().as_ref()
+            {
+                client.log_work(unit, elapsed);
             }
-            self.stall_watch_armed.set(true);
-            let weak = self.self_weak.borrow().clone();
-            let last_tick: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
-            let last_logged: Rc<RefCell<Option<std::time::Instant>>> = Rc::new(RefCell::new(None));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            self.scroll.add_tick_callback(move |_widget, _clock| {
-                let now = std::time::Instant::now();
-                if now > deadline {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.stall_watch_armed.set(false);
-                    }
-                    return gtk::glib::ControlFlow::Break;
-                }
-                if let Some(previous) = *last_tick.borrow() {
-                    let gap = now.duration_since(previous);
-                    if gap.as_millis() > 300 && gap.as_secs() < 30 {
-                        let due = last_logged
-                            .borrow()
-                            .is_none_or(|logged| now.duration_since(logged).as_secs() >= 5);
-                        if due {
-                            *last_logged.borrow_mut() = Some(now);
-                            if let Some(ui) = weak.upgrade()
-                                && let Some(client) = ui.client.borrow().as_ref()
-                            {
-                                client.log_frame_stall(gap);
-                            }
-                        }
-                    }
-                }
-                *last_tick.borrow_mut() = Some(now);
-                gtk::glib::ControlFlow::Continue
-            });
         }
 
         /// Selection follows the scope in place: the row set only
@@ -4139,11 +4139,11 @@ mod native {
                 && let Some(client) = self.client.borrow().as_ref()
             {
                 self.start_logged.set(true);
-                client.log_start(super::super::build_identity::commit().unwrap_or("unknown"));
-            }
-            if *self.last_render_scope.borrow() != Some(state.scope.clone()) {
-                *self.last_render_scope.borrow_mut() = Some(state.scope.clone());
-                self.arm_frame_stall_watch();
+                let a11y = std::env::var("GTK_A11Y").unwrap_or_else(|_| "default".into());
+                client.log_start(&format!(
+                    "{} a11y={a11y}",
+                    super::super::build_identity::commit().unwrap_or("unknown")
+                ));
             }
             let connected = state.account.is_some();
             let idle = state.busy.is_none();
@@ -4234,6 +4234,8 @@ mod native {
             // every switch tore down and rebuilt all ~150 rows just
             // to move the highlight (op-timing-7 review, Nov 13,
             // 2026). Selection is synced in place below instead.
+            let threads_started = std::time::Instant::now();
+            let mut threads_rebuilt = false;
             let threads_key = format!(
                 "{:?}",
                 state
@@ -4242,6 +4244,7 @@ mod native {
                     .map(|a| (&a.identity_name, a.threads.len()))
             );
             if self.threads_key.borrow().as_str() != threads_key {
+                threads_rebuilt = true;
                 *self.threads_key.borrow_mut() = threads_key;
                 while let Some(row) = self.thread_list.row_at_index(0) {
                     self.thread_list.remove(&row);
@@ -4283,6 +4286,9 @@ mod native {
                     self.thread_list.append(&row);
                 }
                 self.thread_list.invalidate_filter();
+            }
+            if threads_rebuilt {
+                self.report_slow_work("threads", threads_started);
             }
             self.sync_thread_selection(&state);
             self.scope_label.set_text(&format!(
@@ -4681,6 +4687,7 @@ mod native {
             {
                 client.log_render(total_rows - floor, transcript_started.elapsed());
             }
+            self.report_slow_work("transcript", transcript_started);
             // Newest messages are at the bottom. A pin, or a reader
             // who was already there, follows them: snap to the
             // bottom the current geometry reports, and the scroll
@@ -4770,6 +4777,7 @@ mod native {
             if let Some(client) = self.client.borrow().as_ref() {
                 client.log_render_full(render_started.elapsed());
             }
+            self.report_slow_work("render", render_started);
             self.rendering.set(false);
         }
     }

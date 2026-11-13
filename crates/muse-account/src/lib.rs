@@ -974,13 +974,25 @@ impl AccountClient {
             &format!("client settle changes={changes} snaps={snaps}"),
         );
     }
-    /// One frame in an actively-drawing window took this long:
-    /// layout, paint, or a blocked main thread -- the phase no op
-    /// or render line can see.
-    pub fn log_frame_stall(&self, elapsed: Duration) {
+    /// A named main-loop work unit (render, transcript, panel,
+    /// threads, completion, backfill) that ran over 300ms: the
+    /// unit reports itself, so a freeze inside the app's own code
+    /// carries its name.
+    pub fn log_work(&self, unit: &str, elapsed: Duration) {
         append_timing_line(
             &self.config.config_dir,
-            &format!("client frame-stall ms={}", elapsed.as_millis()),
+            &format!("client work unit={unit} ms={}", elapsed.as_millis()),
+        );
+    }
+    /// The 250ms heartbeat timer fired this late: the main thread
+    /// was blocked outside every named unit -- GTK's frame
+    /// machinery, the compositor path, or the environment. An
+    /// idle window does not delay a timer, so unlike the retired
+    /// frame-tick watch this cannot be an idle artifact.
+    pub fn log_heartbeat(&self, blocked: Duration) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!("client heartbeat blocked_ms={}", blocked.as_millis()),
         );
     }
     /// One request line to the host, one reply line back.
