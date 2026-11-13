@@ -355,7 +355,32 @@ impl<T> DialogLease<T> {
     }
 }
 
+/// Whether this launch should default GTK to its GL renderer.
+/// Inside the AppImage, GTK's own renderer selection silently
+/// lands on the software (cairo) renderer on Patrick's laptop --
+/// GL initialisation loses to the bundle's library mix -- and
+/// every resize and page switch then repaints the whole window on
+/// the CPU: "very slow to draw to the size of the app", frozen
+/// menu switches (Nov 13, 2026). The same launch with
+/// GSK_RENDERER=gl was "much quicker", so the app fills the gap
+/// itself -- but only inside the AppImage, and never over an
+/// explicit choice in the environment.
+fn default_gl_renderer(appimage: bool, renderer_already_set: bool) -> bool {
+    appimage && !renderer_already_set
+}
+
 fn main() {
+    if default_gl_renderer(
+        std::env::var_os("APPIMAGE").is_some(),
+        std::env::var_os("GSK_RENDERER").is_some(),
+    ) {
+        // SAFETY: this runs before the application object exists --
+        // no other thread has started, so nothing can be reading
+        // the environment concurrently.
+        unsafe {
+            std::env::set_var("GSK_RENDERER", "gl");
+        }
+    }
     // WebKit inside an AppImage needs two accommodations, set
     // before any WebView can exist: its bubblewrap sandbox cannot
     // run there, and its DMABUF compositing path crashes the web
@@ -2244,7 +2269,7 @@ fn append_entry(
 
 #[cfg(test)]
 mod tests {
-    use super::DialogLease;
+    use super::{DialogLease, default_gl_renderer};
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -2254,6 +2279,14 @@ mod tests {
         fn drop(&mut self) {
             self.0.set(self.0.get() + 1);
         }
+    }
+
+    #[test]
+    fn gl_renderer_is_defaulted_only_inside_an_appimage_without_a_choice() {
+        assert!(default_gl_renderer(true, false));
+        assert!(!default_gl_renderer(true, true));
+        assert!(!default_gl_renderer(false, false));
+        assert!(!default_gl_renderer(false, true));
     }
 
     #[test]
