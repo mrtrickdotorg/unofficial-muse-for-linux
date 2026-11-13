@@ -309,6 +309,62 @@ class HostTests(unittest.TestCase):
         stop.set()
         thread.join(10)
 
+    def test_a_user_request_jumps_a_queued_background_poll(self):
+        # The Nov 12 click-latency shape: an activity poll holds the
+        # connection for seconds, a second poll queues behind it, and
+        # then the user's history read arrives. When the holder lets
+        # go, the read must run before the queued poll -- otherwise a
+        # click that lands mid-poll pays two poll durations for data
+        # nobody was waiting on.
+        _module, host, fake, _jar, _root = self.host()
+        order = []
+        first_release = threading.Event()
+
+        class RecordingAdapter:
+            def __init__(self, client, config):
+                pass
+
+            def dispatch(self, request):
+                order.append(request["op"])
+                if len(order) == 1:
+                    first_release.wait(5)
+                return {"ok": True}
+
+        fake.Adapter = RecordingAdapter
+        connection = host.control
+
+        def run(request):
+            try:
+                connection.dispatch(request)
+            except Exception:
+                pass
+
+        holder = threading.Thread(target=run, args=({"op": "activity"},))
+        holder.start()
+        deadline = time.monotonic() + 5
+        while len(order) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(order, ["activity"], "the holder never dispatched")
+
+        queued_poll = threading.Thread(target=run, args=({"op": "activity"},))
+        queued_poll.start()
+        user_read = threading.Thread(target=run, args=({"op": "history"},))
+        user_read.start()
+        # Both must be parked on the gate before the holder lets go,
+        # or the order asserted below proves nothing.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if (connection.gate.background_waiting == 1
+                    and connection.gate.user_waiting == 1):
+                break
+            time.sleep(0.01)
+        self.assertEqual(connection.gate.background_waiting, 1)
+        self.assertEqual(connection.gate.user_waiting, 1)
+        first_release.set()
+        for thread in (holder, queued_poll, user_read):
+            thread.join(5)
+        self.assertEqual(order, ["activity", "history", "activity"])
+
     def test_the_host_survives_a_null_stdin_and_removes_its_socket_on_sigterm(self):
         # The launcher gives the host /dev/null for stdin, so stdin EOF must not
         # mean "stop": the session lease, not an empty pipe, owns the lifetime.

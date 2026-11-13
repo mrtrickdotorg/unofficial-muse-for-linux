@@ -901,6 +901,16 @@ impl AccountClient {
             ),
         );
     }
+    /// Append the desktop's transcript-rebuild time to the same log.
+    /// Every fetch stage already had a number; the render was the one
+    /// stage without, which is why a slow chat open could not be
+    /// attributed from the log alone (Nov 12, 2026).
+    pub fn log_render(&self, rows: usize, elapsed: Duration) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!("client render rows={} ms={}", rows, elapsed.as_millis()),
+        );
+    }
     /// One request line to the host, one reply line back.
     ///
     /// `Ok(None)` means no host is available, so the caller keeps its original

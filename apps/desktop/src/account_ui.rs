@@ -156,6 +156,48 @@ fn history_closes_turn(rows: &[muse_account::HistoryMessage]) -> bool {
     })
 }
 
+/// How a read's account verification came out. A read used to open
+/// with a serial full connect() -- the service spends seconds
+/// answering its conversation list, and every chat click paid that
+/// ahead of the history it was actually waiting for (Nov 12, 2026
+/// op-timing: 528 connects in one log, p95 3.6s, against history's
+/// own p95 of 2.3s). Verification now runs beside the fetch it
+/// guards -- the cheap identity op for a plain read, connect() only
+/// for a refresh, whose consumer wants the thread list -- and this
+/// classification is checked before anything is applied, so the
+/// fetched rows land only on `Verified`, exactly as the serial
+/// version behaved: a rejected session expires the page, a
+/// different account discards the read, and any other failure
+/// reports as a verification failure.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Verification {
+    Verified,
+    AuthExpired,
+    AccountChanged,
+    Failed(String),
+}
+
+fn verification<T>(
+    result: &Result<T, muse_account::AccountError>,
+    name_vm: impl for<'a> Fn(&'a T) -> (&'a str, &'a str),
+    expected: &(String, String),
+) -> Verification {
+    match result {
+        Ok(value) => {
+            let (name, vm) = name_vm(value);
+            if (name, vm) == (expected.0.as_str(), expected.1.as_str()) {
+                Verification::Verified
+            } else {
+                Verification::AccountChanged
+            }
+        }
+        Err(error) if error.code == muse_account::ErrorCode::AuthRequired => {
+            Verification::AuthExpired
+        }
+        Err(error) => Verification::Failed(error.to_string()),
+    }
+}
+
 /// True when the newest row is a reply still being produced.
 ///
 /// The service leaves `status` absent while it is producing and sets a terminal
@@ -2753,43 +2795,44 @@ mod native {
             };
             let request = ticket.clone();
             self.launch(ticket, move || {
-                let account = match client.connect() {
-                    Ok(account) => Ok(account),
-                    // A rejected session is a state change, not a failed read.
-                    Err(error) if error.code == ErrorCode::AuthRequired => {
-                        return Reply::AuthExpired;
-                    }
-                    Err(error) => Err(error.to_string()),
-                };
-                match &account {
-                    Ok(a)
-                        if (a.identity_name.as_str(), a.vm_id.as_str())
-                            != (identity.0.as_str(), identity.1.as_str()) =>
-                    {
-                        return Reply::AccountChanged;
-                    }
-                    Err(error) => {
-                        return if refresh {
-                            Reply::Refresh(
-                                account.clone(),
-                                Err(format!("account verification failed: {error}")),
-                                Err(format!("account verification failed: {error}")),
-                            )
-                        } else {
-                            Reply::History(Err(format!("account verification failed: {error}")))
-                        };
-                    }
-                    _ => {}
-                }
+                // Verification runs BESIDE the fetch it guards now (see
+                // `verification`): the identity op for a plain read,
+                // connect() for a refresh. The classification is
+                // checked before anything is applied, so a rejected
+                // session or a different account discards the fetched
+                // rows exactly as the serial version did -- the only
+                // cost of the overlap is a fetch the service answered
+                // and the page then throws away.
                 if refresh {
-                    let (history, tasks) = std::thread::scope(|scope| {
+                    let (check, account, history, tasks) = std::thread::scope(|scope| {
+                        let connect = scope.spawn(|| {
+                            let raw = client.connect();
+                            let check = super::verification(
+                                &raw,
+                                |a: &muse_account::AccountSnapshot| {
+                                    (a.identity_name.as_str(), a.vm_id.as_str())
+                                },
+                                &identity,
+                            );
+                            (check, raw.map_err(|e| e.to_string()))
+                        });
                         let history = scope.spawn(|| {
                             client
                                 .history(request.scope.as_deref(), request.limit)
                                 .map_err(|e| e.to_string())
                         });
                         let tasks = scope.spawn(|| client.tasks().map_err(|e| e.to_string()));
+                        let (check, account) = connect.join().unwrap_or_else(|_| {
+                            (
+                                super::Verification::Failed(
+                                    "Account worker stopped unexpectedly.".into(),
+                                ),
+                                Err("Account worker stopped unexpectedly.".into()),
+                            )
+                        });
                         (
+                            check,
+                            account,
                             history.join().unwrap_or_else(|_| {
                                 Err("History worker stopped unexpectedly.".into())
                             }),
@@ -2798,16 +2841,62 @@ mod native {
                             }),
                         )
                     });
-                    Reply::Refresh(account, history, tasks)
+                    match check {
+                        super::Verification::Verified => Reply::Refresh(account, history, tasks),
+                        super::Verification::AuthExpired => Reply::AuthExpired,
+                        super::Verification::AccountChanged => Reply::AccountChanged,
+                        super::Verification::Failed(error) => Reply::Refresh(
+                            account,
+                            Err(format!("account verification failed: {error}")),
+                            Err(format!("account verification failed: {error}")),
+                        ),
+                    }
                 } else {
-                    Reply::History(
-                        match client.history(request.scope.as_deref(), request.limit) {
-                            Err(error) if error.code == ErrorCode::AuthRequired => {
-                                return Reply::AuthExpired;
+                    let (check, (history_auth_expired, history)) = std::thread::scope(|scope| {
+                        let verify = scope.spawn(|| {
+                            let raw = client.identity();
+                            super::verification(
+                                &raw,
+                                |a: &muse_account::AccountIdentity| {
+                                    (a.identity_name.as_str(), a.vm_id.as_str())
+                                },
+                                &identity,
+                            )
+                        });
+                        let history = scope.spawn(|| {
+                            match client.history(request.scope.as_deref(), request.limit) {
+                                Ok(rows) => (false, Ok(rows)),
+                                Err(error) if error.code == ErrorCode::AuthRequired => {
+                                    (true, Err(error.to_string()))
+                                }
+                                Err(error) => (false, Err(error.to_string())),
                             }
-                            other => other.map_err(|e| e.to_string()),
-                        },
-                    )
+                        });
+                        (
+                            verify.join().unwrap_or_else(|_| {
+                                super::Verification::Failed(
+                                    "Account worker stopped unexpectedly.".into(),
+                                )
+                            }),
+                            history.join().unwrap_or_else(|_| {
+                                (false, Err("History worker stopped unexpectedly.".into()))
+                            }),
+                        )
+                    });
+                    match check {
+                        super::Verification::Verified => {
+                            if history_auth_expired {
+                                Reply::AuthExpired
+                            } else {
+                                Reply::History(history)
+                            }
+                        }
+                        super::Verification::AuthExpired => Reply::AuthExpired,
+                        super::Verification::AccountChanged => Reply::AccountChanged,
+                        super::Verification::Failed(error) => {
+                            Reply::History(Err(format!("account verification failed: {error}")))
+                        }
+                    }
                 }
             });
         }
@@ -3922,6 +4011,7 @@ mod native {
             if pin_to_bottom && state.busy.is_none() {
                 self.scroll_to_bottom.set(false);
             }
+            let transcript_started = std::time::Instant::now();
             super::super::clear_chat(&self.history);
             if !state.history.is_empty() {
                 super::super::append_day_divider(&self.history);
@@ -3948,6 +4038,13 @@ mod native {
             }
             let cur_first = state.history.first().map(|row| row.message_id.clone());
             let cur_last = state.history.last().map(|row| row.message_id.clone());
+            // The row set this rebuild is about to print, against the
+            // one the last rebuild printed (a scope switch reset the
+            // edges above, so an open or switch always counts).
+            let edges_changed = {
+                let prev = self.history_edges.borrow();
+                prev.0 != cur_first || prev.1 != cur_last
+            };
             {
                 let mut shown = self.shown_stamps.borrow_mut();
                 if self.history_primed.get() {
@@ -4086,6 +4183,20 @@ mod native {
                     &avatar_initial,
                     false,
                 );
+            }
+            // One timing line per changed transcript: every fetch
+            // stage already writes one, and this closes the last
+            // unmeasured stage -- how long rebuilding the message
+            // widgets took once the rows landed (Nov 12, 2026: the
+            // fetch was exonerated for slow chat opens, but the
+            // render had no number at all). Re-renders of an
+            // unchanged row set (a streaming draft, a notice change)
+            // do not log.
+            if edges_changed
+                && !state.history.is_empty()
+                && let Some(client) = self.client.borrow().as_ref()
+            {
+                client.log_render(state.history.len(), transcript_started.elapsed());
             }
             // Newest messages are at the bottom. Follow them when the reader
             // was already there or the pin demands it, and repeat after
@@ -5450,6 +5561,47 @@ mod tests {
             status: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn verification_classifies_a_read_preflight() {
+        // The read paths check this before applying anything fetched
+        // beside the verification: only Verified rows may land.
+        let expected = ("Lotus User".to_string(), "vm-1".to_string());
+        let pair: fn(&(String, String)) -> (&str, &str) =
+            |value| (value.0.as_str(), value.1.as_str());
+        let error = |code| muse_account::AccountError {
+            code,
+            uncertain: false,
+            detail: None,
+        };
+        let ok: Result<(String, String), muse_account::AccountError> =
+            Ok(("Lotus User".into(), "vm-1".into()));
+        assert_eq!(verification(&ok, pair, &expected), Verification::Verified);
+        let other_vm: Result<(String, String), muse_account::AccountError> =
+            Ok(("Lotus User".into(), "vm-2".into()));
+        assert_eq!(
+            verification(&other_vm, pair, &expected),
+            Verification::AccountChanged
+        );
+        let other_name: Result<(String, String), muse_account::AccountError> =
+            Ok(("Someone Else".into(), "vm-1".into()));
+        assert_eq!(
+            verification(&other_name, pair, &expected),
+            Verification::AccountChanged
+        );
+        let auth: Result<(String, String), muse_account::AccountError> =
+            Err(error(muse_account::ErrorCode::AuthRequired));
+        assert_eq!(
+            verification(&auth, pair, &expected),
+            Verification::AuthExpired
+        );
+        let failed: Result<(String, String), muse_account::AccountError> =
+            Err(error(muse_account::ErrorCode::Timeout));
+        assert!(matches!(
+            verification(&failed, pair, &expected),
+            Verification::Failed(_)
+        ));
     }
 
     #[test]
