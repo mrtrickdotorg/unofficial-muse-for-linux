@@ -4607,6 +4607,114 @@ mod native {
         }
 
         #[test]
+        #[ignore = "bench only; run under xvfb-run --test-threads=1 --nocapture"]
+        fn bench_render_with_production_shaped_state() {
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: (0..150)
+                        .map(|i| muse_account::Thread {
+                            session_id: format!("thread-{i}"),
+                            title: format!(
+                                "Project chat {i} -- a realistic conversation title with several words"
+                            ),
+                            archived: false,
+                            updated_at: Some("2026-11-12T15:00:00+00:00".into()),
+                        })
+                        .collect(),
+                });
+                let long_markdown = "## Status\n\n".to_string()
+                    + &"- A finding with a fair amount of prose attached to it, the way a real report reads.\n".repeat(30)
+                    + &"\nSome closing prose. ".repeat(60);
+                state.history = (0..50)
+                    .map(|i| muse_account::HistoryMessage {
+                        message_id: format!("m{i}"),
+                        seq: i as u64,
+                        role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                        text: if i % 2 == 0 {
+                            "A user message with a question in it.".into()
+                        } else {
+                            long_markdown.clone()
+                        },
+                        timestamp: Some("2026-11-12T15:00:00+00:00".into()),
+                        status: Some("completed".into()),
+                        options: vec![],
+                        selected_option: None,
+                    })
+                    .collect();
+                state.tasks = Some(TasksSnapshot {
+                    schedules: (0..25)
+                        .map(|i| muse_account::Schedule {
+                            id: format!("sched-{i}"),
+                            title: format!("Scheduled task number {i} with a title"),
+                            enabled: true,
+                            timezone: Some("America/Detroit".into()),
+                            next_run_at_utc: Some(1_794_500_000),
+                        })
+                        .collect(),
+                    runs: (0..40)
+                        .map(|i| muse_account::TaskRun {
+                            run_id: format!("run-{i}"),
+                            job_id: "sched-1".into(),
+                            status: "completed".into(),
+                            result_summary: Some("Summary delivered".into()),
+                            error_text: None,
+                            scheduled_for_utc: Some(1_794_400_000),
+                        })
+                        .collect(),
+                    agents: (0..12)
+                        .map(|i| muse_account::AgentActivity {
+                            prompt: format!(
+                                "## Task {i}\n\nA long subagent prompt with instructions and context."
+                            ),
+                            status: Some("completed".into()),
+                            created_at: Some("2026-11-12T15:00:00+00:00".into()),
+                            completed_at: Some("2026-11-12T15:04:00+00:00".into()),
+                            final_response: Some("Done.".into()),
+                        })
+                        .collect(),
+                });
+            }
+            fn count_widgets(widget: &gtk::Widget) -> usize {
+                let mut total = 1;
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    total += count_widgets(&current);
+                    child = current.next_sibling();
+                }
+                total
+            }
+            for round in 0..3 {
+                let started = std::time::Instant::now();
+                page.ui.render();
+                println!(
+                    "BENCH render round {round}: {:?} (root widgets now {})",
+                    started.elapsed(),
+                    count_widgets(page.root.upcast_ref())
+                );
+            }
+            let window = gtk::Window::new();
+            window.set_default_size(1680, 1050);
+            window.set_child(Some(&page.root));
+            let started = std::time::Instant::now();
+            window.present();
+            let context = gtk::glib::MainContext::default();
+            while started.elapsed() < std::time::Duration::from_millis(1500) {
+                context.iteration(false);
+            }
+            println!(
+                "BENCH present+pump 1.5s done; window size {}x{}",
+                window.width(),
+                window.height()
+            );
+        }
+
+        #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn side_panel_lists_the_agent_schedules_and_runs() {
             // The right-hand panel Patrick asked for on Nov 11: the
