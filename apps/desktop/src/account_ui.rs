@@ -4291,9 +4291,21 @@ mod native {
         /// until it holds at least MIN_ROWS and either MAX_ROWS or
         /// TEXT_BUDGET characters -- enough to fill a screen of
         /// short messages, a fraction of a heavy thread.
-        const TRANSCRIPT_SLICE_MIN_ROWS: usize = 12;
-        const TRANSCRIPT_SLICE_MAX_ROWS: usize = 40;
-        const TRANSCRIPT_SLICE_TEXT_BUDGET: usize = 48_000;
+        ///
+        /// The budget tightened the same evening, after the bench
+        /// eliminated everything else: widget count, markdown
+        /// structure, stylesheet, selectable labels, pinned
+        /// widths, the renderer, the backend, and the GTK version
+        /// (4.8 vs 4.14 measured identical) all left the build
+        /// cost unchanged -- it is Pango laying out the visible
+        /// text across GTK's size negotiation, proportional to
+        /// characters shown. op-timing-17 (GTK 4.14 build) still
+        /// froze 2-12s per fresh build at 48K characters, so the
+        /// first build now lays out at most ~12K: a screen of
+        /// conversation, with Load older one click away.
+        const TRANSCRIPT_SLICE_MIN_ROWS: usize = 6;
+        const TRANSCRIPT_SLICE_MAX_ROWS: usize = 24;
+        const TRANSCRIPT_SLICE_TEXT_BUDGET: usize = 12_000;
 
         /// Where a sliced view of `history` starts: the index of
         /// the oldest row the slice builds. Pure, so the budget is
@@ -5846,6 +5858,43 @@ mod native {
                 // prepend does, render whole, then present.
                 page.ui.slice_revealed.set(true);
                 page.ui.render();
+                // Bench control: UMFL_BENCH_PINW=<px> pins every
+                // label in the transcript tree to that width
+                // request, testing whether the size negotiation's
+                // width exploration is the build cost.
+                if let Ok(pin) = std::env::var("UMFL_BENCH_PINW") {
+                    let px: i32 = pin.parse().unwrap_or(360);
+                    fn pin_labels(widget: &gtk::Widget, px: i32) {
+                        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                            label.set_width_request(px);
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(c) = child {
+                            let next = c.next_sibling();
+                            pin_labels(&c, px);
+                            child = next;
+                        }
+                    }
+                    pin_labels(page.ui.history.upcast_ref(), px);
+                }
+                // Bench control: UMFL_BENCH_NOSEL=1 clears the
+                // selectable flag on every transcript label,
+                // testing whether selection support forces the
+                // expensive full-layout measure path.
+                if std::env::var_os("UMFL_BENCH_NOSEL").is_some() {
+                    fn nosel(widget: &gtk::Widget) {
+                        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                            label.set_selectable(false);
+                        }
+                        let mut child = widget.first_child();
+                        while let Some(c) = child {
+                            let next = c.next_sibling();
+                            nosel(&c);
+                            child = next;
+                        }
+                    }
+                    nosel(page.ui.history.upcast_ref());
+                }
                 let window = gtk::Window::new();
                 window.set_default_size(1500, 950);
                 window.set_child(Some(&page.root));
@@ -6032,7 +6081,7 @@ mod native {
                     threads: vec![],
                 });
                 state.scope = Some("thread-1".into());
-                state.history = rows(40);
+                state.history = rows(20);
             }
             // The pin an open or switch sets (read(), on scope change).
             page.ui.scroll_to_bottom.set(true);
@@ -6063,7 +6112,7 @@ mod native {
             assert_eq!(
                 Ui::transcript_slice_floor(&page.ui.state.borrow().history),
                 0,
-                "40 short rows fit inside the slice budget, so the whole backlog is built at once"
+                "20 short rows fit inside the slice budget, so the whole backlog is built at once"
             );
 
             // The viewport grows after the open (the window reaching
@@ -6342,19 +6391,19 @@ mod native {
                 attachments: Vec::new(),
             };
             assert_eq!(Ui::transcript_slice_floor(&[]), 0);
-            let light: Vec<_> = (0..30).map(|_| row("short reply".into())).collect();
+            let light: Vec<_> = (0..20).map(|_| row("short reply".into())).collect();
             assert_eq!(Ui::transcript_slice_floor(&light), 0);
             let many_light: Vec<_> = (0..80).map(|_| row("short reply".into())).collect();
             assert_eq!(
                 Ui::transcript_slice_floor(&many_light),
-                40,
-                "the row cap holds back the older half of a long light thread"
+                56,
+                "the row cap holds back everything past the newest 24 of a long light thread"
             );
             let heavy: Vec<_> = (0..50).map(|_| row("x".repeat(4_500))).collect();
             let floor = Ui::transcript_slice_floor(&heavy);
             assert!(
-                (35..=40).contains(&floor),
-                "50 report-sized rows should slice to the newest ~12-15, floor was {floor}"
+                (43..=45).contains(&floor),
+                "50 report-sized rows should slice to the newest ~6, floor was {floor}"
             );
         }
 
