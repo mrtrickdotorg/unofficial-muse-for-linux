@@ -452,6 +452,16 @@ pub struct DeleteAnswer {
     pub deleted: Option<bool>,
 }
 
+/// A side chat the service just started, named by its session id.
+///
+/// The id is the whole answer: the bridge proves it against the
+/// session listing, and the chat's title is the service's to give
+/// once the conversation has a first message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartedSession {
+    pub session_id: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -733,6 +743,15 @@ impl AccountClient {
             serde_json::json!({"op": "delete_task", "job_id": job_id}),
             false,
         )
+    }
+    /// Start exactly one new side chat, once.
+    ///
+    /// One press maps to one `session.start` on the service, never
+    /// retried: a retry could start a second chat the reader never
+    /// asked for. The returned id is proven by the bridge against
+    /// the session listing, not merely echoed from the start call.
+    pub fn start_session(&self) -> Result<StartedSession, AccountError> {
+        self.request(serde_json::json!({"op": "start_session"}), false)
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.

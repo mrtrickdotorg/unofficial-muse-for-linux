@@ -14,6 +14,7 @@ enum Operation {
     Permissions,
     Revoke,
     DeleteTask,
+    StartSession,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -822,6 +823,39 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         Some(ticket)
     }
 
+    /// Take the busy slot for starting one new side chat. A start is
+    /// a single deliberate press, so unlike a deletion it needs no
+    /// arming -- but it does take the shared slot, so a second press
+    /// while one start is in flight cannot start a second chat.
+    fn begin_start_session(&mut self) -> Option<Ticket> {
+        self.account.as_ref()?;
+        self.issue(Operation::StartSession)
+    }
+
+    /// Record a session start's answer: the new chat's session id,
+    /// which is what the caller selects so the reader lands in the
+    /// chat they just started. A failure keeps the reader where
+    /// they were, with the reason in the transcript notice.
+    fn finish_start_session(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::StartedSession, String>,
+    ) -> Option<String> {
+        if !self.accept(ticket) {
+            return None;
+        }
+        match result {
+            Ok(answer) => {
+                self.history_notice.clear();
+                Some(answer.session_id)
+            }
+            Err(error) => {
+                self.history_notice = format!("Could not start a new side chat: {error}");
+                None
+            }
+        }
+    }
+
     /// Record a deletion's answer. True only when the service took it, which
     /// is what triggers the refresh that follows: that re-read is what proves
     /// whether the schedule is actually gone — if it is still scheduled, it
@@ -1335,6 +1369,9 @@ mod native {
         thread_main_list: gtk::ListBox,
         thread_list: gtk::ListBox,
         thread_search: gtk::Entry,
+        /// The + beside the Side chats heading: starts one new
+        /// side chat on the service, like the web's button.
+        new_side_chat: gtk::Button,
         threads_key: RefCell<String>,
         scope_label: gtk::Label,
         /// The transcript column the scroll window holds; the
@@ -1421,6 +1458,7 @@ mod native {
         Permissions(Result<muse_account::ActiveGrants, String>),
         Revoke(Result<muse_account::RevokeAnswer, String>),
         DeleteTask(Result<muse_account::DeleteAnswer, String>),
+        StartSession(Result<muse_account::StartedSession, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
         Login(Result<(), String>),
@@ -2276,9 +2314,20 @@ mod native {
         main_row.set_child(Some(&main_row_label));
         thread_main_list.append(&main_row);
         threads_panel.append(&thread_main_list);
+        // The web's arrangement: the heading, and at the row's end
+        // the + that starts a new side chat.
+        let side_chats_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let side_chats_heading = label("Side chats");
         side_chats_heading.add_css_class("panel-heading");
-        threads_panel.append(&side_chats_heading);
+        side_chats_heading.set_hexpand(true);
+        side_chats_row.append(&side_chats_heading);
+        let new_side_chat = gtk::Button::with_label("+");
+        new_side_chat.set_widget_name("new-side-chat");
+        new_side_chat.add_css_class("flat");
+        new_side_chat.set_valign(gtk::Align::Center);
+        new_side_chat.set_tooltip_text(Some("Start a new side chat"));
+        side_chats_row.append(&new_side_chat);
+        threads_panel.append(&side_chats_row);
         let thread_list = gtk::ListBox::new();
         thread_list.add_css_class("panel-list");
         thread_list.set_selection_mode(gtk::SelectionMode::Single);
@@ -2504,6 +2553,7 @@ mod native {
             thread_main_list,
             thread_list,
             thread_search,
+            new_side_chat,
             threads_key: RefCell::new(String::new()),
             scope_label,
             live_notice,
@@ -2622,6 +2672,10 @@ mod native {
             ui.thread_search.connect_changed(move |_| {
                 list.invalidate_filter();
             });
+        }
+        {
+            let u = Rc::clone(&ui);
+            ui.new_side_chat.connect_clicked(move |_| u.start_session());
         }
         {
             let u = Rc::clone(&ui);
@@ -3461,6 +3515,28 @@ mod native {
             });
         }
 
+        /// Start one new side chat -- the + beside the Side chats
+        /// heading, as on the web. One press sends exactly one
+        /// session.start; the completion lands the reader in the
+        /// fresh chat with the composer focused.
+        fn start_session(self: &Rc<Self>) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().history_notice =
+                    "Not connected. Connect your Muse session before starting a side chat.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_start_session() else {
+                return;
+            };
+            self.launch(ticket, move || match client.start_session() {
+                Ok(answer) => Reply::StartSession(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::StartSession(Err(error.to_string())),
+            });
+        }
+
         fn cancel_run(self: &Rc<Self>) {
             let Some(client) = self.client.borrow().clone() else {
                 self.state.borrow_mut().send_notice =
@@ -3663,6 +3739,9 @@ mod native {
                         Operation::DeleteTask => {
                             Reply::DeleteTask(Err("Deletion worker stopped unexpectedly.".into()))
                         }
+                        Operation::StartSession => Reply::StartSession(Err(
+                            "Session-start worker stopped unexpectedly.".into(),
+                        )),
                     },
                 };
                 let completion_started = std::time::Instant::now();
@@ -3685,6 +3764,7 @@ mod native {
             let mut reread_approvals = false;
             let mut reread_grants = false;
             let mut approvals_after = false;
+            let mut start_after: Option<String> = None;
             let auth_expired = matches!(&reply, Reply::AuthExpired);
             // A dispatch the service accepted starts the reply fast-path
             // whether or not the bridge could confirm it in scoped history:
@@ -3826,6 +3906,12 @@ mod native {
                             refresh_after = true;
                         }
                     }
+                    Reply::StartSession(result) => {
+                        // The press asked for a new chat to land in:
+                        // the id the bridge proved is selected below,
+                        // once this completion's state borrow closes.
+                        start_after = state.finish_start_session(ticket, result);
+                    }
                     Reply::Permissions(result) => {
                         // A list is a report: nothing here revokes anything.
                         state.finish_permissions(ticket, result);
@@ -3928,6 +4014,20 @@ mod native {
             }
             if reread_grants {
                 self.check_permissions();
+            }
+            if let Some(session_id) = start_after {
+                // Land in the chat the press just started. The
+                // refresh both loads its (empty) history and gives
+                // the sidebar the service's own row for it once the
+                // listing carries it; until then the selection is
+                // the scope itself, never a silent fall back to the
+                // main conversation.
+                if self.state.borrow_mut().select_thread(Some(session_id)) {
+                    self.prompt.set_text("");
+                    self.render();
+                    self.read(false, true);
+                }
+                self.prompt.grab_focus();
             }
         }
 
@@ -4427,6 +4527,7 @@ mod native {
             }
             self.thread_main_list.set_sensitive(connected && idle);
             self.thread_list.set_sensitive(connected && idle);
+            self.new_side_chat.set_sensitive(connected && idle);
             self.thread_search.set_sensitive(connected);
             // A stop press only needs a connection; whether anything was
             // actually stopped is the service's answer, not this button's.
@@ -4455,6 +4556,7 @@ mod native {
                     Operation::Permissions => " \u{b7} reading grants in force\u{2026}",
                     Operation::Revoke => " \u{b7} sending your revocation\u{2026}",
                     Operation::DeleteTask => " \u{b7} deleting the scheduled task\u{2026}",
+                    Operation::StartSession => " \u{b7} starting a new side chat\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -5782,6 +5884,48 @@ mod native {
         /// attributed to a content shape before it can be fixed:
         /// many rows, large rows, or one monster row of prose vs
         /// one of unbroken tokens (command output).
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn new_side_chat_button_starts_a_chat_or_says_why_not() {
+            // The web's + beside the Side chats heading (Patrick,
+            // Nov 13, 2026): the button exists in the threads panel,
+            // and a press with no account linked explains itself in
+            // the transcript notice instead of failing silently.
+            gtk::init().unwrap();
+            let page = build(&gtk::Label::new(None));
+            fn find_named(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+                if widget.widget_name() == name {
+                    return Some(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    let next = current.next_sibling();
+                    if let Some(found) = find_named(&current, name) {
+                        return Some(found);
+                    }
+                    child = next;
+                }
+                None
+            }
+            let button = find_named(page.threads_panel.upcast_ref(), "new-side-chat")
+                .expect("the threads panel carries the new-side-chat button")
+                .downcast::<gtk::Button>()
+                .expect("the new-side-chat widget is a button");
+            assert_eq!(
+                button.tooltip_text().as_deref(),
+                Some("Start a new side chat")
+            );
+            button.emit_clicked();
+            assert!(
+                page.ui
+                    .state
+                    .borrow()
+                    .history_notice
+                    .contains("Not connected"),
+                "a disconnected press must say why nothing started"
+            );
+        }
+
         #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn bench_transcript_first_frame() {
@@ -7741,6 +7885,48 @@ mod tests {
         assert!(!state.finish_delete_task(&ticket, Err("timeout".into())));
         assert!(state.deleting.is_none());
         assert!(state.tasks_notice.contains("instead of pressing twice"));
+    }
+
+    #[test]
+    fn starting_a_side_chat_takes_the_busy_slot_once() {
+        let mut state: State = Controller::default();
+        // No account linked: no ticket exists, so nothing can reach
+        // the service.
+        assert!(state.begin_start_session().is_none());
+        state.account = Some("account".into());
+        let ticket = state.begin_start_session().expect("ticket");
+        // A second press while one start is in flight gets no slot:
+        // one press can never start two chats.
+        assert!(state.begin_start_session().is_none());
+        let started = state.finish_start_session(
+            &ticket,
+            Ok(muse_account::StartedSession {
+                session_id: "thread-9".into(),
+            }),
+        );
+        assert_eq!(started.as_deref(), Some("thread-9"));
+        assert!(state.busy.is_none());
+    }
+
+    #[test]
+    fn a_failed_session_start_reports_and_stays_put() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        let ticket = state.begin_start_session().expect("ticket");
+        assert!(
+            state
+                .finish_start_session(&ticket, Err("timeout".into()))
+                .is_none()
+        );
+        assert!(
+            state
+                .history_notice
+                .contains("Could not start a new side chat")
+        );
+        assert!(state.scope.is_none());
+        assert!(state.busy.is_none());
     }
 
     #[test]
