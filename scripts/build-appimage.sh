@@ -11,8 +11,10 @@ LINUXDEPLOY_VERSION="1-alpha-20251107-1"
 GTK_PLUGIN_COMMIT="7a3fbc31a9e5075073ff8790f26effbac5f84453"
 LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
 GTK_PLUGIN_SHA256="b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375171"
+APPIMAGETOOL_SHA256="e8c1169c4af66c3184d7ee110713d4be04befe671fa358e2c1591ee840553b03"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/unofficial-muse-for-linux/appimage-tools"
 LINUXDEPLOY="$CACHE_DIR/linuxdeploy-x86_64.AppImage"
+APPIMAGETOOL="$CACHE_DIR/appimagetool-x86_64.AppImage"
 GTK_PLUGIN="$CACHE_DIR/linuxdeploy-plugin-gtk"
 APPDIR="$ROOT/target/AppDir"
 
@@ -34,6 +36,9 @@ fetch_pinned \
 fetch_pinned \
     "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/$GTK_PLUGIN_COMMIT/linuxdeploy-plugin-gtk.sh" \
     "$GTK_PLUGIN" "$GTK_PLUGIN_SHA256"
+fetch_pinned \
+    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
+    "$APPIMAGETOOL" "$APPIMAGETOOL_SHA256"
 
 cd "$ROOT"
 ./scripts/test-account.sh
@@ -51,10 +56,12 @@ install -m 755 "$ROOT/target/release/unofficial-muse-for-linux" "$APPDIR/usr/bin
 install -m 755 "$ROOT/target/release/muse-reminder-runner" "$APPDIR/usr/bin/muse-reminder-runner"
 
 # WebKit's helper processes are not part of the binary's library
-# closure, so linuxdeploy cannot find them on its own. The engine
-# looks for them beside its library, which inside the AppDir is
-# usr/lib/webkitgtk-6.0/ — copy the directory in explicitly, and
-# fail the build rather than ship frames that can never render.
+# closure, so linuxdeploy cannot find them on its own — copy the
+# directory into the AppDir explicitly, and fail the build rather
+# than ship frames that can never render. (How the engine finds
+# them at runtime is the staging story in patch-webkit-path.py:
+# its compiled-in path is absolute, so the bundle's library is
+# patched to a staging path the app symlinks on launch.)
 webkit_helpers=""
 for candidate in /usr/lib/*/webkitgtk-6.0; do
     if [[ -d "$candidate" ]]; then
@@ -85,12 +92,18 @@ export APPIMAGE_EXTRACT_AND_RUN=1
 export DEPLOY_GTK_VERSION=4
 export LINUXDEPLOY
 export PATH="$CACHE_DIR:$PATH"
+# Deploy only, for now: the WebKit library must be patched before
+# packaging (below), and a second linuxdeploy run would redeploy a
+# pristine copy over the patch — so appimagetool does the packaging.
 "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --desktop-file "$ROOT/resources/unofficial-muse-for-linux.desktop" \
     --icon-file "$ROOT/resources/unofficial-muse-for-linux.svg" \
-    --plugin gtk \
-    --output appimage
+    --plugin gtk
+
+python3 "$ROOT/scripts/patch-webkit-path.py" "$APPDIR/usr/lib"
+
+ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$ROOT/target/unofficial-muse-for-linux-x86_64.AppImage"
 
 artifact=""
 for candidate in "$ROOT"/target/*.AppImage; do
