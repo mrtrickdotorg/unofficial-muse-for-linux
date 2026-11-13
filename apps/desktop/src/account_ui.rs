@@ -4956,7 +4956,7 @@ mod native {
                         &a.identity_name,
                         a.threads
                             .iter()
-                            .map(|t| (&t.session_id, &t.title, t.archived, t.pinned))
+                            .map(|t| (&t.session_id, &t.title, t.archived, t.pinned, t.is_thread))
                             .collect::<Vec<_>>(),
                     )
                 })
@@ -4968,7 +4968,19 @@ mod native {
                     self.thread_list.remove(&row);
                 }
                 if let Some(account) = &state.account {
-                    for thread in &account.threads {
+                    // The web's sidebar lists conversation threads:
+                    // seeded non-thread sessions in the same
+                    // listing (the "Learn about ..." walkthrough)
+                    // are not chats and get no row. The guard keeps
+                    // every row when the listing carries no thread
+                    // flags at all, so a shape change can never
+                    // empty the sidebar.
+                    let any_thread = account.threads.iter().any(|t| t.is_thread);
+                    for thread in account
+                        .threads
+                        .iter()
+                        .filter(|t| !any_thread || t.is_thread)
+                    {
                         let archived = if thread.archived { " [archived]" } else { "" };
                         let row = gtk::ListBoxRow::new();
                         row.set_widget_name(&format!("thread:{}", thread.session_id));
@@ -6329,6 +6341,7 @@ mod native {
                             ),
                             archived: false,
                             pinned: false,
+                            is_thread: true,
                             updated_at: Some("2026-11-12T15:00:00+00:00".into()),
                         })
                         .collect(),
@@ -6472,6 +6485,73 @@ mod native {
 
         #[test]
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn the_sidebar_lists_threads_not_seeded_sessions() {
+            // The service seeds non-thread sessions ("Learn about
+            // lotus") into the same listing the chats come from;
+            // the web's sidebar shows threads only (Patrick,
+            // Nov 13, 2026). A listing with no thread rows at all
+            // keeps every row -- a shape change must never empty
+            // the sidebar.
+            gtk::init().unwrap();
+            fn named(root: &gtk::Widget, name: &str) -> bool {
+                if root.widget_name() == name {
+                    return true;
+                }
+                let mut child = root.first_child();
+                while let Some(current) = child {
+                    let next = current.next_sibling();
+                    if named(&current, name) {
+                        return true;
+                    }
+                    child = next;
+                }
+                false
+            }
+            let page = build(&gtk::Label::new(None));
+            let thread = |id: &str, title: &str, is_thread: bool| muse_account::Thread {
+                session_id: id.into(),
+                title: title.into(),
+                archived: false,
+                pinned: false,
+                is_thread,
+                updated_at: None,
+            };
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![
+                        thread("thread-1", "Real chat", true),
+                        thread("learn-1", "Learn about lotus", false),
+                    ],
+                });
+            }
+            page.ui.render();
+            let root = page.threads_panel.upcast_ref::<gtk::Widget>().clone();
+            assert!(named(&root, "thread:thread-1"));
+            assert!(
+                !named(&root, "thread:learn-1"),
+                "the seeded walkthrough must not list as a chat"
+            );
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![
+                        thread("thread-1", "Real chat", false),
+                        thread("learn-1", "Learn about lotus", false),
+                    ],
+                });
+            }
+            page.ui.render();
+            assert!(named(&root, "thread:thread-1"), "the guard keeps every row");
+            assert!(named(&root, "thread:learn-1"), "the guard keeps every row");
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn side_chat_rows_carry_the_web_menu() {
             // Patrick's screenshot of the web (Nov 13, 2026): every
             // side chat row has a three-dot menu -- pin/unpin,
@@ -6531,6 +6611,7 @@ mod native {
                     title: "Pinned chat".into(),
                     archived: false,
                     pinned: true,
+                    is_thread: true,
                     updated_at: None,
                 },
                 muse_account::Thread {
@@ -6538,6 +6619,7 @@ mod native {
                     title: "Plain chat".into(),
                     archived: true,
                     pinned: false,
+                    is_thread: true,
                     updated_at: None,
                 },
             ];
@@ -6639,6 +6721,7 @@ mod native {
                                 ),
                                 archived: false,
                                 pinned: false,
+                                is_thread: true,
                                 updated_at: Some("2026-11-12T15:00:00+00:00".into()),
                             })
                             .collect(),

@@ -904,7 +904,7 @@ class BridgeTests(unittest.TestCase):
         response = bridge.Adapter(FakeClient(), {}).dispatch({"op": "connect"})
         self.assertEqual(response, {"identity_name": "Test User", "vm_id": "vm-1",
             "threads": [{"session_id": "thread-1", "title": "Example",
-                         "archived": False, "pinned": False,
+                         "archived": False, "pinned": False, "is_thread": True,
                          "updated_at": "2026-10-17T00:00:00Z"}]})
         self.assertNotIn("SECRET", str(response))
 
@@ -1695,6 +1695,34 @@ class SessionOpTests(unittest.TestCase):
         rows = bridge.session_rows(Client(), {})
         self.assertIs(rows[0]["pinned"], True)
         self.assertIs(rows[1]["pinned"], False)
+
+    def test_session_rows_project_is_thread_with_a_safe_default(self):
+        # The web sidebar lists conversation threads; a seeded
+        # non-thread session (the "Learn about ..." walkthrough)
+        # carries is_thread false and must survive projection AS
+        # false, so the app can leave it out. Absent or null reads
+        # as a thread: no payload shape may empty the sidebar.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                return {"sessions": [
+                    {"session_id": "t1", "title": "Chat", "is_thread": True},
+                    {"session_id": "t2", "title": "Learn about x",
+                     "is_thread": False},
+                    {"session_id": "t3", "title": "Unflagged"},
+                    {"session_id": "t4", "title": "Null flag",
+                     "is_thread": None}]}
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        rows = bridge.session_rows(Client(), {})
+        self.assertEqual([row["is_thread"] for row in rows],
+                         [True, False, True, True])
 
 
 class CancelTests(unittest.TestCase):
