@@ -1337,7 +1337,29 @@ mod native {
         thread_search: gtk::Entry,
         threads_key: RefCell<String>,
         scope_label: gtk::Label,
+        /// The transcript column the scroll window holds; the
+        /// page's tests walk it, and the field keeps the tree's
+        /// root owned with the rest of the page.
+        #[allow(dead_code)]
         history: gtk::Box,
+        /// The two children of the transcript column: the history
+        /// rows proper and the working bubble. They rebuild on
+        /// separate fingerprints (see built_rows_key), so a draft
+        /// growing during a live run replaces one bubble row
+        /// instead of re-laying out the whole transcript -- the
+        /// per-render full rebuild was the main-thread CPU burn
+        /// the freeze sampler caught (Nov 13, 2026).
+        history_rows: gtk::Box,
+        bubble_box: gtk::Box,
+        /// Fingerprints of what the transcript rows, the working
+        /// bubble, the tasks list and the panel lists currently
+        /// show. render() rebuilds a surface only when its
+        /// fingerprint changes; 0 means never built (real keys
+        /// are forced odd).
+        built_rows_key: Cell<u64>,
+        built_bubble_key: Cell<u64>,
+        built_tasks_key: Cell<u64>,
+        built_panel_key: Cell<u64>,
         scroll: gtk::ScrolledWindow,
         history_notice: gtk::Label,
         tasks: gtk::Box,
@@ -2290,6 +2312,10 @@ mod native {
         grant_notice.set_visible(false);
         column.append(&grant_notice);
         let history = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        let history_rows = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        let bubble_box = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        history.append(&history_rows);
+        history.append(&bubble_box);
         let scroll = gtk::ScrolledWindow::builder()
             .hexpand(true)
             .vexpand(true)
@@ -2475,6 +2501,12 @@ mod native {
             watch_until: std::cell::Cell::new(None),
             live_turn: std::cell::Cell::new(true),
             history,
+            history_rows,
+            bubble_box,
+            built_rows_key: Cell::new(0),
+            built_bubble_key: Cell::new(0),
+            built_tasks_key: Cell::new(0),
+            built_panel_key: Cell::new(0),
             scroll,
             history_notice,
             tasks,
@@ -3915,6 +3947,17 @@ mod native {
         /// schedules and recent runs from the same snapshot the Tasks
         /// page renders — one read, two views, so they can never
         /// disagree. Hidden until linked.
+        /// A render fingerprint: hash everything a surface is
+        /// about to draw; the surface rebuilds only when the
+        /// fingerprint moves. Forced odd so 0 stays the
+        /// never-built sentinel.
+        fn key_of(build: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
+            use std::hash::Hasher;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            build(&mut hasher);
+            hasher.finish() | 1
+        }
+
         fn render_side_panel(&self, state: &State) {
             let Some(account) = &state.account else {
                 self.side_panel.set_visible(false);
@@ -3944,10 +3987,52 @@ mod native {
                 friendly_status(&state.live_status)
             };
             self.side_status.set_text(&status);
-            super::super::clear_chat(&self.side_agents);
-            super::super::clear_chat(&self.side_tasks);
-            super::super::clear_chat(&self.side_runs);
+            // The three lists rebuild only when what they would
+            // draw changes (the relative stamps inside them earn
+            // a one-minute bucket, so a quiet panel refreshes its
+            // ages about once a minute instead of every render).
+            let panel_key = Self::key_of(|h| {
+                use std::hash::Hash;
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() / 60)
+                    .unwrap_or(0)
+                    .hash(h);
+                match &state.tasks {
+                    Some(tasks) => {
+                        tasks.agents.len().hash(h);
+                        for agent in tasks.agents.iter().take(5) {
+                            agent_title(agent).hash(h);
+                            agent.status.hash(h);
+                            agent.completed_at.hash(h);
+                            agent.created_at.hash(h);
+                        }
+                        tasks.schedules.len().hash(h);
+                        for schedule in tasks.schedules.iter().take(6) {
+                            schedule.title.hash(h);
+                            schedule.next_run_at_utc.hash(h);
+                        }
+                        tasks.runs.len().hash(h);
+                        for run in tasks.runs.iter().take(5) {
+                            run.status.hash(h);
+                            run.scheduled_for_utc.hash(h);
+                            run.result_summary.hash(h);
+                        }
+                    }
+                    None => {
+                        0usize.hash(h);
+                    }
+                }
+            });
+            let rebuild_panel = panel_key != self.built_panel_key.get();
+            if rebuild_panel {
+                self.built_panel_key.set(panel_key);
+                super::super::clear_chat(&self.side_agents);
+                super::super::clear_chat(&self.side_tasks);
+                super::super::clear_chat(&self.side_runs);
+            }
             match &state.tasks {
+                _ if !rebuild_panel => {}
                 Some(tasks) => {
                     if tasks.agents.is_empty() {
                         self.side_agents
@@ -4061,7 +4146,7 @@ mod native {
                 row.append(&spacer);
             }
             row.append(&cards);
-            self.history.append(&row);
+            self.history_rows.append(&row);
         }
 
         fn append_option_buttons(&self, message: &muse_account::HistoryMessage) {
@@ -4097,7 +4182,7 @@ mod native {
                 buttons.insert(&button, -1);
             }
             row.append(&buttons);
-            self.history.append(&row);
+            self.history_rows.append(&row);
         }
 
         /// Put the transcript on its newest message, at the bottom
@@ -4589,10 +4674,6 @@ mod native {
                 self.scroll_to_bottom.set(false);
             }
             let transcript_started = std::time::Instant::now();
-            super::super::clear_chat(&self.history);
-            if !state.history.is_empty() {
-                super::super::append_day_divider(&self.history);
-            }
             // First-shown bookkeeping: a conversation switch starts a new
             // backlog (its rows printed in some earlier session, so none of
             // them earns a shown stamp); once a backlog has rendered, any
@@ -4681,6 +4762,91 @@ mod native {
                 .and_then(|account| account.identity_name.chars().next())
                 .map(|initial| initial.to_uppercase().collect::<String>())
                 .unwrap_or_else(|| "M".to_string());
+            // The visible rows' resolved stamps, computed before
+            // the rebuild decision: they are part of what the rows
+            // draw, so they are part of the fingerprint.
+            let stamp_strings: Vec<Option<String>> = state.history[floor..]
+                .iter()
+                .map(|message| {
+                    let service_stamp = message.timestamp.as_deref().and_then(short_stamp);
+                    let shown_stamp = self
+                        .shown_stamps
+                        .borrow()
+                        .get(&message.message_id)
+                        .cloned()
+                        .flatten();
+                    match (service_stamp, shown_stamp) {
+                        (Some(service), Some(shown)) => {
+                            Some(format!("{service} \u{00b7} shown {shown}"))
+                        }
+                        (Some(service), None) => Some(service),
+                        (None, Some(shown)) => Some(format!("shown {shown}")),
+                        (None, None) => None,
+                    }
+                })
+                .collect();
+            // The pending echo, resolved exactly as the build
+            // below resolves it: (text, stamp) while it shows.
+            let echo: Option<(String, String)> = state.pending_send.as_ref().and_then(|pending| {
+                if pending.scope == state.scope
+                    && !state
+                        .history
+                        .iter()
+                        .any(|row| row.role == "user" && row.text == pending.text)
+                {
+                    Some((
+                        pending.text.clone(),
+                        format!("sent {}", local_stamp_of(pending.sent_at)),
+                    ))
+                } else {
+                    None
+                }
+            });
+            // The rebuild decision. A render whose transcript
+            // inputs are unchanged leaves the row widgets standing:
+            // destroying and recreating them on every render was
+            // what made each poll completion re-lay out the whole
+            // conversation -- the freeze the sampler caught on
+            // Nov 13, 2026, the main thread at 100% CPU for
+            // seconds per render, parked in no syscall at all.
+            let rows_key = Self::key_of(|h| {
+                use std::hash::Hash;
+                state.scope.hash(h);
+                self.slice_revealed.get().hash(h);
+                floor.hash(h);
+                avatar_initial.hash(h);
+                state.history.is_empty().hash(h);
+                for (message, stamp) in state.history[floor..].iter().zip(&stamp_strings) {
+                    message.message_id.hash(h);
+                    message.role.hash(h);
+                    message.status.hash(h);
+                    message.text.hash(h);
+                    stamp.hash(h);
+                    message.selected_option.hash(h);
+                    for option in &message.options {
+                        option.hash(h);
+                    }
+                    for attachment in &message.attachments {
+                        attachment.filename.hash(h);
+                        attachment.mime_type.hash(h);
+                        attachment.kind.hash(h);
+                        attachment.bytes_len.hash(h);
+                        attachment.width.hash(h);
+                        attachment.height.hash(h);
+                        attachment.caption.hash(h);
+                        attachment.transcription.hash(h);
+                    }
+                }
+                echo.hash(h);
+            });
+            let rebuild_rows = rows_key != self.built_rows_key.get();
+            if rebuild_rows {
+                self.built_rows_key.set(rows_key);
+                super::super::clear_chat(&self.history_rows);
+                if !state.history.is_empty() {
+                    super::super::append_day_divider(&self.history_rows);
+                }
+            }
             let mut previous_role: Option<super::super::ChatRole> = if floor > 0 {
                 state
                     .history
@@ -4693,9 +4859,9 @@ mod native {
             } else {
                 None
             };
-            if floor > 0 {
+            if rebuild_rows && floor > 0 {
                 super::super::append_chat_grouped(
-                    &self.history,
+                    &self.history_rows,
                     super::super::ChatRole::Notice,
                     &format!(
                         "{floor} earlier loaded messages are above -- Load older reveals them."
@@ -4705,7 +4871,10 @@ mod native {
                     false,
                 );
             }
-            for message in &state.history[floor..] {
+            for (row_index, message) in state.history[floor..].iter().enumerate() {
+                if !rebuild_rows {
+                    break;
+                }
                 let role = match message.role.as_str() {
                     "user" => super::super::ChatRole::User,
                     "assistant" => super::super::ChatRole::Assistant,
@@ -4720,26 +4889,12 @@ mod native {
                 // -- for a row that first printed this session -- when it
                 // printed, so a slow arrival is visible on the message
                 // itself instead of being a feeling.
-                let service_stamp = message.timestamp.as_deref().and_then(short_stamp);
-                let shown_stamp = self
-                    .shown_stamps
-                    .borrow()
-                    .get(&message.message_id)
-                    .cloned()
-                    .flatten();
-                let stamp = match (service_stamp, shown_stamp) {
-                    (Some(service), Some(shown)) => {
-                        Some(format!("{service} \u{00b7} shown {shown}"))
-                    }
-                    (Some(service), None) => Some(service),
-                    (None, Some(shown)) => Some(format!("shown {shown}")),
-                    (None, None) => None,
-                };
+                let stamp = stamp_strings[row_index].clone();
                 if !message.attachments.is_empty() {
                     self.append_attachment_cards(message, role);
                 }
                 super::super::append_chat_grouped(
-                    &self.history,
+                    &self.history_rows,
                     role,
                     &super::presentation_text(&message.text),
                     stamp,
@@ -4759,18 +4914,12 @@ mod native {
             // (the service's row then replaces it — the reconcile above
             // clears the record the moment the row is in `state.history`,
             // so the two never appear side by side).
-            if let Some(pending) = &state.pending_send
-                && pending.scope == state.scope
-                && !state
-                    .history
-                    .iter()
-                    .any(|row| row.role == "user" && row.text == pending.text)
-            {
+            if rebuild_rows && let Some((text, stamp)) = &echo {
                 super::super::append_chat_stamped(
-                    &self.history,
+                    &self.history_rows,
                     super::super::ChatRole::User,
-                    &super::presentation_text(&pending.text),
-                    Some(format!("sent {}", local_stamp_of(pending.sent_at))),
+                    &super::presentation_text(text),
+                    Some(stamp.clone()),
                 );
             }
             // The working bubble, the way muse.ai shows a turn in flight: an
@@ -4802,10 +4951,40 @@ mod native {
                 *self.draft_stamp.borrow_mut() = None;
                 None
             };
-            if (state.watching_run || state.sending.is_some()) && !newest_in_flight {
+            // The bubble lives in its own box with its own
+            // fingerprint: while a run streams, the draft changes
+            // constantly and the rows must not pay for it.
+            let bubble_key = Self::key_of(|h| {
+                use std::hash::Hash;
+                let applicable =
+                    (state.watching_run || state.sending.is_some()) && !newest_in_flight;
+                applicable.hash(h);
+                if applicable {
+                    avatar_initial.hash(h);
+                    if !state.live_draft.is_empty() {
+                        1u8.hash(h);
+                        state.live_draft.hash(h);
+                    } else if let Some(status) = state.live_status.strip_prefix("Agent \u{00b7} ") {
+                        2u8.hash(h);
+                        status.hash(h);
+                    } else {
+                        3u8.hash(h);
+                    }
+                    bubble_stamp.hash(h);
+                }
+            });
+            let rebuild_bubble = bubble_key != self.built_bubble_key.get();
+            if rebuild_bubble {
+                self.built_bubble_key.set(bubble_key);
+                super::super::clear_chat(&self.bubble_box);
+            }
+            if rebuild_bubble
+                && (state.watching_run || state.sending.is_some())
+                && !newest_in_flight
+            {
                 if !state.live_draft.is_empty() {
                     super::super::append_chat_grouped(
-                        &self.history,
+                        &self.bubble_box,
                         super::super::ChatRole::Assistant,
                         &super::presentation_text(&state.live_draft),
                         bubble_stamp,
@@ -4814,7 +4993,7 @@ mod native {
                     );
                 } else if let Some(status) = state.live_status.strip_prefix("Agent \u{00b7} ") {
                     super::super::append_chat_grouped(
-                        &self.history,
+                        &self.bubble_box,
                         super::super::ChatRole::Assistant,
                         &super::presentation_text(status),
                         bubble_stamp,
@@ -4823,7 +5002,7 @@ mod native {
                     );
                 } else {
                     super::super::append_thinking_grouped(
-                        &self.history,
+                        &self.bubble_box,
                         bubble_stamp,
                         &avatar_initial,
                     );
@@ -4837,7 +5016,8 @@ mod native {
             // render had no number at all). Re-renders of an
             // unchanged row set (a streaming draft, a notice change)
             // do not log.
-            if edges_changed
+            if rebuild_rows
+                && edges_changed
                 && !state.history.is_empty()
                 && let Some(client) = self.client.borrow().as_ref()
             {
@@ -4856,8 +5036,43 @@ mod native {
             if self.follow_bottom.get() {
                 self.snap_to_bottom(&self.scroll.vadjustment());
             }
-            super::super::clear_chat(&self.tasks);
-            if let Some(tasks) = &state.tasks {
+            // The tasks list rebuilds on its fingerprint too --
+            // including the delete button's arm/sensitivity
+            // inputs, so the two-press delete still re-renders
+            // the moment it arms.
+            let tasks_key = Self::key_of(|h| {
+                use std::hash::Hash;
+                connected.hash(h);
+                idle.hash(h);
+                state.confirming_delete.hash(h);
+                state.deleting.is_some().hash(h);
+                match &state.tasks {
+                    Some(tasks) => {
+                        for schedule in &tasks.schedules {
+                            schedule.id.hash(h);
+                            schedule.title.hash(h);
+                            schedule.enabled.hash(h);
+                            schedule.timezone.hash(h);
+                            schedule.next_run_at_utc.hash(h);
+                        }
+                        for run in &tasks.runs {
+                            run.run_id.hash(h);
+                            run.job_id.hash(h);
+                            run.status.hash(h);
+                            run.scheduled_for_utc.hash(h);
+                            run.result_summary.hash(h);
+                            run.error_text.hash(h);
+                        }
+                    }
+                    None => 0usize.hash(h),
+                }
+            });
+            let rebuild_tasks = tasks_key != self.built_tasks_key.get();
+            if rebuild_tasks {
+                self.built_tasks_key.set(tasks_key);
+                super::super::clear_chat(&self.tasks);
+            }
+            if rebuild_tasks && let Some(tasks) = &state.tasks {
                 self.tasks.append(&label(&format!(
                     "{} schedules · {} recent runs returned",
                     tasks.schedules.len(),
@@ -5494,7 +5709,13 @@ mod native {
         #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
         fn bench_transcript_first_frame() {
             gtk::init().unwrap();
-            crate::install_dark_theme();
+            // A/B toggles for attributing the frame cost (Nov 13,
+            // 2026 freeze hunt): UMFL_BENCH_THEME=none skips the
+            // app stylesheet, UMFL_BENCH_THREADS=0 empties the
+            // sidebar, UMFL_BENCH_ONLY=<label> runs one shape.
+            if std::env::var("UMFL_BENCH_THEME").as_deref() != Ok("none") {
+                crate::install_dark_theme();
+            }
             fn prose(chars: usize) -> String {
                 let sentence = "The quick brown fox jumps over the lazy dog while the report explains itself in plain words. ";
                 let mut out = String::new();
@@ -5515,13 +5736,27 @@ mod native {
                 out
             }
             fn run(label: &str, texts: Vec<String>) {
+                let bench_threads = if std::env::var("UMFL_BENCH_THREADS").as_deref() == Ok("0") {
+                    0
+                } else {
+                    150
+                };
                 let page = build(&gtk::Label::new(None));
                 {
                     let mut state = page.ui.state.borrow_mut();
                     state.account = Some(AccountSnapshot {
                         identity_name: "Lotus".into(),
                         vm_id: "fake-vm".into(),
-                        threads: vec![],
+                        threads: (0..bench_threads)
+                            .map(|i| muse_account::Thread {
+                                session_id: format!("thread-{i}"),
+                                title: format!(
+                                    "Project chat {i} -- a realistic conversation title with several words"
+                                ),
+                                archived: false,
+                                updated_at: Some("2026-11-12T15:00:00+00:00".into()),
+                            })
+                            .collect(),
                     });
                     state.scope = Some("bench".into());
                     state.history = texts
@@ -5595,6 +5830,35 @@ mod native {
                     frames.get(),
                     widths.borrow()
                 );
+                // The incremental-render proof (Nov 13, 2026): a
+                // second render of the UNCHANGED state must settle
+                // almost immediately -- before the fingerprint
+                // gates, it paid the full layout again (the
+                // live-run freeze).
+                let rerender_started = std::time::Instant::now();
+                page.ui.render();
+                let mut rr_iterations = 0usize;
+                let mut rr_stable = 0usize;
+                let mut rr_last = adjustment.upper();
+                while rerender_started.elapsed() < std::time::Duration::from_secs(40) {
+                    context.iteration(false);
+                    rr_iterations += 1;
+                    let upper = adjustment.upper();
+                    if (upper - rr_last).abs() < 0.5 {
+                        rr_stable += 1;
+                        if rr_stable >= 3 && rerender_started.elapsed().as_millis() > 300 {
+                            break;
+                        }
+                    } else {
+                        rr_stable = 0;
+                        rr_last = upper;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                println!(
+                    "BENCH frame {label} rerender: settled in {:?} ({rr_iterations} iterations)",
+                    rerender_started.elapsed()
+                );
                 window.destroy();
             }
             let reports = |last: String| -> Vec<String> {
@@ -5604,10 +5868,19 @@ mod native {
                 texts.push(last);
                 texts
             };
-            run("short", (0..50).map(|_| prose(200)).collect());
-            run("reports", reports(prose(4500)));
-            run("monster-prose", reports(prose(30_000)));
-            run("monster-tokens", reports(tokens(30_000)));
+            let only = std::env::var("UMFL_BENCH_ONLY").unwrap_or_default();
+            if only.is_empty() || only == "short" {
+                run("short", (0..50).map(|_| prose(200)).collect());
+            }
+            if only.is_empty() || only == "reports" {
+                run("reports", reports(prose(4500)));
+            }
+            if only.is_empty() || only == "monster-prose" {
+                run("monster-prose", reports(prose(30_000)));
+            }
+            if only.is_empty() || only == "monster-tokens" {
+                run("monster-tokens", reports(tokens(30_000)));
+            }
         }
 
         #[test]
@@ -5830,6 +6103,75 @@ mod native {
             assert!(
                 has_text(&page, "Partial reply"),
                 "the draft should be the bubble's content"
+            );
+        }
+
+        #[test]
+        #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+        fn unchanged_renders_leave_the_transcript_widgets_standing() {
+            // The incremental-render contract the freeze sampler
+            // bought (Nov 13, 2026): widget identity is the proof.
+            // An unchanged re-render keeps the very same row
+            // widgets (no destroy/recreate, so no re-layout); a
+            // changed row rebuilds; a growing draft replaces only
+            // the bubble.
+            gtk::init().unwrap();
+            crate::install_dark_theme();
+            let page = build(&gtk::Label::new(None));
+            let message = |id: &str, text: &str| muse_account::HistoryMessage {
+                message_id: id.into(),
+                seq: 1,
+                role: "assistant".into(),
+                text: text.into(),
+                timestamp: Some("2026-11-12T15:00:00+00:00".into()),
+                status: Some("completed".into()),
+                options: vec![],
+                selected_option: None,
+                attachments: Vec::new(),
+            };
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.account = Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: vec![],
+                });
+                state.scope = Some("chat".into());
+                state.history = vec![
+                    message("m1", "First answer."),
+                    message("m2", "Second answer."),
+                ];
+            }
+            page.ui.render();
+            let first_row = page.ui.history_rows.first_child().expect("rows built");
+            page.ui.render();
+            assert_eq!(
+                page.ui.history_rows.first_child().as_ref(),
+                Some(&first_row),
+                "an unchanged re-render must not rebuild the transcript rows"
+            );
+            page.ui.state.borrow_mut().history[1] = message("m2", "Second answer, edited.");
+            page.ui.render();
+            assert_ne!(
+                page.ui.history_rows.first_child().as_ref(),
+                Some(&first_row),
+                "a changed row set must rebuild"
+            );
+            let standing_row = page.ui.history_rows.first_child().expect("rows rebuilt");
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.watching_run = true;
+                state.live_draft = "Streaming words".into();
+            }
+            page.ui.render();
+            assert_eq!(
+                page.ui.history_rows.first_child().as_ref(),
+                Some(&standing_row),
+                "a draft update must not rebuild the transcript rows"
+            );
+            assert!(
+                page.ui.bubble_box.first_child().is_some(),
+                "the draft bubble must be showing"
             );
         }
 
