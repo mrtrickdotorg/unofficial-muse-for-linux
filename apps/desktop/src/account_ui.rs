@@ -4080,6 +4080,24 @@ mod native {
             });
         }
 
+        /// What a completed operation proves about the account
+        /// connection the data pages share through host_context.
+        /// Only identity-level failures de-verify -- the account
+        /// changed under the session, or the service rejected the
+        /// session itself. An ordinary leg error (a tasks read
+        /// timing out, one history read failing) proves nothing
+        /// about the connection and must not latch the data pages
+        /// shut; any successful account read re-verifies.
+        fn verification_effect(reply: &Reply) -> Option<bool> {
+            match reply {
+                Reply::AccountChanged | Reply::AuthExpired => Some(false),
+                Reply::Connect(Ok(_), _) | Reply::Refresh(Ok(_), _, _) | Reply::History(Ok(_)) => {
+                    Some(true)
+                }
+                _ => None,
+            }
+        }
+
         fn complete(self: &Rc<Self>, ticket: &Ticket, reply: Reply) {
             if !self.state.borrow().owns(ticket) {
                 return;
@@ -4136,14 +4154,18 @@ mod native {
                     | Reply::Send(SendOutcome::NotSent(_))
                     | Reply::SendConnectionError(_)
             ) {
-                self.host_verified.set(false);
                 self.stop_host();
             }
-            if matches!(
-                &reply,
-                Reply::Connect(Ok(_), _) | Reply::Refresh(Ok(_), Ok(_), Ok(_))
-            ) {
-                self.host_verified.set(true);
+            // The data pages (Ideas, Goals, Feed, Library) share
+            // this connection through host_context, and their gate
+            // is this flag. It used to latch on any error above
+            // and clear only on a flawless connect or refresh, so
+            // one failed tasks leg left every data page telling a
+            // connected reader to connect first while his chats
+            // worked (Patrick, Nov 13, 2026). The flag now follows
+            // what a reply actually proves about the account.
+            if let Some(verified) = Self::verification_effect(&reply) {
+                self.host_verified.set(verified);
             }
             {
                 let mut state = self.state.borrow_mut();
@@ -6977,6 +6999,50 @@ mod native {
             if only.is_empty() || only == "monster-tokens" {
                 run("monster-tokens", reports(tokens(30_000)));
             }
+        }
+
+        #[test]
+        fn verification_follows_what_a_reply_proves_not_any_error() {
+            // The data pages share the chat connection through
+            // host_context, gated on host_verified. A refresh whose
+            // snapshot leg succeeded has proven the account even
+            // when its history or tasks legs failed; a failed
+            // history read proves nothing either way; only an
+            // identity-level failure de-verifies (Patrick,
+            // Nov 13, 2026: chats working, Ideas/Feed/Goals all
+            // demanding he connect first).
+            let snapshot = || muse_account::AccountSnapshot {
+                identity_name: "Lotus".into(),
+                vm_id: "vm".into(),
+                threads: vec![],
+            };
+            let err = || "boom".to_string();
+            assert_eq!(
+                Ui::verification_effect(&Reply::Refresh(Ok(snapshot()), Err(err()), Err(err()))),
+                Some(true),
+                "a proven snapshot verifies even with failed legs"
+            );
+            assert_eq!(
+                Ui::verification_effect(&Reply::Refresh(Err(err()), Ok(vec![]), Err(err()))),
+                None,
+                "a failed snapshot proves nothing either way"
+            );
+            assert_eq!(
+                Ui::verification_effect(&Reply::History(Ok(vec![]))),
+                Some(true),
+                "a successful history read re-verifies"
+            );
+            assert_eq!(
+                Ui::verification_effect(&Reply::History(Err(err()))),
+                None,
+                "one failed history read must not latch the pages shut"
+            );
+            assert_eq!(
+                Ui::verification_effect(&Reply::Connect(Ok(snapshot()), None)),
+                Some(true)
+            );
+            assert_eq!(Ui::verification_effect(&Reply::AccountChanged), Some(false));
+            assert_eq!(Ui::verification_effect(&Reply::AuthExpired), Some(false));
         }
 
         #[test]
