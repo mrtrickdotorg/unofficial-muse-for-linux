@@ -995,6 +995,20 @@ impl AccountClient {
             &format!("client heartbeat blocked_ms={}", blocked.as_millis()),
         );
     }
+    /// One freeze episode, sampled by the desktop's watchdog
+    /// thread while the heartbeat was stale: how stale the beat
+    /// was, how much CPU the main thread burned across a 600ms
+    /// window inside the freeze (near 600 = in-process work; near
+    /// 0 = parked), and the syscall it sat in, with the peer path
+    /// when it sat in a read on a unix socket.
+    pub fn log_freeze(&self, blocked_ms: u64, main_cpu_ms: u64, syscall: &str) {
+        append_timing_line(
+            &self.config.config_dir,
+            &format!(
+                "client freeze blocked_ms={blocked_ms} main_cpu_ms={main_cpu_ms} syscall={syscall}"
+            ),
+        );
+    }
     /// One request line to the host, one reply line back.
     ///
     /// `Ok(None)` means no host is available, so the caller keeps its original
