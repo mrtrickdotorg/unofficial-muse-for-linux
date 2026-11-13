@@ -26,7 +26,13 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op"})
+
+# The session mutations the recorded route table names, with the
+# body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
+# rename is a flat {session_id, title}; the rest ride
+# {method: "/api/session/<kind>", session_id}.
+SESSION_OP_KINDS = frozenset({"pin", "unpin", "archive", "unarchive", "delete", "rename"})
 
 
 ERROR_CODES = frozenset({"auth_required", "account_changed", "vm_unavailable", "timeout", "invalid_request",
@@ -599,6 +605,7 @@ def validate_request(request):
                "revoke": {"permission_id"},
                "delete_task": {"job_id"},
                "start_session": set(),
+               "session_op": {"session_id", "kind", "title"},
                "tasks": set(),
                "artifacts": set(),
                "ideas": set(),
@@ -664,6 +671,26 @@ def validate_request(request):
         job_id = request.get("job_id")
         if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
                 or "\x00" in job_id):
+            raise BridgeFailure("invalid_request")
+    if op == "session_op":
+        # Same rule: the id comes from the session listing the
+        # service published, the kind from the recorded route table,
+        # and a title belongs to rename alone -- required there,
+        # refused everywhere else, so no op can smuggle fields into
+        # another op's body.
+        session_id = request.get("session_id")
+        if (not isinstance(session_id, str) or not 1 <= len(session_id) <= 256
+                or "\x00" in session_id):
+            raise BridgeFailure("invalid_request")
+        kind = request.get("kind")
+        if kind not in SESSION_OP_KINDS:
+            raise BridgeFailure("invalid_request")
+        title = request.get("title")
+        if kind == "rename":
+            if (not isinstance(title, str) or not title.strip()
+                    or len(title) > 300 or "\x00" in title):
+                raise BridgeFailure("invalid_request")
+        elif title is not None:
             raise BridgeFailure("invalid_request")
     if op == "send":
         message = request.get("message")
@@ -1744,6 +1771,7 @@ def session_rows(client, config):
             "session_id": required_text(row.get("session_id")),
             "title": required_text(row.get("title")),
             "archived": bool(row.get("archived", False)),
+            "pinned": bool(row.get("pinned", False)),
             "updated_at": optional_text(row.get("updated_at")),
         } for row in object_rows(client.threads(include_archived=True))]
     with gateway_scope(config) as gateway:
@@ -1759,6 +1787,7 @@ def session_rows(client, config):
             "session_id": required_text(session.get("session_id")),
             "title": required_text(session.get("title")),
             "archived": bool(session.get("archived", False)),
+            "pinned": bool(session.get("pinned", False)),
             "updated_at": updated_at_text(session),
         })
     return rows
@@ -1888,6 +1917,24 @@ class Adapter:
             if session_id is None:
                 raise BridgeFailure("protocol_error")
             return {"session_id": session_id}
+        if request["op"] == "session_op":
+            # One menu press, one session mutation, never retried
+            # here. The body is the recorded shape for the kind:
+            # rename flat, the rest under their /api/session method.
+            # The answer claims acceptance only -- the caller's
+            # refresh of the session listing is what proves the new
+            # state, never this echo.
+            kind = request["kind"]
+            if kind == "rename":
+                body = {"session_id": request["session_id"],
+                        "title": request["title"]}
+            else:
+                body = {"method": f"/api/session/{kind}",
+                        "session_id": request["session_id"]}
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(f"session.{kind}", body=body)
+            return {"session_id": request["session_id"], "kind": kind,
+                    "accepted": True}
         if request["op"] == "artifacts":
             # One read of the Library listing. Listing is never consent: nothing
             # here opens, shares or deletes, and the projection keeps the cursor

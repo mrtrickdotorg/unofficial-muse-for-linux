@@ -904,7 +904,8 @@ class BridgeTests(unittest.TestCase):
         response = bridge.Adapter(FakeClient(), {}).dispatch({"op": "connect"})
         self.assertEqual(response, {"identity_name": "Test User", "vm_id": "vm-1",
             "threads": [{"session_id": "thread-1", "title": "Example",
-                         "archived": False, "updated_at": "2026-10-17T00:00:00Z"}]})
+                         "archived": False, "pinned": False,
+                         "updated_at": "2026-10-17T00:00:00Z"}]})
         self.assertNotIn("SECRET", str(response))
 
 
@@ -1619,6 +1620,81 @@ class StartSessionTests(unittest.TestCase):
             bridge.validate_request({"op": "start_session", "config_dir": "/tmp",
                                      "title": "surprise"})
         self.assertEqual(caught.exception.code, "invalid_request")
+
+
+class SessionOpTests(unittest.TestCase):
+    def _dispatch(self, request):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        seen = []
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen.append((method, kwargs))
+                return {"ok": True}
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "session_op", **request})
+        return result, seen
+
+    def test_pin_sends_the_recorded_method_body_once(self):
+        result, seen = self._dispatch({"session_id": "thread-1", "kind": "pin"})
+        self.assertEqual(result, {"session_id": "thread-1", "kind": "pin",
+                                  "accepted": True})
+        self.assertEqual(seen, [("session.pin", {"body": {
+            "method": "/api/session/pin", "session_id": "thread-1"}})])
+
+    def test_rename_sends_the_flat_body(self):
+        result, seen = self._dispatch(
+            {"session_id": "thread-1", "kind": "rename", "title": "New name"})
+        self.assertEqual(result["kind"], "rename")
+        self.assertEqual(seen, [("session.rename", {"body": {
+            "session_id": "thread-1", "title": "New name"}})])
+
+    def test_delete_sends_the_recorded_method_body(self):
+        _result, seen = self._dispatch({"session_id": "thread-9", "kind": "delete"})
+        self.assertEqual(seen, [("session.delete", {"body": {
+            "method": "/api/session/delete", "session_id": "thread-9"}})])
+
+    def test_validation_refuses_unrecorded_kinds_and_smuggled_titles(self):
+        bridge = load_bridge()
+        base = {"op": "session_op", "config_dir": "/tmp",
+                "session_id": "thread-1"}
+        bridge.validate_request({**base, "kind": "archive"})
+        bridge.validate_request({**base, "kind": "rename", "title": "Ok"})
+        for bad in ({**base, "kind": "move"},
+                    {**base, "kind": "rename"},
+                    {**base, "kind": "rename", "title": "  "},
+                    {**base, "kind": "pin", "title": "smuggled"},
+                    {**base, "kind": "pin", "session_id": ""},
+                    {**base, "kind": "pin", "session_id": "a\x00b"}):
+            with self.assertRaises(bridge.BridgeFailure) as caught:
+                bridge.validate_request(bad)
+            self.assertEqual(caught.exception.code, "invalid_request")
+
+    def test_session_rows_project_pinned(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                return {"sessions": [
+                    {"session_id": "t1", "title": "Pinned one", "pinned": True},
+                    {"session_id": "t2", "title": "Plain"}]}
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        rows = bridge.session_rows(Client(), {})
+        self.assertIs(rows[0]["pinned"], True)
+        self.assertIs(rows[1]["pinned"], False)
 
 
 class CancelTests(unittest.TestCase):
