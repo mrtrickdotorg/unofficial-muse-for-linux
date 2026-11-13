@@ -103,6 +103,6 @@ TooLarge, HtmlOnly, NotFound, Tampered, Uncertain}`.
   directly would add a second hand-rolled handshake on top of the existing
   one. `native-tls` uses the OS trust store (consistent with a desktop
   client honoring system CAs) and resolves to a single `openssl 0.10.81`
-  in `Cargo.lock`. It builds in the Debian bookworm builder with no extra
+  in `Cargo.lock`. It builds in the Ubuntu 24.04 builder with no extra
   system packages. Revisit only if the tree ever needs a uniform TLS
   implementation.
