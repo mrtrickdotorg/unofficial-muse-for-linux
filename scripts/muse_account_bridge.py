@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -606,6 +606,8 @@ def validate_request(request):
                "delete_task": {"job_id"},
                "start_session": set(),
                "session_op": {"session_id", "kind", "title"},
+               "idea_execute": {"idea_id"},
+               "feed_react": {"unit_id", "reaction"},
                "tasks": set(),
                "artifacts": set(),
                "ideas": set(),
@@ -671,6 +673,28 @@ def validate_request(request):
         job_id = request.get("job_id")
         if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
                 or "\x00" in job_id):
+            raise BridgeFailure("invalid_request")
+    if op == "idea_execute":
+        # The id is the service's own, taken from the idea-cards
+        # listing it published; anything else would be executing a
+        # guess. The body is the recorded consumer's: the id again
+        # (the route also takes it as a path param) and mode "full".
+        idea_id = request.get("idea_id")
+        if (not isinstance(idea_id, str) or not 1 <= len(idea_id) <= 256
+                or "\x00" in idea_id):
+            raise BridgeFailure("invalid_request")
+    if op == "feed_react":
+        # The unit id comes from the feed listing the service
+        # published, and the reaction is one short visible glyph
+        # string -- the recorded consumer sends exactly
+        # {"reaction": <that string>}.
+        unit_id = request.get("unit_id")
+        if (not isinstance(unit_id, str) or not 1 <= len(unit_id) <= 256
+                or "\x00" in unit_id):
+            raise BridgeFailure("invalid_request")
+        reaction = request.get("reaction")
+        if (not isinstance(reaction, str) or not 1 <= len(reaction) <= 16
+                or any(ord(c) < 32 for c in reaction)):
             raise BridgeFailure("invalid_request")
     if op == "session_op":
         # Same rule: the id comes from the session listing the
@@ -2048,6 +2072,38 @@ class Adapter:
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("goals.list", timeout=20)
             return listing_rows(payload, ("goals", "items", "results", "data"))
+        if request["op"] == "idea_execute":
+            # A write on the shared gateway: one execution, never
+            # retried here -- a retry could start the card's work
+            # twice. The body is the recorded consumer's own. What
+            # the execution becomes (a run, a chat) is the service's
+            # side to show; this answer claims only acceptance plus
+            # the session id when the answer itself carries one.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "api.idea-cards.execute",
+                    path_params={"ideaCardId": request["idea_id"]},
+                    body={"ideaCardId": request["idea_id"], "mode": "full"},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"idea_id": request["idea_id"], "accepted": True,
+                    "session_id": optional_text(answer.get("session_id"))}
+        if request["op"] == "feed_react":
+            # A write on the shared gateway: one reaction, never
+            # retried here. The recorded consumer's body is exactly
+            # {"reaction": <glyph>}; whether the unit now shows it
+            # is proven by re-reading the feed, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "feed.unit.reaction",
+                    path_params={"unit_id": request["unit_id"]},
+                    body={"reaction": request["reaction"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"unit_id": request["unit_id"], "accepted": True,
+                    "reaction": request["reaction"]}
         if request["op"] == "feed":
             # Read-only: the feed units the recorded list route returns.
             # Reactions, reordering and regeneration are writes and stay

@@ -490,6 +490,30 @@ pub struct SessionOpAnswer {
     pub accepted: bool,
 }
 
+/// What the service said about an idea-card execution it took.
+///
+/// `accepted` means the service took the request; the work itself
+/// happens on the Muse side, and the session it runs in travels
+/// only when the execution answer itself carried one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeaExecuteAnswer {
+    pub idea_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// What the service said about a feed reaction it took.
+///
+/// Acceptance only: whether the unit now shows the reaction is
+/// proven by re-reading the feed, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedReactAnswer {
+    pub unit_id: String,
+    pub accepted: bool,
+    pub reaction: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -806,6 +830,42 @@ impl AccountClient {
             body["title"] = title.into();
         }
         self.request(body, false)
+    }
+    /// Execute exactly one idea card, once (its "Try it").
+    ///
+    /// The id must be one the idea-cards listing published, and the
+    /// bridge makes a single request, so one press maps to one
+    /// execution: a retry could start the same work twice.
+    pub fn idea_execute(&self, idea_id: &str) -> Result<IdeaExecuteAnswer, AccountError> {
+        if idea_id.is_empty() || idea_id.len() > 256 || idea_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "idea_execute", "idea_id": idea_id}),
+            false,
+        )
+    }
+    /// React to exactly one feed unit, once.
+    ///
+    /// The id must be one the feed listing published and the bridge
+    /// makes a single request, so one press maps to one write.
+    /// Whether the unit then shows the reaction is proven by
+    /// re-reading the feed, never by this answer alone.
+    pub fn feed_react(
+        &self,
+        unit_id: &str,
+        reaction: &str,
+    ) -> Result<FeedReactAnswer, AccountError> {
+        if unit_id.is_empty() || unit_id.len() > 256 || unit_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if reaction.is_empty() || reaction.len() > 16 {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "feed_react", "unit_id": unit_id, "reaction": reaction}),
+            false,
+        )
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.

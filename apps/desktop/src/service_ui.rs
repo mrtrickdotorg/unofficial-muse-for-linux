@@ -36,8 +36,24 @@ struct Spec {
     /// way the web's Ideas page does (its cards arrive in named
     /// sections). Off for Goals, whose kind is a per-row status.
     group_by_kind: bool,
+    /// The one action a row offers, when the surface has one the
+    /// recorded routes ground (Ideas: "Try it"). A press runs it
+    /// once against the row's own id; the page then re-reads, so
+    /// what shows afterwards is the service's state, not the
+    /// answer's claim.
+    action: Option<SpecAction>,
     fetch: fn(&AccountClient) -> Result<ServiceListing, AccountError>,
 }
+
+#[derive(Clone, Copy)]
+struct SpecAction {
+    label: &'static str,
+    run: fn(&AccountClient, &str) -> Result<String, AccountError>,
+}
+
+/// A row's action as the card builder takes it: the button's
+/// label and the press handler, which receives the row's id.
+type RowAction<'a> = Option<(&'a str, &'a Rc<dyn Fn(String)>)>;
 
 struct Ui {
     epoch: Cell<u64>,
@@ -47,6 +63,10 @@ struct Ui {
     list: gtk::ListBox,
     notice: gtk::Label,
     spinner: gtk::Spinner,
+    /// A message a completed action leaves for the re-read its
+    /// success triggers, so the reader sees the outcome instead of
+    /// the read's summary overwriting it.
+    after_read: std::cell::RefCell<Option<String>>,
 }
 
 fn label(text: &str) -> gtk::Label {
@@ -89,7 +109,7 @@ pub(super) fn summary_text(page: &ServiceListing, empty_copy: &str) -> String {
     summary
 }
 
-fn row_card(item: &ListingItem, show_kind: bool) -> gtk::Box {
+fn row_card(item: &ListingItem, show_kind: bool, action: RowAction<'_>) -> gtk::Box {
     let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
     card.add_css_class("card");
     // The web draws an icon at the card's left edge; when the
@@ -133,6 +153,15 @@ fn row_card(item: &ListingItem, show_kind: bool) -> gtk::Box {
     } else {
         card.append(&text);
     }
+    if let (Some((label, run)), Some(id)) = (action, &item.id) {
+        let button = gtk::Button::with_label(label);
+        button.set_widget_name(&format!("item-action:{id}"));
+        button.set_halign(gtk::Align::Start);
+        let run = Rc::clone(run);
+        let id = id.clone();
+        button.connect_clicked(move |_| run(id.clone()));
+        card.append(&button);
+    }
     card
 }
 
@@ -150,11 +179,12 @@ impl Ui {
         self.spinner.set_visible(busy);
     }
 
-    fn render(&self, items: &[ListingItem]) {
+    fn render(&self, items: &[ListingItem], action: Option<Rc<dyn Fn(String)>>) {
         while let Some(row) = self.list.first_child() {
             self.list.remove(&row);
         }
         let grouped = self.spec.group_by_kind;
+        let action = action.map(|run| (self.spec.action.map(|a| a.label).unwrap_or(""), run));
         let mut last_kind: Option<&str> = None;
         for item in items {
             if grouped
@@ -164,8 +194,78 @@ impl Ui {
                 self.list.append(&section_heading(kind));
                 last_kind = Some(kind);
             }
-            self.list.append(&row_card(item, !grouped));
+            self.list.append(&row_card(
+                item,
+                !grouped,
+                action.as_ref().map(|(label, run)| (*label, run)),
+            ));
         }
+    }
+
+    /// Run the page's row action once for one row id, on a worker
+    /// thread; the notice reports the outcome and the page re-reads
+    /// so the rows show the service's state afterwards.
+    fn run_action(&self, ui: &Rc<Ui>, id: String) {
+        let Some(action) = self.spec.action else {
+            return;
+        };
+        if self.busy.get() {
+            self.notice
+                .set_text("A read is already running. Wait for it to finish.");
+            return;
+        }
+        let Some(config) = (self.context)() else {
+            self.notice.set_text(
+                "Connect your Muse account first: this surface belongs to the connected account. Nothing was sent.",
+            );
+            return;
+        };
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        let epoch = self.epoch.get();
+        self.set_busy(true);
+        self.notice.set_text("Working…");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (action.run)(&AccountClient::new(config), &id);
+            let _ = tx.send(result);
+        });
+        let weak = Rc::downgrade(ui);
+        gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(result) => {
+                    if ui.epoch.get() != epoch {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    ui.set_busy(false);
+                    match result {
+                        Ok(message) => {
+                            *ui.after_read.borrow_mut() = Some(message);
+                            ui.refresh(&ui);
+                        }
+                        Err(error) => {
+                            ui.notice.set_text(&format!(
+                                "That didn't go through: {}. Nothing else was changed.",
+                                crate::library_ui::read_failure(error.code)
+                            ));
+                        }
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if ui.epoch.get() == epoch {
+                        ui.set_busy(false);
+                        ui.notice.set_text(
+                            "The account worker vanished before answering. Nothing was sent.",
+                        );
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+            }
+        });
     }
 
     fn refresh(&self, ui: &Rc<Ui>) {
@@ -210,7 +310,7 @@ impl Ui {
                         return gtk::glib::ControlFlow::Break;
                     }
                     ui.set_busy(false);
-                    ui.finish(result);
+                    ui.finish(&ui, result);
                     gtk::glib::ControlFlow::Break
                 }
                 Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
@@ -227,12 +327,24 @@ impl Ui {
         });
     }
 
-    fn finish(&self, result: Result<ServiceListing, AccountError>) {
+    fn finish(&self, ui: &Rc<Ui>, result: Result<ServiceListing, AccountError>) {
         match result {
             Ok(page) => {
-                self.render(&page.items);
-                self.notice
-                    .set_text(&summary_text(&page, self.spec.empty_copy));
+                let action: Option<Rc<dyn Fn(String)>> = self.spec.action.map(|_| {
+                    let weak = Rc::downgrade(ui);
+                    Rc::new(move |id: String| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.run_action(&ui, id);
+                        }
+                    }) as Rc<dyn Fn(String)>
+                });
+                self.render(&page.items, action);
+                if let Some(message) = self.after_read.borrow_mut().take() {
+                    self.notice.set_text(&message);
+                } else {
+                    self.notice
+                        .set_text(&summary_text(&page, self.spec.empty_copy));
+                }
             }
             Err(error) => {
                 self.notice.set_text(&format!(
@@ -284,6 +396,7 @@ fn build(context: AccountContext, spec: Spec) -> ServicePage {
         list,
         notice,
         spinner,
+        after_read: std::cell::RefCell::new(None),
     });
     {
         let ui = Rc::clone(&ui);
@@ -301,15 +414,32 @@ fn build(context: AccountContext, spec: Spec) -> ServicePage {
     ServicePage { root, load }
 }
 
+/// The Ideas page's one action: execute the card ("Try it" on
+/// the web). The bridge sends the recorded consumer's body; this
+/// reports what the reader can expect to see, not an end state.
+fn idea_execute_action(client: &AccountClient, id: &str) -> Result<String, AccountError> {
+    let answer = client.idea_execute(id)?;
+    Ok(match answer.session_id {
+        Some(session) => format!(
+            "Started — the work runs on the Muse side now. Look for it in Chat (session {session}). The list above has been re-read."
+        ),
+        None => "Started — the work runs on the Muse side now. Look for it in Chat. The list above has been re-read.".to_string(),
+    })
+}
+
 pub fn ideas(context: AccountContext) -> ServicePage {
     build(
         context,
         Spec {
             heading: "Ideas",
-            intro: "The idea cards your Muse saved for the connected account, read-only. Trying a card or rating it happens on the Muse side; this page only reads. The list loads when you open this page.",
+            intro: "The idea cards your Muse saved for the connected account. Try it runs a card on the Muse side; rating a card still happens there. The list loads when you open this page.",
             refresh_label: "Refresh Ideas",
             empty_copy: "No idea cards yet — the service reported an empty list.",
             group_by_kind: true,
+            action: Some(SpecAction {
+                label: "Try it",
+                run: idea_execute_action,
+            }),
             fetch: AccountClient::ideas,
         },
     )
@@ -324,6 +454,7 @@ pub fn goals(context: AccountContext) -> ServicePage {
             refresh_label: "Refresh Goals",
             empty_copy: "No goals yet — the service reported an empty list.",
             group_by_kind: false,
+            action: None,
             fetch: AccountClient::goals,
         },
     )
@@ -406,11 +537,16 @@ mod tests {
                 refresh_label: "",
                 empty_copy: "",
                 group_by_kind: true,
+                action: Some(super::SpecAction {
+                    label: "Try it",
+                    run: |_, _| Ok(String::new()),
+                }),
                 fetch: muse_account::AccountClient::ideas,
             },
             list: gtk::ListBox::new(),
             notice: gtk::Label::new(None),
             spinner: gtk::Spinner::new(),
+            after_read: std::cell::RefCell::new(None),
         });
         let mut first = item("Score the offer");
         first.kind = Some("This week's big calls".into());
@@ -419,7 +555,7 @@ mod tests {
         second.kind = Some("This week's big calls".into());
         let mut third = item("Recover the email");
         third.kind = Some("Productivity".into());
-        ui.render(&[first, second, third]);
+        ui.render(&[first, second, third], None);
         let root = ui.list.clone().upcast::<gtk::Widget>();
         assert!(named(&root, "section-heading:This week's big calls"));
         assert!(named(&root, "section-heading:Productivity"));
@@ -435,7 +571,37 @@ mod tests {
         assert_eq!(rows, 5);
         // The heading building block names itself for the walk.
         assert_eq!(section_heading("S").widget_name(), "section-heading:S");
-        let _ = row_card(&item("x"), true);
+        // A card whose row carries an id gets the page's action
+        // button, named for that id; a press hands the id over.
+        let pressed: Rc<std::cell::RefCell<Vec<String>>> =
+            Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = Rc::clone(&pressed);
+        let run: Rc<dyn Fn(String)> = Rc::new(move |id| sink.borrow_mut().push(id));
+        let mut with_id = item("Executable");
+        with_id.id = Some("c1".into());
+        let card = row_card(&with_id, true, Some(("Try it", &run)));
+        fn find_button(root: &gtk::Widget, name: &str) -> Option<gtk::Button> {
+            if root.widget_name() == name {
+                return root.downcast_ref::<gtk::Button>().cloned();
+            }
+            let mut child = root.first_child();
+            while let Some(current) = child {
+                let next = current.next_sibling();
+                if let Some(button) = find_button(&current, name) {
+                    return Some(button);
+                }
+                child = next;
+            }
+            None
+        }
+        let button = find_button(card.upcast_ref(), "item-action:c1")
+            .expect("the card carries its action button");
+        button.emit_clicked();
+        assert_eq!(pressed.borrow().as_slice(), ["c1"]);
+        // A card without an id offers no button: there is nothing
+        // honest to act on.
+        let bare = row_card(&item("x"), true, Some(("Try it", &run)));
+        assert!(find_button(bare.upcast_ref(), "item-action:c1").is_none());
     }
 
     #[test]

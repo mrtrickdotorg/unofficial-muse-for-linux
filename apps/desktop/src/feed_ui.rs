@@ -70,6 +70,9 @@ struct Ui {
     spinner: gtk::Spinner,
     /// Decoded hero images by URL; `None` marks a URL that failed, so
     /// a broken image is attempted once, not on every render.
+    /// A message a completed reaction leaves for the re-read its
+    /// success triggers, so the outcome survives the refresh.
+    after_read: RefCell<Option<String>>,
     textures: RefCell<HashMap<String, Option<gtk::gdk::Texture>>>,
     inflight: RefCell<HashSet<String>>,
     waiting: RefCell<HashMap<String, Vec<gtk::Picture>>>,
@@ -463,6 +466,17 @@ impl Ui {
             });
         }
         actions.append(&discuss);
+        if let Some(unit_id) = &item.id {
+            let react = gtk::Button::with_label("❤");
+            react.set_widget_name(&format!("feed-react:{unit_id}"));
+            react.set_tooltip_text(Some("React to this post"));
+            {
+                let ui = Rc::clone(self);
+                let unit_id = unit_id.clone();
+                react.connect_clicked(move |_| ui.react(&unit_id));
+            }
+            actions.append(&react);
+        }
         content.append(&actions);
         card.append(&content);
         card
@@ -570,12 +584,82 @@ impl Ui {
         });
     }
 
+    /// Send one ❤ reaction for one unit, once. The recorded
+    /// consumer's body is exactly {"reaction": "❤"}; whether the
+    /// unit then shows it is proven by the re-read that follows,
+    /// never by the reaction's own answer.
+    fn react(self: &Rc<Self>, unit_id: &str) {
+        if self.busy.get() {
+            self.notice
+                .set_text("A read is already running. Wait for it to finish.");
+            return;
+        }
+        let Some(config) = (self.context)() else {
+            self.notice.set_text(
+                "Connect your Muse account first: this surface belongs to the connected account. Nothing was sent.",
+            );
+            return;
+        };
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        let epoch = self.epoch.get();
+        self.set_busy(true);
+        self.notice.set_text("Sending your ❤…");
+        let unit_id = unit_id.to_string();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = AccountClient::new(config).feed_react(&unit_id, "❤");
+            let _ = tx.send(result);
+        });
+        let weak = Rc::downgrade(self);
+        gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(result) => {
+                    if ui.epoch.get() != epoch {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    ui.set_busy(false);
+                    match result {
+                        Ok(_) => {
+                            *ui.after_read.borrow_mut() =
+                                Some("❤ sent. The feed above has been re-read.".to_string());
+                            ui.refresh();
+                        }
+                        Err(error) => {
+                            ui.notice.set_text(&format!(
+                                "Reaction failed: {}. Nothing else was changed.",
+                                crate::library_ui::read_failure(error.code)
+                            ));
+                        }
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if ui.epoch.get() == epoch {
+                        ui.set_busy(false);
+                        ui.notice.set_text(
+                            "The account worker vanished before answering. Nothing was sent.",
+                        );
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
     fn finish(self: &Rc<Self>, result: Result<ServiceListing, AccountError>) {
         match result {
             Ok(page) => {
                 self.render(&page);
-                self.notice
-                    .set_text(&crate::service_ui::summary_text(&page, EMPTY_COPY));
+                if let Some(message) = self.after_read.borrow_mut().take() {
+                    self.notice.set_text(&message);
+                } else {
+                    self.notice
+                        .set_text(&crate::service_ui::summary_text(&page, EMPTY_COPY));
+                }
             }
             Err(error) => {
                 self.notice.set_text(&format!(
@@ -794,6 +878,7 @@ pub fn feed(context: AccountContext, on_discuss: Rc<dyn Fn(String)>) -> FeedPage
         list,
         notice,
         spinner,
+        after_read: RefCell::new(None),
         textures: RefCell::new(HashMap::new()),
         inflight: RefCell::new(HashSet::new()),
         waiting: RefCell::new(HashMap::new()),
@@ -919,6 +1004,7 @@ mod native {
             list: gtk4::ListBox::new(),
             notice: gtk4::Label::new(None),
             spinner: gtk4::Spinner::new(),
+            after_read: std::cell::RefCell::new(None),
             textures: std::cell::RefCell::new(std::collections::HashMap::new()),
             inflight: std::cell::RefCell::new(std::collections::HashSet::new()),
             waiting: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -987,6 +1073,26 @@ mod native {
             "widget line links render as their text (markup stripped): {joined}"
         );
         let discuss = discuss.expect("the card carries a Discuss button");
+        // The unit carries an id, so it also carries its ❤ button,
+        // named for the unit it reacts to.
+        fn named(root: &gtk4::Widget, name: &str) -> bool {
+            if root.widget_name() == name {
+                return true;
+            }
+            let mut child = root.first_child();
+            while let Some(current) = child {
+                let next = current.next_sibling();
+                if named(&current, name) {
+                    return true;
+                }
+                child = next;
+            }
+            false
+        }
+        assert!(
+            named(ui.list.upcast_ref(), "feed-react:u1"),
+            "the card carries its reaction button"
+        );
         discuss.emit_clicked();
         let captured = captured.borrow();
         assert_eq!(captured.len(), 1);
