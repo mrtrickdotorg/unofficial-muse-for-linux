@@ -2345,13 +2345,23 @@ mod native {
         );
         welcome_copy.add_css_class("welcome-copy");
         welcome.append(&welcome_copy);
-        let consent = gtk::CheckButton::with_label(
+        let consent = crate::consent_check(
             "Allow this app to read this account's chats, scheduled tasks and run history.",
         );
         consent.set_halign(gtk::Align::Start);
         welcome.append(&consent);
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        // A wrapping row: three buttons side by side set a 549px minimum
+        // for the welcome card, which became the shell's minimum and made
+        // the window 74px wider than its default before the page could
+        // fit beside the sidebar. Wrapped, the minimum is one button.
+        let actions = gtk::FlowBox::new();
         actions.add_css_class("toolbar");
+        actions.set_selection_mode(gtk::SelectionMode::None);
+        actions.set_activate_on_single_click(false);
+        actions.set_homogeneous(false);
+        actions.set_max_children_per_line(3);
+        actions.set_column_spacing(8);
+        actions.set_row_spacing(8);
         let login = gtk::Button::with_label("Sign in with Muse");
         login.add_css_class("suggested-action");
         login.add_css_class("primary-action");
@@ -2367,7 +2377,7 @@ mod native {
             "Reads the selected session now. Tick the consent box first.",
         ));
         for button in [&login, &existing, &connect] {
-            actions.append(button);
+            actions.insert(button, -1);
         }
         welcome.append(&actions);
         let helper = label(
@@ -2570,6 +2580,12 @@ mod native {
         composer.add_css_class("composer-pill");
         let prompt = gtk::Entry::new();
         prompt.set_hexpand(true);
+        // The entry expands to fill the composer, so this request only sets
+        // its minimum; measured, its default minimum kept the whole shell's
+        // minimum at 1679px, wider than the default window, so the page
+        // column could not fit beside the sidebar. A small request keeps
+        // the shell shrinkable and changes nothing about how it looks.
+        prompt.set_width_chars(6);
         prompt.set_placeholder_text(Some("Message"));
         let stop = gtk::Button::with_label("Stop agent");
         stop.set_tooltip_text(Some(

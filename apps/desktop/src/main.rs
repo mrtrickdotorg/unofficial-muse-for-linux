@@ -895,7 +895,18 @@ fn build_ui(app: &gtk::Application) {
         account_page.host_device.clone(),
     );
     *account_page.host_boundary.borrow_mut() = Some(host_page.shutdown.clone());
-    stack.add_named(&host_page.root, Some("host"));
+    // The host page is a settings page: consent, grants, approvals and a
+    // session log. Its natural height is taller than a laptop screen, and
+    // as a plain stack child that height became the shell's minimum, so
+    // opening the page grew the window past the display. Let it scroll
+    // inside whatever height the window already has instead.
+    let host_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(false)
+        .child(&host_page.root)
+        .build();
+    stack.add_named(&host_scroll, Some("host"));
     let mail_page: mail_ui::MailPage = mail_ui::build();
     let calendar_page: calendar_ui::CalendarPage = calendar_ui::build();
     let desktop_page: desktop_ui::DesktopPage = desktop_ui::build();
@@ -1012,20 +1023,26 @@ fn build_ui(app: &gtk::Application) {
     credential_row.append(&clear_session);
     setup_content.append(&credential_row);
 
-    let billing_consent = gtk::CheckButton::with_label(
+    // A checkbutton label never wraps by itself, and its single line
+    // becomes the minimum width of everything above it: the page, the
+    // stack and the shell that sizes the window. These three consent
+    // sentences set the shell's minimum to 1327px that way, so the
+    // page column could never fit beside the sidebar. See
+    // wrap_check_label.
+    let billing_consent = consent_check(
         "Allow paid Meta Model API requests; prompts leave this device and may be billed.",
     );
     billing_consent.set_halign(gtk::Align::Start);
     setup_content.append(&billing_consent);
 
-    let file_search_consent = gtk::CheckButton::with_label(
+    let file_search_consent = consent_check(
         "Allow searching the granted folder; matching file names and paths may be sent to Meta.",
     );
     file_search_consent.set_sensitive(false);
     file_search_consent.set_halign(gtk::Align::Start);
     setup_content.append(&file_search_consent);
 
-    let file_content_consent = gtk::CheckButton::with_label(
+    let file_content_consent = consent_check(
         "Allow reading granted text files; up to 16 KiB per read may be sent to Meta.",
     );
     file_content_consent.set_sensitive(false);
@@ -1952,6 +1969,26 @@ pub(crate) const READING_COLUMN_START_PX: i32 = 480;
 /// the panel. The panel is company, not content — the page wins,
 /// and the panel returns when the window widens past the line.
 pub(crate) const SIDE_PANEL_MIN_WINDOW_PX: i32 = 1440;
+
+/// A consent row whose sentence wraps instead of setting the window's
+/// minimum width.
+///
+/// A GtkCheckButton's built-in label is a single GtkLabel that never
+/// wraps, and a label's minimum width is its widest line — so a
+/// sentence-long label became the minimum of the page, of the page
+/// stack, and of the shell that sizes the window (measured: 678px from
+/// one label, 1327px for the window). The page column then could not
+/// fit in the space the sidebar left and rendered under it. Give the
+/// button our own wrapping label: its minimum is its longest word.
+pub(crate) fn consent_check(text: &str) -> gtk::CheckButton {
+    let label = gtk::Label::new(Some(text));
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    label.set_xalign(0.0);
+    let check = gtk::CheckButton::new();
+    check.set_child(Some(&label));
+    check
+}
 
 /// Drive a reading column's width request from its parent's real
 /// allocation: min(parent width, READING_COLUMN_MAX_PX). A bare
