@@ -11,7 +11,7 @@ name = "unofficial-muse-for-linux"
 path = "src/main.rs"
 
 [dependencies]
-gtk4 = "0.10.3"
+gtk4 = { version = "0.10.3", features = ["v4_8"] }
 webkit6 = "0.5"
 muse-agent-runtime = { path = "../../crates/muse-agent-runtime" }
 muse-linux-core = { path = "../../crates/muse-linux-core" }
