@@ -507,10 +507,29 @@ status in P1's status area.
 *Gate:* the user can list, correct and delete remembered facts, and the deletion is verified through a
 fresh read rather than assumed.
 
-*State (Nov 13, 2026).* The Goals half of this surface shipped (the Goals page lists, and
-deletes under the interactive-parity discipline). Memory itself is untouched: `memory.get`
-answers only when given a `memory_uri` body, `memory.search` has never been probed, and no
-memory UI exists. The search probe is this phase's first step.
+*Memory is readable and searchable (live, Nov 14, 2026).* `memory.search` is `POST
+/memory/search` and answers only to a JSON body: a live probe refused `q`, query parameters,
+an empty body and an empty query (`query cannot be empty`), and `{"query": "budget"}` answered
+`{"ok": true, "hits": [...]}` — 9 passages, each carrying `chunk_id`, `memory_uri`
+(`memory://md:memory/2026-10-22.md:950`), `text`, `scores`, a `citation` (`path`,
+`line_start`, `line_end`, `source_kind: daily`) and `metadata` (`status: active`,
+`privacy_class`). `memory.get` resolves one of those URIs to its text and path. The bridge
+gained `memory_search` and `memory_get`, projecting only the address, the text and its
+citation — a hit with no address or no text is counted as unreadable, never listed as
+something that cannot be opened — and a not-found `memory.get` answer projects as
+`found: false` rather than an error, because it is the service's statement about state, not a
+failed read. The Memory page lives under the rail's **Menu**, not as a nav item (the web menu
+is the menu, and memory is a settings-level surface there): it searches, lists and opens
+passages, refuses to start without a connected account, and changes nothing.
+
+*Forget is not buildable: no route forgets an entry (Nov 14, 2026).* The pinned table carries
+exactly four memory routes — `memory.search`, `memory.get`, `memory.consolidate`,
+`memory.reindex` — and none of them deletes or edits an entry, so this phase's "correct and
+delete" half has no route to call. A Forget button would either do nothing or, pointed at
+`fs.delete` on a `memory/<date>.md` file, destroy a whole day's memory to remove one line —
+so no such control exists, and the page's copy says where forgetting really happens instead.
+What unblocks it: a memory mutation route in the table, or a recorded shape for a fact-level
+write. Until then P6 is met for reading and search only.
 
 ### P7 — Connector framework (L)
 
@@ -590,7 +609,8 @@ presses are in the live-proof group, and the P5 export probe is in the buildable
   if it answers, a space preview has a path and the list-only Library page can grow one.
 - Search page wiring: `chat.search` is a recorded GET; its query parameters need one read
   probe to ground, then the (currently unwired) Search page can read through it.
-- P6: probe `memory.search`, then build the memory surface to this phase's gate.
+- P6: reading and search shipped (Nov 14, 2026); "correct and forget" stays blocked on a
+  memory mutation route the table does not carry.
 - P8: the agent-browser page — `browser_task.get` answers (an idle task rather than a
   missing route); take-control and stop are unbuilt.
 - P2 policy model: the durable policy store, per-connector reset, and the settings PATCH.

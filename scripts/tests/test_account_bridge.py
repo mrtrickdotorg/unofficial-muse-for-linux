@@ -2417,3 +2417,78 @@ class ListingTests(unittest.TestCase):
             bridge.validate_request({"op": op, "config_dir": "/unused"})
             with self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request({"op": op, "config_dir": "/unused", "limit": 1})
+
+    def test_memory_search_projects_citations_and_counts_unreadable_hits(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            def call_json(self, method, body=None, timeout=None):
+                calls.append((method, body))
+                return {"ok": True, "hits": [
+                    {"memory_uri": "memory://md:memory/2026-10-22.md:950",
+                     "text": "budget surgery", "scores": {"final": 0.5},
+                     "citation": {"path": "memory/2026-10-22.md", "line_start": 950,
+                                  "line_end": 950, "source_kind": "daily"},
+                     "metadata": {"status": "active", "privacy_class": "default",
+                                  "secret": "SECRET"}},
+                    {"memory_uri": "", "text": "no address"},
+                    {"memory_uri": "memory://md:x", "text": ""},
+                ]}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "memory_search", "query": "budget"})
+        self.assertEqual(calls, [("memory.search", {"query": "budget"})])
+        self.assertEqual(result["recognized"], 1)
+        self.assertEqual(result["skipped"], 2)
+        row = result["hits"][0]
+        self.assertEqual(set(row), set(bridge.MEMORY_HIT_FIELDS))
+        self.assertEqual(row["path"], "memory/2026-10-22.md")
+        self.assertEqual(row["line_start"], 950)
+        self.assertEqual(row["source_kind"], "daily")
+        self.assertEqual(row["status"], "active")
+        self.assertNotIn("SECRET", str(result))
+
+    def test_memory_get_projects_a_missing_entry_instead_of_raising(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        uri = "memory://md:memory/2026-10-22.md:950"
+        class Gateway:
+            def call_json(self, method, body=None, timeout=None):
+                assert method == "memory.get" and body == {"memory_uri": uri}
+                return {"ok": False, "memory_uri": uri, "path": "",
+                        "line_start": 1, "line_end": 1, "text": "",
+                        "reason": "memory entry not found"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "memory_get", "memory_uri": uri})
+        self.assertEqual(result["found"], False)
+        self.assertIsNone(result["text"])
+        self.assertNotIn("reason", result, "the service's wording stays upstream")
+
+    def test_memory_ops_accept_only_their_recorded_shape(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "memory_search", "config_dir": "/unused",
+                                 "query": "budget"})
+        for bad in ("", "\x00"):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request({"op": "memory_search", "config_dir": "/unused",
+                                         "query": bad})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "memory_search", "config_dir": "/unused"})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "memory_search", "config_dir": "/unused",
+                                     "query": "b", "q": "b"})
+        uri = "memory://md:memory/2026-10-22.md:950"
+        bridge.validate_request({"op": "memory_get", "config_dir": "/unused",
+                                 "memory_uri": uri})
+        for bad in ("", "workspace/memory/2026-10-22.md", "memory://" + "x" * 3000):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request({"op": "memory_get", "config_dir": "/unused",
+                                         "memory_uri": bad})

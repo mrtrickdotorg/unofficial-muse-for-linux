@@ -12,6 +12,7 @@ mod files_write_ui;
 mod library_ui;
 mod local_host;
 mod mail_ui;
+mod memory_ui;
 mod rich_text;
 mod search_ui;
 mod service_ui;
@@ -840,6 +841,11 @@ fn build_ui(app: &gtk::Application) {
         ("create", "Create", "Start something new with your Muse."),
         ("feed", "Feed", "Briefings and updates from your Muse."),
         (
+            "memory",
+            "Memory",
+            "What your Muse remembers about you, from the connected account.",
+        ),
+        (
             "host",
             "Local host",
             "Consent, folder grants and local approvals for this machine.",
@@ -899,6 +905,8 @@ fn build_ui(app: &gtk::Application) {
     let library_page: library_ui::LibraryPage =
         library_ui::build(account_page.host_context.clone());
     stack.add_named(&library_page.root, Some("library"));
+    let memory_page = memory_ui::build(account_page.host_context.clone());
+    stack.add_named(&memory_page.root, Some("memory"));
     let ideas_page = service_ui::ideas(account_page.host_context.clone());
     stack.add_named(&ideas_page.root, Some("ideas"));
     let goals_page = service_ui::goals(account_page.host_context.clone());
@@ -1577,6 +1585,7 @@ fn build_ui(app: &gtk::Application) {
         let goals_load = goals_page.load.clone();
         let feed_load = feed_page.load.clone();
         let library_load = library_page.load.clone();
+        let memory_load = memory_page.load.clone();
         stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             if let Some(name) = stack.visible_child_name() {
                 match name.as_str() {
@@ -1584,6 +1593,7 @@ fn build_ui(app: &gtk::Application) {
                     "goals" => goals_load(),
                     "feed" => feed_load(),
                     "library" => library_load(),
+                    "memory" => memory_load(),
                     _ => {}
                 }
             }
@@ -1715,22 +1725,82 @@ fn build_ui(app: &gtk::Application) {
         let create = create_nav.clone();
         let feed = feed_nav.clone();
         let setup_for_menu = account_page.settings.clone();
-        menu_button.connect_clicked(move |_| {
-            select_page(
-                &stack,
-                &title,
-                &[
-                    (&chats, "chats"),
-                    (&library, "library"),
-                    (&ideas, "ideas"),
-                    (&goals, "goals"),
-                    (&create, "create"),
-                    (&feed, "feed"),
-                ],
-                "chats",
-            );
-            setup_for_menu.set_expanded(true);
-        });
+        // The web's Menu is a dropdown, not a jump: account settings and the
+        // agent's memory sit one level down, which is also why the rail
+        // carries no item of its own for either.
+        let popover = gtk::Popover::new();
+        popover.set_parent(&menu_button);
+        popover.set_has_arrow(false);
+        popover.add_css_class("app-menu");
+        let rows = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        rows.add_css_class("app-menu-rows");
+        let account_row = gtk::Button::with_label("Account and sign-in");
+        account_row.add_css_class("flat");
+        account_row.set_widget_name("menu-account");
+        let memory_row = gtk::Button::with_label("Agent memory");
+        memory_row.add_css_class("flat");
+        memory_row.set_widget_name("menu-memory");
+        rows.append(&account_row);
+        rows.append(&memory_row);
+        popover.set_child(Some(&rows));
+        {
+            let stack = stack.clone();
+            let title = title.clone();
+            let chats = chats.clone();
+            let library = library.clone();
+            let ideas = ideas.clone();
+            let goals = goals.clone();
+            let create = create.clone();
+            let feed = feed.clone();
+            let setup_for_menu = setup_for_menu.clone();
+            let popover = popover.clone();
+            account_row.connect_clicked(move |_| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "chats",
+                );
+                setup_for_menu.set_expanded(true);
+                popover.popdown();
+            });
+        }
+        {
+            let stack = stack.clone();
+            let title = title.clone();
+            let chats = chats.clone();
+            let library = library.clone();
+            let ideas = ideas.clone();
+            let goals = goals.clone();
+            let create = create.clone();
+            let feed = feed.clone();
+            let popover = popover.clone();
+            memory_row.connect_clicked(move |_| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "memory",
+                );
+                popover.popdown();
+            });
+        }
+        let popover_for_button = popover.clone();
+        menu_button.connect_clicked(move |_| popover_for_button.popup());
     }
 
     {
@@ -1923,6 +1993,7 @@ fn select_page(
         "computer-control" => "Computer Control",
         "tasks" => "Reminders",
         "library" => "Library",
+        "memory" => "Memory",
         "search" => "Search",
         "ideas" => "Ideas",
         "goals" => "Goals",

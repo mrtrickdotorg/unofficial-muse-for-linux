@@ -639,3 +639,62 @@ print(json.dumps({'ok': False, 'error': {'code': 'auth_required', 'uncertain': F
     assert_eq!(error.code, muse_account::ErrorCode::AuthRequired);
     assert!(!error.uncertain);
 }
+
+#[test]
+fn memory_search_sends_the_probed_body_and_projects_citations() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'memory_search'
+assert request['query'] == 'budget'
+assert 'q' not in request
+print(json.dumps({'ok': True, 'data': {'recognized': 1, 'skipped': 1, 'hits': [
+  {'memory_uri': 'memory://md:memory/2026-10-22.md:950', 'text': 'budget surgery',
+   'path': 'memory/2026-10-22.md', 'line_start': 950, 'line_end': 950,
+   'source_kind': 'daily', 'status': 'active', 'scores': {'final': 0.5}}]}}))
+"#,
+    );
+    let found = f.client().memory_search("budget").unwrap();
+    assert_eq!(found.recognized, 1);
+    assert_eq!(found.skipped, 1);
+    let row = &found.hits[0];
+    assert_eq!(row.memory_uri, "memory://md:memory/2026-10-22.md:950");
+    assert_eq!(row.text, "budget surgery");
+    assert_eq!(row.path.as_deref(), Some("memory/2026-10-22.md"));
+    assert_eq!(row.line_start, Some(950));
+    assert_eq!(row.line_end, Some(950));
+    assert_eq!(row.source_kind.as_deref(), Some("daily"));
+    assert_eq!(row.status.as_deref(), Some("active"));
+    // The service refuses an empty query, so the client never sends one.
+    assert!(f.client().memory_search("").is_err());
+    assert!(f.client().memory_search(&"x".repeat(513)).is_err());
+}
+
+#[test]
+fn memory_get_keeps_a_missing_entry_as_an_answer_not_a_failure() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'memory_get'
+assert request['memory_uri'] == 'memory://md:memory/2026-10-22.md:950'
+print(json.dumps({'ok': True, 'data': {'found': False,
+  'memory_uri': request['memory_uri'], 'path': None, 'line_start': None,
+  'line_end': None, 'text': None}}))
+"#,
+    );
+    let entry = f
+        .client()
+        .memory_get("memory://md:memory/2026-10-22.md:950")
+        .unwrap();
+    assert!(!entry.found, "a gone entry is data, not an error");
+    assert!(entry.text.is_none());
+    // Only a URI the service published is addressable; a path is not.
+    assert!(
+        f.client()
+            .memory_get("workspace/memory/2026-10-22.md")
+            .is_err()
+    );
+    assert!(f.client().memory_get("").is_err());
+}

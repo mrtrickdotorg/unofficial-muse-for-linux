@@ -611,6 +611,8 @@ def validate_request(request):
                "goal_delete": {"goal_id"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
+               "memory_search": {"query"},
+               "memory_get": {"memory_uri"},
                "search": {"query"},
                "tasks": set(),
                "artifacts": {"cursor", "seen_refs"},
@@ -700,6 +702,22 @@ def validate_request(request):
         if (not isinstance(query, str) or not 1 <= len(query) <= 512
                 or "\x00" in query):
             raise BridgeFailure("invalid_request")
+    if op in ("memory_search", "memory_get"):
+        # The memory routes take their arguments in a JSON body: a live
+        # probe (Nov 14, 2026) refused `q`, query parameters and an empty
+        # body, and refused an empty query, so exactly the field the
+        # service named is sent. The get address must be one a hit
+        # published (`memory://...`), never a path assembled here.
+        if op == "memory_search":
+            query = request.get("query")
+            if (not isinstance(query, str) or not 1 <= len(query) <= 512
+                    or "\x00" in query):
+                raise BridgeFailure("invalid_request")
+        else:
+            uri = request.get("memory_uri")
+            if (not isinstance(uri, str) or not uri.startswith("memory://")
+                    or not 1 <= len(uri) <= 2048 or "\x00" in uri):
+                raise BridgeFailure("invalid_request")
     if op == "space_unshare":
         # The slug is the service's own, taken from the Library
         # listing's open target; it is one path segment, so a
@@ -1511,6 +1529,84 @@ def search_rows(payload):
     result["items"] = [item for item in result["items"] if item.get("id")]
     result["recognized"] = len(result["items"])
     return result
+
+
+MEMORY_HIT_FIELDS = ("memory_uri", "text", "path", "line_start", "line_end",
+                     "source_kind", "status")
+
+
+def memory_hits(payload):
+    """Project a memory.search answer into citeable passages.
+
+    The body shape is recorded from a live probe (Nov 14, 2026): POST
+    `{"query": ...}` answers `{"ok": true, "hits": [...]}`, each hit carrying
+    `memory_uri`, `text`, a `citation` (`path`, `line_start`, `line_end`,
+    `source_kind`) and `metadata` (`status`, ...). Only what a reader can act
+    on travels: the address the get route needs, the text itself, and where
+    it came from. A hit with no address or no text is counted as `skipped`
+    rather than listed as something that cannot be opened or read.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    hits = payload.get("hits")
+    if hits is None:
+        hits = []
+    if not isinstance(hits, list) or len(hits) > 200:
+        raise BridgeFailure("protocol_error")
+    rows = []
+    skipped = 0
+    for hit in hits:
+        if not isinstance(hit, dict):
+            skipped += 1
+            continue
+        uri = required_text(hit.get("memory_uri"))
+        passage = content_text(hit.get("text"))
+        citation = hit.get("citation") if isinstance(hit.get("citation"), dict) else {}
+        metadata = hit.get("metadata") if isinstance(hit.get("metadata"), dict) else {}
+        if not uri or not passage:
+            skipped += 1
+            continue
+        start = citation.get("line_start")
+        end = citation.get("line_end")
+        rows.append({
+            "memory_uri": uri,
+            "text": passage,
+            "path": optional_text(citation.get("path")),
+            "line_start": start if isinstance(start, int)
+            and not isinstance(start, bool) else None,
+            "line_end": end if isinstance(end, int)
+            and not isinstance(end, bool) else None,
+            "source_kind": optional_text(citation.get("source_kind")),
+            "status": optional_text(metadata.get("status")),
+        })
+    return {"hits": rows, "recognized": len(rows), "skipped": skipped}
+
+
+def memory_entry(payload):
+    """Project a memory.get answer, keeping a not-found answer honest.
+
+    The route answers `ok: false` with a `reason` for an address it no longer
+    holds. That is a real answer about state, not a failed read, so it
+    projects as `found: false` instead of raising; the reason stays upstream,
+    because the window states the fact and never the service's wording.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    uri = optional_text(payload.get("memory_uri"))
+    if payload.get("ok") is not True:
+        if payload.get("ok") is not False:
+            raise BridgeFailure("protocol_error")
+        return {"found": False, "memory_uri": uri, "path": None,
+                "line_start": None, "line_end": None, "text": None}
+    start = payload.get("line_start")
+    end = payload.get("line_end")
+    return {"found": True, "memory_uri": uri,
+            "path": optional_text(payload.get("path")),
+            "line_start": start if isinstance(start, int)
+            and not isinstance(start, bool) else None,
+            "line_end": end if isinstance(end, int)
+            and not isinstance(end, bool) else None,
+            "text": content_text(payload.get("text"))}
 
 
 def _iso_from_epoch(value):
@@ -2344,6 +2440,24 @@ class Adapter:
                     path_params={"slug": request["slug"]},
                 )
             return {"slug": request["slug"], "accepted": True}
+        if request["op"] == "memory_search":
+            # A read on the reader's own words, through the service's own
+            # memory search. Nothing here writes; no recorded memory route
+            # edits or forgets an entry, so this cannot change what the
+            # agent remembers.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "memory.search", body={"query": request["query"]}, timeout=25)
+            return memory_hits(payload)
+        if request["op"] == "memory_get":
+            # A read of one passage, addressed by the `memory_uri` a hit
+            # published. A not-found answer projects as such; it is the
+            # service's statement about state, not a transport failure.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "memory.get", body={"memory_uri": request["memory_uri"]},
+                    timeout=25)
+            return memory_entry(payload)
         if request["op"] == "ideas":
             # Read-only: the idea cards the service recorded a list route
             # for. Executing or rating a card is a write and stays out of

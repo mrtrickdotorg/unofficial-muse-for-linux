@@ -352,6 +352,57 @@ pub struct FeedStatus {
     #[serde(default)]
     pub next_edition_kind: Option<String>,
 }
+/// One remembered passage, as `memory.search` returned it (live, Nov 14, 2026).
+///
+/// `memory_uri` is the service's own address and the only thing `memory.get`
+/// accepts, so it is kept verbatim and never rebuilt from `path`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryHit {
+    pub memory_uri: String,
+    pub text: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line_start: Option<u64>,
+    #[serde(default)]
+    pub line_end: Option<u64>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// One memory search, with the rows this build could not read counted
+/// rather than silently dropped.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySearch {
+    pub recognized: u64,
+    pub skipped: u64,
+    #[serde(default)]
+    pub hits: Vec<MemoryHit>,
+}
+
+/// One resolved memory entry.
+///
+/// `found: false` is the service's own answer about an address it no longer
+/// holds, not a failed read, so it is data rather than an error.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryEntry {
+    pub found: bool,
+    #[serde(default)]
+    pub memory_uri: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub line_start: Option<u64>,
+    #[serde(default)]
+    pub line_end: Option<u64>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DispatchReceipt {
     pub sent: bool,
@@ -795,6 +846,39 @@ impl AccountClient {
             false,
         )
     }
+    /// Search the agent's memory for the reader's own words, read-only.
+    ///
+    /// `memory.search` takes its query in a JSON body — a live probe
+    /// (Nov 14, 2026) refused `q`, query parameters, an empty body and an
+    /// empty query — so exactly that field is sent. Nothing here writes:
+    /// the route table records no memory delete or edit.
+    pub fn memory_search(&self, query: &str) -> Result<MemorySearch, AccountError> {
+        if query.is_empty() || query.len() > 512 || query.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "memory_search", "query": query}),
+            false,
+        )
+    }
+
+    /// Resolve one remembered passage by the `memory_uri` a hit published.
+    ///
+    /// The address is never assembled from a path: only the service's own
+    /// URI is accepted here, and the bridge refuses anything that is not one.
+    pub fn memory_get(&self, memory_uri: &str) -> Result<MemoryEntry, AccountError> {
+        if !memory_uri.starts_with("memory://")
+            || memory_uri.len() > 2048
+            || memory_uri.contains('\0')
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "memory_get", "memory_uri": memory_uri}),
+            false,
+        )
+    }
+
     /// Search the account's conversations for the reader's own
     /// words, read-only.
     ///
