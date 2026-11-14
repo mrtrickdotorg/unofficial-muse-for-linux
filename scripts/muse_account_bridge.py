@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare", "attach_probe"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -623,7 +623,8 @@ def validate_request(request):
                "goals": set(),
                "feed": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
-                        "expect_identity_name"}}
+                        "expect_identity_name"},
+               "attach_probe": {"thread"}}
     if not isinstance(op, str) or op not in allowed:
         raise BridgeFailure("invalid_request")
     if set(request) - ({"op", "config_dir"} | allowed[op]):
@@ -634,6 +635,11 @@ def validate_request(request):
     thread = request.get("thread")
     if thread is not None and (not isinstance(thread, str) or not thread.strip()
                                or len(thread) > 4096 or "\x00" in thread):
+        raise BridgeFailure("invalid_request")
+    if op == "attach_probe" and thread is None:
+        # The probe writes and sends, so it needs a named thread:
+        # it exists to run in a designated scratch chat, never in
+        # whichever conversation happens to be open in the app.
         raise BridgeFailure("invalid_request")
     if op in ("history", "watch"):
         limit = request.get("limit")
@@ -2452,6 +2458,32 @@ def handle_request(request, client_factory=None):
         return error_response(classify_exception(exc))
 
 
+# The attach probe (Patrick, Nov 14, 2026): one designated run in a
+# scratch chat that tries the only evidence-derived candidate for
+# sending a file with a message. The stored shape is recorded --
+# an attachment rides in a message's metadata as filename,
+# mime_type, kind, bytes_len, a service-side path and a sha256 --
+# and the send's shape is recorded for text (items of typed
+# entries plus node_id), but no consumer anywhere writes a file
+# service-side or sends a non-text item, so fs.write's body and
+# the file item's form are the two unknowns. The probe writes one
+# small file, sends one message referencing it in the named
+# thread, and proves the outcome from the thread's own history:
+# whether the message landed, and whether the service stored an
+# attachment with it. Each step's verdict is logged and answered;
+# a refusal is a result, not an error, and nothing is retried.
+ATTACH_PROBE_PATH = "attach-probe.txt"
+ATTACH_PROBE_TEXT = (
+    "Attach probe: a small service-side file referenced by one "
+    "message in a scratch chat, so the desktop app can learn "
+    "whether a send can carry a file in this shape. Nothing real "
+    "is touched.")
+ATTACH_PROBE_MESSAGE = (
+    "Attach probe: the file attach-probe.txt rides with this "
+    "message so the desktop app can verify whether the service "
+    "stores it as an attachment. Scratch chat; safe to delete.")
+
+
 class Adapter:
     def __init__(self, client, config, confirmation_window=8.0):
         self.client = client
@@ -2978,6 +3010,67 @@ class Adapter:
                        "bridge send return unconfirmed ms={}".format(
                            int((time.monotonic() - send_began) * 1000)))
             return {"sent": bool(result.get("sent")), "confirmed": False, "message_id": None}
+        if request["op"] == "attach_probe":
+            import time
+            thread = request["thread"]
+            config_dir = request.get("config_dir")
+            baseline = history_rows(
+                self.client.history(thread=thread, limit=25),
+                config_dir=config_dir)
+            baseline_ids = {row["message_id"] for row in baseline}
+            node_id = self.config.get("node_id")
+            fs_write = "refused"
+            try:
+                write_body = {"path": ATTACH_PROBE_PATH,
+                              "content": ATTACH_PROBE_TEXT}
+                if isinstance(node_id, str) and node_id:
+                    write_body["node_id"] = node_id
+                with self.client._gateway(self.config) as gateway:
+                    gateway.call_json("fs.write", body=write_body, timeout=15)
+                fs_write = "accepted"
+            except Exception as error:  # noqa: BLE001 - the refusal is the result
+                timing_log(config_dir, "attach-probe fs_write refused {}".format(
+                    type(error).__name__))
+            sent = False
+            message_seen = False
+            attachment_seen = False
+            if fs_write == "accepted":
+                body = {"items": [{"type": "text", "text": ATTACH_PROBE_MESSAGE},
+                                  {"type": "file", "path": ATTACH_PROBE_PATH}],
+                        "capabilities": {}, "session_id": thread}
+                if isinstance(node_id, str) and node_id:
+                    body["node_id"] = node_id
+                try:
+                    with self.client._gateway(self.config) as gateway:
+                        gateway._open("chat.stream", body=body)
+                    sent = True
+                except Exception as error:  # noqa: BLE001 - the refusal is the result
+                    timing_log(config_dir, "attach-probe send refused {}".format(
+                        type(error).__name__))
+            if sent:
+                deadline = time.monotonic() + 8.0
+                while time.monotonic() < deadline:
+                    rows = history_rows(
+                        self.client.history(thread=thread, limit=25),
+                        config_dir=config_dir)
+                    for row in rows:
+                        if (row["message_id"] in baseline_ids
+                                or row["role"] != "user"
+                                or row["text"].strip() != ATTACH_PROBE_MESSAGE):
+                            continue
+                        message_seen = True
+                        for attachment in row.get("attachments") or []:
+                            if attachment.get("filename") == ATTACH_PROBE_PATH:
+                                attachment_seen = True
+                    if message_seen:
+                        break
+                    time.sleep(0.4)
+            timing_log(config_dir,
+                       "attach-probe fs_write={} sent={} message={} attachment={}".format(
+                           fs_write, sent, message_seen, attachment_seen))
+            return {"thread": thread, "fs_write": fs_write, "sent": sent,
+                    "message_seen": message_seen,
+                    "attachment_seen": attachment_seen}
         raise BridgeFailure("invalid_request")
 
 

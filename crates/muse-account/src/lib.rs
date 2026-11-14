@@ -32,6 +32,7 @@ fn deadline_for(op: Option<&str>) -> Duration {
     match op {
         Some("watch") => Duration::from_secs(100),
         Some("send") => Duration::from_secs(50),
+        Some("attach_probe") => Duration::from_secs(60),
         Some("activity") => Duration::from_secs(35),
         _ => Duration::from_secs(45),
     }
@@ -662,6 +663,22 @@ pub struct MarkSeenAnswer {
     pub accepted: bool,
 }
 
+/// The attach probe's verdicts, step by step. Each field is what
+/// that step itself proved: whether the service took the file
+/// write ("accepted" or "refused"), whether the send dispatched,
+/// and whether the thread's own history then showed the message
+/// -- and the file stored as its attachment. A false is a
+/// finding, not a failure: the probe exists to learn which step
+/// the recorded-shape candidate does not survive.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachProbeAnswer {
+    pub thread: String,
+    pub fs_write: String,
+    pub sent: bool,
+    pub message_seen: bool,
+    pub attachment_seen: bool,
+}
+
 /// What the service said about a feed reaction it took.
 ///
 /// Acceptance only: whether the unit now shows the reaction is
@@ -1155,6 +1172,23 @@ impl AccountClient {
             false,
         )
     }
+    /// Run the attach probe in one named thread, once: the
+    /// bridge writes one small file service-side, sends one
+    /// message referencing it in that thread, and verifies the
+    /// outcome from the thread's history. A designated scratch
+    /// chat is the intended target; the bridge refuses to run
+    /// without a named thread, so the probe can never land in
+    /// whichever conversation is merely open.
+    pub fn attach_probe(&self, thread: &str) -> Result<AttachProbeAnswer, AccountError> {
+        if thread.is_empty() || thread.len() > 256 || thread.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "attach_probe", "thread": thread}),
+            false,
+        )
+    }
+
     /// Execute exactly one idea card, once (its "Try it").
     ///
     /// The id must be one the idea-cards listing published, and the

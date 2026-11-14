@@ -17,6 +17,7 @@ enum Operation {
     StartSession,
     SessionOp,
     MarkSeen,
+    AttachProbe,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +122,9 @@ struct Controller<A, H, T> {
     /// (a delete of the open chat lands the reader on the main
     /// conversation; everything else just refreshes the listing).
     session_op: Option<(String, String)>,
+    /// The thread an attach probe is running in, while it runs:
+    /// the completion reports the probe's verdicts against it.
+    attach_probe: Option<String>,
     /// The conversation being marked read, in flight from
     /// opening it: the web marks a chat seen when it is opened,
     /// and the badge clears when the re-read says so.
@@ -461,6 +465,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             deleting: None,
             confirming_delete: None,
             session_op: None,
+            attach_probe: None,
             mark_seen: None,
         }
     }
@@ -947,6 +952,54 @@ impl<A, H: Clone, T> Controller<A, H, T> {
             Err(error) => {
                 self.history_notice = format!("Could not update the side chat: {error}");
                 None
+            }
+        }
+    }
+
+    /// Take the busy slot for one attach probe in a named
+    /// thread. The confirming press is the press that calls
+    /// this, so one confirmation maps to exactly one probe run:
+    /// one small file written, one message sent, no retries.
+    fn begin_attach_probe(&mut self, thread: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::AttachProbe)?;
+        self.attach_probe = Some(thread.to_string());
+        Some(ticket)
+    }
+
+    /// Record a probe's verdicts. Every outcome is a finding,
+    /// reported in the transcript notice in plain terms: which
+    /// step the recorded-shape candidate survived and which it
+    /// did not. True when the probe ran, which earns a re-read
+    /// so a probe message in the open chat renders from the
+    /// service's own history rather than from this report.
+    fn finish_attach_probe(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::AttachProbeAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.attach_probe.take();
+        match result {
+            Ok(answer) => {
+                self.history_notice = if answer.attachment_seen {
+                    "Attach probe: the service stored the file as the message's attachment \u{2014} a send can carry a file in this shape.".into()
+                } else if answer.message_seen {
+                    "Attach probe: the message landed, but the service stored no attachment with it \u{2014} the file item was not taken in this shape.".into()
+                } else if answer.sent {
+                    "Attach probe: the send dispatched, but the message did not appear in this chat's history.".into()
+                } else if answer.fs_write == "accepted" {
+                    "Attach probe: the file was written, but the send itself was refused.".into()
+                } else {
+                    "Attach probe: the service refused the file write, so nothing was sent.".into()
+                };
+                true
+            }
+            Err(error) => {
+                self.history_notice = format!("Attach probe could not run: {error}");
+                false
             }
         }
     }
@@ -1592,6 +1645,7 @@ mod native {
         DeleteTask(Result<muse_account::DeleteAnswer, String>),
         StartSession(Result<muse_account::StartedSession, String>),
         SessionOp(Result<muse_account::SessionOpAnswer, String>),
+        AttachProbe(Result<muse_account::AttachProbeAnswer, String>),
         MarkSeen(Result<muse_account::MarkSeenAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
@@ -3777,6 +3831,31 @@ mod native {
             });
         }
 
+        /// Run the attach probe in this row's thread: one
+        /// confirmation, one probe. The probe writes one small
+        /// file service-side and sends one message referencing
+        /// it in that thread, then verifies the outcome from the
+        /// thread's own history.
+        fn attach_probe(self: &Rc<Self>, session_id: &str) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().history_notice =
+                    "Not connected. Connect your Muse session before running the attach probe."
+                        .into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_attach_probe(session_id) else {
+                return;
+            };
+            let session_id = session_id.to_string();
+            self.launch(ticket, move || match client.attach_probe(&session_id) {
+                Ok(answer) => Reply::AttachProbe(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::AttachProbe(Err(error.to_string())),
+            });
+        }
+
         /// Mark a just-opened conversation read, when the listing
         /// says it has unread messages: the web's own behavior for
         /// opening a chat, in the recorded consumer's shape (path
@@ -3913,6 +3992,16 @@ mod native {
                 });
             }
             main_page.append(&delete_item);
+            let probe_item = menu_item("Attach probe");
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let thread = thread.clone();
+                probe_item.connect_clicked(move |_| {
+                    ui.show_attach_probe_page(&popover, &thread);
+                });
+            }
+            main_page.append(&probe_item);
             popover.set_child(Some(&main_page));
             popover
         }
@@ -4001,6 +4090,52 @@ mod native {
                 confirm.connect_clicked(move |_| {
                     popover.popdown();
                     ui.session_op(&session_id, "delete", None);
+                });
+            }
+            buttons.append(&confirm);
+            page.append(&buttons);
+            popover.set_child(Some(&page));
+        }
+
+        /// The menu's attach-probe page: what the probe does,
+        /// in plain terms, before its one confirming press. The
+        /// probe is a reconnaissance write, not the attach
+        /// feature: it exists to learn whether a send can carry
+        /// a file in the recorded shape, and it runs in this
+        /// chat -- a designated scratch chat is the place for it.
+        fn show_attach_probe_page(
+            self: &Rc<Self>,
+            popover: &gtk::Popover,
+            thread: &muse_account::Thread,
+        ) {
+            let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            page.set_margin_top(8);
+            page.set_margin_bottom(8);
+            page.set_margin_start(8);
+            page.set_margin_end(8);
+            let explainer = label(
+                "Run the attach probe here? It writes one small file (attach-probe.txt) on the service side and sends one message referencing it in this chat, then reads the chat back to see whether the service stored the file as an attachment. Nothing is retried, and no other chat is touched.",
+            );
+            explainer.set_max_width_chars(36);
+            page.append(&explainer);
+            let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            buttons.set_halign(gtk::Align::End);
+            let cancel = gtk::Button::with_label("Cancel");
+            {
+                let popover = popover.clone();
+                cancel.connect_clicked(move |_| popover.popdown());
+            }
+            buttons.append(&cancel);
+            let confirm = gtk::Button::with_label("Run probe");
+            confirm.add_css_class("suggested-action");
+            confirm.set_widget_name(&format!("session-attach-probe:{}", thread.session_id));
+            {
+                let popover = popover.clone();
+                let ui = Rc::clone(self);
+                let session_id = thread.session_id.clone();
+                confirm.connect_clicked(move |_| {
+                    popover.popdown();
+                    ui.attach_probe(&session_id);
                 });
             }
             buttons.append(&confirm);
@@ -4234,6 +4369,9 @@ mod native {
                         Operation::SessionOp => {
                             Reply::SessionOp(Err("Session worker stopped unexpectedly.".into()))
                         }
+                        Operation::AttachProbe => Reply::AttachProbe(Err(
+                            "Attach probe worker stopped unexpectedly.".into(),
+                        )),
                         Operation::MarkSeen => {
                             Reply::MarkSeen(Err("Mark-seen worker stopped unexpectedly.".into()))
                         }
@@ -4279,6 +4417,7 @@ mod native {
             let mut approvals_after = false;
             let mut start_after: Option<String> = None;
             let mut session_after: Option<(String, String)> = None;
+            let mut probe_after = false;
             let auth_expired = matches!(&reply, Reply::AuthExpired);
             // A dispatch the service accepted starts the reply fast-path
             // whether or not the bridge could confirm it in scoped history:
@@ -4433,6 +4572,9 @@ mod native {
                     Reply::SessionOp(result) => {
                         session_after = state.finish_session_op(ticket, result);
                     }
+                    Reply::AttachProbe(result) => {
+                        probe_after = state.finish_attach_probe(ticket, result);
+                    }
                     Reply::MarkSeen(result) => {
                         // Acceptance is not sight: the refresh
                         // re-reads the listing, and the badge
@@ -4556,6 +4698,13 @@ mod native {
                     self.state.borrow_mut().select_thread(None);
                     self.prompt.set_text("");
                 }
+                self.render();
+                self.read(false, true);
+            }
+            if probe_after {
+                // The probe's own report is in the notice; the
+                // re-read lets the probe message render from the
+                // service's history when this chat is the one open.
                 self.render();
                 self.read(false, true);
             }
@@ -5165,6 +5314,7 @@ mod native {
                     Operation::StartSession => " \u{b7} starting a new side chat\u{2026}",
                     Operation::SessionOp => " \u{b7} updating the side chat\u{2026}",
                     Operation::MarkSeen => " \u{b7} marking the chat read\u{2026}",
+                    Operation::AttachProbe => " \u{b7} running the attach probe\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -7000,7 +7150,7 @@ mod native {
                 .ui
                 .build_session_menu(&menu_button, &threads[0])
                 .upcast::<gtk::Widget>();
-            for item in ["Unpin", "Rename", "Archive", "Delete"] {
+            for item in ["Unpin", "Rename", "Archive", "Delete", "Attach probe"] {
                 assert!(
                     button_with_text(&popover, item).is_some(),
                     "the pinned chat's menu offers {item}"
@@ -7021,6 +7171,26 @@ mod native {
                     .history_notice
                     .contains("Not connected"),
                 "a disconnected delete must say why nothing was sent"
+            );
+            let popover = page
+                .ui
+                .build_session_menu(&menu_button, &threads[0])
+                .upcast::<gtk::Widget>();
+            button_with_text(&popover, "Attach probe")
+                .expect("probe item")
+                .emit_clicked();
+            assert!(label_contains(&popover, "writes one small file"));
+            assert!(named(&popover, "session-attach-probe:thread-1").is_some());
+            button_with_text(&popover, "Run probe")
+                .expect("probe confirmation")
+                .emit_clicked();
+            assert!(
+                page.ui
+                    .state
+                    .borrow()
+                    .history_notice
+                    .contains("Not connected"),
+                "a disconnected probe must say why nothing ran"
             );
         }
 
@@ -9279,6 +9449,59 @@ mod tests {
                 .is_none()
         );
         assert!(state.history_notice.contains("did not accept"));
+    }
+
+    #[test]
+    fn an_attach_probe_reports_each_verdict_in_plain_terms() {
+        let mut state: State = Controller::default();
+        // No account linked: no ticket, nothing reaches the service.
+        assert!(state.begin_attach_probe("thread-1").is_none());
+        state.account = Some("account".into());
+        let verdict = |state: &mut State,
+                       fs_write: &str,
+                       sent: bool,
+                       message_seen: bool,
+                       attachment_seen: bool|
+         -> String {
+            let ticket = state.begin_attach_probe("thread-1").expect("ticket");
+            assert!(state.finish_attach_probe(
+                &ticket,
+                Ok(muse_account::AttachProbeAnswer {
+                    thread: "thread-1".into(),
+                    fs_write: fs_write.into(),
+                    sent,
+                    message_seen,
+                    attachment_seen,
+                }),
+            ));
+            assert!(state.attach_probe.is_none());
+            assert!(state.busy.is_none());
+            state.history_notice.clone()
+        };
+        assert!(
+            verdict(&mut state, "accepted", true, true, true).contains("stored the file"),
+            "a stored attachment is the shape learned"
+        );
+        assert!(
+            verdict(&mut state, "accepted", true, true, false).contains("no attachment"),
+            "a bare message is reported as nothing stored"
+        );
+        assert!(
+            verdict(&mut state, "accepted", true, false, false).contains("did not appear"),
+            "a dispatched-but-unseen send is its own verdict"
+        );
+        assert!(
+            verdict(&mut state, "accepted", false, false, false)
+                .contains("send itself was refused"),
+            "a written file with a refused send is its own verdict"
+        );
+        assert!(
+            verdict(&mut state, "refused", false, false, false).contains("refused the file write"),
+            "a refused write sends nothing"
+        );
+        let ticket = state.begin_attach_probe("thread-1").expect("ticket");
+        assert!(!state.finish_attach_probe(&ticket, Err("timeout".into())));
+        assert!(state.history_notice.contains("could not run"));
     }
 
     #[test]

@@ -107,7 +107,8 @@ def authorized(connection):
 # held connection for over two minutes. The watchdog in dispatch() is the
 # bound: on expiry it closes the connection from another thread, which is
 # what makes the stuck call let go.
-OP_BUDGETS = {"watch": 75.0, "send": 30.0, "activity": 20.0}
+OP_BUDGETS = {"watch": 75.0, "send": 30.0, "activity": 20.0,
+              "attach_probe": 45.0}
 DEFAULT_BUDGET = 25.0
 
 
