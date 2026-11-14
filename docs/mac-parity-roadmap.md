@@ -15,8 +15,13 @@ window and there is no native Windows app, so the web menu *is* the canonical de
 The app's navigation is therefore exactly the muse.ai menu in web order — Chat, Search,
 Library, Ideas, Goals, Create, Feed, with New, Download and Menu along the bottom — and
 nothing else is reachable; built-but-unshown pages stay unshown, and the Local host page
-alone stays stacked for folder-grant management. Computer control stays unsurfaced until
-Patrick says so.
+alone stays stacked for folder-grant management. Computer Control was unsurfaced until
+Nov 14, 2026, when Patrick surfaced it under the bottom Menu (beside Policy): the built
+portal page -- a consent-gated RemoteDesktop session with per-action Allow-once approvals
+and safe local test actions -- is reachable there now, and its live portal proof on his
+laptop is the next step. Agent-driven control (the service invoking this machine as a
+node) remains unbuilt: the node routes are recorded but the invoke shape is not, so that
+layer starts with a probe, the same discipline as the attach probe.
 
 **Web parity batch (Nov 12–13).** Feed posts render their widget attachments in a
 navigation-locked WebView with a text fallback, with native Discuss; the right panel mirrors
@@ -684,7 +689,9 @@ guessed).**
   "Try it", the Feed ❤, Goals delete, and an unread badge clearing on open.
 
 **Deferred or parked, by Patrick's word.**
-- Computer control: built surfaces stay unshown until he says so.
+- Computer control's agent-driven layer: the page is surfaced (above); the service-side
+  node invocation that would let the agent request actions stays unbuilt until its shape
+  is probed.
 - The transcript freeze work (fresh-build layout cost): the tightened slice budget is
   "good enough for now"; a virtualized list view is the recorded next step if it reopens.
 - Formatting and restyle: round one landed Nov 9 ("still not a great UI, but better");
