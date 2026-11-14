@@ -2479,6 +2479,7 @@ mod native {
         threads_panel.add_css_class("side-panel");
         let thread_search = gtk::Entry::new();
         thread_search.set_placeholder_text(Some("Search"));
+        crate::a11y::name(&thread_search, "Filter conversations");
         thread_search.add_css_class("search-pill");
         thread_search.set_icon_from_icon_name(
             gtk::EntryIconPosition::Primary,
@@ -2510,6 +2511,7 @@ mod native {
         new_side_chat.add_css_class("flat");
         new_side_chat.set_valign(gtk::Align::Center);
         new_side_chat.set_tooltip_text(Some("Start a new side chat"));
+        crate::a11y::name(&new_side_chat, "Start a new side chat");
         side_chats_row.append(&new_side_chat);
         threads_panel.append(&side_chats_row);
         let thread_list = gtk::ListBox::new();
@@ -2597,11 +2599,13 @@ mod native {
         // the shell shrinkable and changes nothing about how it looks.
         prompt.set_width_chars(6);
         prompt.set_placeholder_text(Some("Message"));
+        crate::a11y::name(&prompt, "Message Muse");
         let stop = gtk::Button::with_label("Stop agent");
         stop.set_tooltip_text(Some(
             "Asks the service to stop the run it has in flight. The service answers whether anything was actually stopped, and this window reports that answer instead of assuming it.",
         ));
         let send = gtk::Button::with_label("↑");
+        crate::a11y::name(&send, "Send to Muse");
         send.add_css_class("send-round");
         send.set_tooltip_text(Some(
             "Send to Muse — sends once to your existing Muse agent and may trigger external actions. No local files are uploaded automatically, and a send is never repeated without you.",
@@ -2659,6 +2663,7 @@ mod native {
         panel_header.append(&side_identity);
         let hide_panel_button = gtk::Button::with_label("»");
         hide_panel_button.set_tooltip_text(Some("Hide the side panel"));
+        crate::a11y::name(&hide_panel_button, "Hide the side panel");
         hide_panel_button.add_css_class("panel-toggle");
         panel_header.append(&hide_panel_button);
         side_panel.append(&panel_header);
@@ -2703,6 +2708,7 @@ mod native {
         side_panel_strip.set_visible(false);
         let show_panel_button = gtk::Button::with_label("«");
         show_panel_button.set_tooltip_text(Some("Show the side panel"));
+        crate::a11y::name(&show_panel_button, "Show the side panel");
         show_panel_button.add_css_class("panel-toggle");
         side_panel_strip.append(&show_panel_button);
 
@@ -5272,6 +5278,7 @@ mod native {
                         menu_button.set_widget_name(&format!("thread-menu:{}", thread.session_id));
                         menu_button.set_valign(gtk::Align::Center);
                         menu_button.set_tooltip_text(Some("Side chat actions"));
+                        crate::a11y::name(&menu_button, "Side chat actions");
                         {
                             let weak = self.self_weak.borrow().clone();
                             let thread = thread.clone();

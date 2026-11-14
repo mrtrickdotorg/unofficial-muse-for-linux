@@ -637,7 +637,13 @@ presses are in the live-proof group, and the P5 export probe is in the buildable
   `egress.permissions.active.update` and the connector PATCH) stays blocked: their
   request bodies are recorded nowhere, and the settings-probe line in the next
   op-timing upload settles the settings body's real shape.
-- P9 remainder: the AT-SPI accessibility pass and a Flatpak beside the AppImage.
+- P9 remainder: a Flatpak beside the AppImage. (The AT-SPI names pass shipped
+  Nov 14, 2026: every control whose content is an icon or a glyph -- the rail,
+  the "+" new-chat button, the arrow send button, the panel toggles, the thread
+  menu, the Feed's heart -- plus the placeholder-only entries now carry an
+  accessible name in the tooltip's own words, through a single `a11y::name`
+  helper. A live AT-SPI client read is still owed as the proof the names are
+  heard as intended.)
 
 **Blocked on an unrecorded write shape (a probe needs Patrick's go; the shape is never
 guessed).**

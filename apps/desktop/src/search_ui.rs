@@ -227,6 +227,7 @@ pub fn build(context: AccountContext, open: Rc<dyn Fn(String)>) -> SearchPage {
     toolbar.add_css_class("toolbar");
     let entry = gtk::Entry::new();
     entry.set_placeholder_text(Some("Search your conversations"));
+    crate::a11y::name(&entry, "Search your conversations");
     entry.set_hexpand(true);
     let go = gtk::Button::with_label("Search");
     go.add_css_class("suggested-action");
