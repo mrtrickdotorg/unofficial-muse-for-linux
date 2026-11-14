@@ -529,7 +529,10 @@ delete" half has no route to call. A Forget button would either do nothing or, p
 `fs.delete` on a `memory/<date>.md` file, destroy a whole day's memory to remove one line —
 so no such control exists, and the page's copy says where forgetting really happens instead.
 What unblocks it: a memory mutation route in the table, or a recorded shape for a fact-level
-write. Until then P6 is met for reading and search only.
+write. Re-checked on Nov 14, 2026 against the pin itself: `965cc2f197543a8762d3d7067038da6de962730a`
+is upstream's newest commit (2026-09-17, no tags), and the table's only memory paths are those
+four `POST`s — no delete, forget, write, update or edit exists under any other name. Until then
+P6 is met for reading and search only.
 
 ### P7 — Connector framework (L)
 
