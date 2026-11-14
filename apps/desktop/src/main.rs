@@ -178,6 +178,10 @@ list { background-color: transparent; }
 list row { color: #e9e9ee; padding: 9px 12px; border-radius: 9px; }
 list row:selected { background-color: rgba(255, 255, 255, 0.09); }
 .card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 19px; }
+.library-card { color: #c9c9d1; background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 14px; padding: 12px; }
+.library-title { font-size: 17px; font-weight: 600; color: #f4f4f6; }
+.library-meta { color: #8e8e99; font-size: 14px; }
+.library-chip { background-color: #101014; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 7px; padding: 2px 7px; font-size: 12px; font-weight: 700; color: #c9c9d1; }
 .feed-title { font-size: 19px; font-weight: 700; color: #f4f4f6; }
 .feed-icon { font-size: 27px; }
 .feed-image { border-radius: 14px; background-color: #101014; }
@@ -2651,6 +2655,10 @@ mod tests {
             "composer",
             "dim-label",
             "card",
+            "library-card",
+            "library-title",
+            "library-meta",
+            "library-chip",
             "approval-card",
             "approval-icon",
             "approval-heading",

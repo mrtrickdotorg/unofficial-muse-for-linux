@@ -5,12 +5,21 @@
 //! service's own pagination answer: "Show more" hands the bridge the cursor
 //! the last page issued plus the references already shown, and the bridge
 //! accepts a follow-up page only when its rows provably continue the list.
-//! A space row can be unshared from here — one armed press, one write, then
+//! A space card can be unshared from here — one armed press, one write, then
 //! a re-read to prove the state — and previewed from the service's own HTML
 //! export in a locked frame like the Feed's. Downloading and deleting stay on
-//! the Muse side. Rows are ordered pinned-first because a pin is a choice
-//! the person made and a recency sort would bury it, and the notice repeats
-//! the service's own total so a page of 50 never reads as the whole Library.
+//! the Muse side.
+//!
+//! The presentation is the web Library's: a grid of cards, each carrying
+//! its title, a type word and its updated date, under a plain header — no
+//! explainer paragraph. The web's cards lead with a preview image; ours
+//! cannot, because the one route that would fetch a preview URL
+//! (`artifacts.fetch_url`) answers `{"url": null}` for every shape tried,
+//! so a card leads with its type chip instead of a picture it does not
+//! have. Cards are ordered pinned-first because a pin is a choice the
+//! person made and a recency sort would bury it, and the header repeats
+//! the service's own total so a page of 50 never reads as the whole
+//! Library.
 
 use crate::local_host::AccountContext;
 use gtk::prelude::*;
@@ -37,7 +46,7 @@ pub(super) struct Ui {
     busy: Cell<bool>,
     acting: Cell<bool>,
     context: AccountContext,
-    list: gtk::ListBox,
+    list: gtk::FlowBox,
     notice: gtk::Label,
     spinner: gtk::Spinner,
     more: gtk::Button,
@@ -87,26 +96,57 @@ pub(super) fn order_rows(mut rows: Vec<ArtifactSummary>) -> Vec<ArtifactSummary>
     rows
 }
 
-/// One row's text. Format wins over kind because a person recognises "docx"
-/// faster than "document"; a row carrying neither still says what it is.
-pub(super) fn row_text(row: &ArtifactSummary) -> String {
-    let kind = row
+/// The card's type word. Format wins over kind because a person
+/// recognises "docx" faster than "document"; a few common formats
+/// get the name a person would say, and a row carrying neither
+/// still says what it is.
+pub(super) fn kind_word(row: &ArtifactSummary) -> String {
+    if row.target_kind.as_deref() == Some("space") {
+        return "Space".into();
+    }
+    let raw = row
         .format
         .as_ref()
         .or(row.kind.as_ref())
         .map(String::as_str)
         .unwrap_or("artifact");
-    let when = row
-        .updated_at_ms
-        .map(|ms| format!(" · updated {}", utc_date(ms)))
-        .unwrap_or_default();
-    format!(
-        "{}{} · {}{}",
-        if row.pinned { "★ " } else { "" },
-        row.title,
-        kind,
-        when
-    )
+    match raw.to_ascii_lowercase().as_str() {
+        "md" | "markdown" => "Markdown".into(),
+        "pdf" => "PDF".into(),
+        "docx" | "doc" => "Word document".into(),
+        "csv" | "xlsx" | "xls" => "Spreadsheet".into(),
+        "pptx" | "ppt" => "Presentation".into(),
+        "txt" => "Text".into(),
+        "html" => "Web page".into(),
+        "document" => "Document".into(),
+        _ => raw.to_string(),
+    }
+}
+
+/// The card's type chip: the short form of the type word, the
+/// part of the web's preview tile this app can honestly show.
+pub(super) fn chip_text(row: &ArtifactSummary) -> String {
+    if row.target_kind.as_deref() == Some("space") {
+        return "SPACE".into();
+    }
+    if let Some(format) = row.format.as_ref().filter(|f| !f.is_empty()) {
+        return format.to_uppercase();
+    }
+    match row.kind.as_deref() {
+        Some("document") => "DOC".into(),
+        Some(kind) if kind.len() <= 6 => kind.to_uppercase(),
+        _ => "FILE".into(),
+    }
+}
+
+/// The card's meta line: what it is, and when the service last
+/// touched it. An undated row says only what it is — unknown is
+/// not newest.
+pub(super) fn meta_text(row: &ArtifactSummary) -> String {
+    match row.updated_at_ms {
+        Some(ms) => format!("{} · Updated {}", kind_word(row), utc_date(ms)),
+        None => kind_word(row),
+    }
 }
 
 /// The slug a row's space actions address, when the row is a
@@ -221,16 +261,39 @@ impl Ui {
     }
 
     fn render(&self, ui: &Rc<Ui>) {
-        while let Some(row) = self.list.first_child() {
-            self.list.remove(&row);
+        while let Some(child) = self.list.first_child() {
+            self.list.remove(&child);
         }
         let armed = self.armed.borrow().clone();
         for row in order_rows(self.rows.borrow().clone()) {
-            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let text = label(&row_text(&row));
-            text.set_hexpand(true);
-            line.append(&text);
+            let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            card.add_css_class("library-card");
+            card.set_size_request(216, -1);
+            let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let chip = gtk::Label::new(Some(&chip_text(&row)));
+            chip.set_xalign(0.0);
+            chip.add_css_class("library-chip");
+            top.append(&chip);
+            if row.pinned {
+                let star = gtk::Label::new(Some("★ Pinned"));
+                star.add_css_class("library-meta");
+                star.set_hexpand(true);
+                star.set_xalign(1.0);
+                top.append(&star);
+            }
+            card.append(&top);
+            let title = gtk::Label::new(Some(&row.title));
+            title.set_xalign(0.0);
+            title.set_wrap(true);
+            title.set_lines(2);
+            title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            title.add_css_class("library-title");
+            card.append(&title);
+            let meta = label(&meta_text(&row));
+            meta.add_css_class("library-meta");
+            card.append(&meta);
             if let Some(slug) = space_slug(&row) {
+                let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let preview = gtk::Button::with_label("Preview");
                 preview.set_widget_name(&format!("space-preview:{slug}"));
                 let preview_slug = slug.to_string();
@@ -241,7 +304,7 @@ impl Ui {
                         ui.preview_press(&ui, &preview_slug, &preview_title);
                     }
                 });
-                line.append(&preview);
+                actions.append(&preview);
                 let is_armed = armed.as_deref() == Some(slug);
                 let button = gtk::Button::with_label(if is_armed {
                     "Confirm unshare"
@@ -260,9 +323,10 @@ impl Ui {
                         ui.unshare_press(&ui, &slug, &title);
                     }
                 });
-                line.append(&button);
+                actions.append(&button);
+                card.append(&actions);
             }
-            self.list.append(&line);
+            self.list.insert(&card, -1);
         }
         self.more.set_visible(
             self.has_more.get() && !self.paging_dead.get() && self.next_cursor.borrow().is_some(),
@@ -703,35 +767,35 @@ impl Ui {
 pub fn build(context: AccountContext) -> LibraryPage {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.add_css_class("page-content");
-    let heading = label("Library · saved artifacts and spaces");
-    heading.add_css_class("page-heading");
-    root.append(&heading);
-    let intro = label(
-        "The list loads when you open this page, and Refresh re-reads it. \"Show more\" follows the service's own paging. A space listed here can be previewed from its own HTML export and unshared from this page; downloading and deleting stay on the Muse side. No row is kept after the window closes.",
-    );
-    intro.add_css_class("page-subtitle");
-    root.append(&intro);
-
-    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    toolbar.add_css_class("toolbar");
-    let refresh = gtk::Button::with_label("Refresh Library");
-    refresh.add_css_class("suggested-action");
-    let spinner = gtk::Spinner::new();
-    toolbar.append(&refresh);
-    toolbar.append(&spinner);
-    root.append(&toolbar);
 
     let notice = label("Nothing read yet.");
-    root.append(&notice);
+    notice.add_css_class("dim-label");
+    notice.set_hexpand(true);
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    toolbar.add_css_class("toolbar");
+    let refresh = gtk::Button::with_label("Refresh");
+    refresh.add_css_class("suggested-action");
+    let spinner = gtk::Spinner::new();
+    toolbar.append(&notice);
+    toolbar.append(&spinner);
+    toolbar.append(&refresh);
+    root.append(&toolbar);
 
-    let list = gtk::ListBox::new();
+    let list = gtk::FlowBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
+    list.set_homogeneous(true);
+    list.set_min_children_per_line(1);
+    list.set_max_children_per_line(8);
+    list.set_column_spacing(12);
+    list.set_row_spacing(12);
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_min_content_height(220);
     scroll.set_child(Some(&list));
+    scroll.set_vexpand(true);
     root.append(&scroll);
 
     let more = gtk::Button::with_label("Show more");
+    more.set_halign(gtk::Align::Center);
     more.set_visible(false);
     root.append(&more);
 
@@ -781,8 +845,8 @@ pub fn build(context: AccountContext) -> LibraryPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        order_rows, paging_note, preview_notice, read_failure, row_text, space_slug, summary_text,
-        utc_date,
+        chip_text, kind_word, meta_text, order_rows, paging_note, preview_notice, read_failure,
+        space_slug, summary_text, utc_date,
     };
     use gtk::prelude::*;
     use gtk4 as gtk;
@@ -894,16 +958,23 @@ mod tests {
     }
 
     #[test]
-    fn a_row_names_its_format_or_kind_and_marks_pins() {
-        let mut csv = row("sheet.csv", true, Some(1_700_000_000_000));
+    fn a_card_names_its_type_in_words_and_its_date_when_it_has_one() {
+        let mut md = row("notes.md", false, Some(1_700_000_000_000));
+        md.format = Some("md".into());
+        assert_eq!(kind_word(&md), "Markdown");
+        assert_eq!(chip_text(&md), "MD");
+        assert_eq!(meta_text(&md), "Markdown · Updated 2023-11-14");
+        let mut csv = row("sheet.csv", false, None);
         csv.format = Some("csv".into());
-        let text = row_text(&csv);
-        assert!(text.starts_with("★ sheet.csv"), "{text}");
-        assert!(text.contains(" · csv"), "{text}");
-        assert!(text.contains("updated 2023-11-14"), "{text}");
-        let plain = row_text(&row("undated", false, None));
-        assert!(plain.contains(" · document"), "{plain}");
-        assert!(!plain.contains("updated"), "{plain}");
+        assert_eq!(kind_word(&csv), "Spreadsheet");
+        assert_eq!(meta_text(&csv), "Spreadsheet", "undated is not newest");
+        let plain = row("undated", false, None);
+        assert_eq!(kind_word(&plain), "Document");
+        assert_eq!(chip_text(&plain), "DOC");
+        let mut space = row("Deck", false, None);
+        space.target_kind = Some("space".into());
+        assert_eq!(kind_word(&space), "Space");
+        assert_eq!(chip_text(&space), "SPACE");
     }
 
     fn button(root: &gtk::Widget, name: &str) -> gtk::Button {
@@ -947,7 +1018,7 @@ mod tests {
         let page = super::build(Rc::new(|| None));
         assert!(page.ui.list.first_child().is_none());
         let root: &gtk::Widget = page.root.upcast_ref();
-        button(root, "Refresh Library").emit_clicked();
+        button(root, "Refresh").emit_clicked();
         assert!(
             page.ui
                 .notice
