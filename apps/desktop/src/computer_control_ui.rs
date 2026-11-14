@@ -18,6 +18,61 @@ enum MappedAction {
     KeyboardKeysymTap { keysym: u32 },
     KeyboardKeycode { keycode: u16, state: u8 },
     KeyboardKeycodeTap { keycode: u16 },
+    DemoOpenGithub,
+}
+
+/// One step of the guided demo's fixed sequence. The sequence is
+/// data, not code paths, so a test can spell it exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemoStep {
+    Keysym { keysym: u32, state: u32 },
+    DelayMs(u64),
+}
+
+const DEMO_URL: &str = "https://github.com";
+const KEYSYM_ALT_L: u32 = 0xffe9;
+const KEYSYM_F2: u32 = 0xffbf;
+const KEYSYM_RETURN: u32 = 0xff0d;
+
+/// The demo's full step list: Alt+F2 opens KRunner, settle, the
+/// URL typed as individual key taps (printable ASCII keysyms are
+/// their codepoints), settle, Return hands it to the default
+/// browser. Nothing here is parameterized.
+fn demo_open_github_steps() -> Vec<DemoStep> {
+    let mut steps = vec![
+        DemoStep::Keysym {
+            keysym: KEYSYM_ALT_L,
+            state: 1,
+        },
+        DemoStep::Keysym {
+            keysym: KEYSYM_F2,
+            state: 1,
+        },
+        DemoStep::Keysym {
+            keysym: KEYSYM_F2,
+            state: 0,
+        },
+        DemoStep::Keysym {
+            keysym: KEYSYM_ALT_L,
+            state: 0,
+        },
+        DemoStep::DelayMs(600),
+    ];
+    for character in DEMO_URL.chars() {
+        let keysym = u32::from(character);
+        steps.push(DemoStep::Keysym { keysym, state: 1 });
+        steps.push(DemoStep::Keysym { keysym, state: 0 });
+    }
+    steps.push(DemoStep::DelayMs(250));
+    steps.push(DemoStep::Keysym {
+        keysym: KEYSYM_RETURN,
+        state: 1,
+    });
+    steps.push(DemoStep::Keysym {
+        keysym: KEYSYM_RETURN,
+        state: 0,
+    });
+    steps
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +120,7 @@ fn map_approved_action(action: &Action) -> Result<MappedAction, MappingError> {
             keycode: *keycode,
             state: *state,
         }),
+        Action::DemoOpenGithub => Ok(MappedAction::DemoOpenGithub),
     }
 }
 
@@ -85,7 +141,8 @@ fn mapping_notice(error: MappingError) -> &'static str {
 #[cfg(not(desktop_controller_only))]
 mod native {
     use super::{
-        Action, MappedAction, input_dispatch_allowed, map_approved_action, mapping_notice,
+        Action, DemoStep, MappedAction, demo_open_github_steps, input_dispatch_allowed,
+        map_approved_action, mapping_notice,
     };
     use crate::computer_control::{
         ActionName, ApprovedAction, Broker, RequestReceipt, SessionState,
@@ -177,11 +234,37 @@ mod native {
             MappedAction::KeyboardKeycodeTap { keycode } => session
                 .keyboard_keycode(i32::from(keycode), 1)
                 .and_then(|()| session.keyboard_keycode(i32::from(keycode), 0)),
+            MappedAction::DemoOpenGithub => run_demo_steps(session, dispatch_stopped),
             MappedAction::KeyboardKeycode { keycode, state } => {
                 session.keyboard_keycode(i32::from(keycode), u32::from(state))
             }
         };
         result.map_err(|error| portal_error_kind(&error))
+    }
+
+    /// Run the guided demo's steps in order. The dispatch gate is
+    /// already held by the caller, so the sequence cannot
+    /// interleave with another approved action; a stop requested
+    /// between steps ends it early, and the first portal error is
+    /// the result.
+    fn run_demo_steps(
+        session: &mut RemoteDesktopSession,
+        dispatch_stopped: &AtomicBool,
+    ) -> Result<(), DesktopError> {
+        for step in demo_open_github_steps() {
+            if !input_dispatch_allowed(dispatch_stopped.load(Ordering::Acquire)) {
+                return Err(DesktopError::Cancelled);
+            }
+            match step {
+                DemoStep::DelayMs(ms) => {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+                DemoStep::Keysym { keysym, state } => {
+                    session.keyboard_keysym(i32::try_from(keysym).unwrap_or(i32::MAX), state)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -301,6 +384,10 @@ mod native {
             Action::KeyboardKeysymTap { keysym } => format!("keysym={keysym}, press + release"),
             Action::KeyboardKeycodeTap { keycode } => {
                 format!("keycode={keycode}, press + release")
+            }
+            Action::DemoOpenGithub => {
+                "Alt+F2, type https://github.com, Enter \u{2014} KRunner opens it in the default browser"
+                    .to_string()
             }
             Action::SmoothScroll { dx, dy } => format!("dx={dx:.1}, dy={dy:.1}"),
             Action::DiscreteScroll { dx, dy } => format!("dx={dx}, dy={dy}"),
@@ -650,7 +737,8 @@ mod native {
                 Action::KeyboardKeysym { .. }
                 | Action::KeyboardKeysymTap { .. }
                 | Action::KeyboardKeycode { .. }
-                | Action::KeyboardKeycodeTap { .. } => Some(REMOTE_DEVICE_KEYBOARD),
+                | Action::KeyboardKeycodeTap { .. }
+                | Action::DemoOpenGithub => Some(REMOTE_DEVICE_KEYBOARD),
             }
         }
 
@@ -922,6 +1010,13 @@ mod native {
             REMOTE_DEVICE_KEYBOARD,
             Action::KeyboardKeycodeTap { keycode: 30 },
         );
+        add_action(
+            &ui,
+            &actions,
+            "Demo: open github.com in the default browser",
+            REMOTE_DEVICE_KEYBOARD,
+            Action::DemoOpenGithub,
+        );
         ui.set_controls();
 
         {
@@ -980,6 +1075,58 @@ mod tests {
         assert_eq!(
             map_approved_action(&Action::DiscreteScroll { dx: 1, dy: -1 }),
             Err(MappingError::DiscreteScrollBothAxes)
+        );
+    }
+
+    #[test]
+    fn demo_maps_and_its_steps_spell_the_krunner_sequence() {
+        assert_eq!(
+            map_approved_action(&Action::DemoOpenGithub),
+            Ok(MappedAction::DemoOpenGithub)
+        );
+        let steps = demo_open_github_steps();
+        assert_eq!(
+            steps[..4],
+            [
+                DemoStep::Keysym {
+                    keysym: KEYSYM_ALT_L,
+                    state: 1,
+                },
+                DemoStep::Keysym {
+                    keysym: KEYSYM_F2,
+                    state: 1,
+                },
+                DemoStep::Keysym {
+                    keysym: KEYSYM_F2,
+                    state: 0,
+                },
+                DemoStep::Keysym {
+                    keysym: KEYSYM_ALT_L,
+                    state: 0,
+                },
+            ]
+        );
+        assert_eq!(steps[4], DemoStep::DelayMs(600));
+        let typed: String = steps
+            .iter()
+            .filter_map(|step| match step {
+                DemoStep::Keysym { keysym, state: 1 } if *keysym < 0x100 => char::from_u32(*keysym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed, DEMO_URL);
+        assert_eq!(
+            steps[steps.len() - 2..],
+            [
+                DemoStep::Keysym {
+                    keysym: KEYSYM_RETURN,
+                    state: 1,
+                },
+                DemoStep::Keysym {
+                    keysym: KEYSYM_RETURN,
+                    state: 0,
+                },
+            ]
         );
     }
 

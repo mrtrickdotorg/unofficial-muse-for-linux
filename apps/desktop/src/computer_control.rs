@@ -79,6 +79,14 @@ pub enum Action {
     KeyboardKeycodeTap {
         keycode: u16,
     },
+    /// The one guided demo: a fixed, hard-coded key sequence
+    /// (Alt+F2, type https://github.com, Enter) that hands the
+    /// URL to the default browser through KRunner. It is the
+    /// deliberate, enumerated exception to the no-macro rule --
+    /// nothing about it is parameterized, and its approval card
+    /// spells out every step before anything runs. General text
+    /// injection, app launch and macros stay blocked below.
+    DemoOpenGithub,
 }
 
 /// Actions intentionally unavailable to this first policy implementation.
@@ -149,6 +157,7 @@ pub enum ActionName {
     KeyboardKeysymTap,
     KeyboardKeycode,
     KeyboardKeycodeTap,
+    DemoOpenGithub,
 }
 
 impl fmt::Display for ActionName {
@@ -164,6 +173,7 @@ impl fmt::Display for ActionName {
             Self::KeyboardKeysymTap => "keyboard-keysym-tap",
             Self::KeyboardKeycode => "keyboard-keycode",
             Self::KeyboardKeycodeTap => "keyboard-keycode-tap",
+            Self::DemoOpenGithub => "demo-open-github",
         };
         formatter.write_str(name)
     }
@@ -262,6 +272,11 @@ pub fn validate_action(action: &Action) -> Result<ActionMetadata, ActionValidati
                 requires_fresh_approval: true,
             }
         }
+        Action::DemoOpenGithub => ActionMetadata {
+            name: ActionName::DemoOpenGithub,
+            read_only: false,
+            requires_fresh_approval: true,
+        },
         Action::KeyboardKeycode { keycode, state } => {
             if *keycode > EVDEV_CODE_MAX {
                 return Err(ActionValidationError::InvalidKeycode);
@@ -448,6 +463,7 @@ enum ActionSummary {
     KeyboardKeysymTap { keysym: u32 },
     KeyboardKeycode { keycode: u16, state: u8 },
     KeyboardKeycodeTap { keycode: u16 },
+    DemoOpenGithub,
 }
 
 /// Redacted, allow-listed activity event. It contains only action names and
@@ -508,6 +524,9 @@ impl fmt::Display for ActivityEvent {
             ActionSummary::KeyboardKeycodeTap { keycode } => {
                 write!(formatter, "keycode={keycode} tap")
             }
+            ActionSummary::DemoOpenGithub => {
+                write!(formatter, "opens https://github.com via KRunner")
+            }
             ActionSummary::KeyboardKeycode { keycode, state } => {
                 write!(formatter, "keycode={keycode} state={state}")
             }
@@ -527,6 +546,7 @@ fn action_name(action: &Action) -> ActionName {
         Action::KeyboardKeysymTap { .. } => ActionName::KeyboardKeysymTap,
         Action::KeyboardKeycode { .. } => ActionName::KeyboardKeycode,
         Action::KeyboardKeycodeTap { .. } => ActionName::KeyboardKeycodeTap,
+        Action::DemoOpenGithub => ActionName::DemoOpenGithub,
     }
 }
 
@@ -555,6 +575,7 @@ fn action_summary(action: &Action) -> ActionSummary {
         Action::KeyboardKeycodeTap { keycode } => {
             ActionSummary::KeyboardKeycodeTap { keycode: *keycode }
         }
+        Action::DemoOpenGithub => ActionSummary::DemoOpenGithub,
         Action::KeyboardKeycode { keycode, state } => ActionSummary::KeyboardKeycode {
             keycode: *keycode,
             state: *state,
@@ -1183,6 +1204,15 @@ mod tests {
             broker.allow_once(&receipt.request_id, &receipt.approval_token),
             Err(ApprovalError::StaleEpoch)
         );
+    }
+
+    #[test]
+    fn demo_action_validates_with_its_own_name() {
+        let metadata = validate_action(&Action::DemoOpenGithub).expect("demo validates");
+        assert_eq!(metadata.name, ActionName::DemoOpenGithub);
+        assert!(!metadata.read_only);
+        assert!(metadata.requires_fresh_approval);
+        assert_eq!(metadata.name.to_string(), "demo-open-github");
     }
 
     #[test]
