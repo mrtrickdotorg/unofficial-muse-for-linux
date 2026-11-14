@@ -1,5 +1,6 @@
 use gtk::prelude::*;
 use gtk4 as gtk;
+mod a11y;
 mod account_login;
 mod account_ui;
 mod build_identity;
@@ -1081,10 +1082,12 @@ fn build_ui(app: &gtk::Application) {
     prompt_row.add_css_class("composer");
     let open_files = gtk::Button::from_icon_name("list-add-symbolic");
     open_files.set_tooltip_text(Some("Open local read-only file browser"));
+    crate::a11y::name(&open_files, "Open local read-only file browser");
     prompt_row.append(&open_files);
     let prompt_entry = gtk::Entry::new();
     prompt_entry.set_hexpand(true);
     prompt_entry.set_placeholder_text(Some("Developer experiment: prompt the Meta Model API…"));
+    crate::a11y::name(&prompt_entry, "Developer prompt");
     prompt_row.append(&prompt_entry);
     let send_prompt = gtk::Button::with_label("Send");
     send_prompt.add_css_class("suggested-action");
@@ -1966,6 +1969,7 @@ fn nav_button(icon_name: &str, label: &str, tooltip: &str) -> gtk::Button {
     // tooltip and the sidebar panel title, not beside the icon.
     let button = gtk::Button::new();
     button.set_tooltip_text(Some(&format!("{label} — {tooltip}")));
+    crate::a11y::name(&button, label);
     button.add_css_class("nav-item");
     button.set_halign(gtk::Align::Center);
     let icon = gtk::Image::from_icon_name(icon_name);

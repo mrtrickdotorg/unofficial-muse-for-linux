@@ -470,6 +470,7 @@ impl Ui {
             let react = gtk::Button::with_label("❤");
             react.set_widget_name(&format!("feed-react:{unit_id}"));
             react.set_tooltip_text(Some("React to this post"));
+            crate::a11y::name(&react, "React to this post");
             {
                 let ui = Rc::clone(self);
                 let unit_id = unit_id.clone();
