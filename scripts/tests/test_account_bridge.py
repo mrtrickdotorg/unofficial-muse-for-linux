@@ -530,7 +530,7 @@ class BridgeTests(unittest.TestCase):
                         "status": "ready", "placement": "library", "updated_at_ms": 5,
                         "is_pinned": False, "open_target": {"kind": "file", "path": "/workspace/a.docx"},
                         "capabilities": {"can_open": True, "can_share": False}, "raw": "SECRET"}},
-                    {"node": {"artifact_ref": "file:workspace/b.pdf", "display_name": "b.pdf",
+                    {"cursor": "PAGE-2", "node": {"artifact_ref": "file:workspace/b.pdf", "display_name": "b.pdf",
                         "type": "document", "format": "pdf", "status": "ready",
                         "placement": "library", "updated_at_ms": 7, "is_pinned": True,
                         "open_target": {"kind": "file", "path": "/workspace/b.pdf"},
@@ -548,11 +548,105 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result["artifacts"][1]["pinned"], True)
         self.assertEqual(result["artifacts"][1]["can_share"], True)
         self.assertEqual(result["artifacts"][0]["path"], "/workspace/a.docx")
-        # The cursor and every unlisted node field stay in the bridge.
+        # Only the page's own last cursor travels, as the opaque
+        # token the next page request hands back; per-edge cursors,
+        # the start cursor and every unlisted node field stay here.
+        self.assertEqual(result["next_cursor"], "PAGE-2")
         self.assertNotIn("SECRET", str(result))
         bridge.validate_request({"op": "artifacts", "config_dir": "/unused"})
         with self.assertRaises(bridge.BridgeFailure):
             bridge.validate_request({"op": "artifacts", "config_dir": "/unused", "limit": 1})
+
+    def test_artifacts_paging_proves_continuation_before_accepting_a_page(self):
+        # The route's paging parameter is recorded nowhere, so the
+        # bridge probes it with a proof: a candidate page counts
+        # only when its rows continue the accumulated list.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        def page_of(refs, cursor):
+            return {"total_count": 3, "edges": [
+                {"cursor": cursor, "node": {"artifact_ref": ref,
+                    "display_name": ref, "open_target": {"kind": "file", "path": "/w"},
+                    "capabilities": {}}}
+                for ref in refs], "page_info": {"has_next_page": False}}
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append((method, kwargs))
+                query = kwargs.get("query") or {}
+                if "after" in query:
+                    # The service ignores this candidate and
+                    # answers with the first page again.
+                    return page_of(["file:workspace/a"], "c1")
+                return page_of(["file:workspace/b", "file:workspace/c"], "c2")
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "artifacts", "cursor": "c1", "seen_refs": ["file:workspace/a"]})
+        self.assertEqual([kwargs.get("query") for _, kwargs in calls],
+                         [{"after": "c1"}, {"cursor": "c1"}])
+        self.assertEqual(result["paging"], "continued")
+        self.assertEqual([row["artifact_ref"] for row in result["artifacts"]],
+                         ["file:workspace/b", "file:workspace/c"])
+
+    def test_artifacts_paging_reports_unavailable_when_nothing_continues(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        def page_of(refs):
+            return {"total_count": 3, "edges": [
+                {"cursor": "c1", "node": {"artifact_ref": ref,
+                    "display_name": ref, "open_target": {"kind": "file", "path": "/w"},
+                    "capabilities": {}}}
+                for ref in refs], "page_info": {"has_next_page": True}}
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                return page_of(["file:workspace/a"])
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "artifacts", "cursor": "c1", "seen_refs": ["file:workspace/a"]})
+        self.assertEqual(result["paging"], "unavailable")
+        self.assertEqual(result["artifacts"], [])
+        self.assertEqual(result["total_count"], 3)
+        self.assertFalse(result["has_more"])
+
+    def test_space_unshare_dispatches_one_path_only_delete(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append((method, kwargs))
+                return {"whatever": "the answer shape is unrecorded"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "space_unshare", "slug": "my-space"})
+        self.assertEqual(calls, [("spaces.unshare", {"path_params": {"slug": "my-space"}})])
+        self.assertEqual(result, {"slug": "my-space", "accepted": True})
+
+    def test_space_unshare_and_paging_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "space_unshare", "slug": "ok-slug",
+                                   "config_dir": "/tmp/x"})
+        for bad in ({}, {"slug": ""}, {"slug": "a/b"}, {"slug": "x" * 257}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, op="space_unshare",
+                                               config_dir="/tmp/x"))
+        bridge.validate_request({"op": "artifacts", "cursor": "c1",
+                                   "seen_refs": ["file:workspace/a"],
+                                   "config_dir": "/tmp/x"})
+        for bad in ({"cursor": ""}, {"cursor": 7}, {"cursor": "c", "seen_refs": "nope"},
+                    {"cursor": "c", "seen_refs": ["x"] * 501}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, op="artifacts",
+                                               config_dir="/tmp/x"))
 
     def test_artifacts_fails_closed_on_an_unidentified_row(self):
         from contextlib import contextmanager
