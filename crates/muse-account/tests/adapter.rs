@@ -700,6 +700,41 @@ print(json.dumps({'ok': True, 'data': {'slug': 'my-space', 'format': 'html',
 }
 
 #[test]
+fn policy_settings_project_pairs_and_connector_reset_validates_the_name() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+if request['op'] == 'policy_settings':
+    print(json.dumps({'ok': True, 'data': {
+      'entries': [{'label': 'hitl.enabled', 'value': 'true'}],
+      'connectors': ['gmail'], 'withheld': 2}}))
+elif request['op'] == 'connector_reset':
+    assert request['connector'] == 'gmail'
+    print(json.dumps({'ok': True, 'data': {'connector': 'gmail', 'accepted': True}}))
+else:
+    raise AssertionError(request['op'])
+"#,
+    );
+    let settings = f.client().policy_settings().unwrap();
+    assert_eq!(settings.entries.len(), 1);
+    assert_eq!(settings.entries[0].label, "hitl.enabled");
+    assert_eq!(settings.entries[0].value, "true");
+    assert_eq!(settings.connectors, ["gmail"]);
+    assert_eq!(settings.withheld, 2);
+    let answer = f.client().connector_reset("gmail").unwrap();
+    assert_eq!(answer.connector, "gmail");
+    assert!(answer.accepted);
+    // A connector name is one path segment from the settings' own
+    // section; anything else is refused before it is sent.
+    assert!(f.client().connector_reset("").is_err());
+    assert!(f.client().connector_reset("a/b").is_err());
+    assert!(f.client().connector_reset("has space").is_err());
+    assert!(f.client().connector_reset("-leading").is_err());
+    assert!(f.client().connector_reset(&"x".repeat(129)).is_err());
+}
+
+#[test]
 fn memory_get_keeps_a_missing_entry_as_an_answer_not_a_failure() {
     let f = Fixture::new(
         r#"

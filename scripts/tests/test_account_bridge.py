@@ -1721,6 +1721,94 @@ class PermissionTests(unittest.TestCase):
             bridge.validate_request({"op": "revoke", "config_dir": "/tmp"})
 
 
+class PolicySettingsTests(unittest.TestCase):
+    def test_settings_are_projected_as_scalar_pairs_with_names_only(self):
+        bridge = load_bridge()
+        payload = {
+            "hitl": {"enabled": True, "snooze_until": None},
+            "network": {"mode": "allowlist", "rules": ["a", "b"]},
+            "connectors": {"gmail": {"grants": 2}, "bad/name": {}, "github": {}},
+            "access_token": "SECRET",
+            "note": "x" * 500,
+        }
+        result = bridge.settings_rows(payload)
+        by_label = {e["label"]: e["value"] for e in result["entries"]}
+        self.assertEqual(by_label["hitl.enabled"], "true")
+        self.assertEqual(by_label["network.mode"], "allowlist")
+        self.assertEqual(by_label["access_token"], "SECRET"[:200])
+        self.assertEqual(len(by_label["note"]), 200)
+        # The null and the list are counted as withheld, never
+        # summarized into words of the bridge's own; the
+        # connectors section is represented by its names instead.
+        self.assertEqual(result["withheld"], 2)
+        # Only the settings' own well-formed connector names travel.
+        self.assertEqual(result["connectors"], ["github", "gmail"])
+        self.assertNotIn("bad/name", str(result))
+
+    def test_settings_projection_fails_closed_on_a_non_object(self):
+        bridge = load_bridge()
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.settings_rows(["not", "a", "settings", "object"])
+
+    def test_policy_settings_reads_the_sentinel_route_and_closes_it(self):
+        bridge = load_bridge()
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["method"] = method
+                seen["timeout"] = kwargs.get("timeout")
+                return {"hitl": {"enabled": False}}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch(
+                {"op": "policy_settings"})
+        self.assertEqual(seen["method"], "permissions.settings")
+        self.assertEqual(seen["timeout"], 20)
+        self.assertTrue(seen["closed"])
+        self.assertEqual(result["entries"],
+                         [{"label": "hitl.enabled", "value": "false"}])
+
+    def test_connector_reset_dispatches_one_path_only_delete(self):
+        bridge = load_bridge()
+        seen = {"calls": 0}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["calls"] += 1
+                seen["method"] = method
+                seen.update(kwargs)
+                return {"whatever": "the answer shape is unrecorded"}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch(
+                {"op": "connector_reset", "connector": "gmail"})
+        self.assertEqual(seen["calls"], 1)
+        self.assertEqual(seen["method"], "egress.permissions.connector.reset")
+        self.assertEqual(seen["path_params"], {"connector": "gmail"})
+        self.assertTrue(seen["closed"])
+        self.assertEqual(result, {"connector": "gmail", "accepted": True})
+
+    def test_connector_reset_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "connector_reset", "connector": "gmail",
+                                   "config_dir": "/tmp/x"})
+        for bad in ({}, {"connector": ""}, {"connector": "a/b"},
+                    {"connector": "has space"}, {"connector": "x" * 129},
+                    {"connector": "-leading-dash"}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, op="connector_reset",
+                                               config_dir="/tmp/x"))
+
+
 class DeleteTaskTests(unittest.TestCase):
     def test_a_deletion_asks_the_tasks_route_once_and_claims_acceptance_only(self):
         from contextlib import contextmanager

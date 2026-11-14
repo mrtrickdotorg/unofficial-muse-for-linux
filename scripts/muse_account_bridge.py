@@ -603,6 +603,8 @@ def validate_request(request):
                "decide": {"approval_id", "decision"},
                "permissions": set(),
                "revoke": {"permission_id"},
+               "policy_settings": set(),
+               "connector_reset": {"connector"},
                "delete_task": {"job_id"},
                "start_session": set(),
                "session_op": {"session_id", "kind", "title"},
@@ -673,6 +675,14 @@ def validate_request(request):
         permission_id = request.get("permission_id")
         if (not isinstance(permission_id, str) or not 1 <= len(permission_id) <= 256
                 or "\x00" in permission_id):
+            raise BridgeFailure("invalid_request")
+    if op == "connector_reset":
+        # The name is the service's own, taken from the settings it
+        # published; it becomes one path segment of the reset route,
+        # so it is held to a path segment's alphabet.
+        connector = request.get("connector")
+        if (not isinstance(connector, str)
+                or not _CONNECTOR_NAME.fullmatch(connector)):
             raise BridgeFailure("invalid_request")
     if op == "delete_task":
         # The id is the service's own, taken from the schedule listing it
@@ -2087,6 +2097,110 @@ def decision_answer(approval_id, decision, answer):
     }
 
 
+#: A connector's name as the reset route takes it: one path
+#: segment of letters, digits, dots, underscores and dashes.
+_CONNECTOR_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+#: Bounds on the settings projection: enough pairs to show a
+#: policy, few enough that the answer stays a display, and a
+#: value cap so one long string cannot crowd out the rest.
+SETTINGS_MAX_ENTRIES = 64
+SETTINGS_VALUE_CAP = 200
+
+
+def _settings_scalar(value):
+    """Render one scalar settings value as display text, or None."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value[:SETTINGS_VALUE_CAP]
+    return None
+
+
+def settings_rows(payload):
+    """Project the service's durable policy settings for display.
+
+    Only scalar leaves travel, flattened one level (a section's
+    values as "section.key"); anything deeper, a list, or a null
+    is counted as withheld rather than summarized into words the
+    service never said. Connector names are the keys of the
+    settings' own "connectors" section when it carries one --
+    the only names a reset may address, because they are the
+    names the service itself published.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    entries = []
+    withheld = 0
+
+    def add(label, value):
+        nonlocal withheld
+        text = _settings_scalar(value)
+        if text is None:
+            withheld += 1
+        elif len(entries) < SETTINGS_MAX_ENTRIES:
+            entries.append({"label": label, "value": text})
+        else:
+            withheld += 1
+
+    for key, value in payload.items():
+        if not isinstance(key, str):
+            withheld += 1
+            continue
+        if key == "connectors" and isinstance(value, dict):
+            # The connectors section is represented by its names
+            # (below) and their reset rows, not flattened pairs.
+            continue
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                if isinstance(sub_key, str):
+                    add(f"{key}.{sub_key}", sub_value)
+                else:
+                    withheld += 1
+        else:
+            add(key, value)
+    connectors = []
+    raw_connectors = payload.get("connectors")
+    if isinstance(raw_connectors, dict):
+        connectors = sorted(
+            name for name in raw_connectors
+            if isinstance(name, str) and _CONNECTOR_NAME.fullmatch(name))
+    return {"entries": entries, "connectors": connectors,
+            "withheld": withheld}
+
+
+_SETTINGS_PROBED = False
+
+
+def _probe_settings_shapes(config_dir, payload):
+    """One-shot reconnaissance for the policy settings (Nov 14, 2026).
+
+    `permissions.settings` is a recorded GET no consumer in the
+    pinned source calls, so its body's shape is unrecorded; this
+    records the key structure -- top-level keys and one level of
+    section keys, never values -- once per process. A failure
+    here must never fail the read that carries it.
+    """
+    global _SETTINGS_PROBED
+    if _SETTINGS_PROBED or not config_dir:
+        return
+    _SETTINGS_PROBED = True
+    try:
+        parts = []
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                if isinstance(value, dict):
+                    subs = ",".join(sorted(str(k) for k in value))[:400]
+                    parts.append(f"{key}{{{subs}}}")
+                else:
+                    parts.append(str(key))
+        timing_log(config_dir, "settings-probe keys=" + "|".join(parts)[:1900])
+    except Exception:  # noqa: BLE001 - a probe never fails its read
+        pass
+
+
 def permission_rows(payload):
     """Project the grants the service says are still in force.
 
@@ -2651,6 +2765,38 @@ class Adapter:
             finally:
                 gateway.close()
             return revoke_answer(request["permission_id"], answer)
+        if request["op"] == "policy_settings":
+            # Read-only, on the sentinel service like the grants it
+            # sits beside: the durable settings are the policy the
+            # grants were issued under. The projection keeps the
+            # raw body inside the bridge; only scalar leaves and
+            # the connectors section's own names travel.
+            gateway = sentinel_gateway(self.config)
+            try:
+                payload = gateway.call_json("permissions.settings", timeout=20)
+            finally:
+                gateway.close()
+            _probe_settings_shapes(request.get("config_dir"), payload)
+            return settings_rows(payload)
+        if request["op"] == "connector_reset":
+            # A write on the sentinel service: reset one connector's
+            # grants, once, by the name the settings themselves
+            # published. The route is a path-only DELETE, so one
+            # armed press maps to one reset; whether the connector
+            # then reads as reset is proven by re-reading the
+            # settings, not by this answer. Editing the settings
+            # themselves stays unbuilt: the update route's PATCH
+            # body is recorded nowhere.
+            gateway = sentinel_gateway(self.config)
+            try:
+                gateway.call_json(
+                    "egress.permissions.connector.reset",
+                    path_params={"connector": request["connector"]},
+                    timeout=20,
+                )
+            finally:
+                gateway.close()
+            return {"connector": request["connector"], "accepted": True}
         if request["op"] == "activity":
             return activity_rows(self.client, self.config, request["timeout"])
         if request["op"] == "cancel":

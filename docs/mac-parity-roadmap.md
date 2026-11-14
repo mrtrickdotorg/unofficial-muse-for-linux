@@ -622,7 +622,15 @@ presses are in the live-proof group, and the P5 export probe is in the buildable
   memory mutation route the table does not carry.
 - P8: the agent-browser page — `browser_task.get` answers (an idle task rather than a
   missing route); take-control and stop are unbuilt.
-- P2 policy model: the durable policy store, per-connector reset, and the settings PATCH.
+- P2 policy model: the read half and the one path-only write shipped Nov 14, 2026 --
+  a Policy page under the Menu shows `permissions.settings` projected to scalar pairs
+  (deeper values counted as withheld, never summarized) plus the connectors its own
+  section names, and a named connector's grants can be reset from it
+  (`egress.permissions.connector.reset`, one armed press, state proven by re-read).
+  The settings PATCH itself (`permissions.settings.update`, and likewise
+  `egress.permissions.active.update` and the connector PATCH) stays blocked: their
+  request bodies are recorded nowhere, and the settings-probe line in the next
+  op-timing upload settles the settings body's real shape.
 - P9 remainder: the AT-SPI accessibility pass and a Flatpak beside the AppImage.
 
 **Blocked on an unrecorded write shape (a probe needs Patrick's go; the shape is never
