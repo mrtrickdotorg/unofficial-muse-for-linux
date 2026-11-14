@@ -611,6 +611,7 @@ def validate_request(request):
                "goal_delete": {"goal_id"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
+               "search": {"query"},
                "tasks": set(),
                "artifacts": {"cursor", "seen_refs"},
                "ideas": set(),
@@ -691,6 +692,13 @@ def validate_request(request):
         thread_id = request.get("thread_id")
         if (not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 256
                 or "\x00" in thread_id):
+            raise BridgeFailure("invalid_request")
+    if op == "search":
+        # The reader's own words, sent to the service's search
+        # route; the length bound keeps one request one request.
+        query = request.get("query")
+        if (not isinstance(query, str) or not 1 <= len(query) <= 512
+                or "\x00" in query):
             raise BridgeFailure("invalid_request")
     if op == "space_unshare":
         # The slug is the service's own, taken from the Library
@@ -1328,7 +1336,7 @@ def _artifacts_next_page(gateway, cursor, seen_refs):
 
 LISTING_ID_KEYS = ("id", "goal_id", "unit_id", "idea_card_id", "ideaCardId", "card_id", "idea_id")
 LISTING_TITLE_KEYS = ("title", "name", "headline")
-LISTING_BODY_KEYS = ("body", "description", "summary", "text", "content", "detail", "subtitle")
+LISTING_BODY_KEYS = ("body", "description", "summary", "text", "content", "detail", "snippet", "subtitle")
 LISTING_KIND_KEYS = ("kind", "type", "status", "state")
 LISTING_STAMP_KEYS = ("updated_at", "created_at", "published_at", "date",
                       "updated_at_ms", "created_at_ms")
@@ -1437,6 +1445,72 @@ def listing_rows(payload, container_keys, extras=None):
     """Project a flat read-only listing (goals) into display rows."""
     entries, total = listing_container(payload, container_keys)
     return project_listing_rows(entries, total, extras=extras)
+
+
+_SEARCH_PROBED = False
+
+
+def _probe_search_shapes(config_dir, payload, param):
+    """One-shot reconnaissance for the search surface (Nov 13, 2026).
+
+    `chat.search` is a recorded GET whose parameter name and
+    answer shape no consumer in the pinned source records; the
+    dispatch probes the parameter (see below), and this records
+    the answer's key structure -- the top level and the first
+    row's key names, never values -- plus which parameter the
+    service answered, once per process. A failure here must never
+    fail the search that carries it, so everything is swallowed.
+    """
+    global _SEARCH_PROBED
+    if _SEARCH_PROBED or not config_dir:
+        return
+    _SEARCH_PROBED = True
+    try:
+        parts = ["param:" + str(param)]
+        rows = None
+        if isinstance(payload, dict):
+            parts.append("top:" + ",".join(sorted(payload.keys())))
+            for key in ("results", "items", "matches", "hits",
+                        "conversations", "threads", "data"):
+                if isinstance(payload.get(key), list):
+                    rows = payload[key]
+                    break
+        elif isinstance(payload, list):
+            rows = payload
+        if isinstance(rows, list):
+            parts.append("rows={}".format(len(rows)))
+            if rows and isinstance(rows[0], dict):
+                parts.append("row:" + ",".join(sorted(rows[0].keys())))
+        timing_log(config_dir, "search-probe " + " | ".join(parts)[:600])
+    except Exception:
+        pass
+
+
+def search_rows(payload):
+    """Project a chat.search answer into openable result rows.
+
+    The answer's shape is unrecorded, so the container hunt is the
+    tolerant listing one; what is NOT tolerated is a result with
+    no conversation to open -- its id may ride under any of the
+    usual alias keys, and a row carrying none is dropped here
+    rather than listed as a conversation it cannot open.
+    """
+    entries, total = listing_container(
+        payload, ("results", "items", "matches", "hits",
+                  "conversations", "threads", "data"))
+    normalized = []
+    for row, kind_fallback, stamp_fallback in entries:
+        if isinstance(row, dict) and not optional_text(row.get("id")):
+            row = dict(row)
+            for alias in ("session_id", "thread_id", "chat_id", "conversation_id"):
+                if optional_text(row.get(alias)):
+                    row["id"] = row[alias]
+                    break
+        normalized.append((row, kind_fallback, stamp_fallback))
+    result = project_listing_rows(normalized, total)
+    result["items"] = [item for item in result["items"] if item.get("id")]
+    result["recognized"] = len(result["items"])
+    return result
 
 
 def _iso_from_epoch(value):
@@ -2228,6 +2302,31 @@ class Adapter:
                 return {"total_count": total_hint or 0, "has_more": False,
                         "next_cursor": None, "artifacts": [],
                         "paging": "unavailable"}
+        if request["op"] == "search":
+            # A read on the reader's own words. The route is
+            # recorded; its query parameter's name is not -- no
+            # consumer in the pinned source calls it. So the
+            # parameter is probed, not guessed: the conventional
+            # names in turn, and the first the service answers
+            # without error is the one used. If both are refused,
+            # the refusal is the answer and surfaces as itself.
+            with self.client._gateway(self.config) as gateway:
+                payload = None
+                used = None
+                refusal = None
+                for param in ("q", "query"):
+                    try:
+                        payload = gateway.call_json(
+                            "chat.search",
+                            query={param: request["query"]}, timeout=20)
+                        used = param
+                        break
+                    except Exception as error:  # noqa: BLE001 - re-raised below
+                        refusal = error
+                if payload is None:
+                    raise refusal
+            _probe_search_shapes(request.get("config_dir"), payload, used)
+            return search_rows(payload)
         if request["op"] == "space_unshare":
             # A write on the shared gateway: stop sharing one space,
             # once. The route is a path-only DELETE (the slug from

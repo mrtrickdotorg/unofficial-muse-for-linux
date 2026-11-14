@@ -795,6 +795,20 @@ impl AccountClient {
             false,
         )
     }
+    /// Search the account's conversations for the reader's own
+    /// words, read-only.
+    ///
+    /// The route is recorded; its query parameter's name is not,
+    /// so the bridge probes the conventional names and uses the
+    /// first the service answers (see the bridge's search
+    /// dispatch). Results carry the conversation they belong to,
+    /// so a result can be opened.
+    pub fn search(&self, query: &str) -> Result<ServiceListing, AccountError> {
+        if query.is_empty() || query.len() > 512 || query.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(serde_json::json!({"op": "search", "query": query}), false)
+    }
     /// List the account's idea cards, read-only.
     ///
     /// Executing or rating a card is a write; this client only reads.
