@@ -2303,8 +2303,17 @@ fn append_chat_grouped(
 /// the first words replace the dots. The pulse is pure CSS
 /// (`.think-dot` keyframes, staggered delays), so the animation
 /// costs no main-loop work -- and a frozen frame would freeze the
-/// dots visibly rather than hide a stall.
-fn append_thinking_grouped(container: &gtk::Box, stamp: Option<String>, avatar_initial: &str) {
+/// dots visibly rather than hide a stall. A reported working
+/// status rides as a small caption under the dots (Patrick,
+/// Nov 14, 2026: the status words alone, rendered as a message
+/// row, read as a reply that just says "is starting" -- the
+/// bubbles are the thinking indicator, the words are its caption).
+fn append_thinking_grouped(
+    container: &gtk::Box,
+    stamp: Option<String>,
+    avatar_initial: &str,
+    caption: Option<&str>,
+) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.set_hexpand(true);
     row.set_margin_start(12);
@@ -2332,6 +2341,13 @@ fn append_thinking_grouped(container: &gtk::Box, stamp: Option<String>, avatar_i
         dots.append(&dot);
     }
     bubble.append(&dots);
+    if let Some(caption_text) = caption {
+        let caption = gtk::Label::new(Some(caption_text));
+        caption.set_xalign(0.0);
+        caption.set_halign(gtk::Align::Start);
+        caption.add_css_class("message-meta");
+        bubble.append(&caption);
+    }
     if let Some(stamp_text) = stamp {
         let stamp = gtk::Label::new(Some(&stamp_text));
         stamp.set_xalign(0.0);

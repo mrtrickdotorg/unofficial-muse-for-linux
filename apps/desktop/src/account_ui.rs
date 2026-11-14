@@ -6026,13 +6026,15 @@ mod native {
                         );
                     }
                     BubbleBody::Status(status) => {
-                        super::super::append_chat_grouped(
+                        // The web's shape (Patrick, Nov 14, 2026):
+                        // the animated bubble is the indicator; the
+                        // status is a small caption under its dots,
+                        // never a message row of its own.
+                        super::super::append_thinking_grouped(
                             &self.bubble_box,
-                            super::super::ChatRole::Assistant,
-                            &super::presentation_text(status),
                             bubble_stamp,
                             &avatar_initial,
-                            false,
+                            Some(&super::presentation_text(status)),
                         );
                     }
                     BubbleBody::Dots => {
@@ -6040,6 +6042,7 @@ mod native {
                             &self.bubble_box,
                             bubble_stamp,
                             &avatar_initial,
+                            None,
                         );
                     }
                 }
@@ -7786,10 +7789,14 @@ mod native {
             );
             page.ui.state.borrow_mut().live_status = "Agent \u{00b7} Running a command".into();
             page.ui.render();
-            assert_eq!(dot_count(&page), 0, "a reported status replaces the dots");
+            assert_eq!(
+                dot_count(&page),
+                3,
+                "a reported status captions the dots, never replaces them"
+            );
             assert!(
                 has_text(&page, "Running a command"),
-                "the status text should be the bubble's content"
+                "the status text should ride as the bubble's caption"
             );
             page.ui.state.borrow_mut().live_draft = "Partial reply".into();
             page.ui.render();
