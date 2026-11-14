@@ -1725,9 +1725,10 @@ fn build_ui(app: &gtk::Application) {
         let create = create_nav.clone();
         let feed = feed_nav.clone();
         let setup_for_menu = account_page.settings.clone();
-        // The web's Menu is a dropdown, not a jump: account settings and the
-        // agent's memory sit one level down, which is also why the rail
-        // carries no item of its own for either.
+        // The web's Menu is a dropdown, not a jump: account settings, the
+        // local host (this machine, and what the agent may reach on it) and
+        // the agent's memory sit one level down, which is also why the rail
+        // carries no item of its own for any of them.
         let popover = gtk::Popover::new();
         popover.set_parent(&menu_button);
         popover.set_has_arrow(false);
@@ -1737,10 +1738,17 @@ fn build_ui(app: &gtk::Application) {
         let account_row = gtk::Button::with_label("Account and sign-in");
         account_row.add_css_class("flat");
         account_row.set_widget_name("menu-account");
+        let host_row = gtk::Button::with_label("Local host");
+        host_row.add_css_class("flat");
+        host_row.set_widget_name("menu-host");
+        host_row.set_tooltip_text(Some(
+            "Register this machine, grant folders, and answer the agent's requests",
+        ));
         let memory_row = gtk::Button::with_label("Agent memory");
         memory_row.add_css_class("flat");
         memory_row.set_widget_name("menu-memory");
         rows.append(&account_row);
+        rows.append(&host_row);
         rows.append(&memory_row);
         popover.set_child(Some(&rows));
         {
@@ -1769,6 +1777,33 @@ fn build_ui(app: &gtk::Application) {
                     "chats",
                 );
                 setup_for_menu.set_expanded(true);
+                popover.popdown();
+            });
+        }
+        {
+            let stack = stack.clone();
+            let title = title.clone();
+            let chats = chats.clone();
+            let library = library.clone();
+            let ideas = ideas.clone();
+            let goals = goals.clone();
+            let create = create.clone();
+            let feed = feed.clone();
+            let popover = popover.clone();
+            host_row.connect_clicked(move |_| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "host",
+                );
                 popover.popdown();
             });
         }
