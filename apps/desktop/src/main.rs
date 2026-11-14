@@ -124,7 +124,7 @@ button.panel-toggle { min-width: 30px; min-height: 30px; padding: 2px 7px; font-
 .section-heading { font-weight: 600; font-size: 18px; color: #f4f4f6; padding-top: 11px; }
 .title-2 { font-weight: 600; font-size: 18px; color: #f4f4f6; }
 .settings-disclosure { background-color: #17171c; border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 17px; padding: 12px 17px; }
-.welcome-card { background-image: linear-gradient(180deg, #1e1e28, #17171d); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 19px; padding: 24px; }
+.welcome-card { background-image: linear-gradient(180deg, #1e1e28, #17171d); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 19px; padding: 18px; }
 .welcome-title { color: #f4f4f6; font-size: 27px; font-weight: 700; }
 .welcome-copy { color: #c9c9d1; }
 .settings-content { padding: 10px 2px 4px; }
