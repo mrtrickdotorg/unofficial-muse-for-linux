@@ -37,13 +37,48 @@ pub const KEYSYM_MAX: u32 = 0x1fff_ffff;
 /// The only desktop actions this broker can approve.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    Screenshot { max_bytes: u32 },
-    RelativePointerMotion { dx: f64, dy: f64 },
-    PointerButton { button: u16, state: u8 },
-    SmoothScroll { dx: f64, dy: f64 },
-    DiscreteScroll { dx: i32, dy: i32 },
-    KeyboardKeysym { keysym: u32, state: u8 },
-    KeyboardKeycode { keycode: u16, state: u8 },
+    Screenshot {
+        max_bytes: u32,
+    },
+    RelativePointerMotion {
+        dx: f64,
+        dy: f64,
+    },
+    PointerButton {
+        button: u16,
+        state: u8,
+    },
+    /// A press immediately followed by its release, approved as
+    /// one action. A bare press leaves the button or key logically
+    /// held -- a held key autorepeats, as the first live keyboard
+    /// test demonstrated -- so the paired tap is the shape a
+    /// one-shot approval takes; the press/release variants stay
+    /// for callers that truly mean to hold.
+    PointerButtonTap {
+        button: u16,
+    },
+    SmoothScroll {
+        dx: f64,
+        dy: f64,
+    },
+    DiscreteScroll {
+        dx: i32,
+        dy: i32,
+    },
+    KeyboardKeysym {
+        keysym: u32,
+        state: u8,
+    },
+    KeyboardKeysymTap {
+        keysym: u32,
+    },
+    KeyboardKeycode {
+        keycode: u16,
+        state: u8,
+    },
+    KeyboardKeycodeTap {
+        keycode: u16,
+    },
 }
 
 /// Actions intentionally unavailable to this first policy implementation.
@@ -107,10 +142,13 @@ pub enum ActionName {
     Screenshot,
     RelativePointerMotion,
     PointerButton,
+    PointerButtonTap,
     SmoothScroll,
     DiscreteScroll,
     KeyboardKeysym,
+    KeyboardKeysymTap,
     KeyboardKeycode,
+    KeyboardKeycodeTap,
 }
 
 impl fmt::Display for ActionName {
@@ -119,10 +157,13 @@ impl fmt::Display for ActionName {
             Self::Screenshot => "screenshot",
             Self::RelativePointerMotion => "pointer-motion",
             Self::PointerButton => "pointer-button",
+            Self::PointerButtonTap => "pointer-button-tap",
             Self::SmoothScroll => "smooth-scroll",
             Self::DiscreteScroll => "discrete-scroll",
             Self::KeyboardKeysym => "keyboard-keysym",
+            Self::KeyboardKeysymTap => "keyboard-keysym-tap",
             Self::KeyboardKeycode => "keyboard-keycode",
+            Self::KeyboardKeycodeTap => "keyboard-keycode-tap",
         };
         formatter.write_str(name)
     }
@@ -180,6 +221,16 @@ pub fn validate_action(action: &Action) -> Result<ActionMetadata, ActionValidati
                 requires_fresh_approval: true,
             }
         }
+        Action::PointerButtonTap { button } => {
+            if *button < EVDEV_BUTTON_MIN || *button > EVDEV_CODE_MAX {
+                return Err(ActionValidationError::InvalidButton);
+            }
+            ActionMetadata {
+                name: ActionName::PointerButtonTap,
+                read_only: false,
+                requires_fresh_approval: true,
+            }
+        }
         Action::KeyboardKeysym { keysym, state } => {
             if *keysym > KEYSYM_MAX {
                 return Err(ActionValidationError::InvalidKeysym);
@@ -187,6 +238,26 @@ pub fn validate_action(action: &Action) -> Result<ActionMetadata, ActionValidati
             validate_state(*state)?;
             ActionMetadata {
                 name: ActionName::KeyboardKeysym,
+                read_only: false,
+                requires_fresh_approval: true,
+            }
+        }
+        Action::KeyboardKeysymTap { keysym } => {
+            if *keysym > KEYSYM_MAX {
+                return Err(ActionValidationError::InvalidKeysym);
+            }
+            ActionMetadata {
+                name: ActionName::KeyboardKeysymTap,
+                read_only: false,
+                requires_fresh_approval: true,
+            }
+        }
+        Action::KeyboardKeycodeTap { keycode } => {
+            if *keycode > EVDEV_CODE_MAX {
+                return Err(ActionValidationError::InvalidKeycode);
+            }
+            ActionMetadata {
+                name: ActionName::KeyboardKeycodeTap,
                 read_only: false,
                 requires_fresh_approval: true,
             }
@@ -370,10 +441,13 @@ enum ActionSummary {
     Screenshot { max_bytes: u32 },
     RelativePointerMotion { dx: f64, dy: f64 },
     PointerButton { button: u16, state: u8 },
+    PointerButtonTap { button: u16 },
     SmoothScroll { dx: f64, dy: f64 },
     DiscreteScroll { dx: i32, dy: i32 },
     KeyboardKeysym { keysym: u32, state: u8 },
+    KeyboardKeysymTap { keysym: u32 },
     KeyboardKeycode { keycode: u16, state: u8 },
+    KeyboardKeycodeTap { keycode: u16 },
 }
 
 /// Redacted, allow-listed activity event. It contains only action names and
@@ -416,6 +490,9 @@ impl fmt::Display for ActivityEvent {
             ActionSummary::PointerButton { button, state } => {
                 write!(formatter, "button={button} state={state}")
             }
+            ActionSummary::PointerButtonTap { button } => {
+                write!(formatter, "button={button} tap")
+            }
             ActionSummary::SmoothScroll { dx, dy } => {
                 write!(formatter, "dx={dx:.3} dy={dy:.3}")
             }
@@ -424,6 +501,12 @@ impl fmt::Display for ActivityEvent {
             }
             ActionSummary::KeyboardKeysym { keysym, state } => {
                 write!(formatter, "keysym={keysym} state={state}")
+            }
+            ActionSummary::KeyboardKeysymTap { keysym } => {
+                write!(formatter, "keysym={keysym} tap")
+            }
+            ActionSummary::KeyboardKeycodeTap { keycode } => {
+                write!(formatter, "keycode={keycode} tap")
             }
             ActionSummary::KeyboardKeycode { keycode, state } => {
                 write!(formatter, "keycode={keycode} state={state}")
@@ -437,10 +520,13 @@ fn action_name(action: &Action) -> ActionName {
         Action::Screenshot { .. } => ActionName::Screenshot,
         Action::RelativePointerMotion { .. } => ActionName::RelativePointerMotion,
         Action::PointerButton { .. } => ActionName::PointerButton,
+        Action::PointerButtonTap { .. } => ActionName::PointerButtonTap,
         Action::SmoothScroll { .. } => ActionName::SmoothScroll,
         Action::DiscreteScroll { .. } => ActionName::DiscreteScroll,
         Action::KeyboardKeysym { .. } => ActionName::KeyboardKeysym,
+        Action::KeyboardKeysymTap { .. } => ActionName::KeyboardKeysymTap,
         Action::KeyboardKeycode { .. } => ActionName::KeyboardKeycode,
+        Action::KeyboardKeycodeTap { .. } => ActionName::KeyboardKeycodeTap,
     }
 }
 
@@ -456,12 +542,19 @@ fn action_summary(action: &Action) -> ActionSummary {
             button: *button,
             state: *state,
         },
+        Action::PointerButtonTap { button } => ActionSummary::PointerButtonTap { button: *button },
         Action::SmoothScroll { dx, dy } => ActionSummary::SmoothScroll { dx: *dx, dy: *dy },
         Action::DiscreteScroll { dx, dy } => ActionSummary::DiscreteScroll { dx: *dx, dy: *dy },
         Action::KeyboardKeysym { keysym, state } => ActionSummary::KeyboardKeysym {
             keysym: *keysym,
             state: *state,
         },
+        Action::KeyboardKeysymTap { keysym } => {
+            ActionSummary::KeyboardKeysymTap { keysym: *keysym }
+        }
+        Action::KeyboardKeycodeTap { keycode } => {
+            ActionSummary::KeyboardKeycodeTap { keycode: *keycode }
+        }
         Action::KeyboardKeycode { keycode, state } => ActionSummary::KeyboardKeycode {
             keycode: *keycode,
             state: *state,
