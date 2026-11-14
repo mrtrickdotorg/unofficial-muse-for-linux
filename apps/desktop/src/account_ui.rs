@@ -2390,7 +2390,19 @@ mod native {
         );
         disconnect_note.add_css_class("dim-label");
         welcome.append(&disconnect_note);
-        root.append(&welcome);
+        // The card is 684px tall at the shell's width; left as a plain
+        // child it becomes the whole page's minimum height and the window
+        // opens at 923 instead of its 700 default. A scroller with a
+        // natural-height request keeps the card looking the same in a
+        // tall window while the card itself scrolls when the window is
+        // short, instead of the window growing to fit it.
+        let welcome_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .build();
+        welcome_scroll.set_child(Some(&welcome));
+        root.append(&welcome_scroll);
 
         let settings = gtk::Expander::new(Some("Advanced: interpreter and session folder"));
         settings.add_css_class("settings-disclosure");
