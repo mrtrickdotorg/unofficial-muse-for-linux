@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -610,8 +610,9 @@ def validate_request(request):
                "feed_react": {"unit_id", "reaction"},
                "goal_delete": {"goal_id"},
                "mark_seen": {"thread_id"},
+               "space_unshare": {"slug"},
                "tasks": set(),
-               "artifacts": set(),
+               "artifacts": {"cursor", "seen_refs"},
                "ideas": set(),
                "goals": set(),
                "feed": set(),
@@ -690,6 +691,27 @@ def validate_request(request):
         thread_id = request.get("thread_id")
         if (not isinstance(thread_id, str) or not 1 <= len(thread_id) <= 256
                 or "\x00" in thread_id):
+            raise BridgeFailure("invalid_request")
+    if op == "space_unshare":
+        # The slug is the service's own, taken from the Library
+        # listing's open target; it is one path segment, so a
+        # slash would be aiming the route somewhere else.
+        slug = request.get("slug")
+        if (not isinstance(slug, str) or not 1 <= len(slug) <= 256
+                or "\x00" in slug or "/" in slug):
+            raise BridgeFailure("invalid_request")
+    if op == "artifacts" and "cursor" in request:
+        # A paging request hands back the opaque cursor the last
+        # page issued, plus the references already shown so the
+        # continuation can be proven rather than assumed.
+        cursor = request.get("cursor")
+        if (not isinstance(cursor, str) or not 1 <= len(cursor) <= 2048
+                or "\x00" in cursor):
+            raise BridgeFailure("invalid_request")
+        seen_refs = request.get("seen_refs")
+        if (not isinstance(seen_refs, list) or len(seen_refs) > 500
+                or any(not isinstance(ref, str) or len(ref) > 300
+                       or "\x00" in ref for ref in seen_refs)):
             raise BridgeFailure("invalid_request")
     if op == "idea_execute":
         # The id is the service's own, taken from the idea-cards
@@ -1166,7 +1188,8 @@ def sentinel_gateway(config):
 
 
 ARTIFACT_FIELDS = ("artifact_ref", "title", "kind", "format", "status", "placement",
-                   "path", "updated_at_ms", "pinned", "can_open", "can_share")
+                   "path", "target_kind", "slug", "updated_at_ms", "pinned",
+                   "can_open", "can_share")
 
 
 def artifact_rows(payload):
@@ -1175,9 +1198,16 @@ def artifact_rows(payload):
     `artifacts.list` answers 50 edges per page with opaque cursors, so only the
     fields a list and a viewer need travel: the reference the service itself
     uses, the name a person sees, and the capability flags that say what the
-    service would allow. The cursor stays in the bridge. A row without a
-    reference or a name fails closed: an unnamed artifact can be neither shown
-    nor opened, and silently dropping it would understate the Library.
+    service would allow. A row without a reference or a name fails closed: an
+    unnamed artifact can be neither shown nor opened, and silently dropping it
+    would understate the Library.
+
+    The page's last cursor travels as `next_cursor`: paging is impossible
+    without handing it back verbatim, so the client holds it between presses
+    as an opaque token -- never displayed, never logged, never interpreted.
+    A space row's handle is its open target's slug (the recorded shape:
+    `open_target {kind: space, slug}`), projected alongside the target kind
+    so the page can offer the space actions the routes allow.
     """
     if not isinstance(payload, dict):
         raise BridgeFailure("protocol_error")
@@ -1207,6 +1237,8 @@ def artifact_rows(payload):
             "status": optional_text(node.get("status")),
             "placement": optional_text(node.get("placement")),
             "path": optional_text(target.get("path")),
+            "target_kind": optional_text(target.get("kind")),
+            "slug": optional_text(target.get("slug")),
             "updated_at_ms": updated if isinstance(updated, int)
             and not isinstance(updated, bool) else None,
             "pinned": node.get("is_pinned") is True,
@@ -1214,8 +1246,84 @@ def artifact_rows(payload):
             "can_share": capabilities.get("can_share") is True,
         })
     page = payload.get("page_info") if isinstance(payload.get("page_info"), dict) else {}
+    last_cursor = None
+    if edges and isinstance(edges[-1], dict):
+        cursor = edges[-1].get("cursor")
+        if isinstance(cursor, str) and cursor:
+            last_cursor = cursor
     return {"total_count": total, "has_more": page.get("has_next_page") is True,
-            "artifacts": rows}
+            "next_cursor": last_cursor, "artifacts": rows}
+
+
+_SPACES_PROBED = False
+
+
+def _probe_spaces_shapes(config_dir, gateway):
+    """One-shot reconnaissance for the spaces surface (Nov 13, 2026).
+
+    `spaces.list` answered a live probe on Nov 6, but its row shape
+    was never written down, and the delete routes cannot be routed
+    honestly without knowing which fields carry ownership and
+    sharing state. Record the key structure only -- the top level
+    and the first row's key names, never values -- once per
+    process. A failure here must never fail the Library read that
+    carries it, so everything is swallowed.
+    """
+    global _SPACES_PROBED
+    if _SPACES_PROBED or not config_dir:
+        return
+    _SPACES_PROBED = True
+    try:
+        payload = gateway.call_json("spaces.list", timeout=8)
+        parts = []
+        rows = None
+        if isinstance(payload, dict):
+            parts.append("top:" + ",".join(sorted(payload.keys())))
+            for key in ("spaces", "items", "results", "data"):
+                if isinstance(payload.get(key), list):
+                    rows = payload[key]
+                    break
+        elif isinstance(payload, list):
+            rows = payload
+        if isinstance(rows, list):
+            parts.append("rows={}".format(len(rows)))
+            if rows and isinstance(rows[0], dict):
+                parts.append("row:" + ",".join(sorted(rows[0].keys())))
+        timing_log(config_dir, "spaces-probe " + " | ".join(parts)[:600])
+    except Exception:
+        pass
+
+
+def _artifacts_next_page(gateway, cursor, seen_refs):
+    """Fetch the page after `cursor`, proving it continues the list.
+
+    The route's paging parameter is recorded nowhere -- the payload
+    carries cursors, but no consumer in the pinned source ever
+    sends one back. So this is a probe with a proof, not a guess
+    shipped as fact: try the two conventional names as read-only
+    calls, and accept a response only when its rows demonstrably
+    continue the accumulated list (at least one reference the
+    reader has not seen). A parameter the service ignores answers
+    with the first page again, which fails the proof; a parameter
+    it rejects fails the call. Returns (page, total) with the page
+    None when neither candidate continued the list; the total is
+    the last candidate's own, for the caller's summary.
+    """
+    seen = set(seen_refs)
+    total_hint = None
+    for param in ("after", "cursor"):
+        try:
+            payload = gateway.call_json(
+                "artifacts.list", query={param: cursor}, timeout=20)
+            page = artifact_rows(payload)
+        except Exception:
+            continue
+        total_hint = page["total_count"]
+        refs = {row["artifact_ref"] for row in page["artifacts"]}
+        if refs - seen:
+            page["paging"] = "continued"
+            return page, total_hint
+    return None, total_hint
 
 
 LISTING_ID_KEYS = ("id", "goal_id", "unit_id", "idea_card_id", "ideaCardId", "card_id", "idea_id")
@@ -2101,12 +2209,42 @@ class Adapter:
             return {"session_id": request["session_id"], "kind": kind,
                     "accepted": True}
         if request["op"] == "artifacts":
-            # One read of the Library listing. Listing is never consent: nothing
-            # here opens, shares or deletes, and the projection keeps the cursor
-            # and the raw node shape inside the bridge.
+            # Reads of the Library listing. Listing is never consent: nothing
+            # here opens, shares or deletes. Without a cursor this is the
+            # first page; with one, it is the proven continuation the
+            # paging helper accepts (see _artifacts_next_page) -- when
+            # neither candidate parameter continues the list, the
+            # answer says paging is unavailable instead of repeating
+            # the first page as though it were the second.
             with self.client._gateway(self.config) as gateway:
-                payload = gateway.call_json("artifacts.list", timeout=20)
-            return artifact_rows(payload)
+                if "cursor" not in request:
+                    payload = gateway.call_json("artifacts.list", timeout=20)
+                    _probe_spaces_shapes(request.get("config_dir"), gateway)
+                    return artifact_rows(payload)
+                page, total_hint = _artifacts_next_page(
+                    gateway, request["cursor"], request.get("seen_refs") or [])
+                if page is not None:
+                    return page
+                return {"total_count": total_hint or 0, "has_more": False,
+                        "next_cursor": None, "artifacts": [],
+                        "paging": "unavailable"}
+        if request["op"] == "space_unshare":
+            # A write on the shared gateway: stop sharing one space,
+            # once. The route is a path-only DELETE (the slug from
+            # the listing's own open target). The answer's shape is
+            # not recorded, so acceptance is the call not failing;
+            # whether the space now reads as unshared is proven by
+            # re-reading, not by this answer. Deleting a space is
+            # deliberately NOT offered yet: the table also carries a
+            # saved-space variant, and which one a row needs depends
+            # on ownership fields whose names the spaces probe is
+            # still to settle.
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(
+                    "spaces.unshare",
+                    path_params={"slug": request["slug"]},
+                )
+            return {"slug": request["slug"], "accepted": True}
         if request["op"] == "ideas":
             # Read-only: the idea cards the service recorded a list route
             # for. Executing or rating a card is a write and stays out of

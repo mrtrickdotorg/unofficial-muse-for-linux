@@ -233,6 +233,16 @@ pub struct ArtifactSummary {
     pub placement: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
+    /// The open target's kind ("file", "space", ...), when the
+    /// listing gave one; a space row is recognised by this, not
+    /// by its format word.
+    #[serde(default)]
+    pub target_kind: Option<String>,
+    /// A space row's handle: the slug its open target names.
+    /// Space actions address the space by this, never by the
+    /// artifact reference.
+    #[serde(default)]
+    pub slug: Option<String>,
     #[serde(default)]
     pub updated_at_ms: Option<i64>,
     pub pinned: bool,
@@ -241,12 +251,21 @@ pub struct ArtifactSummary {
 }
 /// One page of the Library listing.
 ///
-/// `has_more` is the service's pagination answer; the cursor itself stays in the
-/// bridge, so holding a page cannot leak a token into the window or the log.
+/// `has_more` is the service's pagination answer. `next_cursor`
+/// is the page's own opaque continuation token: the client holds
+/// it only to hand back verbatim on the next page request, and
+/// never displays, logs or interprets it. `paging` is set on a
+/// follow-up page: "continued" when the bridge proved the page
+/// continues the list, "unavailable" when no candidate paging
+/// parameter did.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactList {
     pub total_count: u64,
     pub has_more: bool,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub paging: Option<String>,
     #[serde(default)]
     pub artifacts: Vec<ArtifactSummary>,
 }
@@ -520,6 +539,16 @@ pub struct GoalDeleteAnswer {
     pub deleted: Option<bool>,
 }
 
+/// What the service said about a space unsharing it took.
+///
+/// Acceptance only: whether the space now reads as unshared is
+/// proven by re-reading the Library, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceUnshareAnswer {
+    pub slug: String,
+    pub accepted: bool,
+}
+
 /// What the service said about a mark-as-read it took.
 ///
 /// Acceptance only: whether the thread now reads as seen is
@@ -719,10 +748,52 @@ impl AccountClient {
     /// List the account's Library, read-only.
     ///
     /// Listing is never consent: nothing here opens, shares, renames or deletes,
-    /// and the bridge projects one page into narrow rows so no cursor or raw
+    /// and the bridge projects one page into narrow rows so no raw
     /// node payload reaches the window.
     pub fn artifacts(&self) -> Result<ArtifactList, AccountError> {
         self.request(serde_json::json!({"op": "artifacts"}), false)
+    }
+    /// Fetch the Library page after a cursor a previous page
+    /// issued, with the references already shown.
+    ///
+    /// The cursor is opaque: it is handed back verbatim, never
+    /// interpreted. The seen references are the proof material --
+    /// the bridge accepts a candidate page only when its rows
+    /// demonstrably continue the list, so a paging parameter the
+    /// service ignores cannot pass the first page off as the
+    /// second. A page whose `paging` reads "unavailable" carries
+    /// no rows: the service did not page.
+    pub fn artifacts_page(
+        &self,
+        cursor: &str,
+        seen_refs: &[String],
+    ) -> Result<ArtifactList, AccountError> {
+        if cursor.is_empty() || cursor.len() > 2048 || cursor.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if seen_refs.len() > 500 {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "artifacts", "cursor": cursor, "seen_refs": seen_refs}),
+            false,
+        )
+    }
+    /// Stop sharing exactly one space, once.
+    ///
+    /// The slug must be one the Library listing's open target
+    /// published, and the bridge makes a single path-only DELETE,
+    /// so one confirmed press maps to one write. Whether the
+    /// space then reads as unshared is proven by re-reading the
+    /// Library, never by this answer.
+    pub fn space_unshare(&self, slug: &str) -> Result<SpaceUnshareAnswer, AccountError> {
+        if slug.is_empty() || slug.len() > 256 || slug.contains('\0') || slug.contains('/') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "space_unshare", "slug": slug}),
+            false,
+        )
     }
     /// List the account's idea cards, read-only.
     ///

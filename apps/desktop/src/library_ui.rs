@@ -1,17 +1,21 @@
-//! Read-only Library page: the artifacts the connected account has saved.
+//! Library page: the artifacts and spaces the connected account has saved.
 //!
-//! Listing is never consent. This page reads `artifacts.list` once per explicit
-//! refresh, on a worker thread, and cannot open, download, rename, share or
-//! delete anything: those actions stay on the Muse side. Rows are ordered
-//! pinned-first because a pin is a choice the person made and a recency sort
-//! would bury it, and the notice repeats the service's own total so a page of
-//! 50 never reads as the whole Library.
+//! Listing is never consent. The page reads `artifacts.list` when it becomes
+//! visible and on explicit refresh, on a worker thread. Paging follows the
+//! service's own pagination answer: "Show more" hands the bridge the cursor
+//! the last page issued plus the references already shown, and the bridge
+//! accepts a follow-up page only when its rows provably continue the list.
+//! A space row can be unshared from here — one armed press, one write, then
+//! a re-read to prove the state. Opening, downloading and deleting stay on
+//! the Muse side. Rows are ordered pinned-first because a pin is a choice
+//! the person made and a recency sort would bury it, and the notice repeats
+//! the service's own total so a page of 50 never reads as the whole Library.
 
 use crate::local_host::AccountContext;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use muse_account::{AccountClient, AccountError, ArtifactList, ArtifactSummary, ErrorCode};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -28,10 +32,26 @@ pub struct LibraryPage {
 pub(super) struct Ui {
     epoch: Cell<u64>,
     busy: Cell<bool>,
+    acting: Cell<bool>,
     context: AccountContext,
     list: gtk::ListBox,
     notice: gtk::Label,
     spinner: gtk::Spinner,
+    more: gtk::Button,
+    /// Every row read so far, in the service's own order; the
+    /// display sorts a copy, so paging appends never reshuffle
+    /// what earlier pages established.
+    rows: RefCell<Vec<ArtifactSummary>>,
+    total: Cell<u64>,
+    has_more: Cell<bool>,
+    /// The service said there is more, but no candidate paging
+    /// parameter continued the list; "Show more" retires for
+    /// this read rather than repeating the first page.
+    paging_dead: Cell<bool>,
+    next_cursor: RefCell<Option<String>>,
+    /// The slug whose Unshare press is armed, if any. Arming is
+    /// the confirmation: the second press on the same row sends.
+    armed: RefCell<Option<String>>,
 }
 
 fn label(text: &str) -> gtk::Label {
@@ -83,6 +103,19 @@ pub(super) fn row_text(row: &ArtifactSummary) -> String {
     )
 }
 
+/// The slug a row's space actions address, when the row is a
+/// space: the open target is the recorded discriminator (a file
+/// row's target kind is "file"), and the slug is the handle its
+/// routes take. A space row without a slug gets no action --
+/// there would be nothing honest to address.
+pub(super) fn space_slug(row: &ArtifactSummary) -> Option<&str> {
+    if row.target_kind.as_deref() == Some("space") {
+        row.slug.as_deref().filter(|slug| !slug.is_empty())
+    } else {
+        None
+    }
+}
+
 /// What the last read reported, in the service's own terms. The total is the
 /// service's, the count is this page's, and "more" is the service's pagination
 /// answer rather than a guess from the page size.
@@ -99,6 +132,16 @@ pub(super) fn summary_text(page: &ArtifactList, shown: usize) -> String {
         text.push_str(" · the service has more than this page");
     }
     text
+}
+
+/// The sentence appended when the service has more rows but
+/// paging did not continue: an honest stop, not a silent one.
+pub(super) fn paging_note(paging_dead: bool, has_more: bool) -> &'static str {
+    if paging_dead && has_more {
+        " Paging did not continue past this page, so the rest stays on the Muse side for now."
+    } else {
+        ""
+    }
 }
 
 /// Map a typed failure to a sentence. The error's own text never reaches the
@@ -143,19 +186,62 @@ impl Ui {
         }
     }
 
-    fn render(&self, rows: &[ArtifactSummary]) {
+    fn render(&self, ui: &Rc<Ui>) {
         while let Some(row) = self.list.first_child() {
             self.list.remove(&row);
         }
-        for row in rows {
-            self.list.append(&label(&row_text(row)));
+        let armed = self.armed.borrow().clone();
+        for row in order_rows(self.rows.borrow().clone()) {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let text = label(&row_text(&row));
+            text.set_hexpand(true);
+            line.append(&text);
+            if let Some(slug) = space_slug(&row) {
+                let is_armed = armed.as_deref() == Some(slug);
+                let button = gtk::Button::with_label(if is_armed {
+                    "Confirm unshare"
+                } else {
+                    "Unshare"
+                });
+                button.set_widget_name(&format!("space-unshare:{slug}"));
+                if is_armed {
+                    button.add_css_class("destructive-action");
+                }
+                let slug = slug.to_string();
+                let title = row.title.clone();
+                let weak = Rc::downgrade(ui);
+                button.connect_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.unshare_press(&ui, &slug, &title);
+                    }
+                });
+                line.append(&button);
+            }
+            self.list.append(&line);
         }
+        self.more.set_visible(
+            self.has_more.get() && !self.paging_dead.get() && self.next_cursor.borrow().is_some(),
+        );
+    }
+
+    fn summary(&self) -> String {
+        let accumulated = self.rows.borrow();
+        let page = ArtifactList {
+            total_count: self.total.get(),
+            has_more: self.has_more.get() && !self.paging_dead.get(),
+            next_cursor: None,
+            paging: None,
+            artifacts: accumulated.clone(),
+        };
+        let mut text = summary_text(&page, accumulated.len());
+        text.push_str(paging_note(self.paging_dead.get(), self.has_more.get()));
+        text
     }
 
     fn refresh(&self, ui: &Rc<Ui>) {
-        if self.busy.get() {
+        if self.busy.get() || self.acting.get() {
             self.notice
-                .set_text("A Library read is already running. Wait for it to finish.");
+                .set_text("The Library is already working. Wait for it to finish.");
             return;
         }
         let Some(config) = (self.context)() else {
@@ -173,7 +259,38 @@ impl Ui {
             let result = AccountClient::new(config).artifacts();
             let _ = tx.send(result);
         });
-        self.poll(ui, rx, epoch);
+        self.poll(ui, rx, epoch, false);
+    }
+
+    fn show_more(&self, ui: &Rc<Ui>) {
+        if self.busy.get() || self.acting.get() {
+            return;
+        }
+        let Some(cursor) = self.next_cursor.borrow().clone() else {
+            return;
+        };
+        let Some(config) = (self.context)() else {
+            self.notice.set_text(
+                "Connect your Muse account first: the Library belongs to the connected account. Nothing was read.",
+            );
+            return;
+        };
+        let seen: Vec<String> = self
+            .rows
+            .borrow()
+            .iter()
+            .map(|row| row.artifact_ref.clone())
+            .collect();
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        let epoch = self.epoch.get();
+        self.set_busy(true);
+        self.notice.set_text("Reading the next page…");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = AccountClient::new(config).artifacts_page(&cursor, &seen);
+            let _ = tx.send(result);
+        });
+        self.poll(ui, rx, epoch, true);
     }
 
     fn poll(
@@ -181,6 +298,7 @@ impl Ui {
         ui: &Rc<Ui>,
         rx: mpsc::Receiver<Result<ArtifactList, AccountError>>,
         epoch: u64,
+        append: bool,
     ) {
         let weak = Rc::downgrade(ui);
         gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
@@ -193,7 +311,7 @@ impl Ui {
                         return gtk::glib::ControlFlow::Break;
                     }
                     ui.set_busy(false);
-                    ui.finish(result);
+                    ui.finish(result, append, &ui);
                     gtk::glib::ControlFlow::Break
                 }
                 Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
@@ -210,14 +328,42 @@ impl Ui {
         });
     }
 
-    fn finish(&self, result: Result<ArtifactList, AccountError>) {
+    fn finish(&self, result: Result<ArtifactList, AccountError>, append: bool, ui: &Rc<Ui>) {
         match result {
             Ok(page) => {
-                let rows = order_rows(page.artifacts.clone());
-                self.render(&rows);
-                let summary = summary_text(&page, rows.len());
+                if append && page.paging.as_deref() == Some("unavailable") {
+                    // No candidate parameter continued the list:
+                    // keep what is shown, retire the button, and
+                    // say so rather than repeating page one.
+                    self.paging_dead.set(true);
+                    self.has_more.set(true);
+                    self.render(ui);
+                    self.notice.set_text(&self.summary());
+                    return;
+                }
+                if append {
+                    let mut rows = self.rows.borrow_mut();
+                    for row in page.artifacts {
+                        if !rows
+                            .iter()
+                            .any(|held| held.artifact_ref == row.artifact_ref)
+                        {
+                            rows.push(row);
+                        }
+                    }
+                } else {
+                    *self.rows.borrow_mut() = page.artifacts.clone();
+                    self.paging_dead.set(false);
+                    *self.armed.borrow_mut() = None;
+                }
+                self.total.set(page.total_count);
+                self.has_more.set(page.has_more);
+                *self.next_cursor.borrow_mut() = page.next_cursor.clone();
+                self.render(ui);
+                let shown = self.rows.borrow().len();
+                let summary = self.summary();
                 self.notice
-                    .set_text(&if rows.is_empty() && page.total_count > 0 {
+                    .set_text(&if shown == 0 && page.total_count > 0 {
                         format!(
                             "{summary}. This page carried no usable rows, so nothing is listed."
                         )
@@ -233,16 +379,96 @@ impl Ui {
             }
         }
     }
+
+    /// One press on a space row's Unshare: the first arms, the
+    /// second sends exactly one write, and the answer is proven
+    /// by the re-read that follows.
+    fn unshare_press(&self, ui: &Rc<Ui>, slug: &str, title: &str) {
+        if self.busy.get() || self.acting.get() {
+            return;
+        }
+        if self.armed.borrow().as_deref() != Some(slug) {
+            *self.armed.borrow_mut() = Some(slug.to_string());
+            self.notice.set_text(&format!(
+                "Unsharing stops sharing \"{title}\" with anyone it was shared with; the space itself stays yours. Press Confirm unshare on that row to send it."
+            ));
+            self.render(ui);
+            return;
+        }
+        *self.armed.borrow_mut() = None;
+        let Some(config) = (self.context)() else {
+            self.notice.set_text(
+                "Connect your Muse account first: unsharing belongs to the connected account. Nothing was sent.",
+            );
+            self.render(ui);
+            return;
+        };
+        self.acting.set(true);
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        let epoch = self.epoch.get();
+        self.spinner.start();
+        self.notice.set_text(&format!("Unsharing \"{title}\"…"));
+        let (tx, rx) = mpsc::channel();
+        let slug_owned = slug.to_string();
+        let title_owned = title.to_string();
+        std::thread::spawn(move || {
+            let result = AccountClient::new(config).space_unshare(&slug_owned);
+            let _ = tx.send(result);
+        });
+        let weak = Rc::downgrade(ui);
+        gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(Ok(_)) => {
+                    if ui.epoch.get() != epoch {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    ui.acting.set(false);
+                    ui.spinner.stop();
+                    ui.notice.set_text(&format!(
+                        "Unshare sent for \"{title_owned}\". Re-reading the Library to show its state…"
+                    ));
+                    ui.refresh(&ui);
+                    gtk::glib::ControlFlow::Break
+                }
+                Ok(Err(error)) => {
+                    if ui.epoch.get() == epoch {
+                        ui.acting.set(false);
+                        ui.spinner.stop();
+                        ui.render(&ui);
+                        ui.notice.set_text(&format!(
+                            "Unshare failed: {}. Nothing was changed.",
+                            read_failure(error.code)
+                        ));
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if ui.epoch.get() == epoch {
+                        ui.acting.set(false);
+                        ui.spinner.stop();
+                        ui.notice.set_text(
+                            "The account worker vanished before answering. The unshare may or may not have been sent; refresh to see the space's state.",
+                        );
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+            }
+        });
+    }
 }
 
 pub fn build(context: AccountContext) -> LibraryPage {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
     root.add_css_class("page-content");
-    let heading = label("Library · saved artifacts, read-only");
+    let heading = label("Library · saved artifacts and spaces");
     heading.add_css_class("page-heading");
     root.append(&heading);
     let intro = label(
-        "One press reads the artifact list for the connected account. This page cannot open, download, rename, share or delete anything: those actions stay on the Muse side. The list loads when you open this page, and no row is kept after the window closes.",
+        "The list loads when you open this page, and Refresh re-reads it. \"Show more\" follows the service's own paging. A space listed here can be unshared from this page; opening, downloading and deleting stay on the Muse side. No row is kept after the window closes.",
     );
     intro.add_css_class("page-subtitle");
     root.append(&intro);
@@ -266,17 +492,34 @@ pub fn build(context: AccountContext) -> LibraryPage {
     scroll.set_child(Some(&list));
     root.append(&scroll);
 
+    let more = gtk::Button::with_label("Show more");
+    more.set_visible(false);
+    root.append(&more);
+
     let ui = Rc::new(Ui {
         epoch: Cell::new(0),
         busy: Cell::new(false),
+        acting: Cell::new(false),
         context,
         list,
         notice,
         spinner,
+        more,
+        rows: RefCell::new(Vec::new()),
+        total: Cell::new(0),
+        has_more: Cell::new(false),
+        paging_dead: Cell::new(false),
+        next_cursor: RefCell::new(None),
+        armed: RefCell::new(None),
     });
     {
         let ui = Rc::clone(&ui);
         refresh.connect_clicked(move |_| ui.refresh(&ui));
+    }
+    {
+        let ui = Rc::clone(&ui);
+        let more_button = ui.more.clone();
+        more_button.connect_clicked(move |_| ui.show_more(&ui));
     }
 
     let load = {
@@ -297,7 +540,9 @@ pub fn build(context: AccountContext) -> LibraryPage {
 
 #[cfg(test)]
 mod tests {
-    use super::{order_rows, read_failure, row_text, summary_text, utc_date};
+    use super::{
+        order_rows, paging_note, read_failure, row_text, space_slug, summary_text, utc_date,
+    };
     use gtk::prelude::*;
     use gtk4 as gtk;
     use muse_account::{ArtifactList, ArtifactSummary, ErrorCode};
@@ -312,6 +557,8 @@ mod tests {
             status: Some("ready".into()),
             placement: Some("library".into()),
             path: Some(format!("/workspace/{title}")),
+            target_kind: Some("file".into()),
+            slug: None,
             updated_at_ms: updated,
             pinned,
             can_open: true,
@@ -323,6 +570,8 @@ mod tests {
         ArtifactList {
             total_count: total,
             has_more,
+            next_cursor: None,
+            paging: None,
             artifacts: rows,
         }
     }
@@ -372,6 +621,30 @@ mod tests {
     }
 
     #[test]
+    fn only_a_space_row_with_a_slug_offers_unshare() {
+        let file = row("a.docx", false, None);
+        assert_eq!(space_slug(&file), None);
+        let mut space = row("My space", false, None);
+        space.target_kind = Some("space".into());
+        assert_eq!(
+            space_slug(&space),
+            None,
+            "a space without a slug has no handle"
+        );
+        space.slug = Some("my-space".into());
+        assert_eq!(space_slug(&space), Some("my-space"));
+        space.slug = Some(String::new());
+        assert_eq!(space_slug(&space), None, "an empty slug addresses nothing");
+    }
+
+    #[test]
+    fn the_paging_note_only_speaks_when_paging_died_with_more_to_show() {
+        assert!(!paging_note(true, true).is_empty());
+        assert!(paging_note(true, false).is_empty());
+        assert!(paging_note(false, true).is_empty());
+    }
+
+    #[test]
     fn dates_are_utc_and_before_epoch_dates_do_not_wrap() {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(1_700_000_000_000), "2023-11-14");
@@ -409,6 +682,23 @@ mod tests {
         panic!("button {name} not found")
     }
 
+    fn named_button(root: &gtk::Widget, name: &str) -> Option<gtk::Button> {
+        let mut stack = vec![root.clone()];
+        while let Some(widget) = stack.pop() {
+            if let Ok(btn) = widget.clone().downcast::<gtk::Button>()
+                && btn.widget_name() == name
+            {
+                return Some(btn);
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                stack.push(current.clone());
+                child = current.next_sibling();
+            }
+        }
+        None
+    }
+
     #[test]
     #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
     fn an_unconnected_refresh_reads_nothing_and_says_so() {
@@ -427,6 +717,30 @@ mod tests {
         );
         // No bridge was started, so no row can appear from an unanswered read.
         assert!(page.ui.list.first_child().is_none());
+    }
+
+    #[test]
+    #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+    fn a_space_row_carries_an_unshare_button_and_a_file_row_does_not() {
+        gtk::init().unwrap();
+        let page = super::build(Rc::new(|| None));
+        let ui = Rc::clone(&page.ui);
+        let mut space = row("Shared space", false, Some(9));
+        space.target_kind = Some("space".into());
+        space.slug = Some("shared-space".into());
+        *page.ui.rows.borrow_mut() = vec![space, row("plain.docx", false, Some(8))];
+        page.ui.render(&ui);
+        let root: &gtk::Widget = page.root.upcast_ref();
+        let unshare = named_button(root, "space-unshare:shared-space")
+            .expect("the space row carries its unshare button");
+        assert_eq!(unshare.label().as_deref(), Some("Unshare"));
+        // Arming is a render state, not a send: the same press
+        // target now asks for confirmation.
+        *page.ui.armed.borrow_mut() = Some("shared-space".into());
+        page.ui.render(&ui);
+        let armed = named_button(root, "space-unshare:shared-space")
+            .expect("the armed row still carries its button");
+        assert_eq!(armed.label().as_deref(), Some("Confirm unshare"));
     }
 
     #[test]
