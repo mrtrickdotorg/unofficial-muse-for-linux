@@ -1721,6 +1721,42 @@ class PermissionTests(unittest.TestCase):
             bridge.validate_request({"op": "revoke", "config_dir": "/tmp"})
 
 
+class BrowserProbeTests(unittest.TestCase):
+    def test_the_browser_probe_logs_vocabulary_and_browser_keys_only(self):
+        import os
+        import tempfile
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        bridge._BROWSER_PROBED = False
+        records = [
+            {"event": "delta.text_append", "seq": 1,
+             "payload": {"text": "SECRET", "session_id": "s-1"}},
+            {"event": "browser.task_started", "seq": 2,
+             "payload": {"browser_task_id": "SECRET", "url": "SECRET"}},
+            {"event": "status", "seq": 3, "payload": {"status": "working"}},
+        ]
+
+        class Connection:
+            def subscribe_json(self, method, **kwargs):
+                return records
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Connection()
+
+        with tempfile.TemporaryDirectory() as config_dir:
+            result = bridge.activity_rows(Client(), {}, 1000,
+                                          config_dir=config_dir)
+            with open(os.path.join(config_dir, "op-timing.log")) as handle:
+                logged = handle.read()
+        self.assertEqual(len(result["events"]), 3)
+        self.assertIn("browser-probe", logged)
+        self.assertIn("browser.task_started", logged)
+        self.assertIn("browser_task_id", logged)
+        self.assertNotIn("SECRET", logged)
+
+
 class PolicySettingsTests(unittest.TestCase):
     def test_settings_are_projected_as_scalar_pairs_with_names_only(self):
         bridge = load_bridge()

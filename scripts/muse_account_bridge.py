@@ -1057,7 +1057,50 @@ def session_facts(client, config):
     return {"identity_name": required_text(identity.get("name")), "vm_id": vm_id}
 
 
-def activity_rows(client, config, timeout_ms):
+_BROWSER_PROBED = False
+
+
+def _probe_browser_shapes(config_dir, records):
+    """One-shot reconnaissance for the agent-browser surface (Nov 14, 2026).
+
+    Every browser route is addressed by a task id
+    (/api/browser-task/{task_id}/...), and no recorded source --
+    route consumer, document, or existing projection -- publishes
+    one, so a browser page has nothing honest to address yet. The
+    live event stream is the remaining candidate: this records
+    its vocabulary (event names and payload key names only, never
+    values) once per process, plus the key names of any event
+    that mentions a browser, so where a task id travels -- if the
+    stream carries one at all -- is settled by evidence.
+    """
+    global _BROWSER_PROBED
+    if _BROWSER_PROBED or not config_dir:
+        return
+    _BROWSER_PROBED = True
+    try:
+        events = set()
+        browser_keys = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            event = record.get("event")
+            if not isinstance(event, str):
+                continue
+            events.add(event)
+            payload = record.get("payload")
+            keys = set(payload) if isinstance(payload, dict) else set()
+            if "browser" in event.lower() or any(
+                    "browser" in str(key).lower() for key in keys):
+                browser_keys.update(str(key) for key in keys)
+        timing_log(config_dir,
+                   "browser-probe events={} browser_keys={}".format(
+                       ",".join(sorted(events))[:1200],
+                       ",".join(sorted(browser_keys))[:600]))
+    except Exception:  # noqa: BLE001 - a probe never fails its read
+        pass
+
+
+def activity_rows(client, config, timeout_ms, config_dir=None):
     """Bounded live-status read: what the agent is doing, not what it said.
 
     The pinned CLI records that threaded replies never arrive as live events
@@ -1074,6 +1117,7 @@ def activity_rows(client, config, timeout_ms):
         records = connection.subscribe_json(
             "chat.subscribe", body={"capabilities": {}},
             max_records=200, idle_timeout=min(6.0, seconds), overall_timeout=seconds)
+    _probe_browser_shapes(config_dir, records)
     rows = []
     for record in records:
         if not isinstance(record, dict):
@@ -2798,7 +2842,8 @@ class Adapter:
                 gateway.close()
             return {"connector": request["connector"], "accepted": True}
         if request["op"] == "activity":
-            return activity_rows(self.client, self.config, request["timeout"])
+            return activity_rows(self.client, self.config, request["timeout"],
+                                 config_dir=request.get("config_dir"))
         if request["op"] == "cancel":
             # The service answers whether anything was actually stopped. A press
             # is a request, never proof, so `cancelled` travels as data and the
