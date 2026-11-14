@@ -452,9 +452,19 @@ impl RemoteDesktopSession {
             .conn
             .as_mut()
             .ok_or_else(|| DesktopError::InvalidArgument("remote session is stopped".into()))?;
+        // Every RemoteDesktop method -- Notify* included -- is
+        // invoked on the portal's main object; the session handle
+        // travels as the body's first argument. The session object
+        // itself implements only org.freedesktop.portal.Session, so
+        // addressing a Notify* call to it earns an UnknownMethod,
+        // which the error mapping reports as an unsupported portal.
+        // The first live dispatch (Nov 14, 2026) failed exactly
+        // that way on a healthy granted session; CreateSession,
+        // SelectDevices and Start had used the portal path all
+        // along and worked, which is what gave it away.
         let reply = conn.transact(
             PORTAL_DEST,
-            &self.session_handle,
+            PORTAL_PATH,
             IFACE_REMOTE_DESKTOP,
             member,
             sig,
@@ -2447,8 +2457,27 @@ mod remote_tests {
                     | "NotifyPointerAxis"
                     | "NotifyPointerAxisDiscrete"
                     | "NotifyKeyboardKeysym"
-                    | "NotifyKeyboardKeycode" => reply_return(&mut s, msg.serial, "", &[]),
+                    | "NotifyKeyboardKeycode" => {
+                        // Portal methods are addressed to the portal
+                        // object; a Notify* call addressed to the
+                        // session object is the regression the first
+                        // live run found, so the fake refuses it the
+                        // way a real portal does.
+                        assert_eq!(
+                            msg.path.as_deref(),
+                            Some(PORTAL_PATH),
+                            "Notify* must target the portal object"
+                        );
+                        reply_return(&mut s, msg.serial, "", &[])
+                    }
                     "Close" => {
+                        // Session.Close is the one call that DOES
+                        // belong on the session object.
+                        assert_eq!(
+                            msg.path.as_deref(),
+                            Some("/org/freedesktop/portal/desktop/session/abc"),
+                            "Session.Close must target the session object"
+                        );
                         reply_return(&mut s, msg.serial, "", &[]);
                         tx.send(calls).unwrap();
                         return;
