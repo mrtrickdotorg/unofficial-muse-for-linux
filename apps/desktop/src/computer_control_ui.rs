@@ -843,9 +843,18 @@ mod native {
         add_action(
             &ui,
             &actions,
-            "Pointer motion (+12, −8)",
+            // Deliberately large: the first live proof (Nov 14,
+            // 2026) dispatched +12/-8 successfully and the jump
+            // was too small to see, which proves nothing either
+            // way. +240/-160 cannot be missed if it lands -- and
+            // if it does not land, the portal accepted the call
+            // without injecting, which is the EIS verdict.
+            "Pointer motion (+240, \u{2212}160)",
             REMOTE_DEVICE_POINTER,
-            Action::RelativePointerMotion { dx: 12.0, dy: -8.0 },
+            Action::RelativePointerMotion {
+                dx: 240.0,
+                dy: -160.0,
+            },
         );
         add_action(
             &ui,
