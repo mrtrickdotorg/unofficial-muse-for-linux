@@ -1757,6 +1757,92 @@ class BrowserProbeTests(unittest.TestCase):
         self.assertNotIn("SECRET", logged)
 
 
+class AttachProbeTests(unittest.TestCase):
+    def _client(self, write_error=None, landed=True, with_attachment=True):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+
+        class Gateway:
+            def __init__(self):
+                self.writes = []
+                self.opened = []
+
+            def call_json(self, method, body=None, **kwargs):
+                self.writes.append((method, body))
+                if write_error is not None:
+                    raise write_error
+                return {}
+
+            def _open(self, method, body=None, **kwargs):
+                self.opened.append((method, body))
+                return 1
+
+        gateway = Gateway()
+
+        class Client(FakeClient):
+            def __init__(self):
+                self.history_calls = 0
+
+            @contextmanager
+            def _gateway(self, config):
+                yield gateway
+
+            def history(self, **kwargs):
+                self.history_calls += 1
+                if self.history_calls == 1 or not landed:
+                    return []
+                attachments = ([{"filename": bridge.ATTACH_PROBE_PATH,
+                                 "mime_type": "text/plain", "kind": "file",
+                                 "bytes_len": 12}] if with_attachment else [])
+                return [{"message_id": "probe-1", "seq": 1, "role": "user",
+                         "text": bridge.ATTACH_PROBE_MESSAGE,
+                         "raw": {"payload": {"metadata": {
+                             "attachments": attachments}}}}]
+
+        return bridge, Client(), gateway
+
+    def test_the_probe_writes_sends_and_verifies_from_history(self):
+        bridge, client, gateway = self._client()
+        answer = bridge.Adapter(client, {"node_id": "node-1"}).dispatch(
+            {"op": "attach_probe", "thread": "thread-9"})
+        self.assertEqual(answer["fs_write"], "accepted")
+        self.assertTrue(answer["sent"])
+        self.assertTrue(answer["message_seen"])
+        self.assertTrue(answer["attachment_seen"])
+        self.assertEqual(gateway.writes[0][0], "fs.write")
+        self.assertEqual(gateway.writes[0][1]["path"], bridge.ATTACH_PROBE_PATH)
+        self.assertEqual(gateway.writes[0][1]["node_id"], "node-1")
+        method, body = gateway.opened[0]
+        self.assertEqual(method, "chat.stream")
+        self.assertEqual(body["session_id"], "thread-9")
+        self.assertEqual(body["items"][0]["type"], "text")
+        self.assertEqual(body["items"][1],
+                         {"type": "file", "path": bridge.ATTACH_PROBE_PATH})
+
+    def test_a_refused_write_sends_nothing(self):
+        bridge, client, gateway = self._client(write_error=RuntimeError("no"))
+        answer = bridge.Adapter(client, {"node_id": "node-1"}).dispatch(
+            {"op": "attach_probe", "thread": "thread-9"})
+        self.assertEqual(answer["fs_write"], "refused")
+        self.assertFalse(answer["sent"])
+        self.assertEqual(gateway.opened, [])
+
+    def test_a_message_without_an_attachment_is_reported_as_such(self):
+        bridge, client, gateway = self._client(with_attachment=False)
+        answer = bridge.Adapter(client, {"node_id": "node-1"}).dispatch(
+            {"op": "attach_probe", "thread": "thread-9"})
+        self.assertTrue(answer["message_seen"])
+        self.assertFalse(answer["attachment_seen"])
+
+    def test_the_probe_requires_a_named_thread(self):
+        bridge = load_bridge()
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "attach_probe",
+                                     "config_dir": "/tmp/x"})
+        bridge.validate_request({"op": "attach_probe", "thread": "t-1",
+                                 "config_dir": "/tmp/x"})
+
+
 class PolicySettingsTests(unittest.TestCase):
     def test_settings_are_projected_as_scalar_pairs_with_names_only(self):
         bridge = load_bridge()

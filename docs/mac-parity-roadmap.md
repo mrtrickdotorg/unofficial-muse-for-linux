@@ -657,8 +657,13 @@ guessed).**
 - Goal creation and editing: `goal_prompt` and `goals.update` bodies unrecorded.
 - The model picker: `model.set`'s body unrecorded.
 - Drag-and-drop file sending: the plausible path (an `fs.write` plus a send referencing the
-  service-side path) is a write shape; the standing proposal is a one-message probe in a
-  scratch conversation Patrick designates.
+  service-side path) is a write shape. The probe is BUILT (Nov 14, 2026, with Patrick's go):
+  a bridge `attach_probe` op and an "Attach probe" item in a chat's actions menu run it once in
+  the chosen chat -- one small file written, one message sent referencing it, the outcome
+  verified from the chat's own history, each step's verdict reported in the app and logged
+  (content-free) in op-timing.log. The drag-and-drop surface itself waits on the probe's
+  live verdict in the scratch chat: a stored attachment makes the path buildable; a refusal
+  closes it just as firmly.
 
 **Blocked service-side (nothing to build until the service moves).**
 - P7 connectors: `connectors.list` answers 500 `internal_error`. Retry it before building

@@ -761,3 +761,28 @@ print(json.dumps({'ok': True, 'data': {'found': False,
     );
     assert!(f.client().memory_get("").is_err());
 }
+
+#[test]
+fn attach_probe_sends_one_named_thread_and_parses_the_verdicts() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'attach_probe'
+assert request['thread'] == 'thread-9'
+print(json.dumps({'ok': True, 'data': {'thread': 'thread-9',
+  'fs_write': 'accepted', 'sent': True, 'message_seen': True,
+  'attachment_seen': False}}))
+"#,
+    );
+    let answer = f.client().attach_probe("thread-9").unwrap();
+    assert_eq!(answer.thread, "thread-9");
+    assert_eq!(answer.fs_write, "accepted");
+    assert!(answer.sent);
+    assert!(answer.message_seen);
+    assert!(!answer.attachment_seen);
+    // The probe runs in a designated thread only; an unnamed or
+    // malformed target is refused before anything is sent.
+    assert!(f.client().attach_probe("").is_err());
+    assert!(f.client().attach_probe(&"x".repeat(257)).is_err());
+}
