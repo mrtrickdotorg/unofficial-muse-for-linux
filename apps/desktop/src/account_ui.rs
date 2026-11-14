@@ -18,6 +18,7 @@ enum Operation {
     SessionOp,
     MarkSeen,
     AttachProbe,
+    StreamProbe,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +126,7 @@ struct Controller<A, H, T> {
     /// The thread an attach probe is running in, while it runs:
     /// the completion reports the probe's verdicts against it.
     attach_probe: Option<String>,
+    stream_probe: Option<String>,
     /// The conversation being marked read, in flight from
     /// opening it: the web marks a chat seen when it is opened,
     /// and the badge clears when the re-read says so.
@@ -466,6 +468,7 @@ impl<A, H, T> Default for Controller<A, H, T> {
             confirming_delete: None,
             session_op: None,
             attach_probe: None,
+            stream_probe: None,
             mark_seen: None,
         }
     }
@@ -1002,6 +1005,32 @@ impl<A, H: Clone, T> Controller<A, H, T> {
                 false
             }
         }
+    }
+
+    /// Take the busy slot for the one stream probe of this
+    /// window's lifetime. It is fired by the watch starting on a
+    /// side chat, never by a press: one listen per app run is
+    /// the whole instrument.
+    fn begin_stream_probe(&mut self, thread: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::StreamProbe)?;
+        self.stream_probe = Some(thread.to_string());
+        Some(ticket)
+    }
+
+    /// The probe's answer is evidence for the timing log, not
+    /// news for the transcript: acceptance and an event count
+    /// change nothing the reader sees, so no notice is set.
+    fn finish_stream_probe(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::StreamProbeAnswer, String>,
+    ) {
+        if !self.accept(ticket) {
+            return;
+        }
+        self.stream_probe.take();
+        let _ = result;
     }
 
     /// Take the busy slot for one mark-as-read. Opening a chat
@@ -1623,6 +1652,9 @@ mod native {
         /// A watch is bounded: an absent status on an old row must not leave a
         /// background listen running for the rest of the session.
         watch_until: std::cell::Cell<Option<std::time::Instant>>,
+        /// The stream probe fires once per window: the first
+        /// watch on a side chat is its moment.
+        stream_probed: std::cell::Cell<bool>,
         /// Alternates the live listen and the history poll during a watch, so
         /// neither starves the other.
         live_turn: std::cell::Cell<bool>,
@@ -1646,6 +1678,7 @@ mod native {
         StartSession(Result<muse_account::StartedSession, String>),
         SessionOp(Result<muse_account::SessionOpAnswer, String>),
         AttachProbe(Result<muse_account::AttachProbeAnswer, String>),
+        StreamProbe(Result<muse_account::StreamProbeAnswer, String>),
         MarkSeen(Result<muse_account::MarkSeenAnswer, String>),
         Send(SendOutcome),
         SendConnectionError(SendOutcome),
@@ -2822,6 +2855,7 @@ mod native {
             grant_notice,
             self_weak: RefCell::new(std::rc::Weak::new()),
             watch_until: std::cell::Cell::new(None),
+            stream_probed: std::cell::Cell::new(false),
             live_turn: std::cell::Cell::new(true),
             history,
             history_rows: RefCell::new(history_rows),
@@ -3686,6 +3720,35 @@ mod native {
             });
         }
 
+        /// Fire the one stream probe of this window's lifetime:
+        /// the first watch on a side chat (a named thread -- the
+        /// main chat's stream is the activity read's job). It
+        /// asks whether the per-thread event stream carries the
+        /// reply deltas the history rows only update in jumps.
+        /// A busy slot or a missing client skips it and leaves
+        /// it armed for the next watch.
+        fn maybe_stream_probe(self: &Rc<Self>) {
+            if self.stream_probed.get() {
+                return;
+            }
+            let Some(thread) = self.state.borrow().scope.clone() else {
+                return;
+            };
+            let Some(client) = self.client.borrow().clone() else {
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_stream_probe(&thread) else {
+                return;
+            };
+            self.stream_probed.set(true);
+            self.launch(ticket, move || match client.stream_probe(&thread) {
+                Ok(answer) => Reply::StreamProbe(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::StreamProbe(Err(error.to_string())),
+            });
+        }
+
         /// One bounded live read feeding the status line. Never the reply: the
         /// service does not deliver threaded replies as live events, so the
         /// transcript keeps polling history while this reports progress.
@@ -4372,6 +4435,9 @@ mod native {
                         Operation::AttachProbe => Reply::AttachProbe(Err(
                             "Attach probe worker stopped unexpectedly.".into(),
                         )),
+                        Operation::StreamProbe => Reply::StreamProbe(Err(
+                            "Stream probe worker stopped unexpectedly.".into(),
+                        )),
                         Operation::MarkSeen => {
                             Reply::MarkSeen(Err("Mark-seen worker stopped unexpectedly.".into()))
                         }
@@ -4575,6 +4641,9 @@ mod native {
                     Reply::AttachProbe(result) => {
                         probe_after = state.finish_attach_probe(ticket, result);
                     }
+                    Reply::StreamProbe(result) => {
+                        state.finish_stream_probe(ticket, result);
+                    }
                     Reply::MarkSeen(result) => {
                         // Acceptance is not sight: the refresh
                         // re-reads the listing, and the badge
@@ -4666,6 +4735,7 @@ mod native {
                 self.watch_until
                     .set(Some(std::time::Instant::now() + Duration::from_secs(600)));
                 self.poll_live();
+                self.maybe_stream_probe();
             }
             if !send_dispatched && refresh_after {
                 self.read(false, true);
@@ -5315,6 +5385,7 @@ mod native {
                     Operation::SessionOp => " \u{b7} updating the side chat\u{2026}",
                     Operation::MarkSeen => " \u{b7} marking the chat read\u{2026}",
                     Operation::AttachProbe => " \u{b7} running the attach probe\u{2026}",
+                    Operation::StreamProbe => " \u{b7} probing the reply stream\u{2026}",
                 })
                 .unwrap_or("");
             let persistence_warning_guard = self.persistence_warning.borrow();
@@ -9509,6 +9580,30 @@ mod tests {
         let ticket = state.begin_attach_probe("thread-1").expect("ticket");
         assert!(!state.finish_attach_probe(&ticket, Err("timeout".into())));
         assert!(state.history_notice.contains("could not run"));
+    }
+
+    #[test]
+    fn a_stream_probe_takes_the_busy_slot_once_and_leaves_no_notice() {
+        let mut state: State = Controller::default();
+        assert!(state.begin_stream_probe("thread-1").is_none());
+        state.account = Some("account".into());
+        let ticket = state.begin_stream_probe("thread-1").expect("ticket");
+        assert!(
+            state.begin_stream_probe("thread-1").is_none(),
+            "one probe at a time"
+        );
+        let notice = state.history_notice.clone();
+        state.finish_stream_probe(
+            &ticket,
+            Ok(muse_account::StreamProbeAnswer {
+                thread: "thread-1".into(),
+                accepted: true,
+                events: 7,
+            }),
+        );
+        assert!(state.stream_probe.is_none());
+        assert!(state.busy.is_none());
+        assert_eq!(state.history_notice, notice, "the probe is silent");
     }
 
     #[test]

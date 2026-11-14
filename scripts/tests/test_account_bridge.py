@@ -2758,3 +2758,125 @@ class ListingTests(unittest.TestCase):
             with self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request({"op": "memory_get", "config_dir": "/unused",
                                          "memory_uri": bad})
+
+
+class StreamProbeTests(unittest.TestCase):
+    def _client(self, records=None, error=None):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+
+        class Gateway:
+            def subscribe_json(self, method, body=None, max_records=None,
+                               idle_timeout=None, overall_timeout=None):
+                calls.append((method, body))
+                if error is not None:
+                    raise error
+                return records or []
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        return bridge, Client(), calls
+
+    def test_the_probe_requires_a_named_thread(self):
+        bridge = load_bridge()
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "stream_probe",
+                                     "config_dir": "/tmp/x"})
+        bridge.validate_request({"op": "stream_probe", "thread": "t-1",
+                                 "config_dir": "/tmp/x"})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "stream_probe", "thread": "t-1",
+                                     "config_dir": "/tmp/x", "extra": 1})
+
+    def test_an_accepted_stream_reports_counts_only(self):
+        bridge, client, calls = self._client(records=[
+            {"event": "delta.text_append", "seq": 1,
+             "payload": {"text": "SECRET"}},
+            {"event": "delta.text_append", "seq": 2,
+             "payload": {"text": "SECRET"}},
+            {"event": "run.status", "payload": {"status": "working"}},
+        ])
+        answer = bridge.Adapter(client, {}).dispatch(
+            {"op": "stream_probe", "thread": "thread-9"})
+        self.assertEqual(answer, {"thread": "thread-9", "accepted": True,
+                                  "events": 3})
+        self.assertEqual(calls[0], ("chat.stream_events",
+                                    {"session_id": "thread-9"}))
+        self.assertNotIn("SECRET", str(answer))
+
+    def test_a_refused_stream_tries_each_candidate_then_reports(self):
+        bridge, client, calls = self._client(error=RuntimeError("no"))
+        answer = bridge.Adapter(client, {}).dispatch(
+            {"op": "stream_probe", "thread": "thread-9"})
+        self.assertEqual(answer, {"thread": "thread-9", "accepted": False,
+                                  "events": 0})
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[1][1], {"thread_id": "thread-9"})
+
+
+class AttachFetchProbeTests(unittest.TestCase):
+    def _client(self, bridge, with_image, answer=b"\x89PNG\r\n\x1a\nrest"):
+        from contextlib import contextmanager
+        calls = []
+
+        class Gateway:
+            def request(self, method, body=None, timeout=None):
+                calls.append((method, body))
+                return answer
+
+        class Client(FakeClient):
+            def history(self, **kwargs):
+                attachments = ([{
+                    "filename": "shot.png", "mime_type": "image/png",
+                    "kind": "image", "bytes_len": 12,
+                    "path": "workspace/private/shot.png",
+                }] if with_image else [])
+                return [{"message_id": "m1", "seq": 1, "role": "user",
+                         "text": "look",
+                         "raw": {"payload": {"metadata": {
+                             "attachments": attachments}}}}]
+
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        return Client(), calls
+
+    def test_the_first_image_read_fetches_once_and_logs_no_path(self):
+        import pathlib
+        import tempfile
+        bridge = load_bridge()
+        client, calls = self._client(bridge, with_image=True)
+        with tempfile.TemporaryDirectory() as config_dir:
+            request = {"op": "history", "thread": "t-1", "limit": 20,
+                       "config_dir": config_dir}
+            rows = bridge.Adapter(client, {}).dispatch(request)
+            self.assertEqual(rows[0]["attachments"][0]["filename"],
+                             "shot.png")
+            self.assertNotIn("path", rows[0]["attachments"][0])
+            self.assertEqual(calls, [("fs.read", {
+                "path": "workspace/private/shot.png"})])
+            bridge.Adapter(client, {}).dispatch(request)
+            self.assertEqual(len(calls), 1, "the probe is one-shot")
+            log = (pathlib.Path(config_dir) / "op-timing.log").read_text(
+                encoding="utf-8")
+            self.assertIn("attach-fetch", log)
+            self.assertIn("magic=png", log)
+            self.assertNotIn("workspace/private", log)
+
+    def test_a_read_without_an_image_leaves_the_probe_armed(self):
+        import tempfile
+        bridge = load_bridge()
+        plain, plain_calls = self._client(bridge, with_image=False)
+        imaged, imaged_calls = self._client(bridge, with_image=True)
+        with tempfile.TemporaryDirectory() as config_dir:
+            request = {"op": "history", "thread": "t-1", "limit": 20,
+                       "config_dir": config_dir}
+            bridge.Adapter(plain, {}).dispatch(request)
+            self.assertEqual(plain_calls, [])
+            bridge.Adapter(imaged, {}).dispatch(request)
+            self.assertEqual(len(imaged_calls), 1)
