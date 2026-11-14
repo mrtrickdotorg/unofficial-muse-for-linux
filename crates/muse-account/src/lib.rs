@@ -34,6 +34,7 @@ fn deadline_for(op: Option<&str>) -> Duration {
         Some("send") => Duration::from_secs(50),
         Some("attach_probe") => Duration::from_secs(60),
         Some("stream_probe") => Duration::from_secs(60),
+        Some("send_images") => Duration::from_secs(90),
         Some("activity") => Duration::from_secs(35),
         _ => Duration::from_secs(45),
     }
@@ -410,6 +411,12 @@ pub struct DispatchReceipt {
     pub sent: bool,
     pub confirmed: bool,
     pub message_id: Option<String>,
+    /// Image sends only: the landed row's attachment did not
+    /// match what was sent (byte count differs), so the picture
+    /// the reader pasted is not the picture the service stored.
+    /// Always false for plain sends and older bridges.
+    #[serde(default)]
+    pub stored_mismatch: bool,
 }
 /// One label/value pair the service attached to an approval request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -678,6 +685,10 @@ pub struct AttachProbeAnswer {
     pub sent: bool,
     pub message_seen: bool,
     pub attachment_seen: bool,
+    /// The binary leg's per-candidate verdicts; absent from
+    /// older bridges.
+    #[serde(default)]
+    pub binary: Vec<BinaryVerdict>,
 }
 
 /// What one stream probe learned: whether the service accepted
@@ -689,6 +700,27 @@ pub struct StreamProbeAnswer {
     pub thread: String,
     pub accepted: bool,
     pub events: u64,
+}
+
+/// One candidate fs.write encoding's verdict from the attach
+/// probe's binary leg, read back from the stored attachment's
+/// own projection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryVerdict {
+    pub candidate: u32,
+    pub verdict: String,
+    pub bytes_len: Option<u64>,
+}
+
+/// One pasted image on its way to the bridge: a staged-file
+/// name (the bridge reads the bytes from the staging directory
+/// both sides share) and the bytes themselves, which only the
+/// client touches -- it writes the staging file and removes it
+/// once the send resolves, whichever way it resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedImage {
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// What the service said about a feed reaction it took.
@@ -1289,6 +1321,84 @@ impl AccountClient {
             Some((vm_id, identity_name)),
         )
     }
+    /// Send one message carrying pasted images. The bytes never
+    /// travel the request: each image is written to the staging
+    /// directory under the account config dir, the bridge reads
+    /// it from there, writes it service-side and sends the file
+    /// items, and the staging files are removed again whatever
+    /// the outcome. The receipt is the send receipt: `confirmed`
+    /// means the landed row carries every image with the byte
+    /// count that was sent; `stored_mismatch` says it landed but
+    /// stored differently.
+    pub fn send_images_verified(
+        &self,
+        thread: Option<&str>,
+        message: &str,
+        images: &[StagedImage],
+        vm_id: &str,
+        identity_name: &str,
+    ) -> Result<DispatchReceipt, AccountError> {
+        validate_thread(thread)?;
+        if message.len() > 512 * 1024 || images.is_empty() || images.len() > 4 {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        for image in images {
+            let name = &image.name;
+            let stem_ok = name.starts_with("pasted-")
+                && name.len() <= 128
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+            let ext_ok = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                .iter()
+                .any(|ext| name.ends_with(ext));
+            if !stem_ok || !ext_ok || image.bytes.is_empty() || image.bytes.len() > 8 * 1024 * 1024
+            {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+        }
+        if vm_id.is_empty()
+            || vm_id.len() > 256
+            || identity_name.is_empty()
+            || identity_name.len() > 256
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let staging = self.config.config_dir.join("paste-staging");
+        let staged_paths: Vec<std::path::PathBuf> = images
+            .iter()
+            .map(|image| staging.join(&image.name))
+            .collect();
+        let outcome = (|| {
+            std::fs::create_dir_all(&staging)
+                .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))?;
+            for (image, path) in images.iter().zip(&staged_paths) {
+                std::fs::write(path, &image.bytes)
+                    .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))?;
+            }
+            let request = serde_json::json!({
+                "op": "send_images",
+                "thread": thread,
+                "message": message,
+                "images": images.iter().map(|image| image.name.clone())
+                    .collect::<Vec<_>>(),
+                "expect_vm_id": vm_id,
+                "expect_identity_name": identity_name,
+            });
+            let receipt: DispatchReceipt = self.request(request, true)?;
+            if receipt.confirmed
+                && (!receipt.sent || receipt.message_id.as_deref().is_none_or(str::is_empty))
+            {
+                return Err(AccountError::new(ErrorCode::ProtocolError, true));
+            }
+            Ok(receipt)
+        })();
+        for path in &staged_paths {
+            let _ = std::fs::remove_file(path);
+        }
+        outcome
+    }
+
     /// Explicit registration attribution; never changes saved account settings.
     pub fn send_from_device(
         &self,

@@ -474,6 +474,34 @@ impl<A, H, T> Default for Controller<A, H, T> {
     }
 }
 
+/// The attach probe's binary leg in one sentence: which
+/// candidate fs.write shape stored the test PNG byte-exact
+/// (that is the shape pasted-image sends may use), or that
+/// none did, with every verdict named.
+fn binary_leg_summary(verdicts: &[muse_account::BinaryVerdict]) -> String {
+    const FORMS: [&str; 4] = [
+        "content with encoding base64",
+        "content_base64",
+        "bare base64 content",
+        "data",
+    ];
+    match verdicts.iter().find(|v| v.verdict == "stored_exact") {
+        Some(winner) => format!(
+            " Binary leg: candidate {} ({}) stored the test PNG byte-exact \u{2014} pasted images can be written in that shape.",
+            winner.candidate + 1,
+            FORMS.get(winner.candidate as usize).copied().unwrap_or("?")
+        ),
+        None => format!(
+            " Binary leg: no candidate stored the test PNG exactly ({}), so pasted-image sends stay unproven.",
+            verdicts
+                .iter()
+                .map(|v| format!("{}:{}", v.candidate + 1, v.verdict))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 impl<A, H: Clone, T> Controller<A, H, T> {
     fn begin_login(&mut self, consent: bool) -> Option<Ticket> {
         if !consent || self.account.is_some() {
@@ -501,6 +529,27 @@ impl<A, H: Clone, T> Controller<A, H, T> {
     fn begin_send(&mut self, text: &str) -> Option<Ticket> {
         self.account.as_ref()?;
         if self.sending.is_some() || text.trim().is_empty() {
+            return None;
+        }
+        let ticket = self.issue(Operation::Send)?;
+        self.pending_send = Some(PendingSend {
+            scope: self.scope.clone(),
+            text: text.into(),
+            sent_at: std::time::SystemTime::now(),
+        });
+        self.pending_send_finished = false;
+        self.send_notice.clear();
+        Some(ticket)
+    }
+
+    /// Take the sending slot for a message carrying pasted
+    /// images. Text may be empty -- the web sends image-only
+    /// messages -- but the slot discipline is the plain send's:
+    /// one dispatch in flight, and the record echoes locally
+    /// until a history load settles it.
+    fn begin_send_with_images(&mut self, text: &str, image_count: usize) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.sending.is_some() || (text.trim().is_empty() && image_count == 0) {
             return None;
         }
         let ticket = self.issue(Operation::Send)?;
@@ -987,7 +1036,7 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         self.attach_probe.take();
         match result {
             Ok(answer) => {
-                self.history_notice = if answer.attachment_seen {
+                let mut notice: String = if answer.attachment_seen {
                     "Attach probe: the service stored the file as the message's attachment \u{2014} a send can carry a file in this shape.".into()
                 } else if answer.message_seen {
                     "Attach probe: the message landed, but the service stored no attachment with it \u{2014} the file item was not taken in this shape.".into()
@@ -998,6 +1047,10 @@ impl<A, H: Clone, T> Controller<A, H, T> {
                 } else {
                     "Attach probe: the service refused the file write, so nothing was sent.".into()
                 };
+                if !answer.binary.is_empty() {
+                    notice.push_str(&binary_leg_summary(&answer.binary));
+                }
+                self.history_notice = notice;
                 true
             }
             Err(error) => {
@@ -1493,6 +1546,18 @@ mod native {
         ui: Rc<Ui>,
     }
 
+    /// One pasted image staged above the composer: its staged
+    /// file name, its PNG bytes (the clipboard texture re-encoded
+    /// -- screenshots arrive as PNG anyway, and one known format
+    /// keeps the size cap and the bridge's magic check honest),
+    /// and the texture its chip shows as a thumbnail.
+    #[derive(Clone)]
+    struct StagedPaste {
+        name: String,
+        bytes: Vec<u8>,
+        texture: gtk::gdk::Texture,
+    }
+
     struct Ui {
         state: RefCell<State>,
         client: RefCell<Option<AccountClient>>,
@@ -1658,6 +1723,16 @@ mod native {
         /// Alternates the live listen and the history poll during a watch, so
         /// neither starves the other.
         live_turn: std::cell::Cell<bool>,
+        /// The staged-images row above the composer: one chip
+        /// per pasted image waiting to ride the next send.
+        staged_row: gtk::Box,
+        /// Pasted images staged for the next composer send.
+        staged_images: RefCell<Vec<StagedPaste>>,
+        /// Pasted images riding the send in flight: a refused
+        /// dispatch puts them back above the composer, a landed
+        /// one drops them.
+        inflight_images: RefCell<Vec<StagedPaste>>,
+        paste_counter: Cell<u32>,
     }
 
     enum Reply {
@@ -2674,6 +2749,11 @@ mod native {
         let send_notice = label("");
         send_notice.add_css_class("chat-status");
         column.append(&send_notice);
+        let staged_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        staged_row.set_margin_start(12);
+        staged_row.set_margin_end(12);
+        staged_row.set_margin_top(6);
+        staged_row.set_visible(false);
         let composer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         composer.add_css_class("composer");
         composer.add_css_class("composer-pill");
@@ -2703,6 +2783,7 @@ mod native {
         composer.append(&prompt);
         composer.append(&stop);
         composer.append(&send);
+        column.append(&staged_row);
         column.append(&composer);
         pages.append_page(&chat, Some(&gtk::Label::new(Some("Shared chat history"))));
 
@@ -2856,6 +2937,10 @@ mod native {
             self_weak: RefCell::new(std::rc::Weak::new()),
             watch_until: std::cell::Cell::new(None),
             stream_probed: std::cell::Cell::new(false),
+            staged_row: staged_row.clone(),
+            staged_images: RefCell::new(Vec::new()),
+            inflight_images: RefCell::new(Vec::new()),
+            paste_counter: Cell::new(0),
             live_turn: std::cell::Cell::new(true),
             history,
             history_rows: RefCell::new(history_rows),
@@ -2972,6 +3057,54 @@ mod native {
             ui.send.connect_clicked(move |_| u.send_message());
             let enter = Rc::clone(&ui);
             ui.prompt.connect_activate(move |_| enter.send_message());
+        }
+        {
+            // Paste an image, stage it; paste anything else,
+            // leave the entry's own paste alone. The clipboard's
+            // offered formats answer synchronously, so a text
+            // paste is never intercepted speculatively: only a
+            // paste that offers an image is claimed, and the
+            // image itself is read asynchronously into the
+            // staging row.
+            let paste_keys = gtk::EventControllerKey::new();
+            paste_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let u = Rc::clone(&ui);
+            paste_keys.connect_key_pressed(move |_, key, _, modifiers| {
+                let paste_key = (key == gtk::gdk::Key::v
+                    && modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK))
+                    || (key == gtk::gdk::Key::Insert
+                        && modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK));
+                if !paste_key {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                let clipboard = u.prompt.display().clipboard();
+                let image_offered = [
+                    "image/png",
+                    "image/jpeg",
+                    "image/gif",
+                    "image/webp",
+                    "image/bmp",
+                    "image/tiff",
+                ]
+                .iter()
+                .any(|mime| clipboard.formats().contain_mime_type(mime));
+                if !image_offered {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                let ui = Rc::clone(&u);
+                gtk::glib::spawn_future_local(async move {
+                    match clipboard.read_texture_future().await {
+                        Ok(Some(texture)) => ui.stage_pasted_image(texture),
+                        Ok(None) | Err(_) => {
+                            ui.state.borrow_mut().send_notice =
+                                "The clipboard image could not be read.".into();
+                            ui.render();
+                        }
+                    }
+                });
+                gtk::glib::Propagation::Stop
+            });
+            ui.prompt.add_controller(paste_keys);
         }
         for entry in [&ui.python, &ui.config_dir] {
             let u = Rc::clone(&ui);
@@ -4258,6 +4391,83 @@ mod native {
             });
         }
 
+        /// Stage one clipboard image above the composer. The
+        /// texture is re-encoded as PNG: screenshots already
+        /// are PNG, and one known format keeps the size cap
+        /// and the bridge's magic check honest for every source.
+        fn stage_pasted_image(self: &Rc<Self>, texture: gtk::gdk::Texture) {
+            let bytes = texture.save_to_png_bytes().to_vec();
+            if bytes.len() > 8 * 1024 * 1024 {
+                self.state.borrow_mut().send_notice =
+                    "That pasted image is larger than 8 MB, so it was not staged.".into();
+                self.render();
+                return;
+            }
+            if self.staged_images.borrow().len() >= 4 {
+                self.state.borrow_mut().send_notice =
+                    "Up to four pasted images can ride one message.".into();
+                self.render();
+                return;
+            }
+            let count = self.paste_counter.get() + 1;
+            self.paste_counter.set(count);
+            let millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis())
+                .unwrap_or(0);
+            self.staged_images.borrow_mut().push(StagedPaste {
+                name: format!("pasted-{millis}-{count}.png"),
+                bytes,
+                texture,
+            });
+            self.render_staged_images();
+        }
+
+        fn remove_staged_image(self: &Rc<Self>, index: usize) {
+            {
+                let mut staged = self.staged_images.borrow_mut();
+                if index < staged.len() {
+                    staged.remove(index);
+                }
+            }
+            self.render_staged_images();
+        }
+
+        /// Rebuild the staged-images row from the staging
+        /// state: a thumbnail chip per image, with its size
+        /// and a remove button. The row hides itself empty.
+        fn render_staged_images(self: &Rc<Self>) {
+            while let Some(child) = self.staged_row.first_child() {
+                self.staged_row.remove(&child);
+            }
+            let staged = self.staged_images.borrow();
+            self.staged_row.set_visible(!staged.is_empty());
+            for (index, paste) in staged.iter().enumerate() {
+                let chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                let thumb = gtk::Image::from_paintable(Some(&paste.texture));
+                thumb.set_pixel_size(28);
+                let size = if paste.bytes.len() >= 1024 {
+                    format!("{:.0} KB", paste.bytes.len() as f64 / 1024.0)
+                } else {
+                    format!("{} B", paste.bytes.len())
+                };
+                let label = gtk::Label::new(Some(&format!("{} \u{b7} {}", paste.name, size)));
+                let remove = gtk::Button::with_label("\u{2715}");
+                crate::a11y::name(&remove, "Remove pasted image");
+                remove.set_tooltip_text(Some("Remove this pasted image"));
+                let weak = Rc::downgrade(self);
+                remove.connect_clicked(move |_| {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.remove_staged_image(index);
+                    }
+                });
+                chip.append(&thumb);
+                chip.append(&label);
+                chip.append(&remove);
+                self.staged_row.append(&chip);
+            }
+        }
+
         fn send_message(self: &Rc<Self>) {
             let text = self.prompt.text().to_string();
             self.send_text(text, true);
@@ -4283,12 +4493,36 @@ mod native {
                 self.render();
                 return;
             };
-            let Some(ticket) = self.state.borrow_mut().begin_send(&text) else {
-                let reason = self.state.borrow().describe_send_block(&text);
-                self.state.borrow_mut().send_notice = reason.into();
+            let images: Vec<StagedPaste> = if from_composer {
+                self.staged_images.borrow().clone()
+            } else {
+                Vec::new()
+            };
+            let ticket = if images.is_empty() {
+                self.state.borrow_mut().begin_send(&text)
+            } else {
+                self.state
+                    .borrow_mut()
+                    .begin_send_with_images(&text, images.len())
+            };
+            let Some(ticket) = ticket else {
+                let reason = if images.is_empty() {
+                    self.state.borrow().describe_send_block(&text).to_string()
+                } else if self.state.borrow().account.is_none() {
+                    "Not connected. Connect your Muse session before sending.".to_string()
+                } else {
+                    "The previous message is still being dispatched. Wait for its receipt before sending."
+                        .to_string()
+                };
+                self.state.borrow_mut().send_notice = reason;
                 self.render();
                 return;
             };
+            if !images.is_empty() {
+                self.staged_images.borrow_mut().clear();
+                *self.inflight_images.borrow_mut() = images.clone();
+                self.render_staged_images();
+            }
             // Your own message and its reply land at the bottom.
             self.scroll_to_bottom.set(true);
             // The box empties when the message goes, like muse.ai: the text
@@ -4311,11 +4545,30 @@ mod native {
             } else {
                 client
             };
+            let image_inputs: Vec<muse_account::StagedImage> = images
+                .iter()
+                .map(|paste| muse_account::StagedImage {
+                    name: paste.name.clone(),
+                    bytes: paste.bytes.clone(),
+                })
+                .collect();
             self.launch(ticket, move || {
                 // The dispatch verifies the session itself, so one account check
                 // rides along instead of a separate `connect` round trip that
                 // also lists every conversation.
-                let dispatch = match device {
+                let dispatch = if !image_inputs.is_empty() {
+                    // An image send carries no device attribution
+                    // in this shape: the bridge stages, writes and
+                    // sends from the account connection itself.
+                    client.send_images_verified(
+                        request.scope.as_deref(),
+                        &text,
+                        &image_inputs,
+                        &identity.1,
+                        &identity.0,
+                    )
+                } else {
+                    match device {
                     Some(device) if device.active.load(Ordering::SeqCst) => client
                         .send_from_device_verified(
                             request.scope.as_deref(),
@@ -4329,17 +4582,21 @@ mod native {
                             "Local host stopped before dispatch.".into(),
                         ));
                     }
-                    None => client.send_verified(
-                        request.scope.as_deref(),
-                        &text,
-                        &identity.1,
-                        &identity.0,
-                    ),
+                        None => client.send_verified(
+                            request.scope.as_deref(),
+                            &text,
+                            &identity.1,
+                            &identity.0,
+                        ),
+                    }
                 };
                 let result = match dispatch {
                     Ok(receipt) if !receipt.sent => {
                         SendOutcome::NotSent("Service did not accept the dispatch.".into())
                     }
+                    Ok(receipt) if receipt.stored_mismatch => SendOutcome::Uncertain(
+                        "The message landed, but the service stored a pasted image differently than it was sent (its byte count differs), so it may not show as the picture you pasted.".into(),
+                    ),
                     Ok(receipt) if receipt.confirmed => SendOutcome::Confirmed,
                     Ok(_) => SendOutcome::Uncertain(
                         "Service dispatch returned without scoped-history confirmation.".into(),
@@ -4512,6 +4769,12 @@ mod native {
                     .map(|pending| pending.text.clone()),
                 _ => None,
             };
+            let send_refused = matches!(
+                &reply,
+                Reply::Send(SendOutcome::NotSent(_))
+                    | Reply::SendConnectionError(SendOutcome::NotSent(_))
+            );
+            let send_resolved = matches!(&reply, Reply::Send(_) | Reply::SendConnectionError(_));
             // Stop immediately on account verification errors or identity changes,
             // before any old account result is installed or rendered.
             if matches!(
@@ -4717,6 +4980,20 @@ mod native {
                 // the message never left, so its text belongs back where the
                 // reader can fix or resend it.
                 self.prompt.set_text(text);
+            }
+            // The refused send's pictures go back above the
+            // composer with its text; a landed or uncertain one
+            // drops them -- it may already be running, and
+            // re-staging would invite a duplicate send.
+            if send_refused {
+                let inflight: Vec<StagedPaste> =
+                    self.inflight_images.borrow_mut().drain(..).collect();
+                if !inflight.is_empty() && self.staged_images.borrow().is_empty() {
+                    *self.staged_images.borrow_mut() = inflight;
+                    self.render_staged_images();
+                }
+            } else if send_resolved {
+                self.inflight_images.borrow_mut().clear();
             }
             if send_dispatched {
                 // A send does not change the conversation chooser, and a full
@@ -9550,6 +9827,7 @@ mod tests {
                     sent,
                     message_seen,
                     attachment_seen,
+                    binary: Vec::new(),
                 }),
             ));
             assert!(state.attach_probe.is_none());
@@ -9604,6 +9882,28 @@ mod tests {
         assert!(state.stream_probe.is_none());
         assert!(state.busy.is_none());
         assert_eq!(state.history_notice, notice, "the probe is silent");
+    }
+
+    #[test]
+    fn an_image_send_allows_empty_text_but_not_an_empty_send() {
+        let mut state: State = Controller::default();
+        assert!(state.begin_send_with_images("", 1).is_none());
+        state.account = Some("account".into());
+        assert!(state.begin_send_with_images("", 0).is_none());
+        assert!(
+            state.begin_send("",).is_none(),
+            "a plain send still needs text"
+        );
+        let ticket = state.begin_send_with_images("", 2).expect("ticket");
+        assert!(
+            state.begin_send_with_images("again", 1).is_none(),
+            "one dispatch at a time"
+        );
+        state.finish_send(&ticket, SendOutcome::Confirmed);
+        let ticket = state
+            .begin_send_with_images("with words", 1)
+            .expect("ticket");
+        state.finish_send(&ticket, SendOutcome::Confirmed);
     }
 
     #[test]

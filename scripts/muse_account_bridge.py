@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare", "attach_probe"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -438,6 +438,61 @@ def _message_attachments(payload):
     return attachments
 
 
+# Clipboard image sends (Nov 14, 2026). The app stages pasted
+# images as files under <config_dir>/paste-staging/ -- the host's
+# 1 MiB frame could never carry one -- and names them in the
+# request; the bridge reads the bytes, writes them service-side,
+# and sends one message whose items carry the files. The remote
+# copies land under pasted-images/, so a chat's attachments never
+# collide with anything the reader keeps.
+PASTE_STAGING_DIR = "paste-staging"
+PASTE_REMOTE_DIR = "pasted-images"
+MAX_PASTE_IMAGES = 4
+MAX_PASTE_IMAGE_BYTES = 8 * 1024 * 1024
+PASTE_EXTENSIONS = {"png": "png", "jpg": "jpeg", "jpeg": "jpeg",
+                    "gif": "gif", "webp": "webp"}
+
+
+def _paste_name_ok(name):
+    if not isinstance(name, str) or not name.startswith("pasted-"):
+        return False
+    stem, dot, ext = name.rpartition(".")
+    if not dot or ext not in PASTE_EXTENSIONS or len(name) > 128:
+        return False
+    return all(ch.isalnum() and ch.isascii() or ch == "-" for ch in stem)
+
+
+def _binary_write_bodies(path, data):
+    """Candidate fs.write bodies for binary content, in the
+    order the attach probe tries them. fs.write's recorded use
+    is text; which of these the service decodes as base64 bytes
+    is what the probe's binary leg settles (it verifies the
+    stored attachment's byte count and dimensions). Index 0 is
+    the current best guess and the one real sends use."""
+    import base64
+    encoded = base64.b64encode(data).decode("ascii")
+    return [
+        {"path": path, "content": encoded, "encoding": "base64"},
+        {"path": path, "content_base64": encoded},
+        {"path": path, "content": encoded},
+        {"path": path, "data": encoded},
+    ]
+
+
+def _binary_write_body(path, data, node_id):
+    body = _binary_write_bodies(path, data)[0]
+    if isinstance(node_id, str) and node_id:
+        body["node_id"] = node_id
+    return body
+
+
+# A 1x1 transparent PNG (68 bytes), the binary leg's test card:
+# its stored form is verifiable from the history projection
+# alone (bytes_len, width, height all ride the attachment).
+PROBE_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4"
+                 "2mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+
+
 def history_rows(rows, config_dir=None):
     rows = object_rows(rows)
     latest = {}
@@ -624,6 +679,8 @@ def validate_request(request):
                "feed": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"},
+               "send_images": {"thread", "message", "images", "device_id",
+                               "expect_vm_id", "expect_identity_name"},
                "attach_probe": {"thread"},
                "stream_probe": {"thread"}}
     if not isinstance(op, str) or op not in allowed:
@@ -807,6 +864,21 @@ def validate_request(request):
         message = request.get("message")
         if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > 512 * 1024:
             raise BridgeFailure("invalid_request")
+    if op == "send_images":
+        # An image send may carry no text at all -- the web sends
+        # image-only messages -- but it must carry at least one
+        # staged image, and every name must be one the client
+        # could have staged: a bare pasted-<token>.<ext> basename,
+        # never a path.
+        message = request.get("message")
+        if not isinstance(message, str) or len(message.encode("utf-8")) > 512 * 1024:
+            raise BridgeFailure("invalid_request")
+        images = request.get("images")
+        if not isinstance(images, list) or not 1 <= len(images) <= MAX_PASTE_IMAGES:
+            raise BridgeFailure("invalid_request")
+        for name in images:
+            if not _paste_name_ok(name):
+                raise BridgeFailure("invalid_request")
 
 
 def provides_checkout(site_dir):
@@ -1149,6 +1221,88 @@ def activity_rows(client, config, timeout_ms, config_dir=None):
         if len(rows) >= 200:
             break
     return {"events": rows}
+
+
+def _attach_probe_binary(client, config, thread, config_dir, baseline_ids):
+    """The attach probe's binary leg (Nov 14, 2026): one 1x1 PNG
+    per candidate fs.write encoding, each sent as a file item in
+    the scratch thread, each verdict read back from the landed
+    row's own attachment projection -- byte count and dimensions
+    are the proof, so a candidate that stores its base64 as text
+    convicts itself. One verdict per candidate; the winner is
+    the encoding real image sends may use."""
+    import base64
+    import time
+    data = base64.b64decode(PROBE_PNG_B64)
+    node_id = config.get("node_id")
+    by_candidate = {}
+    pending = {}
+    for index, template in enumerate(_binary_write_bodies("unused", data)):
+        remote = "attach-probe-bin-{}.png".format(index)
+        body = dict(template, path=remote)
+        if isinstance(node_id, str) and node_id:
+            body["node_id"] = node_id
+        try:
+            with client._gateway(config) as gateway:
+                gateway.call_json("fs.write", body=body, timeout=15)
+        except Exception:  # noqa: BLE001 - a refusal is a verdict
+            by_candidate[index] = {"candidate": index,
+                                   "verdict": "write_refused",
+                                   "bytes_len": None}
+            continue
+        text = "Attach probe binary candidate {}".format(index)
+        stream = {"items": [{"type": "text", "text": text},
+                            {"type": "file", "path": remote}],
+                  "capabilities": {}, "session_id": thread}
+        if isinstance(node_id, str) and node_id:
+            stream["node_id"] = node_id
+        try:
+            with client._gateway(config) as gateway:
+                gateway._open("chat.stream", body=stream)
+        except Exception:  # noqa: BLE001 - a refusal is a verdict
+            by_candidate[index] = {"candidate": index,
+                                   "verdict": "send_refused",
+                                   "bytes_len": None}
+            continue
+        by_candidate[index] = {"candidate": index, "verdict": "unverified",
+                               "bytes_len": None}
+        pending[text] = (index, remote)
+    if pending:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and pending:
+            rows = history_rows(client.history(thread=thread, limit=25),
+                                config_dir=config_dir)
+            for row in rows:
+                key = row["text"].strip()
+                if (key not in pending or row["role"] != "user"
+                        or row["message_id"] in baseline_ids):
+                    continue
+                index, remote = pending.pop(key)
+                found = None
+                for attachment in row.get("attachments") or []:
+                    if attachment.get("filename") in (
+                            remote, remote.rpartition("/")[2]):
+                        found = attachment
+                entry = by_candidate[index]
+                if found is None:
+                    entry["verdict"] = "no_attachment"
+                elif (found.get("bytes_len") == len(data)
+                        and found.get("width") == 1
+                        and found.get("height") == 1):
+                    entry["verdict"] = "stored_exact"
+                    entry["bytes_len"] = found.get("bytes_len")
+                else:
+                    entry["verdict"] = "stored_other"
+                    entry["bytes_len"] = found.get("bytes_len")
+            if pending:
+                time.sleep(0.4)
+    verdicts = [by_candidate[index] for index in sorted(by_candidate)]
+    winner = next((v["candidate"] for v in verdicts
+                   if v["verdict"] == "stored_exact"), None)
+    timing_log(config_dir, "attach-probe binary winner={} verdicts={}".format(
+        winner, ",".join("{}:{}".format(v["candidate"], v["verdict"])
+                         for v in verdicts)))
+    return verdicts
 
 
 def stream_probe_rows(client, config, thread, config_dir=None):
@@ -3267,9 +3421,105 @@ class Adapter:
             timing_log(config_dir,
                        "attach-probe fs_write={} sent={} message={} attachment={}".format(
                            fs_write, sent, message_seen, attachment_seen))
+            binary = _attach_probe_binary(self.client, self.config, thread,
+                                          config_dir, baseline_ids)
             return {"thread": thread, "fs_write": fs_write, "sent": sent,
                     "message_seen": message_seen,
-                    "attachment_seen": attachment_seen}
+                    "attachment_seen": attachment_seen,
+                    "binary": binary}
+        if request["op"] == "send_images":
+            import time
+            send_began = time.monotonic()
+            thread = request.get("thread")
+            message = request["message"]
+            config_dir = request.get("config_dir")
+            if "expect_vm_id" in request:
+                facts = session_facts(self.client, self.config)
+                if (facts["vm_id"] != request["expect_vm_id"]
+                        or facts["identity_name"]
+                        != request["expect_identity_name"]):
+                    raise BridgeFailure("account_changed")
+            staged = []
+            for name in request["images"]:
+                data = b""
+                if config_dir:
+                    try:
+                        data = (Path(config_dir) / PASTE_STAGING_DIR
+                                / name).read_bytes()
+                    except OSError:
+                        data = b""
+                ext = name.rpartition(".")[2]
+                if (not data or len(data) > MAX_PASTE_IMAGE_BYTES
+                        or _image_magic(data) != PASTE_EXTENSIONS[ext]):
+                    raise BridgeFailure("invalid_request")
+                staged.append((name, "{}/{}".format(PASTE_REMOTE_DIR, name),
+                               data))
+            baseline = history_rows(
+                self.client.history(thread=thread, limit=25),
+                config_dir=config_dir)
+            baseline_seq = max((r["seq"] for r in baseline), default=0)
+            baseline_ids = {r["message_id"] for r in baseline}
+            node_id = self.config.get("node_id")
+            try:
+                with self.client._gateway(self.config) as gateway:
+                    for _name, remote, data in staged:
+                        gateway.call_json(
+                            "fs.write",
+                            body=_binary_write_body(remote, data, node_id),
+                            timeout=20)
+            except Exception:  # noqa: BLE001 - nothing was dispatched
+                raise BridgeFailure("protocol_error",
+                                    uncertain=False) from None
+            items = []
+            if message.strip():
+                items.append({"type": "text", "text": message})
+            items += [{"type": "file", "path": remote}
+                      for _name, remote, _data in staged]
+            body = {"items": items, "capabilities": {}}
+            if isinstance(node_id, str) and node_id:
+                body["node_id"] = node_id
+            if thread:
+                body["session_id"] = thread
+            try:
+                with self.client._gateway(self.config) as gateway:
+                    gateway._open("chat.stream", body=body)
+            except Exception:  # noqa: BLE001 - the dispatch may have landed
+                raise BridgeFailure("protocol_error",
+                                    uncertain=True) from None
+            deadline = time.monotonic() + self.confirmation_window
+            while True:
+                rows = history_rows(
+                    self.client.history(thread=thread, limit=25),
+                    config_dir=config_dir)
+                for row in rows:
+                    if (row["seq"] > baseline_seq
+                            and row["message_id"] not in baseline_ids
+                            and row["role"] == "user"
+                            and row["text"].strip() == message.strip()):
+                        stored = {a.get("filename"): a
+                                  for a in row.get("attachments") or []}
+                        mismatch = False
+                        for name, remote, data in staged:
+                            found = stored.get(remote) or stored.get(name)
+                            if (found is None
+                                    or found.get("bytes_len") != len(data)):
+                                mismatch = True
+                        timing_log(config_dir,
+                                   "bridge send-images return {} ms={}".format(
+                                       "mismatch" if mismatch else "confirmed",
+                                       int((time.monotonic()
+                                            - send_began) * 1000)))
+                        return {"sent": True, "confirmed": not mismatch,
+                                "message_id": row["message_id"],
+                                "stored_mismatch": mismatch}
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
+            timing_log(config_dir,
+                       "bridge send-images return unconfirmed ms={}".format(
+                           int((time.monotonic() - send_began) * 1000)))
+            return {"sent": True, "confirmed": False, "message_id": None,
+                    "stored_mismatch": False}
         if request["op"] == "stream_probe":
             return stream_probe_rows(self.client, self.config, request["thread"],
                                      config_dir=request.get("config_dir"))

@@ -2880,3 +2880,200 @@ class AttachFetchProbeTests(unittest.TestCase):
             self.assertEqual(plain_calls, [])
             bridge.Adapter(imaged, {}).dispatch(request)
             self.assertEqual(len(imaged_calls), 1)
+
+
+class PasteSendTests(unittest.TestCase):
+    PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 40
+
+    def _client(self, bridge, landed_bytes_len=None):
+        from contextlib import contextmanager
+        calls = {"writes": [], "opened": []}
+        png_len = landed_bytes_len if landed_bytes_len is not None else len(self.PNG)
+
+        class Gateway:
+            def call_json(self, method, body=None, timeout=None):
+                calls["writes"].append((method, body))
+                return {}
+
+            def _open(self, method, body=None):
+                calls["opened"].append((method, body))
+                return 1
+
+        class Client(FakeClient):
+            def __init__(self):
+                self.sent = False
+
+            def history(self, **kwargs):
+                if not calls["opened"]:
+                    return []
+                attachments = [{
+                    "filename": "pasted-images/pasted-1-1.png",
+                    "mime_type": "image/png", "kind": "image",
+                    "bytes_len": png_len, "width": 4, "height": 4,
+                }]
+                return [{"message_id": "m-new", "seq": 9, "role": "user",
+                         "text": "look at this",
+                         "raw": {"payload": {"metadata": {
+                             "attachments": attachments}}}}]
+
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        return Client(), calls
+
+    def _stage(self, config_dir, data=None):
+        import pathlib
+        staging = pathlib.Path(config_dir) / "paste-staging"
+        staging.mkdir(parents=True)
+        (staging / "pasted-1-1.png").write_bytes(
+            self.PNG if data is None else data)
+
+    def test_validation_rejects_paths_and_empty_image_lists(self):
+        bridge = load_bridge()
+        base = {"op": "send_images", "config_dir": "/tmp/x",
+                "message": "", "thread": "t-1"}
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({**base, "images": []})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request(
+                {**base, "images": ["../pasted-1-1.png"]})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({**base, "images": ["notes.txt"]})
+        bridge.validate_request({**base, "images": ["pasted-1-1.png"]})
+
+    def test_a_staged_image_is_written_sent_and_verified(self):
+        import tempfile
+        bridge = load_bridge()
+        client, calls = self._client(bridge)
+        with tempfile.TemporaryDirectory() as config_dir:
+            self._stage(config_dir)
+            answer = bridge.Adapter(client, {}).dispatch({
+                "op": "send_images", "thread": "thread-9",
+                "message": "look at this", "images": ["pasted-1-1.png"],
+                "config_dir": config_dir})
+        self.assertTrue(answer["sent"])
+        self.assertTrue(answer["confirmed"])
+        self.assertFalse(answer["stored_mismatch"])
+        method, body = calls["writes"][0]
+        self.assertEqual(method, "fs.write")
+        self.assertEqual(body["path"], "pasted-images/pasted-1-1.png")
+        self.assertEqual(body["encoding"], "base64")
+        import base64
+        self.assertEqual(base64.b64decode(body["content"]), self.PNG)
+        method, body = calls["opened"][0]
+        self.assertEqual(method, "chat.stream")
+        self.assertEqual(body["session_id"], "thread-9")
+        self.assertEqual(body["items"][0],
+                         {"type": "text", "text": "look at this"})
+        self.assertEqual(body["items"][1],
+                         {"type": "file",
+                          "path": "pasted-images/pasted-1-1.png"})
+
+    def test_a_different_stored_size_is_a_mismatch_not_a_confirmation(self):
+        import tempfile
+        bridge = load_bridge()
+        client, calls = self._client(bridge, landed_bytes_len=999)
+        with tempfile.TemporaryDirectory() as config_dir:
+            self._stage(config_dir)
+            answer = bridge.Adapter(client, {}).dispatch({
+                "op": "send_images", "thread": "thread-9",
+                "message": "look at this", "images": ["pasted-1-1.png"],
+                "config_dir": config_dir})
+        self.assertTrue(answer["sent"])
+        self.assertFalse(answer["confirmed"])
+        self.assertTrue(answer["stored_mismatch"])
+
+    def test_a_missing_or_non_image_staging_file_is_refused(self):
+        import tempfile
+        bridge = load_bridge()
+        client, calls = self._client(bridge)
+        with tempfile.TemporaryDirectory() as config_dir:
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.Adapter(client, {}).dispatch({
+                    "op": "send_images", "thread": "thread-9",
+                    "message": "", "images": ["pasted-1-1.png"],
+                    "config_dir": config_dir})
+            self._stage(config_dir, data=b"not an image at all")
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.Adapter(client, {}).dispatch({
+                    "op": "send_images", "thread": "thread-9",
+                    "message": "", "images": ["pasted-1-1.png"],
+                    "config_dir": config_dir})
+        self.assertEqual(calls["writes"], [])
+
+
+class AttachProbeBinaryTests(unittest.TestCase):
+    def test_the_binary_leg_names_the_byte_exact_candidate(self):
+        import base64
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        png_len = len(base64.b64decode(bridge.PROBE_PNG_B64))
+        b64_len = len(bridge.PROBE_PNG_B64)
+        writes = []
+        opened = []
+
+        class Gateway:
+            def call_json(self, method, body=None, timeout=None):
+                writes.append((method, body))
+                return {}
+
+            def _open(self, method, body=None):
+                opened.append((method, body))
+                return 1
+
+        class Client(FakeClient):
+            def history(self, **kwargs):
+                rows = []
+                for _method, body in opened:
+                    text = body["items"][0]["text"]
+                    if text == bridge.ATTACH_PROBE_MESSAGE:
+                        rows.append({
+                            "message_id": "probe-text", "seq": 1,
+                            "role": "user", "text": text,
+                            "raw": {"payload": {"metadata": {"attachments": [
+                                {"filename": bridge.ATTACH_PROBE_PATH,
+                                 "mime_type": "text/plain",
+                                 "bytes_len": 12}]}}}})
+                        continue
+                    index = int(text.rsplit(" ", 1)[1])
+                    # Candidate 0 stores its base64 as text (wrong
+                    # size), candidate 1 stores the PNG exactly,
+                    # candidate 2 lands no attachment, candidate 3
+                    # is also exact -- the winner is the FIRST exact.
+                    if index == 2:
+                        attachments = []
+                    elif index in (1, 3):
+                        attachments = [{
+                            "filename": "attach-probe-bin-%d.png" % index,
+                            "mime_type": "image/png",
+                            "bytes_len": png_len, "width": 1, "height": 1}]
+                    else:
+                        attachments = [{
+                            "filename": "attach-probe-bin-%d.png" % index,
+                            "mime_type": "image/png",
+                            "bytes_len": b64_len, "width": 1, "height": 1}]
+                    rows.append({
+                        "message_id": "probe-bin-%d" % index,
+                        "seq": 2 + index, "role": "user", "text": text,
+                        "raw": {"payload": {"metadata": {
+                            "attachments": attachments}}}})
+                return rows
+
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        answer = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "attach_probe", "thread": "thread-9"})
+        verdicts = {v["candidate"]: v["verdict"] for v in answer["binary"]}
+        self.assertEqual(verdicts[0], "stored_other")
+        self.assertEqual(verdicts[1], "stored_exact")
+        self.assertEqual(verdicts[2], "no_attachment")
+        self.assertEqual(verdicts[3], "stored_exact")
+        bodies = {body["path"]: body for _m, body in writes
+                  if body["path"].startswith("attach-probe-bin")}
+        self.assertEqual(bodies["attach-probe-bin-1.png"]["content_base64"],
+                         bridge.PROBE_PNG_B64)
+        self.assertEqual(bodies["attach-probe-bin-0.png"]["encoding"],
+                         "base64")
