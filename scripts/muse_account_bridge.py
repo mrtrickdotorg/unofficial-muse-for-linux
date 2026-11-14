@@ -624,7 +624,8 @@ def validate_request(request):
                "feed": set(),
                "send": {"thread", "message", "device_id", "expect_vm_id",
                         "expect_identity_name"},
-               "attach_probe": {"thread"}}
+               "attach_probe": {"thread"},
+               "stream_probe": {"thread"}}
     if not isinstance(op, str) or op not in allowed:
         raise BridgeFailure("invalid_request")
     if set(request) - ({"op", "config_dir"} | allowed[op]):
@@ -640,6 +641,10 @@ def validate_request(request):
         # The probe writes and sends, so it needs a named thread:
         # it exists to run in a designated scratch chat, never in
         # whichever conversation happens to be open in the app.
+        raise BridgeFailure("invalid_request")
+    if op == "stream_probe" and thread is None:
+        # The stream probe listens to one thread's events; the
+        # main chat's stream is the activity read's job.
         raise BridgeFailure("invalid_request")
     if op in ("history", "watch"):
         limit = request.get("limit")
@@ -1144,6 +1149,196 @@ def activity_rows(client, config, timeout_ms, config_dir=None):
         if len(rows) >= 200:
             break
     return {"events": rows}
+
+
+def stream_probe_rows(client, config, thread, config_dir=None):
+    """One bounded listen on the per-thread event stream (probe,
+    Nov 14, 2026).
+
+    Side-chat replies reach this app only as history rows whose
+    text the service updates in coarse jumps -- a row once sat at
+    12 characters for ~50 s -- because the account-wide live read
+    never carries threaded replies. `chat.stream_events` is a
+    recorded subscription nobody here has opened; this learns
+    whether it carries a thread's reply deltas, and what its
+    events are called. Candidate bodies are tried in order (the
+    send path names a thread `session_id`; the subscription may
+    want `thread_id`, or the pair with empty capabilities, or the
+    bare capabilities the account subscribe uses); the first one
+    the service accepts is the recorded shape. Only event names
+    and key names are logged -- never text, never ids beyond the
+    thread the caller named. A refusal at every candidate is a
+    result, not an error.
+    """
+    import time
+    gateway_factory = getattr(client, "_gateway", None)
+    if gateway_factory is None:
+        raise BridgeFailure("bridge_unavailable")
+    candidates = [
+        {"session_id": thread},
+        {"thread_id": thread},
+        {"session_id": thread, "capabilities": {}},
+        {"capabilities": {}},
+    ]
+    for index, body in enumerate(candidates):
+        began = time.monotonic()
+        try:
+            with gateway_factory(config) as connection:
+                records = connection.subscribe_json(
+                    "chat.stream_events", body=body,
+                    max_records=100, idle_timeout=3.5, overall_timeout=10.0)
+        except Exception as error:  # noqa: BLE001 - a refusal is a result
+            timing_log(config_dir, "stream-probe body={} refused {}".format(
+                index, type(error).__name__))
+            continue
+        kinds = {}
+        seen_kinds = set()
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("event") or record.get("type") or record.get("kind")
+            kind = kind if isinstance(kind, str) and 1 <= len(kind) <= 64 else "<none>"
+            kinds[kind] = kinds.get(kind, 0) + 1
+            if kind not in seen_kinds:
+                seen_kinds.add(kind)
+                payload = record.get("payload")
+                payload_keys = (sorted(payload)[:24] if isinstance(payload, dict)
+                                else [])
+                timing_log(config_dir,
+                           "stream-probe kind={} keys={} payload_keys={}".format(
+                               kind,
+                               ",".join(sorted(record)[:24]),
+                               ",".join(str(k) for k in payload_keys)))
+        delta_kinds = sum(count for name, count in kinds.items()
+                          if "delta" in name)
+        timing_log(config_dir,
+                   "stream-probe body={} accepted events={} kinds={} "
+                   "delta_events={} ms={}".format(
+                       index, sum(kinds.values()),
+                       ",".join("{}:{}".format(name, kinds[name])
+                                for name in sorted(kinds))[:600],
+                       delta_kinds,
+                       int((time.monotonic() - began) * 1000)))
+        return {"thread": thread, "accepted": True,
+                "events": sum(kinds.values())}
+    return {"thread": thread, "accepted": False, "events": 0}
+
+
+_ATTACH_FETCH_PROBED = False
+
+_IMAGE_MAGICS = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpeg"),
+                 (b"GIF8", "gif"), (b"RIFF", "webp"))
+
+
+def _image_magic(data):
+    for prefix, name in _IMAGE_MAGICS:
+        if data.startswith(prefix):
+            if name == "webp" and data[8:12] != b"WEBP":
+                continue
+            return name
+    return "none"
+
+
+def _probe_attachment_fetch(config_dir, client, config, raw_rows):
+    """One-shot reconnaissance for inline image previews (Nov 14,
+    2026).
+
+    A message's image attachments reach the app as name, size and
+    dimensions only; the payload's service-side path stays behind
+    the bridge by design, so no client can show the picture. The
+    gateway records an `fs.read` route -- the likely fetch the web
+    uses. The first history read in this process that carries an
+    image attachment tries it, once: candidate bodies in order,
+    and the log records only the reference's key name, the
+    answer's form (JSON key names, or byte count) and whether the
+    bytes carry the image format's magic -- never the path, never
+    the bytes. A refusal is a result. A failure here must never
+    fail the history read that carries it, so everything is
+    swallowed.
+    """
+    global _ATTACH_FETCH_PROBED
+    if _ATTACH_FETCH_PROBED or not config_dir:
+        return
+    try:
+        target = None
+        for row in raw_rows or []:
+            raw = row.get("raw") if isinstance(row, dict) else None
+            payload = raw.get("payload") if isinstance(raw, dict) else None
+            metadata = (payload.get("metadata")
+                        if isinstance(payload, dict) else None)
+            attachments = (metadata.get("attachments")
+                           if isinstance(metadata, dict) else None)
+            if not isinstance(attachments, list):
+                continue
+            for item in attachments:
+                if not isinstance(item, dict):
+                    continue
+                mime = item.get("mime_type")
+                if not (isinstance(mime, str) and mime.startswith("image/")):
+                    continue
+                for key in ("path", "file_path", "uri", "url", "handle"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value:
+                        target = (key, value, mime)
+                        break
+                if target:
+                    break
+            if target:
+                break
+        if target is None:
+            return  # stay armed for a read that carries an image
+        _ATTACH_FETCH_PROBED = True
+        key, path, mime = target
+        node_id = config.get("node_id") if isinstance(config, dict) else None
+        candidates = [{"path": path}]
+        if isinstance(node_id, str) and node_id:
+            candidates.append({"path": path, "node_id": node_id})
+        for index, body in enumerate(candidates):
+            try:
+                with client._gateway(config) as gateway:
+                    raw = gateway.request("fs.read", body=body, timeout=20)
+            except Exception as error:  # noqa: BLE001 - a refusal is a result
+                timing_log(config_dir,
+                           "attach-fetch body={} refused {}".format(
+                               index, type(error).__name__))
+                continue
+            _form, detail = _describe_fetch_answer(raw)
+            timing_log(config_dir,
+                       "attach-fetch body={} refkey={} mime={} {}".format(
+                           index, key, mime, detail))
+            return
+    except Exception:  # noqa: BLE001 - a probe never fails its read
+        pass
+
+
+def _describe_fetch_answer(raw):
+    """(form, content-free description) for one fs.read answer."""
+    import base64
+    import json as _json
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            parsed = _json.loads(bytes(raw).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            longest = ""
+            for value in parsed.values():
+                if isinstance(value, str) and len(value) > len(longest):
+                    longest = value
+            magic = "none"
+            if longest:
+                try:
+                    decoded = base64.b64decode(
+                        longest + "=" * (-len(longest) % 4), validate=False)
+                    magic = _image_magic(decoded)
+                except Exception:  # noqa: BLE001 - shape only
+                    magic = "none"
+            return "json", "form=json keys={} b64_bytes={} magic={}".format(
+                ",".join(sorted(parsed)[:24]),
+                (len(longest) * 3) // 4 if longest else 0, magic)
+        return "bytes", "form=bytes bytes={} magic={}".format(
+            len(raw), _image_magic(bytes(raw)))
+    return "other", "form=other"
 
 
 def cookie_header(config):
@@ -2516,7 +2711,11 @@ class Adapter:
             # to prove the saved session still belongs to the same account.
             return session_facts(self.client, self.config)
         if request["op"] == "history":
-            return history_rows(self.client.history(thread=request.get("thread"), limit=request["limit"]), config_dir=request.get("config_dir"))
+            raw_rows = self.client.history(thread=request.get("thread"), limit=request["limit"])
+            rows = history_rows(raw_rows, config_dir=request.get("config_dir"))
+            _probe_attachment_fetch(request.get("config_dir"), self.client,
+                                    self.config, raw_rows)
+            return rows
         if request["op"] == "tasks":
             with self.client._gateway(self.config) as gateway:
                 schedules = gateway.call_json("tasks.list")["schedules"]
@@ -3071,6 +3270,9 @@ class Adapter:
             return {"thread": thread, "fs_write": fs_write, "sent": sent,
                     "message_seen": message_seen,
                     "attachment_seen": attachment_seen}
+        if request["op"] == "stream_probe":
+            return stream_probe_rows(self.client, self.config, request["thread"],
+                                     config_dir=request.get("config_dir"))
         raise BridgeFailure("invalid_request")
 
 

@@ -33,7 +33,7 @@ WAIT_OPS = frozenset({"watch"})
 # read behind a four-second activity poll), the user's request goes
 # first -- see PriorityGate. An op already running is never
 # interrupted; priority only orders the queue.
-BACKGROUND_OPS = frozenset({"activity"})
+BACKGROUND_OPS = frozenset({"activity", "stream_probe"})
 RETRY_CODES = frozenset({"bridge_failure", "timeout", "auth_required"})
 REFUSED = {"ok": False, "error": {"code": "invalid_request", "uncertain": False}}
 
@@ -108,6 +108,7 @@ def authorized(connection):
 # bound: on expiry it closes the connection from another thread, which is
 # what makes the stuck call let go.
 OP_BUDGETS = {"watch": 75.0, "send": 30.0, "activity": 20.0,
+              "stream_probe": 45.0,
               "attach_probe": 45.0}
 DEFAULT_BUDGET = 25.0
 

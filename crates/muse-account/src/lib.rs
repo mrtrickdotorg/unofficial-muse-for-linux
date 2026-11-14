@@ -33,6 +33,7 @@ fn deadline_for(op: Option<&str>) -> Duration {
         Some("watch") => Duration::from_secs(100),
         Some("send") => Duration::from_secs(50),
         Some("attach_probe") => Duration::from_secs(60),
+        Some("stream_probe") => Duration::from_secs(60),
         Some("activity") => Duration::from_secs(35),
         _ => Duration::from_secs(45),
     }
@@ -679,6 +680,17 @@ pub struct AttachProbeAnswer {
     pub attachment_seen: bool,
 }
 
+/// What one stream probe learned: whether the service accepted
+/// a per-thread event subscription at all, and how many events
+/// it carried in the listen window. The event shapes themselves
+/// are the bridge's timing log, never this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamProbeAnswer {
+    pub thread: String,
+    pub accepted: bool,
+    pub events: u64,
+}
+
 /// What the service said about a feed reaction it took.
 ///
 /// Acceptance only: whether the unit now shows the reaction is
@@ -1185,6 +1197,22 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "attach_probe", "thread": thread}),
+            false,
+        )
+    }
+
+    /// One bounded listen on a thread's event stream. The probe
+    /// is how the fill-lag question gets answered with evidence:
+    /// whether `chat.stream_events` carries a side chat's reply
+    /// deltas, and under what request shape. One call, one
+    /// listen; the bridge tries its candidate bodies in order
+    /// and reports only acceptance and an event count.
+    pub fn stream_probe(&self, thread: &str) -> Result<StreamProbeAnswer, AccountError> {
+        if thread.is_empty() || thread.len() > 256 || thread.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "stream_probe", "thread": thread}),
             false,
         )
     }
