@@ -648,6 +648,62 @@ class BridgeTests(unittest.TestCase):
                 bridge.validate_request(dict(bad, op="artifacts",
                                                config_dir="/tmp/x"))
 
+    def test_search_probes_the_parameter_and_projects_openable_rows(self):
+        # The route is recorded; its parameter's name is not. The
+        # first candidate is refused, the second answers, and only
+        # rows carrying a conversation survive the projection.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append((method, kwargs))
+                if (kwargs.get("query") or {}).get("q"):
+                    raise RuntimeError("unknown parameter")
+                return {"results": [
+                    {"session_id": "thread-1", "title": "River plans",
+                     "snippet": "the otters return in May"},
+                    {"title": "No conversation id", "snippet": "unopenable"},
+                    {"session_id": "thread-2", "title": "River again",
+                     "snippet": "more otters"},
+                ]}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "search", "query": "otters"})
+        self.assertEqual([kwargs.get("query") for _, kwargs in calls],
+                         [{"q": "otters"}, {"query": "otters"}])
+        self.assertEqual([item["id"] for item in result["items"]],
+                         ["thread-1", "thread-2"])
+        self.assertEqual(result["items"][0]["title"], "River plans")
+        self.assertEqual(result["items"][0]["body"], "the otters return in May")
+        self.assertEqual(result["recognized"], 2)
+
+    def test_search_surfaces_the_refusal_when_no_parameter_answers(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                raise RuntimeError("no such parameter")
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        # The refusal surfaces through the bridge's ordinary
+        # failure classification, like any gateway error.
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.Adapter(Client(), {}).dispatch({"op": "search", "query": "otters"})
+
+    def test_search_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "search", "query": "otters",
+                                   "config_dir": "/tmp/x"})
+        for bad in ({}, {"query": ""}, {"query": "x" * 513}, {"query": 7}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, op="search", config_dir="/tmp/x"))
+
     def test_artifacts_fails_closed_on_an_unidentified_row(self):
         from contextlib import contextmanager
         bridge = load_bridge()

@@ -13,6 +13,7 @@ mod library_ui;
 mod local_host;
 mod mail_ui;
 mod rich_text;
+mod search_ui;
 mod service_ui;
 mod tasks_ui;
 mod updater;
@@ -1529,6 +1530,42 @@ fn build_ui(app: &gtk::Application) {
     };
     stack.add_named(&feed_page.root, Some("feed"));
 
+    // The Search page, built here for the same reason as the
+    // Feed: opening a result needs the finished navigation -- it
+    // lands on the chat page with that conversation open, the
+    // sidebar selection's own flow.
+    let search_page = {
+        let stack = stack.clone();
+        let title = page_title.clone();
+        let chats = chats_nav.clone();
+        let library = library_nav.clone();
+        let ideas = ideas_nav.clone();
+        let goals = goals_nav.clone();
+        let create = create_nav.clone();
+        let feed = feed_nav.clone();
+        let open_thread = Rc::clone(&account_page.open_thread);
+        search_ui::build(
+            account_page.host_context.clone(),
+            Rc::new(move |session_id: String| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "chats",
+                );
+                open_thread(session_id);
+            }),
+        )
+    };
+    stack.add_named(&search_page.root, Some("search"));
+
     // Opening a data tab loads it: the shell fires each page's load
     // hook as its stack page becomes visible, so Ideas, Goals, Feed
     // and Library show their contents on the click that opens them
@@ -1590,7 +1627,11 @@ fn build_ui(app: &gtk::Application) {
         });
     }
     {
-        // Search: land on Chat with the sidebar search focused.
+        // Search: the Search page, its query entry focused. (It
+        // used to land on Chat with the sidebar's title filter
+        // focused; that filter still sits above the thread list
+        // for what it is, but Search the menu action is the
+        // service search now.)
         let stack = stack.clone();
         let title = page_title.clone();
         let chats = chats_nav.clone();
@@ -1599,7 +1640,7 @@ fn build_ui(app: &gtk::Application) {
         let goals = goals_nav.clone();
         let create = create_nav.clone();
         let feed = feed_nav.clone();
-        let focus_search = Rc::clone(&account_page.focus_search);
+        let search_load = search_page.load.clone();
         search_button.connect_clicked(move |_| {
             select_page(
                 &stack,
@@ -1612,9 +1653,9 @@ fn build_ui(app: &gtk::Application) {
                     (&create, "create"),
                     (&feed, "feed"),
                 ],
-                "chats",
+                "search",
             );
-            focus_search();
+            search_load();
         });
     }
     {
@@ -1882,6 +1923,7 @@ fn select_page(
         "computer-control" => "Computer Control",
         "tasks" => "Reminders",
         "library" => "Library",
+        "search" => "Search",
         "ideas" => "Ideas",
         "goals" => "Goals",
         "create" => "Create",

@@ -1390,14 +1390,15 @@ mod native {
         /// The slim strip shown in the side panel's place while it
         /// is collapsed, carrying the button that brings it back.
         pub side_panel_strip: gtk::Box,
-        /// Focus the sidebar search entry (the rail's Search action).
-        pub focus_search: Rc<dyn Fn()>,
         /// Go to the main conversation and focus the composer (the
         /// rail's New action).
         pub new_chat: Rc<dyn Fn()>,
         /// Start a new conversation with text already in the composer
         /// (the Feed page's Discuss action).
         pub discuss: Rc<dyn Fn(String)>,
+        /// Open an existing conversation by its service id (the
+        /// Search page's results).
+        pub open_thread: Rc<dyn Fn(String)>,
         /// Re-evaluate the side panel (the shell calls this when the
         /// window crosses the responsive breakpoint).
         pub refresh_side_panel: Rc<dyn Fn()>,
@@ -2831,25 +2832,7 @@ mod native {
                 if let Some(client) = u.client.borrow().as_ref() {
                     client.log_switch();
                 }
-                let changed = u.state.borrow_mut().select_thread(Some(scope.clone()));
-                if changed {
-                    u.state.borrow_mut().prime_history_from_cache();
-                    u.prompt.set_text("");
-                    u.render();
-                    u.read(false, false);
-                    // Opening a chat marks it read, as on the
-                    // web -- but only when the listing says there
-                    // is anything unread in it.
-                    let unread = u.state.borrow().account.as_ref().is_some_and(|account| {
-                        account
-                            .threads
-                            .iter()
-                            .any(|t| t.session_id == scope && t.unread_count > 0)
-                    });
-                    if unread {
-                        u.mark_seen(&scope);
-                    }
-                }
+                u.open_thread(&scope);
             });
         }
         {
@@ -3075,12 +3058,6 @@ mod native {
             }
         });
         let weak = Rc::downgrade(&ui);
-        let focus_search = Rc::new(move || {
-            if let Some(ui) = weak.upgrade() {
-                ui.thread_search.grab_focus();
-            }
-        });
-        let weak = Rc::downgrade(&ui);
         let refresh_side_panel = Rc::new(move || {
             if let Some(ui) = weak.upgrade() {
                 let state = ui.state.borrow();
@@ -3135,6 +3112,12 @@ mod native {
             }
         });
         let weak = Rc::downgrade(&ui);
+        let open_thread = Rc::new(move |session_id: String| {
+            if let Some(ui) = weak.upgrade() {
+                ui.open_thread(&session_id);
+            }
+        });
+        let weak = Rc::downgrade(&ui);
         let host_context = Rc::new(move || {
             let ui = weak.upgrade()?;
             if ui.state.borrow().account.is_some() && ui.host_verified.get() {
@@ -3148,9 +3131,9 @@ mod native {
             threads_panel,
             side_panel,
             side_panel_strip,
-            focus_search,
             new_chat,
             discuss,
+            open_thread,
             refresh_side_panel,
             settings,
             cancel_login,
@@ -3769,6 +3752,36 @@ mod native {
         /// re-reads the listing, which is what clears the badge.
         /// A busy slot or a vanished client skips quietly -- the
         /// next open retries.
+        /// Open one conversation in the transcript: the sidebar
+        /// selection's exact flow, shared with anything that
+        /// arrives holding a conversation id (the Search page's
+        /// results). Priming from the history cache makes the
+        /// switch instant when the conversation was read this
+        /// session; the read that follows settles it, and an
+        /// unread conversation is marked read as on the web.
+        fn open_thread(self: &Rc<Self>, scope: &str) {
+            let changed = self
+                .state
+                .borrow_mut()
+                .select_thread(Some(scope.to_string()));
+            if !changed {
+                return;
+            }
+            self.state.borrow_mut().prime_history_from_cache();
+            self.prompt.set_text("");
+            self.render();
+            self.read(false, false);
+            let unread = self.state.borrow().account.as_ref().is_some_and(|account| {
+                account
+                    .threads
+                    .iter()
+                    .any(|t| t.session_id == scope && t.unread_count > 0)
+            });
+            if unread {
+                self.mark_seen(scope);
+            }
+        }
+
         fn mark_seen(self: &Rc<Self>, thread_id: &str) {
             let Some(client) = self.client.borrow().clone() else {
                 return;
