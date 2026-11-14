@@ -600,6 +600,21 @@ pub struct SpaceUnshareAnswer {
     pub accepted: bool,
 }
 
+/// What the service's HTML export of one space came back as.
+///
+/// `html` is present only when the export decoded as a page and
+/// fit the frame it travels in; `size` always reports the
+/// export's true byte count, and `truncated` says the page was
+/// withheld for size rather than lost.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceExportAnswer {
+    pub slug: String,
+    pub format: String,
+    pub size: u64,
+    pub truncated: bool,
+    pub html: Option<String>,
+}
+
 /// What the service said about a mark-as-read it took.
 ///
 /// Acceptance only: whether the thread now reads as seen is
@@ -843,6 +858,22 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "space_unshare", "slug": slug}),
+            false,
+        )
+    }
+    /// Read one space's HTML export for an in-app preview.
+    ///
+    /// The slug must be one the Library listing's open target
+    /// published; the bridge makes a single raw GET on the
+    /// recorded binary route, so the export itself is the only
+    /// thing that travels. An oversized export arrives as its
+    /// size and a truncation flag, never as a broken frame.
+    pub fn space_export(&self, slug: &str) -> Result<SpaceExportAnswer, AccountError> {
+        if slug.is_empty() || slug.len() > 256 || slug.contains('\0') || slug.contains('/') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "space_export", "slug": slug}),
             false,
         )
     }

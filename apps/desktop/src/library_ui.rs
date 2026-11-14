@@ -6,7 +6,8 @@
 //! the last page issued plus the references already shown, and the bridge
 //! accepts a follow-up page only when its rows provably continue the list.
 //! A space row can be unshared from here — one armed press, one write, then
-//! a re-read to prove the state. Opening, downloading and deleting stay on
+//! a re-read to prove the state — and previewed from the service's own HTML
+//! export in a locked frame like the Feed's. Downloading and deleting stay on
 //! the Muse side. Rows are ordered pinned-first because a pin is a choice
 //! the person made and a recency sort would bury it, and the notice repeats
 //! the service's own total so a page of 50 never reads as the whole Library.
@@ -14,7 +15,9 @@
 use crate::local_host::AccountContext;
 use gtk::prelude::*;
 use gtk4 as gtk;
-use muse_account::{AccountClient, AccountError, ArtifactList, ArtifactSummary, ErrorCode};
+use muse_account::{
+    AccountClient, AccountError, ArtifactList, ArtifactSummary, ErrorCode, SpaceExportAnswer,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -52,6 +55,9 @@ pub(super) struct Ui {
     /// The slug whose Unshare press is armed, if any. Arming is
     /// the confirmation: the second press on the same row sends.
     armed: RefCell<Option<String>>,
+    /// The open preview window, if any; a new preview replaces
+    /// it rather than stacking a window per press.
+    preview_window: RefCell<Option<gtk::Window>>,
 }
 
 fn label(text: &str) -> gtk::Label {
@@ -144,6 +150,34 @@ pub(super) fn paging_note(paging_dead: bool, has_more: bool) -> &'static str {
     }
 }
 
+/// Whole kilobytes, rounded up: the magnitude is the point.
+fn size_kb(size: u64) -> u64 {
+    size.div_ceil(1024)
+}
+
+/// The notice a finished export read leaves when it cannot open
+/// a preview, or None when the preview opens. The sizes are the
+/// service's own byte counts; a withheld page is named as
+/// withheld, never as missing.
+pub(super) fn preview_notice(answer: &SpaceExportAnswer, title: &str) -> Option<String> {
+    if answer.truncated {
+        return Some(format!(
+            "The export of \"{title}\" is {} KB -- too large to preview in the app. It stays available on the Muse side.",
+            size_kb(answer.size)
+        ));
+    }
+    match answer.format.as_str() {
+        "html" if answer.html.is_some() => None,
+        "binary" => Some(format!(
+            "The export of \"{title}\" came back as binary data ({} KB), not a page, so there is nothing to preview.",
+            size_kb(answer.size)
+        )),
+        _ => Some(format!(
+            "The export of \"{title}\" did not come back as a page, so there is nothing to preview."
+        )),
+    }
+}
+
 /// Map a typed failure to a sentence. The error's own text never reaches the
 /// page: the bridge's codes are fixed, its details are not, and a detail could
 /// quote service output.
@@ -197,6 +231,17 @@ impl Ui {
             text.set_hexpand(true);
             line.append(&text);
             if let Some(slug) = space_slug(&row) {
+                let preview = gtk::Button::with_label("Preview");
+                preview.set_widget_name(&format!("space-preview:{slug}"));
+                let preview_slug = slug.to_string();
+                let preview_title = row.title.clone();
+                let preview_weak = Rc::downgrade(ui);
+                preview.connect_clicked(move |_| {
+                    if let Some(ui) = preview_weak.upgrade() {
+                        ui.preview_press(&ui, &preview_slug, &preview_title);
+                    }
+                });
+                line.append(&preview);
                 let is_armed = armed.as_deref() == Some(slug);
                 let button = gtk::Button::with_label(if is_armed {
                     "Confirm unshare"
@@ -459,6 +504,200 @@ impl Ui {
             }
         });
     }
+
+    /// One press on a space row's Preview: one read of the
+    /// space's own HTML export, then either the preview window
+    /// or the honest reason there is none (see preview_notice).
+    fn preview_press(&self, ui: &Rc<Ui>, slug: &str, title: &str) {
+        if self.busy.get() || self.acting.get() {
+            return;
+        }
+        let Some(config) = (self.context)() else {
+            self.notice.set_text(
+                "Connect your Muse account first: previewing belongs to the connected account. Nothing was read.",
+            );
+            return;
+        };
+        self.acting.set(true);
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        let epoch = self.epoch.get();
+        self.spinner.start();
+        self.notice
+            .set_text(&format!("Reading the export of \"{title}\"..."));
+        let (tx, rx) = mpsc::channel();
+        let slug_owned = slug.to_string();
+        let title_owned = title.to_string();
+        std::thread::spawn(move || {
+            let result = AccountClient::new(config).space_export(&slug_owned);
+            let _ = tx.send(result);
+        });
+        let weak = Rc::downgrade(ui);
+        gtk::glib::timeout_add_local(Duration::from_millis(80), move || {
+            let Some(ui) = weak.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            match rx.try_recv() {
+                Ok(Ok(answer)) => {
+                    if ui.epoch.get() != epoch {
+                        return gtk::glib::ControlFlow::Break;
+                    }
+                    ui.acting.set(false);
+                    ui.spinner.stop();
+                    match preview_notice(&answer, &title_owned) {
+                        Some(text) => ui.notice.set_text(&text),
+                        None => {
+                            let html = answer.html.as_deref().unwrap_or_default();
+                            ui.open_preview(&ui, &title_owned, html);
+                            ui.notice.set_text(&format!(
+                                "Previewing \"{title_owned}\" from its export ({} KB).",
+                                size_kb(answer.size)
+                            ));
+                        }
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Ok(Err(error)) => {
+                    if ui.epoch.get() == epoch {
+                        ui.acting.set(false);
+                        ui.spinner.stop();
+                        ui.notice.set_text(&format!(
+                            "Preview failed: {}. Nothing was changed.",
+                            read_failure(error.code)
+                        ));
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+                Err(mpsc::TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    if ui.epoch.get() == epoch {
+                        ui.acting.set(false);
+                        ui.spinner.stop();
+                        ui.notice.set_text(
+                            "The account worker vanished before answering. Nothing was read.",
+                        );
+                    }
+                    gtk::glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    /// Show one space's exported HTML in its own window: a
+    /// WebView locked the way the Feed's frames are -- the
+    /// exported document itself renders, a real link press hands
+    /// its URL to the system browser, and nothing else
+    /// navigates. A new preview replaces the old window rather
+    /// than stacking them, and a frame that cannot render says
+    /// so instead of sitting blank.
+    fn open_preview(&self, ui: &Rc<Ui>, title: &str, html: &str) {
+        use webkit6::prelude::*;
+        use webkit6::{NavigationPolicyDecision, PolicyDecisionType, WebView};
+
+        if let Some(window) = self.preview_window.borrow_mut().take() {
+            window.close();
+        }
+        let window = gtk::Window::new();
+        window.set_title(Some(&format!("{title} -- preview")));
+        window.set_default_size(920, 660);
+        if let Some(root) = self.list.root()
+            && let Ok(main_window) = root.downcast::<gtk::Window>()
+        {
+            window.set_transient_for(Some(&main_window));
+        }
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        bar.add_css_class("toolbar");
+        let heading = label(&format!("{title} -- exported preview"));
+        heading.set_hexpand(true);
+        bar.append(&heading);
+        let close = gtk::Button::with_label("Close");
+        bar.append(&close);
+        column.append(&bar);
+
+        let view = WebView::new();
+        view.set_hexpand(true);
+        view.set_vexpand(true);
+        if let Some(settings) = WebViewExt::settings(&view) {
+            // JavaScript stays on: a space computes itself at
+            // display time, like the web's own rendering of it.
+            settings.set_enable_javascript(true);
+            settings.set_enable_developer_extras(false);
+        }
+        view.connect_decide_policy(|_, decision, kind| {
+            if kind != PolicyDecisionType::NavigationAction {
+                return false;
+            }
+            let Some(navigation) = decision.downcast_ref::<NavigationPolicyDecision>() else {
+                return false;
+            };
+            let attempted = navigation.navigation_action().and_then(|mut action| {
+                let gesture = action.is_user_gesture();
+                action
+                    .request()
+                    .map(|request| (request.uri().unwrap_or_default(), gesture))
+            });
+            if let Some((uri, gesture)) = attempted {
+                if uri == "about:blank" {
+                    // The exported document itself (load_html's
+                    // base): the one navigation the frame is for.
+                    return false;
+                }
+                if gesture && (uri.starts_with("https://") || uri.starts_with("http://")) {
+                    let _ = gtk::gio::AppInfo::launch_default_for_uri(
+                        &uri,
+                        None::<&gtk::gio::AppLaunchContext>,
+                    );
+                }
+                decision.ignore();
+                return true;
+            }
+            false
+        });
+        let swapped = Rc::new(Cell::new(false));
+        let fallback: Rc<dyn Fn()> = {
+            let column = column.clone();
+            let view = view.clone();
+            let swapped = Rc::clone(&swapped);
+            Rc::new(move || {
+                if swapped.replace(true) {
+                    return;
+                }
+                column.remove(&view);
+                let note = label("The preview could not be rendered in the app.");
+                note.set_vexpand(true);
+                column.append(&note);
+            })
+        };
+        {
+            let fallback = Rc::clone(&fallback);
+            view.connect_load_failed(move |_, _, _, _| {
+                fallback();
+                true
+            });
+        }
+        view.connect_web_process_terminated(move |_, _| fallback());
+        column.append(&view);
+        {
+            let window = window.clone();
+            close.connect_clicked(move |_| window.close());
+        }
+        window.set_child(Some(&column));
+        view.load_html(html, None);
+        {
+            let weak = Rc::downgrade(ui);
+            let this = window.clone();
+            window.connect_destroy(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    let mut slot = ui.preview_window.borrow_mut();
+                    if slot.as_ref() == Some(&this) {
+                        *slot = None;
+                    }
+                }
+            });
+        }
+        *self.preview_window.borrow_mut() = Some(window.clone());
+        window.present();
+    }
 }
 
 pub fn build(context: AccountContext) -> LibraryPage {
@@ -468,7 +707,7 @@ pub fn build(context: AccountContext) -> LibraryPage {
     heading.add_css_class("page-heading");
     root.append(&heading);
     let intro = label(
-        "The list loads when you open this page, and Refresh re-reads it. \"Show more\" follows the service's own paging. A space listed here can be unshared from this page; opening, downloading and deleting stay on the Muse side. No row is kept after the window closes.",
+        "The list loads when you open this page, and Refresh re-reads it. \"Show more\" follows the service's own paging. A space listed here can be previewed from its own HTML export and unshared from this page; downloading and deleting stay on the Muse side. No row is kept after the window closes.",
     );
     intro.add_css_class("page-subtitle");
     root.append(&intro);
@@ -511,6 +750,7 @@ pub fn build(context: AccountContext) -> LibraryPage {
         paging_dead: Cell::new(false),
         next_cursor: RefCell::new(None),
         armed: RefCell::new(None),
+        preview_window: RefCell::new(None),
     });
     {
         let ui = Rc::clone(&ui);
@@ -541,11 +781,12 @@ pub fn build(context: AccountContext) -> LibraryPage {
 #[cfg(test)]
 mod tests {
     use super::{
-        order_rows, paging_note, read_failure, row_text, space_slug, summary_text, utc_date,
+        order_rows, paging_note, preview_notice, read_failure, row_text, space_slug, summary_text,
+        utc_date,
     };
     use gtk::prelude::*;
     use gtk4 as gtk;
-    use muse_account::{ArtifactList, ArtifactSummary, ErrorCode};
+    use muse_account::{ArtifactList, ArtifactSummary, ErrorCode, SpaceExportAnswer};
     use std::rc::Rc;
 
     fn row(title: &str, pinned: bool, updated: Option<i64>) -> ArtifactSummary {
@@ -741,6 +982,59 @@ mod tests {
         let armed = named_button(root, "space-unshare:shared-space")
             .expect("the armed row still carries its button");
         assert_eq!(armed.label().as_deref(), Some("Confirm unshare"));
+    }
+
+    #[test]
+    fn a_preview_opens_only_for_an_html_export_that_carried_its_page() {
+        let answer =
+            |format: &str, size: u64, truncated: bool, html: Option<&str>| SpaceExportAnswer {
+                slug: "s".into(),
+                format: format.into(),
+                size,
+                truncated,
+                html: html.map(str::to_string),
+            };
+        assert_eq!(
+            preview_notice(&answer("html", 10, false, Some("<html>")), "T"),
+            None
+        );
+        let large = preview_notice(&answer("html", 900 * 1024, true, None), "T")
+            .expect("a truncated export explains itself");
+        assert!(large.contains("900 KB"), "{large}");
+        assert!(large.contains("too large"), "{large}");
+        let binary = preview_notice(&answer("binary", 2048, false, None), "T")
+            .expect("a binary export explains itself");
+        assert!(binary.contains("binary data (2 KB)"), "{binary}");
+        let text = preview_notice(&answer("text", 12, false, Some("words")), "T")
+            .expect("a text export explains itself");
+        assert!(text.contains("did not come back as a page"), "{text}");
+    }
+
+    #[test]
+    #[ignore = "requires GTK display; run under xvfb-run --test-threads=1"]
+    fn a_space_row_carries_a_preview_button_and_an_unconnected_press_reads_nothing() {
+        gtk::init().unwrap();
+        let page = super::build(Rc::new(|| None));
+        let ui = Rc::clone(&page.ui);
+        let mut space = row("Shared space", false, Some(9));
+        space.target_kind = Some("space".into());
+        space.slug = Some("shared-space".into());
+        *page.ui.rows.borrow_mut() = vec![space, row("plain.docx", false, Some(8))];
+        page.ui.render(&ui);
+        let root: &gtk::Widget = page.root.upcast_ref();
+        let preview = named_button(root, "space-preview:shared-space")
+            .expect("the space row carries its preview button");
+        assert_eq!(preview.label().as_deref(), Some("Preview"));
+        preview.emit_clicked();
+        assert!(
+            page.ui
+                .notice
+                .text()
+                .contains("Connect your Muse account first"),
+            "{}",
+            page.ui.notice.text()
+        );
+        assert!(page.ui.preview_window.borrow().is_none());
     }
 
     #[test]
