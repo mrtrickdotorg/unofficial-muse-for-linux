@@ -94,12 +94,12 @@ button.panel-toggle { min-width: 30px; min-height: 30px; padding: 2px 7px; font-
 .search-pill:focus { border-color: rgba(255, 255, 255, 0.25); }
 .rail-separator { background-color: rgba(255, 255, 255, 0.08); min-height: 1px; margin: 6px 8px; }
 .brand-mark { background-image: linear-gradient(135deg, #5b8cff, #8b5cf6); color: #ffffff; border-radius: 13px; font-weight: 700; min-width: 48px; min-height: 48px; }
-.nav-item { min-width: 67px; min-height: 67px; padding: 0; border-radius: 17px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
+.nav-item { min-width: 67px; min-height: 58px; padding: 0; border-radius: 17px; background: transparent; color: #a7a7b1; border-color: transparent; box-shadow: none; }
 .nav-item:hover { background-color: rgba(255, 255, 255, 0.05); color: #f4f4f6; }
 .nav-item.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
 .nav-item:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
 .nav-icon { min-width: 34px; }
-.rail-button { min-width: 63px; min-height: 63px; padding: 0; border-radius: 31px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
+.rail-button { min-width: 63px; min-height: 56px; padding: 0; border-radius: 31px; background: transparent; color: #a7a7b1; border-color: transparent; transition: background-color 120ms ease-in-out; }
 .rail-button:hover { background-color: rgba(255, 255, 255, 0.05); color: #ffffff; }
 .rail-button.active { background-color: rgba(255, 255, 255, 0.09); color: #ffffff; }
 .rail-button:focus { outline-width: 2px; outline-style: solid; outline-color: rgba(255, 255, 255, 0.35); outline-offset: 1px; }
@@ -772,7 +772,7 @@ fn build_ui(app: &gtk::Application) {
     // stretch them back out.
     sidebar.set_hexpand(false);
 
-    let rail = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let rail = gtk::Box::new(gtk::Orientation::Vertical, 5);
     rail.add_css_class("icon-rail");
     rail.set_size_request(64, -1);
     let chats_nav = nav_button("umfl-chat", "Chat", "Main chat and your side chats");
