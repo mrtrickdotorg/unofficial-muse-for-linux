@@ -293,6 +293,40 @@ fn friendly_status(status: &str) -> String {
     }
 }
 
+/// What the working bubble shows for a turn in flight.
+///
+/// The web's order of preference, and the reason the in-flight
+/// row's text is an input at all: the service plants the reply
+/// row at the turn's start, and until the live stream attaches --
+/// or when it never does, as for a run started elsewhere -- that
+/// row's lagging text is the only reply text there is. Showing
+/// nothing until the stream or the settlement arrived was the
+/// "app just sits there" bug (Patrick, Nov 13, 2026).
+#[derive(Clone, Debug, PartialEq, Eq, std::hash::Hash)]
+enum BubbleBody {
+    /// Reply text: the streamed draft, or the in-flight row's own.
+    Text(String),
+    /// The run's working status, human words only.
+    Status(String),
+    /// Nothing to show yet: the animated dots.
+    Dots,
+}
+
+fn bubble_body(live_draft: &str, in_flight_text: Option<&str>, live_status: &str) -> BubbleBody {
+    if !live_draft.is_empty() {
+        return BubbleBody::Text(live_draft.to_string());
+    }
+    if let Some(text) = in_flight_text
+        && !text.is_empty()
+    {
+        return BubbleBody::Text(text.to_string());
+    }
+    if let Some(status) = live_status.strip_prefix("Agent \u{00b7} ") {
+        return BubbleBody::Status(status.to_string());
+    }
+    BubbleBody::Dots
+}
+
 fn presentation_text(text: &str) -> String {
     // The marker matches the bare prefix on purpose: the service's real
     // tokens use a colon ([[hatch_widget:widget-<uuid>]]) while this
@@ -5535,6 +5569,23 @@ mod native {
                     None
                 }
             });
+            // The newest row, when it is an assistant reply with
+            // no terminal status, is a turn still in flight: the
+            // service plants the row at the turn's start and its
+            // text then lags in jumps (it once sat at 12 characters
+            // for ~50 s, then jumped to the full reply). Rendering
+            // it as a settled row while letting it suppress the
+            // working bubble left the transcript looking idle for
+            // most of a run -- no dots, no status, none of the
+            // streamed text (Patrick, Nov 13, 2026). The working
+            // bubble below is that row's rendering; the settled
+            // rows end before it.
+            let in_flight_row: Option<&muse_account::HistoryMessage> = state
+                .history
+                .last()
+                .filter(|row| row.role == "assistant" && row.status.is_none());
+            let in_flight_text: Option<String> = in_flight_row.map(|row| row.text.clone());
+            let settled_len = state.history.len() - usize::from(in_flight_row.is_some());
             // The rebuild decision. A render whose transcript
             // inputs are unchanged leaves the row widgets standing:
             // destroying and recreating them on every render was
@@ -5549,7 +5600,8 @@ mod native {
                 floor.hash(h);
                 avatar_initial.hash(h);
                 state.history.is_empty().hash(h);
-                for (message, stamp) in state.history[floor..].iter().zip(&stamp_strings) {
+                for (message, stamp) in state.history[floor..settled_len].iter().zip(&stamp_strings)
+                {
                     message.message_id.hash(h);
                     message.role.hash(h);
                     message.status.hash(h);
@@ -5652,7 +5704,7 @@ mod native {
                     false,
                 );
             }
-            for (row_index, message) in state.history[floor..].iter().enumerate() {
+            for (row_index, message) in state.history[floor..settled_len].iter().enumerate() {
                 if !rebuild_rows {
                     break;
                 }
@@ -5686,6 +5738,17 @@ mod native {
                     self.append_option_buttons(message);
                 }
             }
+            if rebuild_rows && let Some(row) = in_flight_row {
+                // The in-flight row's cards and choices still
+                // belong to the transcript, above the bubble that
+                // carries its text.
+                if !row.attachments.is_empty() {
+                    self.append_attachment_cards(row, super::super::ChatRole::Assistant);
+                }
+                if !row.options.is_empty() {
+                    self.append_option_buttons(row);
+                }
+            }
             if !state.history.is_empty() {
                 self.history_primed.set(true);
                 *self.history_edges.borrow_mut() = (cur_first, cur_last);
@@ -5703,26 +5766,29 @@ mod native {
                     Some(stamp.clone()),
                 );
             }
-            // The working bubble, the way muse.ai shows a turn in flight: an
-            // assistant row in the transcript while the newest service row is
-            // still the reader's own message. It carries the streamed reply
-            // text as fragments land; before the first fragment it carries
-            // the working status when the run reports one, and the web's
-            // animated three-dot thinking bubble when it does not (Patrick,
-            // Nov 13, 2026). An in-flight assistant row already in the
-            // transcript IS that bubble, so no second one is added over it,
-            // and the finished row replaces the bubble the moment the turn
+            // The working bubble, the way muse.ai shows a turn in
+            // flight. Its body is chosen by bubble_body: the
+            // streamed draft first (freshest), then the in-flight
+            // row's own text (the reply so far, when no stream has
+            // attached), then the working status, then the web's
+            // animated three-dot thinking bubble. The bubble shows
+            // whenever a turn is observably in flight -- this
+            // window is sending, the live stream reports work, or
+            // the transcript's newest row is an unsettled reply --
+            // and the finished row replaces it the moment the turn
             // closes.
-            let newest_in_flight = state
-                .history
-                .last()
-                .is_some_and(|row| row.role == "assistant" && row.status.is_none());
-            // The bubble earns its shown stamp when the first streamed
-            // words print -- the moment the reply itself reached the
-            // screen, before history settles it. The dots before that
-            // carry no stamp: they printed at send time and would only
-            // duplicate the echo's sent stamp.
-            let bubble_stamp = if !state.live_draft.is_empty() {
+            let body = bubble_body(
+                &state.live_draft,
+                in_flight_text.as_deref(),
+                &state.live_status,
+            );
+            // The bubble earns its shown stamp when the first
+            // reply words print -- the moment the reply itself
+            // reached the screen, before history settles it. The
+            // dots and the status before that carry no stamp: they
+            // printed at send time and would only duplicate the
+            // echo's sent stamp.
+            let bubble_stamp = if matches!(body, BubbleBody::Text(_)) {
                 let mut slot = self.draft_stamp.borrow_mut();
                 Some(format!(
                     "shown {}",
@@ -5735,22 +5801,14 @@ mod native {
             // The bubble lives in its own box with its own
             // fingerprint: while a run streams, the draft changes
             // constantly and the rows must not pay for it.
+            let applicable =
+                state.watching_run || state.sending.is_some() || in_flight_row.is_some();
             let bubble_key = Self::key_of(|h| {
                 use std::hash::Hash;
-                let applicable =
-                    (state.watching_run || state.sending.is_some()) && !newest_in_flight;
                 applicable.hash(h);
                 if applicable {
                     avatar_initial.hash(h);
-                    if !state.live_draft.is_empty() {
-                        1u8.hash(h);
-                        state.live_draft.hash(h);
-                    } else if let Some(status) = state.live_status.strip_prefix("Agent \u{00b7} ") {
-                        2u8.hash(h);
-                        status.hash(h);
-                    } else {
-                        3u8.hash(h);
-                    }
+                    body.hash(h);
                     bubble_stamp.hash(h);
                 }
             });
@@ -5759,34 +5817,35 @@ mod native {
                 self.built_bubble_key.set(bubble_key);
                 super::super::clear_chat(&self.bubble_box);
             }
-            if rebuild_bubble
-                && (state.watching_run || state.sending.is_some())
-                && !newest_in_flight
-            {
-                if !state.live_draft.is_empty() {
-                    super::super::append_chat_grouped(
-                        &self.bubble_box,
-                        super::super::ChatRole::Assistant,
-                        &super::presentation_text(&state.live_draft),
-                        bubble_stamp,
-                        &avatar_initial,
-                        false,
-                    );
-                } else if let Some(status) = state.live_status.strip_prefix("Agent \u{00b7} ") {
-                    super::super::append_chat_grouped(
-                        &self.bubble_box,
-                        super::super::ChatRole::Assistant,
-                        &super::presentation_text(status),
-                        bubble_stamp,
-                        &avatar_initial,
-                        false,
-                    );
-                } else {
-                    super::super::append_thinking_grouped(
-                        &self.bubble_box,
-                        bubble_stamp,
-                        &avatar_initial,
-                    );
+            if rebuild_bubble && applicable {
+                match &body {
+                    BubbleBody::Text(text) => {
+                        super::super::append_chat_grouped(
+                            &self.bubble_box,
+                            super::super::ChatRole::Assistant,
+                            &super::presentation_text(text),
+                            bubble_stamp,
+                            &avatar_initial,
+                            false,
+                        );
+                    }
+                    BubbleBody::Status(status) => {
+                        super::super::append_chat_grouped(
+                            &self.bubble_box,
+                            super::super::ChatRole::Assistant,
+                            &super::presentation_text(status),
+                            bubble_stamp,
+                            &avatar_initial,
+                            false,
+                        );
+                    }
+                    BubbleBody::Dots => {
+                        super::super::append_thinking_grouped(
+                            &self.bubble_box,
+                            bubble_stamp,
+                            &avatar_initial,
+                        );
+                    }
                 }
             }
             // One timing line per changed transcript: every fetch
@@ -7523,6 +7582,60 @@ mod native {
                 has_text(&page, "Partial reply"),
                 "the draft should be the bubble's content"
             );
+
+            // The reported failure (Patrick, Nov 13, 2026): the
+            // service plants its reply row at the turn's start,
+            // and the row's presence used to suppress the bubble
+            // outright -- the transcript sat on a stale partial
+            // row with no dots, no status and no streamed text
+            // for most of the run. The row now feeds the bubble
+            // instead of replacing it.
+            let bubble_text = |page: &AccountPage, needle: &str| {
+                let mut found = Vec::new();
+                collect(page.ui.bubble_box.upcast_ref(), &mut found);
+                found.iter().any(|label| label.text().contains(needle))
+            };
+            let row_text_present = |page: &AccountPage, needle: &str| {
+                let rows = page.ui.history_rows.borrow().clone();
+                let mut found = Vec::new();
+                collect(rows.upcast_ref(), &mut found);
+                found.iter().any(|label| label.text().contains(needle))
+            };
+            {
+                let mut state = page.ui.state.borrow_mut();
+                state.watching_run = false;
+                state.live_draft = String::new();
+                state.live_status = String::new();
+                state.history.push(muse_account::HistoryMessage {
+                    message_id: "m1".into(),
+                    seq: 1,
+                    role: "assistant".into(),
+                    text: String::new(),
+                    timestamp: None,
+                    status: None,
+                    options: vec![],
+                    selected_option: None,
+                    attachments: Vec::new(),
+                });
+            }
+            page.ui.render();
+            assert_eq!(
+                dot_count(&page),
+                3,
+                "an in-flight row with no words yet shows the dots, watched or not"
+            );
+            page.ui.state.borrow_mut().history.last_mut().unwrap().text =
+                "Row-carried words".into();
+            page.ui.render();
+            assert!(
+                bubble_text(&page, "Row-carried words"),
+                "the in-flight row's own text is the bubble's content when no stream has attached"
+            );
+            assert!(
+                !row_text_present(&page, "Row-carried words"),
+                "the in-flight row is not also drawn as a settled row"
+            );
+            assert_eq!(dot_count(&page), 0, "row-carried words replace the dots");
         }
 
         #[test]
@@ -8627,6 +8740,36 @@ mod tests {
             status: None,
             session_id: None,
         }
+    }
+
+    #[test]
+    fn the_bubble_prefers_the_draft_then_the_row_then_the_status_then_dots() {
+        // Patrick, Nov 13, 2026: mid-run the app sat looking idle
+        // because the in-flight row suppressed the bubble. The
+        // body's priority is the fix: freshest text first.
+        assert_eq!(
+            bubble_body("streamed", Some("row text"), "Agent \u{00b7} Working"),
+            BubbleBody::Text("streamed".into())
+        );
+        assert_eq!(
+            bubble_body("", Some("row text"), "Agent \u{00b7} Working"),
+            BubbleBody::Text("row text".into())
+        );
+        assert_eq!(
+            bubble_body("", Some(""), "Agent \u{00b7} Working"),
+            BubbleBody::Status("Working".into())
+        );
+        assert_eq!(
+            bubble_body("", None, "Agent \u{00b7} Working"),
+            BubbleBody::Status("Working".into())
+        );
+        assert_eq!(bubble_body("", None, ""), BubbleBody::Dots);
+        // A status without the run prefix is not a working
+        // status (an error line, say) and never poses as one.
+        assert_eq!(
+            bubble_body("", None, "Live status unavailable: boom"),
+            BubbleBody::Dots
+        );
     }
 
     #[test]
