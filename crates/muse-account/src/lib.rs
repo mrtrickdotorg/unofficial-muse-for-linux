@@ -527,6 +527,42 @@ pub struct RevokeAnswer {
     #[serde(default)]
     pub revoked: Option<bool>,
 }
+/// One durable policy setting, as the service reports it: its
+/// own dotted name and the scalar value it holds, projected by
+/// the bridge from the settings body.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyEntry {
+    pub label: String,
+    pub value: String,
+}
+
+/// The service's durable policy settings, for display.
+///
+/// `connectors` are the names the settings' own connectors
+/// section published -- the only names a reset may address.
+/// `withheld` counts values the projection could not show as
+/// pairs (anything deeper than a scalar leaf), so a page can say
+/// the list is partial instead of implying it is the whole.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicySettings {
+    #[serde(default)]
+    pub entries: Vec<PolicyEntry>,
+    #[serde(default)]
+    pub connectors: Vec<String>,
+    #[serde(default)]
+    pub withheld: u64,
+}
+
+/// What the service said about a connector reset it took.
+///
+/// Acceptance only: whether the connector now reads as reset is
+/// proven by re-reading the settings, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorResetAnswer {
+    pub connector: String,
+    pub accepted: bool,
+}
+
 /// What the service said about a schedule deletion it took.
 ///
 /// `accepted` means the service accepted the request; it does not mean the
@@ -1006,6 +1042,35 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "revoke", "permission_id": permission_id}),
+            false,
+        )
+    }
+    /// Read the service's durable policy settings. Read-only.
+    pub fn policy_settings(&self) -> Result<PolicySettings, AccountError> {
+        self.request(serde_json::json!({"op": "policy_settings"}), false)
+    }
+    /// Reset exactly one connector's grants, once.
+    ///
+    /// The name must be one the policy settings' own connectors
+    /// section published, and the bridge makes a single path-only
+    /// DELETE, so one confirmed press maps to one reset. Whether
+    /// the connector then reads as reset is proven by re-reading
+    /// the settings, never by this answer.
+    pub fn connector_reset(&self, connector: &str) -> Result<ConnectorResetAnswer, AccountError> {
+        let valid = !connector.is_empty()
+            && connector.len() <= 128
+            && connector
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_alphanumeric())
+            && connector
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if !valid {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "connector_reset", "connector": connector}),
             false,
         )
     }

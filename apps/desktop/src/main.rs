@@ -13,6 +13,7 @@ mod library_ui;
 mod local_host;
 mod mail_ui;
 mod memory_ui;
+mod policy_ui;
 mod rich_text;
 mod search_ui;
 mod service_ui;
@@ -918,6 +919,8 @@ fn build_ui(app: &gtk::Application) {
     stack.add_named(&library_page.root, Some("library"));
     let memory_page = memory_ui::build(account_page.host_context.clone());
     stack.add_named(&memory_page.root, Some("memory"));
+    let policy_page = policy_ui::build(account_page.host_context.clone());
+    stack.add_named(&policy_page.root, Some("policy"));
     let ideas_page = service_ui::ideas(account_page.host_context.clone());
     stack.add_named(&ideas_page.root, Some("ideas"));
     let goals_page = service_ui::goals(account_page.host_context.clone());
@@ -1603,6 +1606,7 @@ fn build_ui(app: &gtk::Application) {
         let feed_load = feed_page.load.clone();
         let library_load = library_page.load.clone();
         let memory_load = memory_page.load.clone();
+        let policy_load = policy_page.load.clone();
         stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             if let Some(name) = stack.visible_child_name() {
                 match name.as_str() {
@@ -1611,6 +1615,7 @@ fn build_ui(app: &gtk::Application) {
                     "feed" => feed_load(),
                     "library" => library_load(),
                     "memory" => memory_load(),
+                    "policy" => policy_load(),
                     _ => {}
                 }
             }
@@ -1764,9 +1769,16 @@ fn build_ui(app: &gtk::Application) {
         let memory_row = gtk::Button::with_label("Agent memory");
         memory_row.add_css_class("flat");
         memory_row.set_widget_name("menu-memory");
+        let policy_row = gtk::Button::with_label("Policy");
+        policy_row.add_css_class("flat");
+        policy_row.set_widget_name("menu-policy");
+        policy_row.set_tooltip_text(Some(
+            "The durable settings the service holds, and resetting a connector's grants",
+        ));
         rows.append(&account_row);
         rows.append(&host_row);
         rows.append(&memory_row);
+        rows.append(&policy_row);
         popover.set_child(Some(&rows));
         {
             let stack = stack.clone();
@@ -1847,6 +1859,33 @@ fn build_ui(app: &gtk::Application) {
                         (&feed, "feed"),
                     ],
                     "memory",
+                );
+                popover.popdown();
+            });
+        }
+        {
+            let stack = stack.clone();
+            let title = title.clone();
+            let chats = chats.clone();
+            let library = library.clone();
+            let ideas = ideas.clone();
+            let goals = goals.clone();
+            let create = create.clone();
+            let feed = feed.clone();
+            let popover = popover.clone();
+            policy_row.connect_clicked(move |_| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "policy",
                 );
                 popover.popdown();
             });
@@ -2066,6 +2105,7 @@ fn select_page(
         "tasks" => "Reminders",
         "library" => "Library",
         "memory" => "Memory",
+        "policy" => "Policy",
         "search" => "Search",
         "ideas" => "Ideas",
         "goals" => "Goals",
