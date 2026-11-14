@@ -606,10 +606,16 @@ _The previous "next three actions" are folded into the groups below: the P2 and 
 presses are in the live-proof group, and the P5 export probe is in the buildable group._
 
 **Buildable now (shapes recorded; no new evidence needed).**
-- P5: Library pagination (past the first 50 of 76), and Spaces delete/unshare.
-- P5 probe: the space export route `can_download_html: true` advertises
-  (`spaces.export_html`), since `artifacts.fetch_url` yields no URL for any artifact kind;
-  if it answers, a space preview has a path and the list-only Library page can grow one.
+- P5: Library pagination and Spaces unshare shipped Nov 13, 2026. Spaces delete stays
+  held until the spaces listing probe settles which delete variant (owned vs saved) a
+  row needs.
+- P5 space preview: shipped Nov 14, 2026. A Library space row's Preview button reads
+  `spaces.export_html` through the gateway's raw request (the route is a binary GET;
+  `call_json` cannot carry it) and renders the export in a navigation-locked WebView
+  window. The bridge bounds what travels: an export that does not decode as UTF-8, or
+  whose encoded answer would not fit the host's one-line frame, arrives as its size
+  and shape instead of its content. The first live proof (a real space's export size
+  and format, logged as the export-probe line) lands in the next op-timing upload.
 - Search page wiring: `chat.search` is a recorded GET; its query parameters need one read
   probe to ground, then the (currently unwired) Search page can read through it.
 - P6: reading and search shipped (Nov 14, 2026); "correct and forget" stays blocked on a
@@ -637,7 +643,8 @@ guessed).**
 **Blocked service-side (nothing to build until the service moves).**
 - P7 connectors: `connectors.list` answers 500 `internal_error`. Retry it before building
   any connector UI.
-- Library preview: `artifacts.fetch_url` returns `url: null` for every accepted shape.
+- Library preview for artifacts: `artifacts.fetch_url` returns `url: null` for every
+  accepted shape. Space rows preview through `spaces.export_html` instead (above).
 - P3 screen capture: a decoded application frame is capped at 256 KiB and results are JSON,
   so an image cannot travel the result channel.
 - Usage surface: no usage route exists, so no meter, cap warning or reset time can be shown.

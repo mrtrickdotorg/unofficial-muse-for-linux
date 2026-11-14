@@ -611,6 +611,7 @@ def validate_request(request):
                "goal_delete": {"goal_id"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
+               "space_export": {"slug"},
                "memory_search": {"query"},
                "memory_get": {"memory_uri"},
                "search": {"query"},
@@ -718,7 +719,7 @@ def validate_request(request):
             if (not isinstance(uri, str) or not uri.startswith("memory://")
                     or not 1 <= len(uri) <= 2048 or "\x00" in uri):
                 raise BridgeFailure("invalid_request")
-    if op == "space_unshare":
+    if op in ("space_unshare", "space_export"):
         # The slug is the service's own, taken from the Library
         # listing's open target; it is one path segment, so a
         # slash would be aiming the route somewhere else.
@@ -1463,6 +1464,41 @@ def listing_rows(payload, container_keys, extras=None):
     """Project a flat read-only listing (goals) into display rows."""
     entries, total = listing_container(payload, container_keys)
     return project_listing_rows(entries, total, extras=extras)
+
+
+#: The most export HTML a preview answer may carry raw. The
+#: host's frame is one JSON line of at most a megabyte, and the
+#: encoded length is measured exactly before the answer is sent
+#: (see _space_export_answer); this raw cap keeps even a
+#: quote-dense export comfortably inside it.
+EXPORT_PREVIEW_CAP = 512 * 1024
+EXPORT_LINE_CAP = 950_000
+
+
+def _space_export_answer(slug, raw):
+    """Shape one raw export body into the preview answer.
+
+    The export route answers binary, so what it carried is
+    reported honestly: its byte size always; its text only when
+    it decoded as UTF-8 and the whole encoded answer fits the
+    host's frame. An oversized or non-text export still proves
+    the route answers -- it just does not travel, and the page
+    says so with the size instead of failing.
+    """
+    size = len(raw)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"slug": slug, "format": "binary", "size": size,
+                "truncated": False, "html": None}
+    fmt = "html" if text.lstrip()[:64].lower().startswith("<") else "text"
+    answer = {"slug": slug, "format": fmt, "size": size,
+              "truncated": False, "html": text}
+    if size > EXPORT_PREVIEW_CAP or len(
+            json.dumps(answer, ensure_ascii=True).encode("utf-8")) > EXPORT_LINE_CAP:
+        answer["truncated"] = True
+        answer["html"] = None
+    return answer
 
 
 _SEARCH_PROBED = False
@@ -2440,6 +2476,26 @@ class Adapter:
                     path_params={"slug": request["slug"]},
                 )
             return {"slug": request["slug"], "accepted": True}
+        if request["op"] == "space_export":
+            # A read: the space's own HTML export, for an in-app
+            # preview. The route is recorded as a binary GET, so
+            # it is taken through the gateway's raw request --
+            # call_json would refuse the non-JSON body. What
+            # crosses back is bounded by _space_export_answer:
+            # an oversized export reports its size and its
+            # truncation instead of breaking the frame it
+            # travels in. The probe line records the size and
+            # shape only, never the content.
+            with self.client._gateway(self.config) as gateway:
+                raw = gateway.request(
+                    "spaces.export_html",
+                    path_params={"slug": request["slug"]}, timeout=25)
+            answer = _space_export_answer(request["slug"], raw)
+            timing_log(request.get("config_dir"),
+                       "export-probe size:%d format:%s truncated:%s"
+                       % (answer["size"], answer["format"],
+                          answer["truncated"]))
+            return answer
         if request["op"] == "memory_search":
             # A read on the reader's own words, through the service's own
             # memory search. Nothing here writes; no recorded memory route

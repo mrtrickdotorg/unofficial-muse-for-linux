@@ -672,6 +672,34 @@ print(json.dumps({'ok': True, 'data': {'recognized': 1, 'skipped': 1, 'hits': [
 }
 
 #[test]
+fn space_export_carries_the_html_and_refuses_a_bad_slug_locally() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+request = json.load(sys.stdin)
+assert request['op'] == 'space_export'
+assert request['slug'] == 'my-space'
+print(json.dumps({'ok': True, 'data': {'slug': 'my-space', 'format': 'html',
+  'size': 42, 'truncated': False, 'html': '<html><body>space</body></html>'}}))
+"#,
+    );
+    let answer = f.client().space_export("my-space").unwrap();
+    assert_eq!(answer.slug, "my-space");
+    assert_eq!(answer.format, "html");
+    assert_eq!(answer.size, 42);
+    assert!(!answer.truncated);
+    assert_eq!(
+        answer.html.as_deref(),
+        Some("<html><body>space</body></html>")
+    );
+    // A slug is one path segment from the listing's own open target;
+    // anything else is refused before it is sent.
+    assert!(f.client().space_export("").is_err());
+    assert!(f.client().space_export("a/b").is_err());
+    assert!(f.client().space_export(&"x".repeat(257)).is_err());
+}
+
+#[test]
 fn memory_get_keeps_a_missing_entry_as_an_answer_not_a_failure() {
     let f = Fixture::new(
         r#"

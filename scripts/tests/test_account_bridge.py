@@ -648,6 +648,62 @@ class BridgeTests(unittest.TestCase):
                 bridge.validate_request(dict(bad, op="artifacts",
                                                config_dir="/tmp/x"))
 
+    def _export_dispatch(self, bridge, body):
+        from contextlib import contextmanager
+        calls = []
+        class Gateway:
+            def request(self, method, **kwargs):
+                calls.append((method, kwargs))
+                return body
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "space_export", "slug": "my-space"})
+        return calls, result
+
+    def test_space_export_returns_a_small_html_export_verbatim(self):
+        bridge = load_bridge()
+        calls, result = self._export_dispatch(
+            bridge, b"<!DOCTYPE html><html><body>hi</body></html>")
+        self.assertEqual(calls, [("spaces.export_html",
+                                  {"path_params": {"slug": "my-space"},
+                                   "timeout": 25})])
+        self.assertEqual(result, {
+            "slug": "my-space", "format": "html",
+            "size": len(b"<!DOCTYPE html><html><body>hi</body></html>"),
+            "truncated": False,
+            "html": "<!DOCTYPE html><html><body>hi</body></html>"})
+
+    def test_space_export_reports_binary_and_plain_text_without_a_page(self):
+        bridge = load_bridge()
+        _, binary = self._export_dispatch(bridge, b"\x89PNG\xff\xfe binary")
+        self.assertEqual(binary["format"], "binary")
+        self.assertIsNone(binary["html"])
+        self.assertFalse(binary["truncated"])
+        _, text = self._export_dispatch(bridge, b"just some words")
+        self.assertEqual(text["format"], "text")
+        self.assertEqual(text["html"], "just some words")
+
+    def test_space_export_truncates_an_oversized_export(self):
+        bridge = load_bridge()
+        body = b"<" + b"a" * (600 * 1024)
+        _, result = self._export_dispatch(bridge, body)
+        self.assertEqual(result["size"], len(body))
+        self.assertEqual(result["format"], "html")
+        self.assertTrue(result["truncated"])
+        self.assertIsNone(result["html"])
+
+    def test_space_export_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "space_export", "slug": "ok-slug",
+                                   "config_dir": "/tmp/x"})
+        for bad in ({}, {"slug": ""}, {"slug": "a/b"}, {"slug": "x" * 257}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, op="space_export",
+                                               config_dir="/tmp/x"))
+
     def test_search_probes_the_parameter_and_projects_openable_rows(self):
         # The route is recorded; its parameter's name is not. The
         # first candidate is refused, the second answers, and only
