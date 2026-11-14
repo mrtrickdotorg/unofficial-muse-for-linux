@@ -646,6 +646,10 @@ mod native {
                 }
             };
             self.render_approval(receipt, action);
+            self.set_status(&format!(
+                "{} staged \u{2014} nothing has been sent. Press Allow once on its card under Pending approvals to send it; the card expires in two minutes.",
+                receipt.metadata.name
+            ));
         }
 
         fn render_approval(self: &Rc<Self>, receipt: RequestReceipt, action: Action) {
@@ -784,21 +788,24 @@ mod native {
         status.add_css_class("chat-status");
         root.append(&status);
 
+        // Pending approvals sit directly under the status line,
+        // above the test actions: a staged card has to land where
+        // the eye already is. The first live run (Nov 14, 2026)
+        // buried the cards below nine tall buttons inside their
+        // own nested scroller at the page's foot, and a staged
+        // press looked exactly like a dead one. The cards now
+        // stack in the page's own flow; the page scrolls as one.
+        let approval_heading = label("Pending approvals");
+        approval_heading.add_css_class("section-heading");
+        root.append(&approval_heading);
+        let approval_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.append(&approval_box);
+
         let actions_heading = label("Safe local test actions");
         actions_heading.add_css_class("section-heading");
         root.append(&actions_heading);
         let actions = gtk::Box::new(gtk::Orientation::Vertical, 6);
         root.append(&actions);
-
-        let approval_heading = label("Pending approvals");
-        approval_heading.add_css_class("section-heading");
-        root.append(&approval_heading);
-        let approval_scroll = gtk::ScrolledWindow::new();
-        approval_scroll.add_css_class("approval-scroll");
-        approval_scroll.set_vexpand(true);
-        let approval_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        approval_scroll.set_child(Some(&approval_box));
-        root.append(&approval_scroll);
 
         let ui = Rc::new(Ui {
             epoch: Cell::new(0),
