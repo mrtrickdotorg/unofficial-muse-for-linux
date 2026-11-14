@@ -8698,7 +8698,7 @@ print(json.dumps({'ok':True,'data':data}))
             assert!(!entries[2].is_sensitive());
             button(&page.root, "Link account").emit_clicked();
             assert!(has_label(&page.root, "Explicit consent is required"));
-            button(&page.root, "Use my existing Muse login").emit_clicked();
+            button(&page.root, "Existing login").emit_clicked();
             assert_eq!(
                 entries[1].text().as_str(),
                 config_home().unwrap().join("muse-cli").to_str().unwrap()
