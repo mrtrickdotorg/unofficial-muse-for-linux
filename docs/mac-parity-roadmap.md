@@ -620,8 +620,14 @@ presses are in the live-proof group, and the P5 export probe is in the buildable
   probe to ground, then the (currently unwired) Search page can read through it.
 - P6: reading and search shipped (Nov 14, 2026); "correct and forget" stays blocked on a
   memory mutation route the table does not carry.
-- P8: the agent-browser page — `browser_task.get` answers (an idle task rather than a
-  missing route); take-control and stop are unbuilt.
+- P8: the agent-browser page is blocked on task-id discovery, settled as far as the
+  recorded sources go (Nov 14, 2026): every browser route is addressed by a task id
+  (`/api/browser-task/{task_id}/...`), and no route consumer, document or existing
+  projection publishes one. A one-shot browser-probe now rides the live event stream
+  (the activity read's `chat.subscribe`) and logs its event vocabulary plus the key
+  names of any browser-mentioning event; a browser-using run followed by an
+  op-timing upload settles whether the stream carries the id. The page builds only
+  once an id source is recorded -- a page with nothing to address would be a mock.
 - P2 policy model: the read half and the one path-only write shipped Nov 14, 2026 --
   a Policy page under the Menu shows `permissions.settings` projected to scalar pairs
   (deeper values counted as withheld, never summarized) plus the connectors its own
