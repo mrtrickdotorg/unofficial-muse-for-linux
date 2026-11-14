@@ -697,9 +697,18 @@ guessed).**
   "Try it", the Feed ❤, Goals delete, and an unread badge clearing on open.
 
 **Deferred or parked, by Patrick's word.**
-- Computer control's agent-driven layer: the page is surfaced (above); the service-side
-  node invocation that would let the agent request actions stays unbuilt until its shape
-  is probed.
+- Computer control's agent-driven layer: the page is surfaced (above), local control is
+  proven end to end on Patrick's KDE (portal consent, pointer, keyboard taps, Stop) and
+  the guided demo (one approval opens github.com via KRunner) is proven live. The
+  invocation channel turned out to be the Local host's own link protocol -- link.register
+  advertises commands_v2 and link.invoke already carries agent file requests -- so the
+  probe is built: the manifest advertises one `computer.probe` command whose description
+  tells the agent this build cannot move the pointer or type, and the local-tools broker
+  answers it `probe_only` (no grant, no approval, no action), with the Local host
+  activity log naming the call. Still owed: one live invoke round trip from a real agent
+  session (which also settles how the service presents node commands to the agent), then
+  the wiring build -- real input commands staged through the Computer Control broker as
+  Allow-once cards while a portal session is active.
 - The transcript freeze work (fresh-build layout cost): the tightened slice budget is
   "good enough for now"; a virtualized list view is the recorded next step if it reopens.
 - Formatting and restyle: round one landed Nov 9 ("still not a great UI, but better");

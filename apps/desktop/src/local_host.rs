@@ -123,7 +123,8 @@ fn safe_command(raw: &str) -> &str {
         | "files.create_text"
         | "files.edit"
         | "files.rename"
-        | "files.delete" => raw,
+        | "files.delete"
+        | "computer.probe" => raw,
         _ => "unknown-command",
     }
 }

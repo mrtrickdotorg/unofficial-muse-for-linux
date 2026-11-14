@@ -314,6 +314,20 @@ impl ToolBroker {
             }
             commands.insert(name.into(),json!({"description":description,"required":required,"optional":optional,"timeout_ms":120000,"parameters":{"type":"object","properties":properties,"required":names,"additionalProperties":false}}));
         }
+        // The computer-control probe (Patrick, Nov 14, 2026): one
+        // advertised command whose whole job is to prove the request
+        // path from the service to this machine before any real
+        // input capability is wired. Its description tells the
+        // calling agent the truth -- this build cannot move the
+        // pointer or type -- and invoke() answers it locally with a
+        // probe_only refusal. It takes no grant: there is nothing
+        // for a folder grant to scope.
+        let probe_intent = json!({"type":"string","description":"What you hoped the computer would do, in a few words. It is not stored or acted on; only the fact that the call arrived is recorded locally."});
+        let mut probe_required = serde_json::Map::new();
+        probe_required.insert("intent".into(), probe_intent.clone());
+        let mut probe_properties = serde_json::Map::new();
+        probe_properties.insert("intent".into(), probe_intent);
+        commands.insert("computer.probe".into(), json!({"description":"Probe for a future computer-control capability. This build cannot move the pointer, click, or type: calling this only records that a computer-control request reached this machine, and it returns a probe_only error. Do not retry.","required":probe_required,"optional":{},"timeout_ms":120000,"parameters":{"type":"object","properties":probe_properties,"required":["intent"],"additionalProperties":false}}));
         json!({"commands_v2":commands,"grants":grants})
     }
     pub fn invoke(&self, invocation: Invocation) -> Decision {
@@ -332,6 +346,27 @@ impl ToolBroker {
                 return Decision::Reply(fail(&invocation.id, "capacity"));
             }
             state.seen.insert(invocation.id.clone());
+            // The probe is answered before any grant machinery: it
+            // scopes to no folder, stages no approval and performs
+            // no action -- a well-formed call gets the honest
+            // probe_only refusal, anything else invalid_params.
+            if invocation.command == "computer.probe" {
+                let valid = invocation.params.as_object().is_some_and(|params| {
+                    params.len() == 1
+                        && params
+                            .get("intent")
+                            .and_then(Value::as_str)
+                            .is_some_and(|intent| !intent.is_empty() && intent.len() <= 256)
+                });
+                return Decision::Reply(fail(
+                    &invocation.id,
+                    if valid {
+                        "probe_only"
+                    } else {
+                        "invalid_params"
+                    },
+                ));
+            }
             let result = (|| {
                 let keys: &[&str] = match invocation.command.as_str() {
                     "files.read_text" => &["grant_id", "path"],
@@ -1430,6 +1465,47 @@ impl ToolBroker {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn manifest_advertises_the_computer_probe_honestly() {
+        let broker = ToolBroker::new();
+        let manifest = broker.manifest();
+        let probe = &manifest["commands_v2"]["computer.probe"];
+        let description = probe["description"].as_str().unwrap_or_default();
+        assert!(
+            description.contains("cannot move the pointer"),
+            "{description}"
+        );
+        assert!(description.contains("probe_only"), "{description}");
+        assert_eq!(probe["parameters"]["required"], json!(["intent"]));
+        assert_eq!(probe["parameters"]["additionalProperties"], json!(false));
+    }
+
+    #[test]
+    fn computer_probe_replies_probe_only_without_any_grant() {
+        let broker = ToolBroker::new();
+        let invoke = |id: &str, params: Value| {
+            broker.invoke(Invocation {
+                id: id.into(),
+                command: "computer.probe".into(),
+                params,
+                timeout_ms: 1000,
+            })
+        };
+        let Decision::Reply(reply) = invoke("probe-1", json!({"intent": "open github"})) else {
+            panic!("the probe must reply, never stage an approval")
+        };
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_deref(), Some("probe_only"));
+        let Decision::Reply(reply) = invoke("probe-2", json!({})) else {
+            panic!("the probe must reply")
+        };
+        assert_eq!(reply.error.as_deref(), Some("invalid_params"));
+        let Decision::Reply(reply) = invoke("probe-3", json!({"intent": "x", "extra": "y"})) else {
+            panic!("the probe must reply")
+        };
+        assert_eq!(reply.error.as_deref(), Some("invalid_params"));
+    }
+
     #[test]
     fn granted_read_is_confined() {
         let dir = tempfile::tempdir().unwrap();
