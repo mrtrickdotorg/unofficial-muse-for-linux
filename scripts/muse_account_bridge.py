@@ -3459,6 +3459,10 @@ class Adapter:
                 config_dir=config_dir)
             baseline_seq = max((r["seq"] for r in baseline), default=0)
             baseline_ids = {r["message_id"] for r in baseline}
+            timing_log(config_dir,
+                       "send-images staged count={} baseline ms={}".format(
+                           len(staged),
+                           int((time.monotonic() - send_began) * 1000)))
             node_id = self.config.get("node_id")
             try:
                 with self.client._gateway(self.config) as gateway:
@@ -3466,10 +3470,18 @@ class Adapter:
                         gateway.call_json(
                             "fs.write",
                             body=_binary_write_body(remote, data, node_id),
-                            timeout=20)
-            except Exception:  # noqa: BLE001 - nothing was dispatched
-                raise BridgeFailure("protocol_error",
-                                    uncertain=False) from None
+                            timeout=15)
+            except Exception as error:  # noqa: BLE001 - nothing dispatched
+                timing_log(config_dir,
+                           "send-images fs_write refused {} ms={}".format(
+                               type(error).__name__,
+                               int((time.monotonic() - send_began) * 1000)))
+                raise BridgeFailure(
+                    "bridge_failure", uncertain=False,
+                    detail="the service refused the image write ({})".format(
+                        type(error).__name__)) from None
+            timing_log(config_dir, "send-images writes ok ms={}".format(
+                int((time.monotonic() - send_began) * 1000)))
             items = []
             if message.strip():
                 items.append({"type": "text", "text": message})
@@ -3483,19 +3495,40 @@ class Adapter:
             try:
                 with self.client._gateway(self.config) as gateway:
                     gateway._open("chat.stream", body=body)
-            except Exception:  # noqa: BLE001 - the dispatch may have landed
-                raise BridgeFailure("protocol_error",
-                                    uncertain=True) from None
-            deadline = time.monotonic() + self.confirmation_window
+            except Exception as error:  # noqa: BLE001 - it may have landed
+                timing_log(config_dir,
+                           "send-images dispatch refused {} ms={}".format(
+                               type(error).__name__,
+                               int((time.monotonic() - send_began) * 1000)))
+                raise BridgeFailure(
+                    "protocol_error", uncertain=True,
+                    detail="the image send dispatch was refused ({})".format(
+                        type(error).__name__)) from None
+            timing_log(config_dir, "send-images dispatched ms={}".format(
+                int((time.monotonic() - send_began) * 1000)))
+            # The window is a hard cap on the whole confirmation,
+            # not just a check between polls: one slow history
+            # read mid-turn must not stretch this op past its
+            # host budget and take the shared connection with it
+            # (Patrick's first live attempt, Nov 14, 2026: the op
+            # died at its budget and the queued history read died
+            # at its own).
+            deadline = time.monotonic() + self.confirmation_window + 10.0
             while True:
                 rows = history_rows(
                     self.client.history(thread=thread, limit=25),
                     config_dir=config_dir)
                 for row in rows:
+                    row_files = {a.get("filename")
+                                 for a in row.get("attachments") or []}
+                    file_match = any(
+                        remote in row_files or name in row_files
+                        for name, remote, _data in staged)
                     if (row["seq"] > baseline_seq
                             and row["message_id"] not in baseline_ids
                             and row["role"] == "user"
-                            and row["text"].strip() == message.strip()):
+                            and (row["text"].strip() == message.strip()
+                                 or file_match)):
                         stored = {a.get("filename"): a
                                   for a in row.get("attachments") or []}
                         mismatch = False
