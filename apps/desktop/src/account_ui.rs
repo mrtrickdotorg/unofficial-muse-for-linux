@@ -2332,7 +2332,7 @@ mod native {
     }
 
     pub fn build(chip: &gtk::Label) -> AccountPage {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.add_css_class("page-content");
 
         let welcome = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -2341,7 +2341,7 @@ mod native {
         welcome_title.add_css_class("welcome-title");
         welcome.append(&welcome_title);
         let welcome_copy = label(
-            "Sign in to the Muse account you already use. A private browser window opens at muse.ai and only that session is saved, in this app's own folder. Your chats and scheduled tasks then load from that account. Your password is never entered in this app.",
+            "Sign in to the Muse account you already use. A private browser window opens at muse.ai; only that session is saved, in this app's own folder, and your password is never entered here.",
         );
         welcome_copy.add_css_class("welcome-copy");
         welcome.append(&welcome_copy);
@@ -2368,7 +2368,7 @@ mod native {
         login.set_tooltip_text(Some(
             "Opens muse.ai in a private Chromium-compatible browser window, saves the session in this app's folder, then links the account. Not all installed browsers are supported.",
         ));
-        let existing = gtk::Button::with_label("Use my existing Muse login");
+        let existing = gtk::Button::with_label("Existing login");
         existing.set_tooltip_text(Some(
             "Links the Muse CLI session already on this computer instead of signing in again.",
         ));
@@ -2381,13 +2381,11 @@ mod native {
         }
         welcome.append(&actions);
         let helper = label(
-            "\u{201c}Sign in with Muse\u{201d} is the usual choice: it links the account by itself once you finish signing in. \u{201c}Use my existing Muse login\u{201d} reads the Muse CLI session at ~/.config/muse-cli instead. Only one of the two folders is used at a time; interpreter or folder overrides are under Advanced.",
+            "\u{201c}Sign in with Muse\u{201d} links the account for you; \u{201c}Existing login\u{201d} reads the Muse CLI session.",
         );
         helper.add_css_class("dim-label");
         welcome.append(&helper);
-        let disconnect_note = label(
-            "Disconnecting clears only this app's memory: it does not sign you out on other devices, erase saved session files or delete cloud history.",
-        );
+        let disconnect_note = label("Disconnecting clears only this app's memory.");
         disconnect_note.add_css_class("dim-label");
         welcome.append(&disconnect_note);
         // The card is 684px tall at the shell's width; left as a plain
@@ -2807,7 +2805,7 @@ mod native {
                 u.consent.set_active(false);
                 u.state.borrow_mut().connection_notice = if selected {
                     format!(
-                        "Using the Muse CLI session at {chosen}. Tick the consent box, then press Link account. Nothing has been read yet."
+                        "A Muse CLI session is available at {chosen}; nothing has been read. Tick consent, then press Link account."
                     )
                 } else {
                     "Set HOME or XDG_CONFIG_HOME before choosing a local Muse session.".into()
