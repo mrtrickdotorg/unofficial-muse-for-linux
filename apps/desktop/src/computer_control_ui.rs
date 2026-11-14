@@ -11,10 +11,13 @@ use crate::computer_control::Action;
 enum MappedAction {
     PointerMotion { dx: f64, dy: f64 },
     PointerButton { button: u16, state: u8 },
+    PointerButtonTap { button: u16 },
     PointerAxis { dx: f64, dy: f64 },
     PointerAxisDiscrete { axis: u32, steps: i32 },
     KeyboardKeysym { keysym: u32, state: u8 },
+    KeyboardKeysymTap { keysym: u32 },
     KeyboardKeycode { keycode: u16, state: u8 },
+    KeyboardKeycodeTap { keycode: u16 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,10 +48,19 @@ fn map_approved_action(action: &Action) -> Result<MappedAction, MappingError> {
             (0, y) => Ok(MappedAction::PointerAxisDiscrete { axis: 1, steps: y }),
             (_, _) => Err(MappingError::DiscreteScrollBothAxes),
         },
+        Action::PointerButtonTap { button } => {
+            Ok(MappedAction::PointerButtonTap { button: *button })
+        }
         Action::KeyboardKeysym { keysym, state } => Ok(MappedAction::KeyboardKeysym {
             keysym: *keysym,
             state: *state,
         }),
+        Action::KeyboardKeysymTap { keysym } => {
+            Ok(MappedAction::KeyboardKeysymTap { keysym: *keysym })
+        }
+        Action::KeyboardKeycodeTap { keycode } => {
+            Ok(MappedAction::KeyboardKeycodeTap { keycode: *keycode })
+        }
         Action::KeyboardKeycode { keycode, state } => Ok(MappedAction::KeyboardKeycode {
             keycode: *keycode,
             state: *state,
@@ -150,9 +162,21 @@ mod native {
             MappedAction::PointerAxisDiscrete { axis, steps } => {
                 session.pointer_axis_discrete(axis, steps)
             }
+            MappedAction::PointerButtonTap { button } => session
+                .pointer_button(i32::from(button), 1)
+                .and_then(|()| session.pointer_button(i32::from(button), 0)),
             MappedAction::KeyboardKeysym { keysym, state } => {
                 session.keyboard_keysym(i32::try_from(keysym).unwrap_or(i32::MAX), u32::from(state))
             }
+            MappedAction::KeyboardKeysymTap { keysym } => {
+                let keysym = i32::try_from(keysym).unwrap_or(i32::MAX);
+                session
+                    .keyboard_keysym(keysym, 1)
+                    .and_then(|()| session.keyboard_keysym(keysym, 0))
+            }
+            MappedAction::KeyboardKeycodeTap { keycode } => session
+                .keyboard_keycode(i32::from(keycode), 1)
+                .and_then(|()| session.keyboard_keycode(i32::from(keycode), 0)),
             MappedAction::KeyboardKeycode { keycode, state } => {
                 session.keyboard_keycode(i32::from(keycode), u32::from(state))
             }
@@ -273,6 +297,11 @@ mod native {
         let summary = match action {
             Action::RelativePointerMotion { dx, dy } => format!("dx={dx:.1}, dy={dy:.1}"),
             Action::PointerButton { button, state } => format!("button={button}, state={state}"),
+            Action::PointerButtonTap { button } => format!("button={button}, press + release"),
+            Action::KeyboardKeysymTap { keysym } => format!("keysym={keysym}, press + release"),
+            Action::KeyboardKeycodeTap { keycode } => {
+                format!("keycode={keycode}, press + release")
+            }
             Action::SmoothScroll { dx, dy } => format!("dx={dx:.1}, dy={dy:.1}"),
             Action::DiscreteScroll { dx, dy } => format!("dx={dx}, dy={dy}"),
             Action::KeyboardKeysym { keysym, state } => format!("keysym={keysym}, state={state}"),
@@ -615,11 +644,13 @@ mod native {
                 Action::Screenshot { .. } => None,
                 Action::RelativePointerMotion { .. }
                 | Action::PointerButton { .. }
+                | Action::PointerButtonTap { .. }
                 | Action::SmoothScroll { .. }
                 | Action::DiscreteScroll { .. } => Some(REMOTE_DEVICE_POINTER),
-                Action::KeyboardKeysym { .. } | Action::KeyboardKeycode { .. } => {
-                    Some(REMOTE_DEVICE_KEYBOARD)
-                }
+                Action::KeyboardKeysym { .. }
+                | Action::KeyboardKeysymTap { .. }
+                | Action::KeyboardKeycode { .. }
+                | Action::KeyboardKeycodeTap { .. } => Some(REMOTE_DEVICE_KEYBOARD),
             }
         }
 
@@ -859,22 +890,9 @@ mod native {
         add_action(
             &ui,
             &actions,
-            "Pointer click press",
+            "Pointer click (press + release)",
             REMOTE_DEVICE_POINTER,
-            Action::PointerButton {
-                button: 0x110,
-                state: 1,
-            },
-        );
-        add_action(
-            &ui,
-            &actions,
-            "Pointer click release",
-            REMOTE_DEVICE_POINTER,
-            Action::PointerButton {
-                button: 0x110,
-                state: 0,
-            },
+            Action::PointerButtonTap { button: 0x110 },
         );
         add_action(
             &ui,
@@ -893,42 +911,16 @@ mod native {
         add_action(
             &ui,
             &actions,
-            "Keysym ‘a’ press",
+            "Tap key ‘a’",
             REMOTE_DEVICE_KEYBOARD,
-            Action::KeyboardKeysym {
-                keysym: 0x61,
-                state: 1,
-            },
+            Action::KeyboardKeysymTap { keysym: 0x61 },
         );
         add_action(
             &ui,
             &actions,
-            "Keysym ‘a’ release",
+            "Tap keycode 30",
             REMOTE_DEVICE_KEYBOARD,
-            Action::KeyboardKeysym {
-                keysym: 0x61,
-                state: 0,
-            },
-        );
-        add_action(
-            &ui,
-            &actions,
-            "Keycode 30 press",
-            REMOTE_DEVICE_KEYBOARD,
-            Action::KeyboardKeycode {
-                keycode: 30,
-                state: 1,
-            },
-        );
-        add_action(
-            &ui,
-            &actions,
-            "Keycode 30 release",
-            REMOTE_DEVICE_KEYBOARD,
-            Action::KeyboardKeycode {
-                keycode: 30,
-                state: 0,
-            },
+            Action::KeyboardKeycodeTap { keycode: 30 },
         );
         ui.set_controls();
 
@@ -988,6 +980,22 @@ mod tests {
         assert_eq!(
             map_approved_action(&Action::DiscreteScroll { dx: 1, dy: -1 }),
             Err(MappingError::DiscreteScrollBothAxes)
+        );
+    }
+
+    #[test]
+    fn tap_actions_map_to_typed_worker_calls() {
+        assert_eq!(
+            map_approved_action(&Action::PointerButtonTap { button: 0x110 }),
+            Ok(MappedAction::PointerButtonTap { button: 0x110 })
+        );
+        assert_eq!(
+            map_approved_action(&Action::KeyboardKeysymTap { keysym: 0x61 }),
+            Ok(MappedAction::KeyboardKeysymTap { keysym: 0x61 })
+        );
+        assert_eq!(
+            map_approved_action(&Action::KeyboardKeycodeTap { keycode: 30 }),
+            Ok(MappedAction::KeyboardKeycodeTap { keycode: 30 })
         );
     }
 
