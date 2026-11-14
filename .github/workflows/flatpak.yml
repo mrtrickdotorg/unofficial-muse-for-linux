@@ -1,0 +1,27 @@
+name: Flatpak
+
+# Dispatch-only: the Flatpak bundle is a second packaging of the
+# same tree, built when someone asks for it, not on every push.
+on:
+  workflow_dispatch:
+
+jobs:
+  flatpak:
+    name: Build Flatpak bundle
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vendor crates for the offline sandbox build
+        run: |
+          export PATH="$PATH:/usr/lib/sdk/rust-stable/bin:$HOME/.cargo/bin"
+          which cargo || (curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y)
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo vendor flatpak/vendor > /dev/null
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: unofficial-muse-for-linux-x86_64.flatpak
+          manifest-path: flatpak/org.kythos.UnofficialMuseForLinux.json
+          cache-key: flatpak-builder-${{ github.sha }}

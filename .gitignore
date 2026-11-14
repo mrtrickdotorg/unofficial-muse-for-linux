@@ -8,3 +8,9 @@ __pycache__/
 
 # Local AppImage build output (never commit the binary)
 /dist/
+
+# Flatpak build state
+flatpak/vendor/
+flatpak/build-dir/
+flatpak/repo/
+.flatpak-builder/

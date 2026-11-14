@@ -642,7 +642,15 @@ presses are in the live-proof group, and the P5 export probe is in the buildable
   `egress.permissions.active.update` and the connector PATCH) stays blocked: their
   request bodies are recorded nowhere, and the settings-probe line in the next
   op-timing upload settles the settings body's real shape.
-- P9 remainder: a Flatpak beside the AppImage. (The AT-SPI names pass shipped
+- P9 remainder: a Flatpak beside the AppImage -- PACKAGING LANDED Nov 14, 2026:
+  the manifest (`flatpak/org.kythos.UnofficialMuseForLinux.json`, GNOME 48
+  runtime, Rust SDK extension), a local build script, and a dispatch-only CI
+  workflow are in the tree, and the offline vendored cargo build they rely on
+  is proven (a clean tree plus `cargo vendor` output compiled the full app
+  with `--offline --locked`). Not yet proven: a bundle built and installed
+  end-to-end on a real seat, the in-sandbox account setup flow, and portal
+  grants inside the sandbox -- see `flatpak/README.md` for the layout choices.
+  (The AT-SPI names pass shipped
   Nov 14, 2026: every control whose content is an icon or a glyph -- the rail,
   the "+" new-chat button, the arrow send button, the panel toggles, the thread
   menu, the Feed's heart -- plus the placeholder-only entries now carry an
