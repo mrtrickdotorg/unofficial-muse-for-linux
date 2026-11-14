@@ -856,6 +856,11 @@ fn build_ui(app: &gtk::Application) {
             "Local host",
             "Consent, folder grants and local approvals for this machine.",
         ),
+        (
+            "computer-control",
+            "Computer Control",
+            "A consent-gated RemoteDesktop session for this machine.",
+        ),
     ] {
         panel_stack.add_named(&panel_placeholder(title, copy), Some(name));
     }
@@ -918,6 +923,18 @@ fn build_ui(app: &gtk::Application) {
     let desktop_page: desktop_ui::DesktopPage = desktop_ui::build();
     let computer_control_page: computer_control_ui::ComputerControlPage =
         computer_control_ui::build();
+    // Surfaced Nov 14, 2026 on Patrick's word, under the bottom
+    // Menu beside Policy: the page is a settings surface (portal
+    // session controls, approvals, test actions), so like the
+    // host page it scrolls inside the window's height instead of
+    // letting its natural height set the shell's minimum.
+    let control_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(false)
+        .child(&computer_control_page.root)
+        .build();
+    stack.add_named(&control_scroll, Some("computer-control"));
     let tasks_page: tasks_ui::TasksPage = tasks_ui::build();
     let library_page: library_ui::LibraryPage =
         library_ui::build(account_page.host_context.clone());
@@ -938,11 +955,13 @@ fn build_ui(app: &gtk::Application) {
         Some("create"),
     );
 
-    // Pages from the old navigation (mail, calendar, desktop, computer
-    // control, reminders, the developer experiment, the files browser)
+    // Pages from the old navigation (mail, calendar, desktop,
+    // reminders, the developer experiment, the files browser)
     // are still built above so their lifecycle stays identical, but
     // they are no longer part of the app Patrick asked for: the menu is
-    // muse.ai's, and nothing else is reachable.
+    // muse.ai's, and nothing else is reachable. (Computer Control was
+    // in this group until Nov 14, 2026, when Patrick surfaced it
+    // under the Menu.)
     let cancel_login = Rc::clone(&account_page.cancel_login);
     let stop_host = host_page.shutdown.clone();
     let stop_calendar = calendar_page.shutdown.clone();
@@ -960,7 +979,6 @@ fn build_ui(app: &gtk::Application) {
         &mail_page.root,
         &calendar_page.root,
         &desktop_page.root,
-        &computer_control_page.root,
         &tasks_page.root,
     );
     stack.set_visible_child_name("chats");
@@ -1782,10 +1800,17 @@ fn build_ui(app: &gtk::Application) {
         policy_row.set_tooltip_text(Some(
             "The durable settings the service holds, and resetting a connector's grants",
         ));
+        let control_row = gtk::Button::with_label("Computer Control");
+        control_row.add_css_class("flat");
+        control_row.set_widget_name("menu-computer-control");
+        control_row.set_tooltip_text(Some(
+            "A separate, consent-gated RemoteDesktop session: test pointer and keyboard input on this machine",
+        ));
         rows.append(&account_row);
         rows.append(&host_row);
         rows.append(&memory_row);
         rows.append(&policy_row);
+        rows.append(&control_row);
         popover.set_child(Some(&rows));
         {
             let stack = stack.clone();
@@ -1893,6 +1918,33 @@ fn build_ui(app: &gtk::Application) {
                         (&feed, "feed"),
                     ],
                     "policy",
+                );
+                popover.popdown();
+            });
+        }
+        {
+            let stack = stack.clone();
+            let title = title.clone();
+            let chats = chats.clone();
+            let library = library.clone();
+            let ideas = ideas.clone();
+            let goals = goals.clone();
+            let create = create.clone();
+            let feed = feed.clone();
+            let popover = popover.clone();
+            control_row.connect_clicked(move |_| {
+                select_page(
+                    &stack,
+                    &title,
+                    &[
+                        (&chats, "chats"),
+                        (&library, "library"),
+                        (&ideas, "ideas"),
+                        (&goals, "goals"),
+                        (&create, "create"),
+                        (&feed, "feed"),
+                    ],
+                    "computer-control",
                 );
                 popover.popdown();
             });
