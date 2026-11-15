@@ -82,6 +82,24 @@ pub struct HistoryWindow {
     pub transcript_revision: Option<String>,
 }
 
+/// Selected-model state, the web UI's model.get/model.set shape.
+///
+/// The service's `generation` wins over anything cached: a caller keeps
+/// an answer only when its generation is newer than what it holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    #[serde(default)]
+    pub generation: Option<i64>,
+    #[serde(default)]
+    pub selected_model: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub available_models: Vec<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountSnapshot {
     pub identity_name: String,
@@ -1084,6 +1102,35 @@ impl AccountClient {
                 .unwrap_or(serde_json::Value::Null),
         )
         .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
+    }
+    /// Read the selected-model state the web UI loads on start.
+    ///
+    /// The answer carries the service's `generation` plus the scalar
+    /// selection; the caller keeps it only when the generation is newer
+    /// than what it already holds.
+    pub fn model_get(&self) -> Result<ModelInfo, AccountError> {
+        let answer: serde_json::Value =
+            self.request(serde_json::json!({"op": "model_get"}), false)?;
+        serde_json::from_value(answer)
+            .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
+    }
+    /// Select one model by its service id.
+    ///
+    /// The id comes from a `model_get` listing or the picker, never a
+    /// guess; the answer reports the generation the service settled on.
+    pub fn model_set(&self, model: &str) -> Result<ModelInfo, AccountError> {
+        if model.is_empty() || model.len() > 256 || model.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let answer: serde_json::Value = self.request(
+            serde_json::json!({
+                "op": "model_set",
+                "model": model,
+            }),
+            false,
+        )?;
+        serde_json::from_value(answer)
+            .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
     }
     /// Wait until the newest message changes, then return the window.
     ///
@@ -2501,5 +2548,28 @@ mod deadline_tests {
                 .expect_err("validation must fire before any subprocess");
             assert_eq!(error.code, ErrorCode::InvalidRequest);
         }
+    }
+
+    #[test]
+    fn model_set_rejects_a_wild_model_id_before_touching_the_service() {
+        // Same offline-safe shape as subscribe: validation fires before
+        // any subprocess spawns.
+        use super::{AccountClient, BridgeConfig, ErrorCode};
+        use std::path::PathBuf;
+        let client = AccountClient::new(BridgeConfig {
+            python: PathBuf::from("/unused/python"),
+            script: PathBuf::from("/unused/bridge.py"),
+            config_dir: PathBuf::from("/unused"),
+        });
+        for model in ["".to_string(), "m\x000".to_string(), "m".repeat(257)] {
+            let error = client
+                .model_set(&model)
+                .expect_err("validation must fire before any subprocess");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
+        let info: super::ModelInfo = serde_json::from_value(serde_json::json!({"generation": 7}))
+            .expect("sparse model answers keep parsing");
+        assert_eq!(info.generation, Some(7));
+        assert!(info.available_models.is_empty());
     }
 }

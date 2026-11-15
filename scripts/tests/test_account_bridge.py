@@ -653,6 +653,74 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(bad)
 
+    def test_model_get_reads_the_selected_model_and_its_generation(self):
+        # The web UI calls model.get ({}) on load and keeps the newest
+        # generation: the bridge returns the scalar selection fields and
+        # drops everything else.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"generation": 7, "selected_model": "m1",
+                        "default_model": "m0",
+                        "available_models": ["m0", "m1"],
+                        "display_name": "Muse",
+                        "access_token": "SECRET"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch({"op": "model_get"})
+        self.assertEqual(seen["method"], "model.get")
+        self.assertEqual(result["generation"], 7)
+        self.assertEqual(result["selected_model"], "m1")
+        self.assertEqual(result["default_model"], "m0")
+        self.assertEqual(result["available_models"], ["m0", "m1"])
+        self.assertEqual(result["display_name"], "Muse")
+        self.assertNotIn("SECRET", str(result))
+
+    def test_model_set_names_a_model_and_reports_the_new_generation(self):
+        # The web UI sends model.set ({model}) and keeps the answer only
+        # when its generation is newer: the bridge echoes the service's
+        # own generation, selection, and display name.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"generation": 8, "selected_model": "m2",
+                        "display_name": "Muse 2"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "model_set", "model": "m2"})
+        self.assertEqual(seen["method"], "model.set")
+        self.assertEqual(seen["body"], {"model": "m2"})
+        self.assertEqual(result["generation"], 8)
+        self.assertEqual(result["selected_model"], "m2")
+        self.assertEqual(result["display_name"], "Muse 2")
+
+    def test_model_set_rejects_a_missing_or_wild_model_id(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "model_set", "config_dir": "/unused",
+                                 "model": "m2"})
+        for bad in [{"op": "model_set", "config_dir": "/unused"},
+                    {"op": "model_set", "config_dir": "/unused",
+                     "model": ""},
+                    {"op": "model_set", "config_dir": "/unused",
+                     "model": "m" * 257},
+                    {"op": "model_set", "config_dir": "/unused",
+                     "model": "m\x002"}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
     def test_grants_lists_issued_access_with_a_page_cursor(self):
         # The web UI reads grants.list ({include_revoked} + paging) and the
         # Linux Policy page needs the same inventory: typed scalar fields
