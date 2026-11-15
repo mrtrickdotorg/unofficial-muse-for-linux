@@ -12,6 +12,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 const LIMIT: usize = 65536;
+/// Mutations a saved folder policy may auto-approve. Reads never need a card,
+/// so they are not policy-gated; rename covers the cross-folder move too.
+const WRITE_COMMANDS: [&str; 4] = [
+    "files.create_text",
+    "files.edit",
+    "files.rename",
+    "files.delete",
+];
 #[derive(Clone, Debug)]
 pub struct GrantInfo {
     pub id: String,
@@ -88,6 +96,10 @@ struct State {
     grants: HashMap<String, Grant>,
     seen: HashSet<String>,
     pending: HashMap<String, Pending>,
+    /// Folders where the person chose to allow writes without a card. Keyed
+    /// by the grant's own root path: grant ids are minted per session, and
+    /// the choice is about the folder, not about one session's grant.
+    policies: HashSet<PathBuf>,
     nonce: String,
     epoch: u64,
     next: u64,
@@ -607,6 +619,8 @@ impl ToolBroker {
         if state.pending.len() >= 128 {
             return Decision::Reply(fail(&id, "capacity"));
         }
+        let policy_allowed =
+            WRITE_COMMANDS.contains(&operation) && state.policies.contains(&root_path);
         let request = ApprovalRequest {
             approval_id,
             invocation_id: id.clone(),
@@ -620,18 +634,29 @@ impl ToolBroker {
                 .as_millis()
                 .div_ceil(1000) as u64,
         };
-        state.pending.insert(
-            request.approval_id.clone(),
-            Pending {
-                request: request.clone(),
-                root,
-                root_path,
-                target_root: target_grant.map(|(fd, _, _)| fd),
-                before,
-                deadline,
-                epoch,
-            },
-        );
+        let pending = Pending {
+            request: request.clone(),
+            root,
+            root_path,
+            target_root: target_grant.map(|(fd, _, _)| fd),
+            before,
+            deadline,
+            epoch,
+        };
+        if policy_allowed {
+            // The folder's writes are already allowed, so this mutation runs
+            // now. The output says why, so the Activity log can distinguish a
+            // saved policy from a card the person pressed.
+            drop(state);
+            let mut reply = self.execute(pending);
+            if reply.ok {
+                if let Value::Object(fields) = &mut reply.output {
+                    fields.insert("allowed_by".into(), json!("policy"));
+                }
+            }
+            return Decision::Reply(reply);
+        }
+        state.pending.insert(request.approval_id.clone(), pending);
         Decision::Approval(request)
     }
     pub fn deny(&self, approval_id: &str) -> ToolReply {
@@ -639,6 +664,33 @@ impl ToolBroker {
             Some(p) => fail(&p.request.invocation_id, "denied"),
             None => fail("", "stale_approval"),
         }
+    }
+    /// Remember, or forget, that this folder's writes were explicitly
+    /// allowed without a card. It applies to mutations proposed after the
+    /// call; a card already on screen keeps its own decision, and Stop still
+    /// revokes every pending one.
+    pub fn set_folder_policy(&self, root: &Path, allow: bool) {
+        let mut state = self.state.lock().unwrap();
+        if allow {
+            state.policies.insert(root.to_path_buf());
+        } else {
+            state.policies.remove(root);
+        }
+    }
+    pub fn folder_policy(&self, root: &Path) -> bool {
+        self.state.lock().unwrap().policies.contains(root)
+    }
+    pub fn policy_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = self
+            .state
+            .lock()
+            .unwrap()
+            .policies
+            .iter()
+            .cloned()
+            .collect();
+        roots.sort();
+        roots
     }
     pub fn revoke_all(&self) -> Vec<ToolReply> {
         let mut state = self.state.lock().unwrap();
@@ -678,6 +730,9 @@ impl ToolBroker {
             Some(p) => p,
             None => return fail("", "stale_approval"),
         };
+        self.execute(pending)
+    }
+    fn execute(&self, pending: Pending) -> ToolReply {
         let id = pending.request.invocation_id.clone();
         if Instant::now() >= pending.deadline {
             return fail(&id, "expired");
@@ -1522,6 +1577,63 @@ mod tests {
         };
         assert!(reply.ok);
         assert_eq!(reply.output["content"], "hello");
+    }
+
+    /// A folder policy is the "always allow" outcome: the write runs without
+    /// a card, says so in its output, and asks again once the policy is gone.
+    #[test]
+    fn a_folder_policy_runs_writes_without_a_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let broker = ToolBroker::new();
+        let grant = broker.grant(dir.path()).unwrap();
+        let create = |id: &str| Invocation {
+            id: id.into(),
+            command: "files.create_text".into(),
+            params: json!({"grant_id": grant.id, "path": "note.txt", "content": "hello"}),
+            timeout_ms: 5000,
+        };
+        assert!(matches!(
+            broker.invoke(create("before")),
+            Decision::Approval(_)
+        ));
+        broker.set_folder_policy(&grant.root, true);
+        let Decision::Reply(reply) = broker.invoke(create("during")) else {
+            panic!("a saved policy must run the write, not ask again")
+        };
+        assert!(reply.ok, "{:?}", reply.error);
+        assert_eq!(reply.output["allowed_by"], "policy");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.txt")).unwrap(),
+            "hello"
+        );
+        broker.set_folder_policy(&grant.root, false);
+        assert!(!broker.folder_policy(&grant.root));
+        assert!(matches!(
+            broker.invoke(create("after")),
+            Decision::Approval(_)
+        ));
+    }
+
+    /// The policy is about one folder: another granted folder still asks, and
+    /// only the folders actually allowed are reported.
+    #[test]
+    fn a_folder_policy_covers_only_its_own_folder() {
+        let allowed = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let broker = ToolBroker::new();
+        let allowed_grant = broker.grant(allowed.path()).unwrap();
+        let other_grant = broker.grant(other.path()).unwrap();
+        broker.set_folder_policy(&allowed_grant.root, true);
+        assert!(broker.folder_policy(&allowed_grant.root));
+        assert!(!broker.folder_policy(&other_grant.root));
+        assert_eq!(broker.policy_roots(), vec![allowed_grant.root.clone()]);
+        let elsewhere = Invocation {
+            id: "elsewhere".into(),
+            command: "files.create_text".into(),
+            params: json!({"grant_id": other_grant.id, "path": "x.txt", "content": "x"}),
+            timeout_ms: 5000,
+        };
+        assert!(matches!(broker.invoke(elsewhere), Decision::Approval(_)));
     }
 
     fn pause(b: &ToolBroker) -> Arc<(std::sync::Barrier, std::sync::Barrier)> {

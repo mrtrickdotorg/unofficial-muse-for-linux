@@ -70,6 +70,60 @@ fn node_id_is_valid(value: &str) -> bool {
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
+/// Saved "allow writes here without a card" decisions, beside the device
+/// identity. Grant ids are minted per session, so the choice is stored by
+/// the folder's own path and re-applied to a later grant of that folder.
+const POLICY_FILE: &str = "local-host-policy.json";
+const POLICY_SAVE_FAILED: &str = "Could not save the folder permission.";
+
+fn policy_path(directory: &std::path::Path) -> std::path::PathBuf {
+    directory.join(POLICY_FILE)
+}
+
+/// A missing or unreadable file means no saved permissions, never a guess:
+/// the person can only gain a permission by setting it again.
+fn load_folder_policies(directory: &std::path::Path) -> Vec<PathBuf> {
+    let Ok(text) = std::fs::read_to_string(policy_path(directory)) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<String>>(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| !entry.is_empty() && !entry.contains('\0'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Save the set atomically, owner-only, so an interrupted write cannot leave a
+/// half permission that a later start would read as something else.
+fn save_folder_policies(
+    directory: &std::path::Path,
+    roots: &[PathBuf],
+) -> Result<(), &'static str> {
+    let entries: Vec<String> = roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect();
+    let body = serde_json::to_vec(&entries).map_err(|_| POLICY_SAVE_FAILED)?;
+    let staged = directory.join(format!(".{POLICY_FILE}.{}", std::process::id()));
+    let written = {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&staged)
+            .and_then(|mut file| file.write_all(&body))
+    };
+    if written.is_err() || std::fs::rename(&staged, policy_path(directory)).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return Err(POLICY_SAVE_FAILED);
+    }
+    Ok(())
+}
+
 fn random_node_id() -> Option<String> {
     let mut nonce = [0u8; 16];
     // SAFETY: the writable buffer is valid for its supplied length.
@@ -190,6 +244,12 @@ struct Controller {
     tx: mpsc::SyncSender<Completion>,
     rx: mpsc::Receiver<Completion>,
     notice: String,
+    /// The account config folder, known once the host has started: where the
+    /// saved folder permissions live.
+    config_dir: Option<PathBuf>,
+    /// Folder permissions saved on disk. Kept beside the broker's copy because
+    /// Stop replaces the broker, and the switch must still show what is saved.
+    policies: Vec<PathBuf>,
 }
 impl Controller {
     fn new() -> Self {
@@ -208,6 +268,8 @@ impl Controller {
             tx,
             rx,
             notice: "Disconnected. No folders shared with Muse.".into(),
+            config_dir: None,
+            policies: Vec::new(),
         }
     }
     fn device(&self) -> Option<DeviceLease> {
@@ -258,6 +320,13 @@ impl Controller {
             return Err("Connect the account, consent and grant a folder before starting.");
         }
         let config = config.ok_or("Connect your Muse account first.")?;
+        // Saved permissions belong to the folders, not to a session's grant
+        // ids, so they are re-applied to whatever this session grants.
+        self.policies = load_folder_policies(&config.config_dir);
+        for root in &self.policies {
+            self.broker.set_folder_policy(root, true);
+        }
+        self.config_dir = Some(config.config_dir.clone());
         let node_id = persisted_node_id(&config.config_dir)?;
         let script = config.script.with_file_name("muse_local_host.py");
         let session = HostSession::spawn(HostConfig {
@@ -368,6 +437,41 @@ impl Controller {
             self.stop();
             self.notice = "Host stopped: local worker capacity reached.".into();
         }
+    }
+    /// Turn the saved write permission on (for every writable folder granted
+    /// now) or off. Durable first, then enforced: a save that fails leaves the
+    /// broker exactly as it was.
+    fn set_write_policy(&mut self, allow: bool) -> Result<(), &'static str> {
+        let directory = self
+            .config_dir
+            .clone()
+            .ok_or("Start the local host once before saving this permission.")?;
+        let roots = if allow {
+            let mut roots = self.policies.clone();
+            for root in self
+                .broker
+                .grants()
+                .iter()
+                .filter(|grant| grant.writable)
+                .map(|grant| grant.root.clone())
+            {
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+            if roots.is_empty() {
+                return Err("Grant a read-write folder before saving this permission.");
+            }
+            roots
+        } else {
+            Vec::new()
+        };
+        save_folder_policies(&directory, &roots)?;
+        self.policies = roots.clone();
+        for root in &roots {
+            self.broker.set_folder_policy(root, true);
+        }
+        Ok(())
     }
     fn decide(&mut self, id: &str, allow: bool) -> Result<(), &'static str> {
         self.poll(); // Closure/expiry wins over a click on an old rendered card.
@@ -553,7 +657,12 @@ impl Controller {
                 };
                 let rid = reply.id.clone();
                 let what = self.logged_command(&rid);
-                let outcome = Self::outcome(reply);
+                let outcome =
+                    if reply.output.get("allowed_by").and_then(|v| v.as_str()) == Some("policy") {
+                        "ok · allowed by saved permission".to_string()
+                    } else {
+                        Self::outcome(reply)
+                    };
                 match session.send_result(
                     &reply.id,
                     reply.ok,
@@ -681,6 +790,10 @@ mod native {
         stop: gtk::Button,
         status: gtk::Label,
         grants: gtk::Label,
+        pub(super) allow_writes: gtk::CheckButton,
+        /// Set while render() mirrors the saved state into the switch, so a
+        /// programmatic set_active cannot be mistaken for a person's press.
+        syncing: RefCell<bool>,
         cards: gtk::Box,
         activity: gtk::Box,
         clear: gtk::Button,
@@ -711,6 +824,9 @@ mod native {
             "Grant read-only: folders granted while this is on can be read and searched, but Muse can never propose a write in them — the broker refuses mutations before any approval.",
         );
         root.append(&read_only);
+        let allow_writes = gtk::CheckButton::with_label(
+            "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.",
+        );
         // A checkbutton's label never wraps on its own, and these two
         // are sentences: left alone, the read-only one's single line
         // set this page's minimum width to 1079px. The shell's stack
@@ -718,7 +834,7 @@ mod native {
         // not the chat page — decided the shell's width, and on
         // Patrick's 1680px laptop the overflow pushed the right-hand
         // panel off the screen. Wrap both labels.
-        for check in [&consent, &read_only] {
+        for check in [&consent, &read_only, &allow_writes] {
             // GtkCheckButton is not a Button in GTK4: its label is
             // found by walking the widget subtree.
             let mut pending = vec![check.clone().upcast::<gtk::Widget>()];
@@ -758,6 +874,7 @@ mod native {
         let grants = label("No folders granted.");
         grants.add_css_class("dim-label");
         root.append(&grants);
+        root.append(&allow_writes);
         let approvals_heading =
             label("Pending file approvals · review the exact path and content before allowing");
         approvals_heading.add_css_class("section-heading");
@@ -792,6 +909,8 @@ mod native {
             stop,
             status,
             grants,
+            allow_writes,
+            syncing: RefCell::new(false),
             cards,
             activity,
             clear,
@@ -831,6 +950,19 @@ mod native {
         ui.stop.connect_clicked(move |_| {
             if let Some(u) = weak.upgrade() {
                 u.shutdown();
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        ui.allow_writes.connect_toggled(move |button| {
+            if let Some(u) = weak.upgrade() {
+                if *u.syncing.borrow() {
+                    return;
+                }
+                let allow = button.is_active();
+                if let Err(e) = u.host.borrow_mut().set_write_policy(allow) {
+                    u.host.borrow_mut().notice = e.into();
+                }
+                u.render();
             }
         });
         let weak = Rc::downgrade(&ui);
@@ -971,6 +1103,17 @@ mod native {
                     .collect::<Vec<_>>()
                     .join("\n\n")
             });
+            let writable: Vec<PathBuf> = grants
+                .iter()
+                .filter(|grant| grant.writable)
+                .map(|grant| grant.root.clone())
+                .collect();
+            *self.syncing.borrow_mut() = true;
+            self.allow_writes.set_active(
+                !writable.is_empty() && writable.iter().all(|root| host.policies.contains(root)),
+            );
+            self.allow_writes.set_sensitive(!writable.is_empty());
+            *self.syncing.borrow_mut() = false;
             let changed = {
                 let widgets = self.widgets.borrow();
                 widgets.len() != host.cards.len()
