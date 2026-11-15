@@ -241,8 +241,13 @@ def read_devtools_endpoint(profile, process, launched_ns):
     try:
         info = os.fstat(fd)
         fresh_after = launched_ns - CLOCK_SKEW_NS
+        # No write-bit check on the file itself: the profile chain above it
+        # is 0700-enforced (group members cannot reach the file at all) and
+        # validate_listener below proves the port belongs to our own process
+        # tree. Real browsers honor the umask, so a group-writable file our
+        # own browser wrote under umask 002 must not fail sign-in here.
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_nlink != 1 or info.st_mode & 0o022
+                or info.st_nlink != 1
                 or info.st_mtime_ns < fresh_after or info.st_ctime_ns < fresh_after
                 or not 1 <= info.st_size <= 512):
             raise LoginError("unsafe_devtools")

@@ -245,6 +245,30 @@ class LoginTests(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def test_group_writable_devtools_file_from_our_browser_is_still_accepted(self):
+        # umask 002 systems: Chrome creates DevToolsActivePort group-writable.
+        # The profile chain is always 0700 and the listener must belong to our
+        # process tree, so a group-writable file from OUR browser proves the
+        # same ownership as a 0600 one -- refusing it breaks sign-in wherever
+        # the umask is 002.
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as root, socket.socket() as listener:
+            profile = Path(root)
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            launched = time.time_ns()
+            active = profile / "DevToolsActivePort"
+            active.write_text(str(port) + "\n/devtools/browser/fake-process-token\n")
+            os.chmod(active, 0o664)
+            process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: None})()
+            try:
+                url = helper.read_devtools_endpoint(fd, process, launched)
+                self.assertEqual(url, f"ws://127.0.0.1:{port}/devtools/browser/fake-process-token")
+            finally:
+                os.close(fd)
+
     def test_cdp_urls_cannot_escape_loopback_or_include_ambiguous_authorities(self):
         helper = load_helper()
         for url in ("ws://evil.test:123/devtools/browser/fake", "ws://127.0.0.1.evil:123/devtools/browser/fake",
