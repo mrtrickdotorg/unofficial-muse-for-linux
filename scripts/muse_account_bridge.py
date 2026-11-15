@@ -26,7 +26,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -650,7 +650,20 @@ def validate_request(request):
     if not isinstance(request, dict):
         raise BridgeFailure("invalid_request")
     op = request.get("op")
-    allowed = {"connect": set(), "identity": set(), "history": {"thread", "limit"},
+    allowed = {"connect": set(), "identity": set(),
+               "history": {"thread", "limit"},
+               "history_window": {"thread", "anchor_seq", "before_limit",
+                                 "after_limit"},
+               "stream_events": {"message_id", "reply_to_message_id",
+                                "limit"},
+               "grants": {"limit", "cursor", "include_revoked"},
+               "scoped_permissions": {"scope_type", "scope_id",
+                                     "connectors"},
+               "scoped_update": {"scope_type", "scope_id",
+                                "expected_revision", "connector", "method",
+                                "mode", "display_name"},
+               "tasks_run": {"job_id"},
+               "chat_delete": {"target", "message_id"},
                "watch": {"thread", "limit", "timeout", "after"},
                "activity": {"timeout"},
                "cancel": set(),
@@ -706,6 +719,93 @@ def validate_request(request):
     if op in ("history", "watch"):
         limit = request.get("limit")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise BridgeFailure("invalid_request")
+    if op == "history_window":
+        # The web UI pages with an anchor plus a bounded window on each side
+        # instead of re-reading a long conversation in full.
+        anchor = request.get("anchor_seq")
+        if not isinstance(anchor, int) or isinstance(anchor, bool) or anchor < 0:
+            raise BridgeFailure("invalid_request")
+        for key in ("before_limit", "after_limit"):
+            bound = request.get(key)
+            if (not isinstance(bound, int) or isinstance(bound, bool)
+                    or not 1 <= bound <= 200):
+                raise BridgeFailure("invalid_request")
+    if op == "stream_events":
+        # The web UI replays a turn from exactly one anchor: the message
+        # id or the id it replies to. Both at once, or neither, is a
+        # malformed request, not a wider replay.
+        anchors = [request.get("message_id"), request.get("reply_to_message_id")]
+        if sum(isinstance(a, str) and 1 <= len(a) <= 4096 and "\x00" not in a
+               for a in anchors) != 1:
+            raise BridgeFailure("invalid_request")
+        limit = request.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise BridgeFailure("invalid_request")
+    if op == "grants":
+        # The issued-access inventory behind the Policy page. The web UI
+        # pages it with an opaque cursor and an include_revoked flag.
+        limit = request.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise BridgeFailure("invalid_request")
+        cursor = request.get("cursor")
+        if cursor is not None and (not isinstance(cursor, str)
+                                   or not 1 <= len(cursor) <= 4096
+                                   or "\x00" in cursor):
+            raise BridgeFailure("invalid_request")
+        revoked = request.get("include_revoked", False)
+        if not isinstance(revoked, bool):
+            raise BridgeFailure("invalid_request")
+    if op == "scoped_permissions":
+        # One connector scope's allow/ask/deny map. Identifiers travel short
+        # and NUL-free like thread ids; connectors arrive as a small list
+        # and leave as the comma string the route takes.
+        for key in ("scope_type", "scope_id"):
+            value = request.get(key)
+            if (not isinstance(value, str) or not 1 <= len(value) <= 256
+                    or "\x00" in value):
+                raise BridgeFailure("invalid_request")
+        connectors = request.get("connectors")
+        if connectors is not None:
+            if (not isinstance(connectors, list) or len(connectors) > 32
+                    or any(not isinstance(c, str) or not 1 <= len(c) <= 128
+                           or "\x00" in c for c in connectors)):
+                raise BridgeFailure("invalid_request")
+            if not connectors:
+                connectors = None
+    if op == "tasks_run":
+        # The id is the service's own, taken from the schedule listing it
+        # published; anything else would be running a guess.
+        job_id = request.get("job_id")
+        if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
+                or "\x00" in job_id):
+            raise BridgeFailure("invalid_request")
+    if op == "scoped_update":
+        # The write half of the scoped model. The revision is the read's:
+        # a stale page must fail loudly rather than overwrite a newer one.
+        for key in ("scope_type", "scope_id", "connector", "method"):
+            value = request.get(key)
+            if (not isinstance(value, str) or not 1 <= len(value) <= 256
+                    or "\x00" in value):
+                raise BridgeFailure("invalid_request")
+        revision = request.get("expected_revision")
+        if (not isinstance(revision, int) or isinstance(revision, bool)
+                or revision < 0):
+            raise BridgeFailure("invalid_request")
+        if request.get("mode") not in ("allow", "ask", "deny"):
+            raise BridgeFailure("invalid_request")
+        name = request.get("display_name")
+        if (not isinstance(name, str) or not 1 <= len(name) <= 256
+                or "\x00" in name):
+            raise BridgeFailure("invalid_request")
+    if op == "chat_delete":
+        # One row or one turn, named by the history listing's own id.
+        if request.get("target") not in ("message", "turn"):
+            raise BridgeFailure("invalid_request")
+        message_id = request.get("message_id")
+        if (not isinstance(message_id, str)
+                or not 1 <= len(message_id) <= 4096
+                or "\x00" in message_id):
             raise BridgeFailure("invalid_request")
     if op in ("watch", "activity"):
         timeout = request.get("timeout")
@@ -1194,6 +1294,37 @@ def _probe_browser_shapes(config_dir, records):
         pass
 
 
+def _project_live_events(records, limit=200):
+    """Project raw subscribe/stream records to the allowlisted event shape.
+
+    Shared by the activity read and the stream replay: only whitelisted
+    fields leave this function, because a live payload can carry more than
+    a status line or a fragment.
+    """
+    rows = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        event = record.get("event")
+        if not isinstance(event, str) or not 1 <= len(event) <= 64:
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        text = payload.get("display_text") or payload.get("text") or payload.get("content")
+        seq = record.get("seq")
+        rows.append({
+            "event": event,
+            "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+            "text": text[:200] if isinstance(text, str) else None,
+            "status": optional_text(payload.get("status") or payload.get("activity_text")),
+            "session_id": optional_text(payload.get("session_id")),
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def activity_rows(client, config, timeout_ms, config_dir=None):
     """Bounded live-status read: what the agent is doing, not what it said.
 
@@ -1212,26 +1343,7 @@ def activity_rows(client, config, timeout_ms, config_dir=None):
             "chat.subscribe", body={"capabilities": {}},
             max_records=200, idle_timeout=min(6.0, seconds), overall_timeout=seconds)
     _probe_browser_shapes(config_dir, records)
-    rows = []
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        event = record.get("event")
-        if not isinstance(event, str) or not 1 <= len(event) <= 64:
-            continue
-        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
-        text = payload.get("display_text") or payload.get("text") or payload.get("content")
-        seq = record.get("seq")
-        rows.append({
-            "event": event,
-            "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
-            "text": text[:200] if isinstance(text, str) else None,
-            "status": optional_text(payload.get("status") or payload.get("activity_text")),
-            "session_id": optional_text(payload.get("session_id")),
-        })
-        if len(rows) >= 200:
-            break
-    return {"events": rows}
+    return {"events": _project_live_events(records)}
 
 
 def _attach_probe_binary(client, config, thread, config_dir, baseline_ids):
@@ -2925,6 +3037,166 @@ class Adapter:
             _probe_attachment_fetch(request.get("config_dir"), self.client,
                                     self.config, raw_rows)
             return rows
+        if request["op"] == "history_window":
+            # Windowed transcript paging the way the web UI reads it: an
+            # anchor seq plus a bounded window on each side, projected
+            # through the same history_rows allowlist as a full read.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "chat.history_window",
+                    body={"anchor_seq": request["anchor_seq"],
+                          "before_limit": request["before_limit"],
+                          "after_limit": request["after_limit"]},
+                    query={"session_id": request.get("thread")}
+                    if request.get("thread") else None,
+                    timeout=20)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            rows = history_rows(payload.get("chat_events"),
+                                config_dir=request.get("config_dir"))
+            newest = payload.get("newest_seq")
+            return {
+                "messages": rows,
+                "has_older": bool(payload.get("has_older", False)),
+                "has_newer": bool(payload.get("has_newer", False)),
+                "newest_seq": newest if isinstance(newest, int)
+                and not isinstance(newest, bool) else None,
+                "transcript_revision": optional_text(
+                    payload.get("transcript_revision")),
+            }
+        if request["op"] == "stream_events":
+            # Turn replay the way the web UI performs it: exactly one
+            # anchor (the message or what it replies to), the 'all' lane,
+            # projected through the same event allowlist as the activity
+            # read. Read-only: a replay never dispatches.
+            body = {"stream_lane": "all", "limit": request["limit"]}
+            if request.get("message_id") is not None:
+                body["message_id"] = request["message_id"]
+            else:
+                body["reply_to_message_id"] = request["reply_to_message_id"]
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "chat.stream_events", body=body, timeout=20)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            return {"events": _project_live_events(
+                payload.get("events"))}
+        if request["op"] == "grants":
+            # Paged issued-access inventory, projected to the scalar fields
+            # the web UI's own validator reads. The cursor travels opaque:
+            # per-row secrets and unlisted fields stay in the bridge.
+            body = {"limit": request["limit"],
+                    "include_revoked": request.get("include_revoked", False)}
+            if request.get("cursor") is not None:
+                body["cursor"] = request["cursor"]
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "grants.list", body=body, timeout=20)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            grants = []
+            for item in payload.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                caps = item.get("capabilities")
+                grants.append({
+                    "grant_id": required_text(item.get("grant_id")),
+                    "subject_kind": required_text(item.get("subject_kind")),
+                    "subject_id": required_text(item.get("subject_id")),
+                    "capabilities": [required_text(c) for c in caps]
+                    if isinstance(caps, list) else [],
+                    "revision": item.get("revision")
+                    if isinstance(item.get("revision"), int)
+                    and not isinstance(item.get("revision"), bool) else None,
+                    "not_before_ms": item.get("not_before_ms"),
+                    "expires_at_ms": item.get("expires_at_ms"),
+                    "revoked_at_ms": item.get("revoked_at_ms"),
+                    "provenance": optional_text(item.get("provenance")),
+                    "created_at_ms": item.get("created_at_ms"),
+                })
+            cursor = payload.get("nextCursor")
+            cursor = cursor if isinstance(cursor, str) and cursor else None
+            return {"grants": grants, "next_cursor": cursor,
+                    "has_more": cursor is not None}
+        if request["op"] == "scoped_permissions":
+            # One scope's allow/ask/deny map, the read half of the scoped
+            # grant model the web UI's Policy page renders. The response
+            # must echo the requested scope: a mix-up between scopes must
+            # never surface as the wrong scope's permissions.
+            body = {"scope_type": request["scope_type"],
+                    "scope_id": request["scope_id"]}
+            connectors = request.get("connectors")
+            if connectors:
+                body["connectors"] = ",".join(connectors)
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "egress.permissions.scoped", body=body, timeout=20)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            scope = payload.get("scope")
+            if (not isinstance(scope, dict)
+                    or scope.get("scope_type") != request["scope_type"]
+                    or scope.get("scope_id") != request["scope_id"]):
+                raise BridgeFailure("protocol_error")
+            groups = []
+            action_groups = payload.get("action_groups")
+            if isinstance(action_groups, dict):
+                for key in sorted(action_groups):
+                    group = action_groups[key]
+                    if not isinstance(group, dict):
+                        continue
+                    methods = group.get("methods")
+                    groups.append({
+                        "key": key,
+                        "label": optional_text(group.get("label")),
+                        "category": optional_text(group.get("category")),
+                        "methods": [m for m in methods
+                                    if isinstance(m, str) and m]
+                        if isinstance(methods, list) else [],
+                    })
+            return {"scope": {"scope_type": request["scope_type"],
+                              "scope_id": request["scope_id"]},
+                    "groups": groups}
+        if request["op"] == "tasks_run":
+            # Run one listed schedule, once. Whether a run appears is
+            # proven by re-reading tasks.runs: the web UI itself treats a
+            # failed dispatch with a queued run as a success.
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(
+                    "tasks.run",
+                    path_params={"job_id": request["job_id"]},
+                    timeout=20)
+            return {"job_id": request["job_id"], "accepted": True}
+        if request["op"] == "scoped_update":
+            # One connector+method mode change, guarded by the revision the
+            # read published. The caller proves the change by re-reading
+            # the scope, never by this answer alone.
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(
+                    "egress.permissions.scoped.update",
+                    body={"scope_type": request["scope_type"],
+                          "scope_id": request["scope_id"],
+                          "expected_revision": request["expected_revision"],
+                          "connector": request["connector"],
+                          "method": request["method"],
+                          "mode": request["mode"],
+                          "display_name": request["display_name"]},
+                    timeout=20)
+            return {"scope_type": request["scope_type"],
+                    "scope_id": request["scope_id"],
+                    "method": request["method"], "mode": request["mode"],
+                    "accepted": True}
+        if request["op"] == "chat_delete":
+            # One message or one turn, the web UI's delete_message vs
+            # delete_turn. Acceptance is not absence: the caller re-reads
+            # history to prove the row is gone.
+            method = ("chat.delete_message"
+                      if request["target"] == "message"
+                      else "chat.delete_turn")
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(method, body={}, timeout=20)
+            return {"target": request["target"],
+                    "message_id": request["message_id"], "accepted": True}
         if request["op"] == "tasks":
             with self.client._gateway(self.config) as gateway:
                 schedules = gateway.call_json("tasks.list")["schedules"]

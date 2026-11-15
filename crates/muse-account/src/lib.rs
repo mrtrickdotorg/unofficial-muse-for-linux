@@ -57,6 +57,31 @@ pub struct AccountClient {
     host: Option<PathBuf>,
 }
 
+/// One live event, the allowlisted projection the bridge returns for both
+/// the activity read and the stream replay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamEvent {
+    pub event: String,
+    pub seq: Option<u64>,
+    pub text: Option<String>,
+    pub status: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Windowed transcript page, the web UI's history_window shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryWindow {
+    pub messages: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub has_older: bool,
+    #[serde(default)]
+    pub has_newer: bool,
+    #[serde(default)]
+    pub newest_seq: Option<u64>,
+    #[serde(default)]
+    pub transcript_revision: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountSnapshot {
     pub identity_name: String,
@@ -523,6 +548,105 @@ pub struct ActiveGrants {
     #[serde(default)]
     pub grants: Vec<ActiveGrant>,
 }
+/// One issued grant, the web UI's grants.list item shape.
+///
+/// Scalar identity and lifecycle fields only; the paging cursor travels
+/// opaque beside the page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantItem {
+    pub grant_id: String,
+    pub subject_kind: String,
+    pub subject_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub revision: Option<u64>,
+    #[serde(default)]
+    pub not_before_ms: Option<i64>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+    #[serde(default)]
+    pub revoked_at_ms: Option<i64>,
+    #[serde(default)]
+    pub provenance: Option<String>,
+    #[serde(default)]
+    pub created_at_ms: Option<i64>,
+}
+/// One page of the issued-access inventory.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrantsPage {
+    #[serde(default)]
+    pub grants: Vec<GrantItem>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub has_more: bool,
+}
+/// One action group's allow/ask/deny surface inside a connector scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedGroup {
+    pub key: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub methods: Vec<String>,
+}
+/// One connector scope's permission map, the read half of the scoped
+/// grant model the web UI's Policy page renders.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedPermissions {
+    pub scope_type: String,
+    pub scope_id: String,
+    #[serde(default)]
+    pub groups: Vec<ScopedGroup>,
+}
+/// One scoped mode change, the write half of the scoped grant model.
+///
+/// Carried as one struct so the call stays a single revision-guarded write.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedUpdate {
+    pub scope_type: String,
+    pub scope_id: String,
+    pub expected_revision: u64,
+    pub connector: String,
+    pub method: String,
+    pub mode: String,
+    pub display_name: String,
+}
+/// What the service said about a run it accepted.
+///
+/// `accepted` means the request landed; a run showing up is a fact only a
+/// fresh read of tasks.runs holds, so the caller re-reads rather than
+/// trusting this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunAnswer {
+    pub job_id: String,
+    pub accepted: bool,
+}
+/// What the service said about a scoped mode change it accepted.
+///
+/// The change itself is proven by re-reading the scope, never by this
+/// answer alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedUpdateAnswer {
+    pub scope_type: String,
+    pub scope_id: String,
+    pub method: String,
+    pub mode: String,
+    pub accepted: bool,
+}
+/// What the service said about a message/turn deletion it accepted.
+///
+/// Acceptance is not absence: the caller re-reads history to prove the
+/// row is gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatDeleteAnswer {
+    pub target: String,
+    pub message_id: String,
+    pub accepted: bool,
+}
 /// What the service said about a revocation it took.
 ///
 /// `accepted` means the service accepted the request; it does not mean the
@@ -858,6 +982,72 @@ impl AccountClient {
             false,
         )
     }
+    /// Windowed transcript paging the way the web UI reads it.
+    ///
+    /// An anchor seq plus a bounded window on each side, instead of a full
+    /// re-read of a long conversation. The answer carries the rows plus the
+    /// paging flags the web UI renders from.
+    pub fn history_window(
+        &self,
+        thread: Option<&str>,
+        anchor_seq: u64,
+        before_limit: usize,
+        after_limit: usize,
+    ) -> Result<HistoryWindow, AccountError> {
+        validate_thread(thread)?;
+        if !(1..=200).contains(&before_limit) || !(1..=200).contains(&after_limit) {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({
+                "op": "history_window",
+                "thread": thread,
+                "anchor_seq": anchor_seq,
+                "before_limit": before_limit,
+                "after_limit": after_limit,
+            }),
+            false,
+        )
+    }
+    /// Replay a turn's stream events from either anchor.
+    ///
+    /// Exactly one of `message_id` / `reply_to_message_id`, the web UI's
+    /// `chat.stream_events` shape with the 'all' lane. Read-only.
+    pub fn stream_events(
+        &self,
+        message_id: Option<&str>,
+        reply_to_message_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StreamEvent>, AccountError> {
+        let anchors = [message_id, reply_to_message_id];
+        if anchors
+            .iter()
+            .filter(|a| matches!(a, Some(s) if !s.is_empty() && s.len() <= 4096))
+            .count()
+            != 1
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if !(1..=200).contains(&limit) {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let answer: serde_json::Value = self.request(
+            serde_json::json!({
+                "op": "stream_events",
+                "message_id": message_id,
+                "reply_to_message_id": reply_to_message_id,
+                "limit": limit,
+            }),
+            false,
+        )?;
+        serde_json::from_value(
+            answer
+                .get("events")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
+    }
     /// Wait until the newest message changes, then return the window.
     ///
     /// The bridge holds one connection for the wait, so a recheck costs ~0.1s
@@ -1091,6 +1281,64 @@ impl AccountClient {
     pub fn permissions(&self) -> Result<ActiveGrants, AccountError> {
         self.request(serde_json::json!({"op": "permissions"}), false)
     }
+    /// One page of the issued-access inventory, the web UI's grants.list.
+    ///
+    /// The cursor travels opaque; `None` reads the first page.
+    pub fn grants(
+        &self,
+        limit: usize,
+        cursor: Option<&str>,
+        include_revoked: bool,
+    ) -> Result<GrantsPage, AccountError> {
+        if !(1..=200).contains(&limit) {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if let Some(cursor) = cursor
+            && (cursor.is_empty() || cursor.len() > 4096)
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({
+                "op": "grants",
+                "limit": limit,
+                "cursor": cursor,
+                "include_revoked": include_revoked,
+            }),
+            false,
+        )
+    }
+    /// One connector scope's allow/ask/deny map. Read-only.
+    pub fn scoped_permissions(
+        &self,
+        scope_type: &str,
+        scope_id: &str,
+        connectors: &[String],
+    ) -> Result<ScopedPermissions, AccountError> {
+        if scope_type.is_empty()
+            || scope_type.len() > 256
+            || scope_id.is_empty()
+            || scope_id.len() > 256
+            || connectors.len() > 32
+            || connectors.iter().any(|c| c.is_empty() || c.len() > 128)
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let answer: serde_json::Value = self.request(
+            serde_json::json!({
+                "op": "scoped_permissions",
+                "scope_type": scope_type,
+                "scope_id": scope_id,
+                "connectors": connectors,
+            }),
+            false,
+        )?;
+        let mut answer = answer;
+        answer["scope_type"] = serde_json::Value::String(scope_type.to_owned());
+        answer["scope_id"] = serde_json::Value::String(scope_id.to_owned());
+        serde_json::from_value(answer)
+            .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
+    }
     /// Revoke exactly one grant, once.
     ///
     /// The id must be one the active listing published, and the bridge makes
@@ -1147,6 +1395,68 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "delete_task", "job_id": job_id}),
+            false,
+        )
+    }
+    /// Run one listed schedule, once. Acceptance is not a run: the caller
+    /// proves the run by re-reading tasks.runs.
+    pub fn tasks_run(&self, job_id: &str) -> Result<RunAnswer, AccountError> {
+        if job_id.is_empty() || job_id.len() > 256 || job_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "tasks_run", "job_id": job_id}),
+            false,
+        )
+    }
+    /// Change one connector+method mode, guarded by the revision the read
+    /// published. The caller proves the change by re-reading the scope.
+    pub fn scoped_update(&self, update: &ScopedUpdate) -> Result<ScopedUpdateAnswer, AccountError> {
+        if update.scope_type.is_empty()
+            || update.scope_type.len() > 256
+            || update.scope_id.is_empty()
+            || update.scope_id.len() > 256
+            || update.connector.is_empty()
+            || update.connector.len() > 256
+            || update.method.is_empty()
+            || update.method.len() > 256
+            || !matches!(update.mode.as_str(), "allow" | "ask" | "deny")
+            || update.display_name.is_empty()
+            || update.display_name.len() > 256
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({
+                "op": "scoped_update",
+                "scope_type": update.scope_type,
+                "scope_id": update.scope_id,
+                "expected_revision": update.expected_revision,
+                "connector": update.connector,
+                "method": update.method,
+                "mode": update.mode,
+                "display_name": update.display_name,
+            }),
+            false,
+        )
+    }
+    /// Delete one message or one turn. Acceptance is not absence: the
+    /// caller re-reads history to prove the row is gone.
+    pub fn chat_delete(
+        &self,
+        target: &str,
+        message_id: &str,
+    ) -> Result<ChatDeleteAnswer, AccountError> {
+        if !matches!(target, "message" | "turn") || message_id.is_empty() || message_id.len() > 4096
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({
+                "op": "chat_delete",
+                "target": target,
+                "message_id": message_id,
+            }),
             false,
         )
     }
