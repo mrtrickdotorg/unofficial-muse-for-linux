@@ -498,6 +498,351 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(client.limits[-1], 50)
         self.assertEqual(result[-1]["message_id"], "new")
 
+    def test_history_window_pages_around_an_anchor_without_a_full_reread(self):
+        # The web UI pages with chat.history_window ({anchor_seq,
+        # before/after_limit:20}) instead of re-reading long conversations
+        # in full: the window returns the rows plus the paging flags.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"chat_events": [
+                    {"message_id": "a", "seq": 8, "role": "user", "text": "eight"},
+                    {"message_id": "b", "seq": 9, "role": "assistant", "text": "nine",
+                     "raw": {"payload": {"status": "complete"}}},
+                ], "has_older": True, "has_newer": False, "newest_seq": 12,
+                    "transcript_revision": "r1"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "history_window", "thread": "t1", "anchor_seq": 9,
+             "before_limit": 20, "after_limit": 20})
+        self.assertEqual(seen["method"], "chat.history_window")
+        self.assertEqual(seen["body"], {"anchor_seq": 9, "before_limit": 20,
+                                        "after_limit": 20})
+        self.assertEqual([r["message_id"] for r in result["messages"]], ["a", "b"])
+        self.assertEqual(result["has_older"], True)
+        self.assertEqual(result["has_newer"], False)
+        self.assertEqual(result["newest_seq"], 12)
+        self.assertNotIn("SECRET", str(result))
+
+    def test_history_window_rejects_a_missing_anchor_or_bad_window(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "history_window", "config_dir": "/unused",
+                                 "thread": "t1", "anchor_seq": 9,
+                                 "before_limit": 20, "after_limit": 20})
+        for bad in [{"op": "history_window", "config_dir": "/unused",
+                     "before_limit": 20, "after_limit": 20},
+                    {"op": "history_window", "config_dir": "/unused",
+                     "thread": "t1", "anchor_seq": True,
+                     "before_limit": 20, "after_limit": 20},
+                    {"op": "history_window", "config_dir": "/unused",
+                     "thread": "t1", "anchor_seq": 9,
+                     "before_limit": 0, "after_limit": 20},
+                    {"op": "history_window", "config_dir": "/unused",
+                     "thread": "t1", "anchor_seq": 9,
+                     "before_limit": 20, "after_limit": 201}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+    def test_stream_events_replays_a_turn_from_either_anchor(self):
+        # The web UI replays a turn with chat.stream_events ({message_id |
+        # reply_to_message_id, stream_lane:'all'}): the bridge projects the
+        # same allowlisted event shape the activity read uses.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"events": [
+                    {"event": "delta.text_append", "seq": 3,
+                     "occurred_at_ms": 100,
+                     "payload": {"content": "Hel", "session_id": "s1",
+                                 "access_token": "SECRET"}},
+                    {"event": "chat.done", "seq": 4, "occurred_at_ms": 200,
+                     "payload": {"status": "complete", "session_id": "s1"}},
+                ]}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        for anchor in ({"message_id": "m1"}, {"reply_to_message_id": "m1"}):
+            seen.clear()
+            result = bridge.Adapter(Client(), {}).dispatch(
+                dict({"op": "stream_events", "limit": 100}, **anchor))
+            self.assertEqual(seen["method"], "chat.stream_events")
+            self.assertEqual(seen["body"]["stream_lane"], "all")
+            self.assertEqual(seen["body"]["limit"], 100)
+            self.assertEqual(result, {"events": [
+                {"event": "delta.text_append", "seq": 3, "text": "Hel",
+                 "status": None, "session_id": "s1"},
+                {"event": "chat.done", "seq": 4, "text": None,
+                 "status": "complete", "session_id": "s1"},
+            ]})
+            self.assertNotIn("SECRET", str(result))
+
+    def test_stream_events_needs_one_anchor_and_a_bounded_limit(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "stream_events", "config_dir": "/unused",
+                                 "message_id": "m1", "limit": 100})
+        for bad in [{"op": "stream_events", "config_dir": "/unused",
+                     "limit": 100},
+                    {"op": "stream_events", "config_dir": "/unused",
+                     "message_id": "m1", "reply_to_message_id": "m1",
+                     "limit": 100},
+                    {"op": "stream_events", "config_dir": "/unused",
+                     "message_id": "", "limit": 100},
+                    {"op": "stream_events", "config_dir": "/unused",
+                     "message_id": "m1", "limit": 0}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+    def test_grants_lists_issued_access_with_a_page_cursor(self):
+        # The web UI reads grants.list ({include_revoked} + paging) and the
+        # Linux Policy page needs the same inventory: typed scalar fields
+        # only, the next cursor as the opaque paging token.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"items": [
+                    {"grant_id": "g1", "subject_kind": "peer",
+                     "subject_id": "p1", "capabilities": ["chat.send"],
+                     "revision": 2, "not_before_ms": 100,
+                     "expires_at_ms": 200, "revoked_at_ms": None,
+                     "provenance": "invite", "created_at_ms": 50,
+                     "access_token": "SECRET"},
+                ], "nextCursor": "PAGE-2"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "grants", "limit": 50, "include_revoked": False})
+        self.assertEqual(seen["method"], "grants.list")
+        self.assertEqual(seen["body"],
+                         {"limit": 50, "include_revoked": False})
+        self.assertEqual(result, {"grants": [
+            {"grant_id": "g1", "subject_kind": "peer", "subject_id": "p1",
+             "capabilities": ["chat.send"], "revision": 2,
+             "not_before_ms": 100, "expires_at_ms": 200,
+             "revoked_at_ms": None, "provenance": "invite",
+             "created_at_ms": 50},
+        ], "next_cursor": "PAGE-2", "has_more": True})
+        self.assertNotIn("SECRET", str(result))
+
+    def test_grants_validates_limit_and_cursor(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "grants", "config_dir": "/unused",
+                                 "limit": 50})
+        for bad in [{"op": "grants", "config_dir": "/unused", "limit": 0},
+                    {"op": "grants", "config_dir": "/unused", "limit": True},
+                    {"op": "grants", "config_dir": "/unused", "limit": 50,
+                     "cursor": ""},
+                    {"op": "grants", "config_dir": "/unused", "limit": 50,
+                     "include_revoked": "yes"}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+    def test_scoped_permissions_reads_one_scope_with_an_echo_check(self):
+        # The web UI reads GET /permissions/scopes/{type}/{id} with
+        # {scope_type, scope_id, connectors} and rejects a response whose
+        # scope echo does not match the request: a mix-up between scopes
+        # must never surface as the wrong scope's permissions.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"scope": {"scope_type": "connector",
+                                  "scope_id": "gmail"},
+                        "action_groups": {
+                            "read": {"label": "Read", "category": "mail",
+                                     "methods": ["chat.send", 7]},
+                        },
+                        "access_token": "SECRET"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "scoped_permissions", "scope_type": "connector",
+             "scope_id": "gmail", "connectors": ["chat"]})
+        self.assertEqual(seen["method"], "egress.permissions.scoped")
+        self.assertEqual(seen["body"], {"scope_type": "connector",
+                                        "scope_id": "gmail",
+                                        "connectors": "chat"})
+        self.assertEqual(result, {"scope": {"scope_type": "connector",
+                                            "scope_id": "gmail"},
+                                  "groups": [{"key": "read", "label": "Read",
+                                              "category": "mail",
+                                              "methods": ["chat.send"]}]})
+        self.assertNotIn("SECRET", str(result))
+
+    def test_scoped_permissions_rejects_a_mismatched_scope_echo(self):
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                return {"scope": {"scope_type": "connector",
+                                  "scope_id": "other"}}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.Adapter(Client(), {}).dispatch(
+                {"op": "scoped_permissions", "scope_type": "connector",
+                 "scope_id": "gmail"})
+        self.assertEqual(caught.exception.code, "protocol_error")
+
+    def test_scoped_permissions_validates_scope_and_connectors(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "scoped_permissions",
+                                 "config_dir": "/unused",
+                                 "scope_type": "connector",
+                                 "scope_id": "gmail",
+                                 "connectors": ["chat"]})
+        for bad in [{"op": "scoped_permissions", "config_dir": "/unused",
+                     "scope_id": "gmail"},
+                    {"op": "scoped_permissions", "config_dir": "/unused",
+                     "scope_type": "", "scope_id": "gmail"},
+                    {"op": "scoped_permissions", "config_dir": "/unused",
+                     "scope_type": "connector", "scope_id": "gmail",
+                     "connectors": "chat"},
+                    {"op": "scoped_permissions", "config_dir": "/unused",
+                     "scope_type": "connector", "scope_id": "gmail",
+                     "connectors": [""]},
+                    {"op": "scoped_permissions", "config_dir": "/unused",
+                     "scope_type": "connector", "scope_id": "gmail",
+                     "connectors": ["a"] * 33}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+    def test_tasks_run_dispatches_one_run_for_a_listed_schedule(self):
+        # The web UI runs a schedule with tasks.run ({job_id}); the answer
+        # claims acceptance only, and whether a run appears is proven by
+        # re-reading tasks.runs, not by this answer.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["kwargs"] = kwargs
+                return {"ok": True}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "tasks_run", "job_id": "job-1"})
+        self.assertEqual(seen["method"], "tasks.run")
+        self.assertEqual(seen["kwargs"].get("path_params"), {"job_id": "job-1"})
+        self.assertEqual(result, {"job_id": "job-1", "accepted": True})
+        bridge.validate_request({"op": "tasks_run", "config_dir": "/unused",
+                                 "job_id": "job-1"})
+        for bad in [{"op": "tasks_run", "config_dir": "/unused"},
+                    {"op": "tasks_run", "config_dir": "/unused", "job_id": ""},
+                    {"op": "tasks_run", "config_dir": "/unused",
+                     "job_id": "j" * 257}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+    def test_scoped_update_writes_one_mode_with_its_revision(self):
+        # The write half of the scoped model: one connector+method mode
+        # change, guarded by the revision the read published so a stale
+        # page cannot overwrite a newer one.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"ok": True}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "scoped_update", "scope_type": "connector",
+             "scope_id": "gmail", "expected_revision": 7,
+             "connector": "gmail", "method": "chat.send", "mode": "ask",
+             "display_name": "Gmail"})
+        self.assertEqual(seen["method"], "egress.permissions.scoped.update")
+        self.assertEqual(seen["body"], {"scope_type": "connector",
+                                        "scope_id": "gmail",
+                                        "expected_revision": 7,
+                                        "connector": "gmail",
+                                        "method": "chat.send",
+                                        "mode": "ask",
+                                        "display_name": "Gmail"})
+        self.assertTrue(result["accepted"])
+        bridge.validate_request({"op": "scoped_update",
+                                 "config_dir": "/unused",
+                                 "scope_type": "connector", "scope_id": "gmail",
+                                 "expected_revision": 7, "connector": "gmail",
+                                 "method": "chat.send", "mode": "ask",
+                                 "display_name": "Gmail"})
+        for bad in [{"op": "scoped_update", "config_dir": "/unused",
+                     "scope_type": "connector", "scope_id": "gmail",
+                     "expected_revision": True, "connector": "gmail",
+                     "method": "chat.send", "mode": "ask"},
+                    {"op": "scoped_update", "config_dir": "/unused",
+                     "scope_type": "connector", "scope_id": "gmail",
+                     "expected_revision": 7, "connector": "gmail",
+                     "method": "chat.send", "mode": "sometimes"}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
+    def test_chat_delete_removes_one_message_or_turn(self):
+        # The web UI deletes with chat.delete_message vs chat.delete_turn;
+        # the bridge maps one op onto both, and acceptance is not absence:
+        # the caller re-reads history to prove the row is gone.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen.setdefault("methods", []).append(method)
+                return {"ok": True}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        for target, method in (("message", "chat.delete_message"),
+                               ("turn", "chat.delete_turn")):
+            seen.clear()
+            result = bridge.Adapter(Client(), {}).dispatch(
+                {"op": "chat_delete", "target": target,
+                 "message_id": "m1"})
+            self.assertEqual(seen["methods"], [method])
+            self.assertEqual(result["message_id"], "m1")
+            self.assertTrue(result["accepted"])
+        bridge.validate_request({"op": "chat_delete", "config_dir": "/unused",
+                                 "target": "message", "message_id": "m1"})
+        for bad in [{"op": "chat_delete", "config_dir": "/unused",
+                     "target": "message"},
+                    {"op": "chat_delete", "config_dir": "/unused",
+                     "target": "thread", "message_id": "m1"},
+                    {"op": "chat_delete", "config_dir": "/unused",
+                     "target": "message", "message_id": ""}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
     def test_send_verifies_the_expected_session_before_dispatching(self):
         # The preflight rides inside the dispatch request, so it must fail before
         # anything reaches the service when the account changed underneath.
