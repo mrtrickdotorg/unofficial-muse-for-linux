@@ -604,6 +604,55 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(bad)
 
+    def test_subscribe_opens_one_per_area_subscription(self):
+        # The shipped client holds one subscribe per area (activity, fs,
+        # identity, ...): the bridge opens exactly the named method with a
+        # small scalar body and projects the same allowlisted event shape
+        # the activity read uses.
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def subscribe_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return [{"event": "agent.status", "seq": 9,
+                         "payload": {"status": "completed",
+                                     "session_id": "s1",
+                                     "access_token": "SECRET"}}]
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "subscribe", "method": "fs.subscribe",
+             "body": {"paths": ["/a"]}, "limit": 50})
+        self.assertEqual(seen["method"], "fs.subscribe")
+        self.assertEqual(seen["body"], {"paths": ["/a"]})
+        self.assertEqual(result["events"][0]["status"], "completed")
+        self.assertNotIn("SECRET", str(result))
+
+    def test_subscribe_rejects_unknown_methods_and_wild_bodies(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "subscribe", "config_dir": "/unused",
+                                 "method": "activity.subscribe",
+                                 "body": {"capabilities": ["chat.send"]},
+                                 "limit": 50})
+        for bad in [{"op": "subscribe", "config_dir": "/unused",
+                     "method": "peers.subscribe", "limit": 50},
+                    {"op": "subscribe", "config_dir": "/unused",
+                     "method": "activity.subscribe", "limit": 50,
+                     "body": {"nested": {"deep": True}}},
+                    {"op": "subscribe", "config_dir": "/unused",
+                     "method": "activity.subscribe", "limit": 50,
+                     "body": {"paths": ["x" * 5000]}},
+                    {"op": "subscribe", "config_dir": "/unused",
+                     "method": "activity.subscribe", "limit": 0},
+                    {"op": "subscribe", "config_dir": "/unused",
+                     "limit": 50}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
     def test_grants_lists_issued_access_with_a_page_cursor(self):
         # The web UI reads grants.list ({include_revoked} + paging) and the
         # Linux Policy page needs the same inventory: typed scalar fields
