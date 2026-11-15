@@ -36,7 +36,7 @@ SESSION_OP_KINDS = frozenset({"pin", "unpin", "archive", "unarchive", "delete", 
 
 
 ERROR_CODES = frozenset({"auth_required", "account_changed", "vm_unavailable", "timeout", "invalid_request",
-    "insecure_config", "bridge_unavailable", "bridge_failure", "protocol_error", "response_too_large"})
+    "unsupported_method", "insecure_config", "bridge_unavailable", "bridge_failure", "protocol_error", "response_too_large"})
 
 
 class BridgeFailure(Exception):
@@ -760,11 +760,16 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
     if op == "subscribe":
         # One bounded listen on exactly one per-area subscription. The
-        # method must be one the shipped client holds open; the body is
-        # a small scalar map (capabilities, paths), never a nested
-        # structure the service never asked for.
-        if request.get("method") not in SUBSCRIBE_METHODS:
+        # method must be one the shipped client holds open; a well-formed
+        # name outside that set is unsupported_method (the shipped
+        # client's own local answer), while a malformed method is still
+        # an invalid request.
+        method = request.get("method")
+        if (not isinstance(method, str) or not 1 <= len(method) <= 128
+                or "\x00" in method):
             raise BridgeFailure("invalid_request")
+        if method not in SUBSCRIBE_METHODS:
+            raise BridgeFailure("unsupported_method")
         limit = request.get("limit")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise BridgeFailure("invalid_request")

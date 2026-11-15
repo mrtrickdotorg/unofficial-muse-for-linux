@@ -889,6 +889,7 @@ pub enum ErrorCode {
     BridgeFailure,
     ProtocolError,
     ResponseTooLarge,
+    UnsupportedMethod,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountError {
@@ -933,6 +934,7 @@ impl fmt::Display for AccountError {
             ErrorCode::BridgeFailure => "The community account gateway request failed.",
             ErrorCode::ProtocolError => "The account bridge returned an invalid response.",
             ErrorCode::ResponseTooLarge => "The account bridge response exceeded its size limit.",
+            ErrorCode::UnsupportedMethod => "The Muse service does not support that request.",
         })?;
         if self.uncertain {
             f.write_str(" Delivery is uncertain; do not automatically resend.")?;
@@ -2571,5 +2573,17 @@ mod deadline_tests {
             .expect("sparse model answers keep parsing");
         assert_eq!(info.generation, Some(7));
         assert!(info.available_models.is_empty());
+    }
+
+    #[test]
+    fn unsupported_method_errors_parse_and_name_themselves() {
+        // The bridge emits this code for well-formed but unheld methods;
+        // the app must read it back instead of failing the envelope.
+        let error: super::AccountError = serde_json::from_value(serde_json::json!({
+            "code": "unsupported_method", "uncertain": false
+        }))
+        .expect("new bridge codes keep parsing");
+        assert_eq!(error.code, super::ErrorCode::UnsupportedMethod);
+        assert!(format!("{error}").contains("does not support"));
     }
 }
