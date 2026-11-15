@@ -229,6 +229,7 @@ pub(super) fn read_failure(code: ErrorCode) -> &'static str {
         ErrorCode::Timeout => "the service did not answer in time",
         ErrorCode::InsecureConfig => "the account directory is not private",
         ErrorCode::InvalidRequest => "the request was refused before it was sent",
+        ErrorCode::UnsupportedMethod => "the service does not support that request",
         _ => "the service answered in a shape this app cannot read",
     }
 }
@@ -1123,6 +1124,7 @@ mod tests {
             ErrorCode::ProtocolError,
             ErrorCode::InsecureConfig,
             ErrorCode::InvalidRequest,
+            ErrorCode::UnsupportedMethod,
             ErrorCode::VmUnavailable,
             ErrorCode::BridgeFailure,
             ErrorCode::ResponseTooLarge,

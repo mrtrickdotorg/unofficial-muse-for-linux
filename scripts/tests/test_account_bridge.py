@@ -632,15 +632,34 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result["events"][0]["status"], "completed")
         self.assertNotIn("SECRET", str(result))
 
-    def test_subscribe_rejects_unknown_methods_and_wild_bodies(self):
+    def test_subscribe_names_an_unsupported_method_instead_of_a_bad_request(self):
+        # The shipped client answers an unknown method locally with
+        # unsupported_method, not a generic refusal: a well-formed name
+        # outside the held subscriptions gets that code, while a
+        # malformed method is still an invalid request.
+        bridge = load_bridge()
+        with self.assertRaises(bridge.BridgeFailure) as caught:
+            bridge.validate_request({"op": "subscribe", "config_dir": "/unused",
+                                     "method": "peers.subscribe", "limit": 50})
+        self.assertEqual(caught.exception.code, "unsupported_method")
+        for bad in [{"op": "subscribe", "config_dir": "/unused",
+                     "method": "", "limit": 50},
+                    {"op": "subscribe", "config_dir": "/unused",
+                     "method": 7, "limit": 50},
+                    {"op": "subscribe", "config_dir": "/unused",
+                     "method": "m\x00s", "limit": 50}]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(bridge.BridgeFailure) as caught:
+                    bridge.validate_request(bad)
+                self.assertEqual(caught.exception.code, "invalid_request")
+
+    def test_subscribe_rejects_wild_bodies_and_bounds(self):
         bridge = load_bridge()
         bridge.validate_request({"op": "subscribe", "config_dir": "/unused",
                                  "method": "activity.subscribe",
                                  "body": {"capabilities": ["chat.send"]},
                                  "limit": 50})
         for bad in [{"op": "subscribe", "config_dir": "/unused",
-                     "method": "peers.subscribe", "limit": 50},
-                    {"op": "subscribe", "config_dir": "/unused",
                      "method": "activity.subscribe", "limit": 50,
                      "body": {"nested": {"deep": True}}},
                     {"op": "subscribe", "config_dir": "/unused",
