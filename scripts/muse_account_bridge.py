@@ -646,6 +646,19 @@ def secure_config(config_dir):
                 os.close(fd)
 
 
+# The per-area subscribes the shipped 12.1 client holds open (one per
+# area, verified in NoiseChannel::sendGatewayApplicationFrame): the only
+# subscription methods this bridge will open. Dotted spellings are the
+# canonical ones the web UI sends; the service tolerates dashed aliases,
+# but the bridge always sends what the web sends.
+SUBSCRIBE_METHODS = frozenset({
+    "chat.subscribe", "activity.subscribe", "fs.subscribe",
+    "files.subscribe", "identity.subscribe", "skills.subscribe",
+    "spaces.subscribe", "theme.subscribe", "reset.subscribe",
+    "navigation.subscribe",
+})
+
+
 def validate_request(request):
     if not isinstance(request, dict):
         raise BridgeFailure("invalid_request")
@@ -656,6 +669,7 @@ def validate_request(request):
                                  "after_limit"},
                "stream_events": {"message_id", "reply_to_message_id",
                                 "limit"},
+               "subscribe": {"method", "body", "limit"},
                "grants": {"limit", "cursor", "include_revoked"},
                "scoped_permissions": {"scope_type", "scope_id",
                                      "connectors"},
@@ -742,6 +756,42 @@ def validate_request(request):
         limit = request.get("limit")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
             raise BridgeFailure("invalid_request")
+    if op == "subscribe":
+        # One bounded listen on exactly one per-area subscription. The
+        # method must be one the shipped client holds open; the body is
+        # a small scalar map (capabilities, paths), never a nested
+        # structure the service never asked for.
+        if request.get("method") not in SUBSCRIBE_METHODS:
+            raise BridgeFailure("invalid_request")
+        limit = request.get("limit")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise BridgeFailure("invalid_request")
+        body = request.get("body")
+        if body is not None:
+            if not isinstance(body, dict):
+                raise BridgeFailure("invalid_request")
+            for key, value in body.items():
+                if (not isinstance(key, str) or not 1 <= len(key) <= 64
+                        or "\x00" in key):
+                    raise BridgeFailure("invalid_request")
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, int):
+                    if not -10 ** 9 <= value <= 10 ** 9:
+                        raise BridgeFailure("invalid_request")
+                    continue
+                if isinstance(value, str):
+                    if not 1 <= len(value) <= 1024 or "\x00" in value:
+                        raise BridgeFailure("invalid_request")
+                    continue
+                if isinstance(value, list):
+                    if (len(value) > 64 or any(
+                            not isinstance(item, str)
+                            or not 1 <= len(item) <= 1024
+                            or "\x00" in item for item in value)):
+                        raise BridgeFailure("invalid_request")
+                    continue
+                raise BridgeFailure("invalid_request")
     if op == "grants":
         # The issued-access inventory behind the Policy page. The web UI
         # pages it with an opaque cursor and an include_revoked flag.
@@ -3081,6 +3131,18 @@ class Adapter:
                 raise BridgeFailure("protocol_error")
             return {"events": _project_live_events(
                 payload.get("events"))}
+        if request["op"] == "subscribe":
+            # One bounded per-area listen the way the shipped client
+            # holds them: exactly the named method, a small scalar body,
+            # projected through the same event allowlist as activity.
+            with self.client._gateway(self.config) as gateway:
+                records = gateway.subscribe_json(
+                    request["method"], body=request.get("body") or {},
+                    max_records=request["limit"],
+                    idle_timeout=3.5, overall_timeout=20.0)
+            if not isinstance(records, list):
+                raise BridgeFailure("protocol_error")
+            return {"events": _project_live_events(records)}
         if request["op"] == "grants":
             # Paged issued-access inventory, projected to the scalar fields
             # the web UI's own validator reads. The cursor travels opaque:

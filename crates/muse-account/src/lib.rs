@@ -1048,6 +1048,43 @@ impl AccountClient {
         )
         .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
     }
+    /// One bounded listen on a per-area subscription.
+    ///
+    /// The shipped 12.1 client holds one subscribe per area (activity,
+    /// fs, identity, ...): the method names one of those, the body is a
+    /// small JSON object of scalar fields. Read-only.
+    pub fn subscribe(
+        &self,
+        method: &str,
+        body: serde_json::Value,
+        limit: usize,
+    ) -> Result<Vec<StreamEvent>, AccountError> {
+        if method.is_empty() || method.len() > 64 || method.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if !(1..=200).contains(&limit) {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if !body.is_null() && !body.is_object() {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let answer: serde_json::Value = self.request(
+            serde_json::json!({
+                "op": "subscribe",
+                "method": method,
+                "body": body,
+                "limit": limit,
+            }),
+            false,
+        )?;
+        serde_json::from_value(
+            answer
+                .get("events")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        )
+        .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))
+    }
     /// Wait until the newest message changes, then return the window.
     ///
     /// The bridge holds one connection for the wait, so a recheck costs ~0.1s
@@ -2441,5 +2478,28 @@ mod deadline_tests {
         .expect("non-feed listings keep parsing");
         assert!(page.feed_prompt.is_none());
         assert!(page.feed_status.is_none());
+    }
+
+    #[test]
+    fn subscribe_rejects_a_wild_method_or_body_before_touching_the_service() {
+        // Validation fires before any subprocess spawns, so these paths
+        // are offline-safe: no request leaves this process.
+        use super::{AccountClient, BridgeConfig, ErrorCode};
+        use std::path::PathBuf;
+        let client = AccountClient::new(BridgeConfig {
+            python: PathBuf::from("/unused/python"),
+            script: PathBuf::from("/unused/bridge.py"),
+            config_dir: PathBuf::from("/unused"),
+        });
+        for (method, body, limit) in [
+            ("", serde_json::json!({}), 50),
+            ("activity.subscribe", serde_json::json!([1, 2]), 50),
+            ("activity.subscribe", serde_json::json!({}), 0),
+        ] {
+            let error = client
+                .subscribe(method, body, limit)
+                .expect_err("validation must fire before any subprocess");
+            assert_eq!(error.code, ErrorCode::InvalidRequest);
+        }
     }
 }
