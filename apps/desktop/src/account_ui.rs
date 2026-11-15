@@ -15,6 +15,8 @@ enum Operation {
     Revoke,
     DeleteTask,
     RunTask,
+    ChatDelete,
+    Subscribe,
     HistoryWindow,
     ScopedPermissions,
     StartSession,
@@ -135,6 +137,21 @@ struct Controller<A, H, T> {
     /// is permanent and has no undo, so the press that arms and the press
     /// that sends are two different presses.
     confirming_delete: Option<String>,
+    /// The transcript message armed for turn deletion by a first press.
+    /// A turn delete is permanent, so the press that arms and the press
+    /// that sends are two different presses.
+    confirming_turn_delete: Option<String>,
+    /// The transcript message whose turn delete is in flight, so the
+    /// composer stops accepting a second press while one is unanswered.
+    deleting_turn: Option<String>,
+    /// The per-area subscription the live inspector last read, so the
+    /// events below it render under the area that produced them.
+    live_area: Option<String>,
+    /// The last live-inspector read, kept whole so the inspector renders
+    /// from the service's own answer.
+    live_events: Vec<muse_account::StreamEvent>,
+    /// Why the last live-inspector read failed, if it did.
+    live_notice: String,
     /// The side chat and mutation kind in flight from its row's
     /// menu, so the completion knows what was asked of the service
     /// (a delete of the open chat lands the reader on the main
@@ -491,6 +508,11 @@ impl<A, H, T> Default for Controller<A, H, T> {
             // settled question, so the Load-older path stays off.
             history_older_exhausted: false,
             confirming_delete: None,
+            confirming_turn_delete: None,
+            deleting_turn: None,
+            live_area: None,
+            live_events: Vec::new(),
+            live_notice: String::new(),
             session_op: None,
             attach_probe: None,
             stream_probe: None,
@@ -1244,6 +1266,99 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         }
     }
 
+    /// Arm one transcript turn for deletion. The first press only arms:
+    /// a turn delete is permanent, so the confirming press is a separate,
+    /// deliberate one. Arming a different message disarms the previous.
+    fn arm_turn_delete(&mut self, message_id: &str) {
+        self.confirming_turn_delete = Some(message_id.to_owned());
+        self.history_notice =
+            "Press Delete turn again to permanently remove this turn and its reply. This cannot be undone."
+                .into();
+    }
+
+    /// Take the busy slot for one turn deletion. Only an armed message
+    /// can take it, so a stray first press can never reach the service.
+    fn begin_turn_delete(&mut self, message_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.confirming_turn_delete.as_deref() != Some(message_id) {
+            return None;
+        }
+        let ticket = self.issue(Operation::ChatDelete)?;
+        self.confirming_turn_delete = None;
+        self.deleting_turn = Some(message_id.to_owned());
+        Some(ticket)
+    }
+
+    /// Record one turn deletion's answer. Acceptance is not absence: only
+    /// the refreshed history proves the turn is gone, so a true answer
+    /// asks the caller for a re-read rather than claiming the removal.
+    fn finish_turn_delete(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::ChatDeleteAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.deleting_turn = None;
+        match result {
+            Ok(answer) => {
+                self.history_notice = if answer.accepted {
+                    "The service accepted the deletion. Refreshing to confirm the turn is gone."
+                        .into()
+                } else {
+                    "The service did not accept the deletion. The turn is still shown.".into()
+                };
+                answer.accepted
+            }
+            Err(error) => {
+                self.history_notice = format!(
+                    "Delete failed: {error}. The turn may still exist; refresh instead of pressing twice."
+                );
+                false
+            }
+        }
+    }
+
+    /// Take the busy slot for one bounded per-area listen. Only one
+    /// flies at a time, and none flies without a linked account. The
+    /// method is one the shipped client holds open; anything else never
+    /// leaves this process (the bridge refuses it as unsupported).
+    fn begin_area(&mut self, method: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.busy.is_some() {
+            return None;
+        }
+        let ticket = self.issue(Operation::Subscribe)?;
+        self.live_area = Some(method.to_owned());
+        Some(ticket)
+    }
+
+    /// Record one per-area listen. The events render from the service's
+    /// own answer; a failure keeps whatever events were showing and says
+    /// which area did not answer.
+    fn finish_area(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<Vec<muse_account::StreamEvent>, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        match result {
+            Ok(events) => {
+                self.live_notice.clear();
+                self.live_events = events;
+                true
+            }
+            Err(error) => {
+                self.live_notice =
+                    format!("Live area unread: {error}. Showing the previous events, if any.");
+                false
+            }
+        }
+    }
+
     /// Take the busy slot for one schedule run. A run is not destructive,
     /// so unlike a deletion it needs no arming -- but it does take the
     /// shared slot, so a second press while one run is in flight cannot
@@ -1893,6 +2008,12 @@ mod native {
         send_notice: gtk::Label,
         prompt: gtk::Entry,
         send: gtk::Button,
+        /// The live inspector's event lines, refilled on every render
+        /// from the last per-area read.
+        live_box: gtk::Box,
+        /// Delete-last-turn: first press arms the newest settled turn,
+        /// second press sends chat_delete. The label says which.
+        delete_turn: gtk::Button,
         cancel: gtk::Button,
         spinner: gtk::Spinner,
         live_notice: gtk::Label,
@@ -1941,6 +2062,8 @@ mod native {
         Revoke(Result<muse_account::RevokeAnswer, String>),
         DeleteTask(Result<muse_account::DeleteAnswer, String>),
         RunTask(Result<muse_account::RunAnswer, String>),
+        DeleteTurn(Result<muse_account::ChatDeleteAnswer, String>),
+        Subscribed(Result<Vec<muse_account::StreamEvent>, String>),
         Scoped(Result<muse_account::ScopedPermissions, String>),
         Window(Result<muse_account::HistoryWindow, String>),
         StartSession(Result<muse_account::StartedSession, String>),
@@ -2946,6 +3069,14 @@ mod native {
         let send_notice = label("");
         send_notice.add_css_class("chat-status");
         column.append(&send_notice);
+        // The live inspector: one bounded read per area the web UI
+        // sends bare (identity, spaces, theme). The buttons send;
+        // the lines below render the service's own answer.
+        let live_heading = label("Live area");
+        live_heading.add_css_class("dim-label");
+        column.append(&live_heading);
+        let live_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        column.append(&live_box);
         let staged_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         staged_row.set_margin_start(12);
         staged_row.set_margin_end(12);
@@ -2980,6 +3111,12 @@ mod native {
         composer.append(&prompt);
         composer.append(&stop);
         composer.append(&send);
+        let delete_turn = gtk::Button::with_label("Delete turn");
+        delete_turn.set_widget_name("delete-turn");
+        delete_turn.set_tooltip_text(Some(
+            "Delete the newest settled turn and its reply. The first press arms, the second press sends; deletion is permanent.",
+        ));
+        composer.append(&delete_turn);
         column.append(&staged_row);
         column.append(&composer);
         pages.append_page(&chat, Some(&gtk::Label::new(Some("Shared chat history"))));
@@ -3166,6 +3303,8 @@ mod native {
             send_notice,
             prompt,
             send,
+            delete_turn,
+            live_box,
             cancel: stop.clone(),
             spinner,
         });
@@ -3261,6 +3400,9 @@ mod native {
             let stopper = Rc::clone(&ui);
             ui.cancel.connect_clicked(move |_| stopper.cancel_run());
             ui.send.connect_clicked(move |_| u.send_message());
+            let deleter = Rc::clone(&ui);
+            ui.delete_turn
+                .connect_clicked(move |_| deleter.delete_turn());
             let enter = Rc::clone(&ui);
             ui.prompt.connect_activate(move |_| enter.send_message());
         }
@@ -4283,6 +4425,60 @@ mod native {
             });
         }
 
+        /// The newest settled turn's message id. The render treats the
+        /// newest assistant row with no terminal status as still in
+        /// flight, so a turn delete never targets it; both the button
+        /// label and the armed press anchor here, never on a guess.
+        fn newest_settled_turn(history: &[muse_account::HistoryMessage]) -> Option<String> {
+            let in_flight = history
+                .last()
+                .is_some_and(|row| row.role == "assistant" && row.status.is_none());
+            history[..history.len() - usize::from(in_flight)]
+                .iter()
+                .rev()
+                .find(|row| row.role == "user" || row.role == "assistant")
+                .map(|row| row.message_id.clone())
+        }
+
+        /// Delete the newest settled turn, or arm it first. The anchor is
+        /// the newest settled row: an in-flight reply is still being
+        /// written, so it is never the delete target. A press with no
+        /// turn to delete says so instead of arming a guess.
+        fn delete_turn(self: &Rc<Self>) {
+            let Some(message_id) = Self::newest_settled_turn(&self.state.borrow().history) else {
+                self.state.borrow_mut().history_notice =
+                    "Nothing to delete: the transcript holds no turn yet.".into();
+                self.render();
+                return;
+            };
+            {
+                let armed = self.state.borrow().confirming_turn_delete.as_deref()
+                    == Some(message_id.as_str());
+                if !armed {
+                    self.state.borrow_mut().arm_turn_delete(&message_id);
+                    self.render();
+                    return;
+                }
+            }
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().history_notice =
+                    "Not connected. Connect your Muse session before deleting a turn.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_turn_delete(&message_id) else {
+                return;
+            };
+            self.launch(ticket, move || {
+                match client.chat_delete("turn", &message_id) {
+                    Ok(answer) => Reply::DeleteTurn(Ok(answer)),
+                    Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    Err(error) => Reply::DeleteTurn(Err(error.to_string())),
+                }
+            });
+        }
+
         /// Run one scheduled task now. A run queues work rather than
         /// destroying anything, so one press sends -- but it still takes
         /// the shared slot, so a second press while one run is in flight
@@ -4341,6 +4537,30 @@ mod native {
                     Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
                     Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
                     Err(error) => Reply::Scoped(Err(error.to_string())),
+                }
+            });
+        }
+
+        /// Read one per-area subscription into the live inspector. The
+        /// areas are the ones whose bodies the web UI sends bare ({}):
+        /// identity, spaces, theme. Areas needing capabilities, params,
+        /// or paths stay out until their shapes are recovered.
+        fn watch_area(self: &Rc<Self>, method: String) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().live_notice =
+                    "Not connected. Connect your Muse session before reading a live area.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_area(&method) else {
+                return;
+            };
+            self.launch(ticket, move || {
+                match client.subscribe(&method, serde_json::json!({}), 50) {
+                    Ok(events) => Reply::Subscribed(Ok(events)),
+                    Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    Err(error) => Reply::Subscribed(Err(error.to_string())),
                 }
             });
         }
@@ -5035,6 +5255,12 @@ mod native {
                         Operation::RunTask => {
                             Reply::RunTask(Err("Run worker stopped unexpectedly.".into()))
                         }
+                        Operation::ChatDelete => {
+                            Reply::DeleteTurn(Err("Delete worker stopped unexpectedly.".into()))
+                        }
+                        Operation::Subscribe => {
+                            Reply::Subscribed(Err("Live worker stopped unexpectedly.".into()))
+                        }
                         Operation::ScopedPermissions => {
                             Reply::Scoped(Err("Scope worker stopped unexpectedly.".into()))
                         }
@@ -5258,6 +5484,19 @@ mod native {
                         if state.finish_run_task(ticket, result) {
                             refresh_after = true;
                         }
+                    }
+                    Reply::DeleteTurn(result) => {
+                        // Acceptance is not absence: refresh asks the
+                        // service what the transcript holds rather than
+                        // trusting our own copy after a write.
+                        if state.finish_turn_delete(ticket, result) {
+                            refresh_after = true;
+                        }
+                    }
+                    Reply::Subscribed(result) => {
+                        // Events are a report: they render from the
+                        // service's own answer, with no refresh after.
+                        state.finish_area(ticket, result);
                     }
                     Reply::Scoped(result) => {
                         // A map is a report: it renders from the service's
@@ -6019,6 +6258,88 @@ mod native {
             // why, which beats a dead button that cannot even say no.
             self.prompt.set_sensitive(connected);
             self.send.set_sensitive(connected);
+            // A turn delete is permanent, so the button arms first and
+            // sends on the confirming press; the label says which stage
+            // it is at, and the in-flight reply is never the target.
+            {
+                let anchor = Self::newest_settled_turn(&state.history);
+                let armed = anchor
+                    .as_deref()
+                    .is_some_and(|id| state.confirming_turn_delete.as_deref() == Some(id));
+                self.delete_turn.set_label(if armed {
+                    "Confirm delete"
+                } else {
+                    "Delete turn"
+                });
+                self.delete_turn.set_sensitive(
+                    connected && idle && anchor.is_some() && state.deleting_turn.is_none(),
+                );
+            }
+            // The live inspector's buttons and lines. Rebuilt every
+            // render from state: the section is small (three buttons
+            // plus a handful of lines), so no cache key is worth the
+            // staleness risk a key would carry.
+            {
+                while let Some(child) = self.live_box.first_child() {
+                    self.live_box.remove(&child);
+                }
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                for (name, method) in [
+                    ("Identity", "identity.subscribe"),
+                    ("Spaces", "spaces.subscribe"),
+                    ("Theme", "theme.subscribe"),
+                ] {
+                    let active = state.live_area.as_deref() == Some(method);
+                    let button = gtk::Button::with_label(name);
+                    button.set_widget_name(&format!("live-area:{method}"));
+                    button.set_sensitive(connected && idle);
+                    if active {
+                        button.add_css_class("suggested-action");
+                    }
+                    let weak = self.self_weak.borrow().clone();
+                    let method = method.to_owned();
+                    button.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.watch_area(method.clone());
+                        }
+                    });
+                    row.append(&button);
+                }
+                self.live_box.append(&row);
+                if !state.live_notice.is_empty() {
+                    let line = label(&state.live_notice);
+                    line.add_css_class("dim-label");
+                    self.live_box.append(&line);
+                } else if let Some(area) = state.live_area.as_deref() {
+                    let events: Vec<String> = state
+                        .live_events
+                        .iter()
+                        .rev()
+                        .take(8)
+                        .map(|event| {
+                            let detail = event
+                                .status
+                                .as_deref()
+                                .or(event.text.as_deref())
+                                .unwrap_or("-");
+                            format!("{}: {detail}", event.event)
+                        })
+                        .collect();
+                    let caption = if events.is_empty() {
+                        format!("{area}: no events in this read")
+                    } else {
+                        format!("{area}: {} event(s)", state.live_events.len())
+                    };
+                    let head = label(&caption);
+                    head.add_css_class("dim-label");
+                    self.live_box.append(&head);
+                    for text in events.into_iter().rev() {
+                        let line = label(&text);
+                        line.add_css_class("dim-label");
+                        self.live_box.append(&line);
+                    }
+                }
+            }
             self.spinner.set_spinning(!idle && !background);
             let busy = state
                 .busy
@@ -6036,6 +6357,8 @@ mod native {
                     Operation::Revoke => " \u{b7} sending your revocation\u{2026}",
                     Operation::DeleteTask => " \u{b7} deleting the scheduled task\u{2026}",
                     Operation::RunTask => " \u{b7} running the scheduled task\u{2026}",
+                    Operation::ChatDelete => " \u{b7} deleting the transcript turn\u{2026}",
+                    Operation::Subscribe => " \u{b7} reading the live area\u{2026}",
                     Operation::ScopedPermissions => " \u{b7} reading scope permissions\u{2026}",
                     Operation::HistoryWindow => " \u{b7} loading older messages\u{2026}",
                     Operation::StartSession => " \u{b7} starting a new side chat\u{2026}",
@@ -7210,6 +7533,35 @@ mod native {
                 selected_option: None,
                 attachments: Vec::new(),
             }
+        }
+
+        #[test]
+        fn turn_delete_anchors_on_the_newest_settled_row() {
+            // Empty and notice-only transcripts name nothing: the press
+            // says so instead of arming a guess.
+            assert!(Ui::newest_settled_turn(&[]).is_none());
+            let mut notice = window_row("n0", 0);
+            notice.role = "notice".into();
+            assert!(Ui::newest_settled_turn(&[notice]).is_none());
+            // A settled pair anchors the reply, not the prompt.
+            let mut user = window_row("m7", 7);
+            user.role = "user".into();
+            let mut reply = window_row("m8", 8);
+            reply.status = Some("complete".into());
+            assert_eq!(
+                Ui::newest_settled_turn(&[user, reply]).as_deref(),
+                Some("m8")
+            );
+            // An in-flight reply is still being written, so the anchor
+            // falls back to the prompt it answers.
+            let mut flying = window_row("m9", 9);
+            flying.status = None;
+            let mut user = window_row("m7", 7);
+            user.role = "user".into();
+            assert_eq!(
+                Ui::newest_settled_turn(&[user, flying]).as_deref(),
+                Some("m7")
+            );
         }
 
         #[test]
@@ -10359,6 +10711,87 @@ mod tests {
         assert!(!state.finish_scoped(&ticket, Err("timeout".into())));
         assert!(state.scoped.is_none());
         assert!(state.scoped_notice.contains("Scope"));
+    }
+
+    #[test]
+    fn turn_delete_arms_first_then_sends_once() {
+        let mut state: State = Controller::default();
+        assert!(state.begin_turn_delete("m1").is_none());
+        state.account = Some("account".into());
+        // Unarmed: nothing reaches the service.
+        assert!(state.begin_turn_delete("m1").is_none());
+        assert!(state.confirming_turn_delete.is_none());
+        // First press arms: still nothing reaches the service.
+        state.arm_turn_delete("m1");
+        assert_eq!(state.confirming_turn_delete.as_deref(), Some("m1"));
+        // The confirming press takes the busy slot exactly once.
+        let ticket = state.begin_turn_delete("m1").expect("ticket");
+        assert!(state.begin_turn_delete("m1").is_none());
+        assert!(state.confirming_turn_delete.is_none());
+        assert_eq!(state.deleting_turn.as_deref(), Some("m1"));
+        let _ = ticket;
+    }
+
+    #[test]
+    fn finished_turn_delete_clears_and_says_so() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        state.arm_turn_delete("m1");
+        let ticket = state.begin_turn_delete("m1").expect("ticket");
+        assert!(state.finish_turn_delete(
+            &ticket,
+            Ok(muse_account::ChatDeleteAnswer {
+                target: "turn".into(),
+                message_id: "m1".into(),
+                accepted: true,
+            })
+        ));
+        assert!(state.deleting_turn.is_none());
+        state.arm_turn_delete("m2");
+        let ticket = state.begin_turn_delete("m2").expect("ticket");
+        assert!(!state.finish_turn_delete(&ticket, Err("gone".into())));
+        assert!(state.deleting_turn.is_none());
+        assert!(state.history_notice.contains("Delete"));
+    }
+
+    #[test]
+    fn live_area_read_needs_a_linked_account_and_a_free_slot() {
+        let mut state: State = Controller::default();
+        assert!(state.begin_area("identity.subscribe").is_none());
+        state.account = Some("account".into());
+        let ticket = state.begin_area("identity.subscribe").expect("ticket");
+        // One bounded listen at a time: a second press waits.
+        assert!(state.begin_area("identity.subscribe").is_none());
+        assert_eq!(state.live_area.as_deref(), Some("identity.subscribe"));
+        let _ = ticket;
+    }
+
+    #[test]
+    fn finished_live_read_stores_events_and_names_failures() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        let ticket = state.begin_area("spaces.subscribe").expect("ticket");
+        assert!(state.finish_area(
+            &ticket,
+            Ok(vec![muse_account::StreamEvent {
+                event: "agent.status".into(),
+                seq: Some(3),
+                text: None,
+                status: Some("working".into()),
+                session_id: Some("s1".into()),
+            }])
+        ));
+        assert_eq!(state.live_events.len(), 1);
+        assert!(state.live_notice.is_empty());
+        let ticket = state.begin_area("spaces.subscribe").expect("ticket");
+        assert!(!state.finish_area(&ticket, Err("refused".into())));
+        // A failed re-read keeps the last good events and says so.
+        assert_eq!(state.live_events.len(), 1);
+        assert!(state.live_notice.contains("Live"));
     }
 
     #[test]
