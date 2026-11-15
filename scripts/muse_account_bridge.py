@@ -670,6 +670,8 @@ def validate_request(request):
                "stream_events": {"message_id", "reply_to_message_id",
                                 "limit"},
                "subscribe": {"method", "body", "limit"},
+               "model_get": set(),
+               "model_set": {"model"},
                "grants": {"limit", "cursor", "include_revoked"},
                "scoped_permissions": {"scope_type", "scope_id",
                                      "connectors"},
@@ -792,6 +794,13 @@ def validate_request(request):
                         raise BridgeFailure("invalid_request")
                     continue
                 raise BridgeFailure("invalid_request")
+    if op == "model_set":
+        # The id is the service's own, taken from a model.get listing or
+        # the picker; anything else would be selecting a guess.
+        model = request.get("model")
+        if (not isinstance(model, str) or not 1 <= len(model) <= 256
+                or "\x00" in model):
+            raise BridgeFailure("invalid_request")
     if op == "grants":
         # The issued-access inventory behind the Policy page. The web UI
         # pages it with an opaque cursor and an include_revoked flag.
@@ -1373,6 +1382,28 @@ def _project_live_events(records, limit=200):
         if len(rows) >= limit:
             break
     return rows
+
+
+def _project_model(payload):
+    """Project the model.get/model.set answer to the scalar selection shape.
+
+    The web UI reads {generation, selected_model, default_model,
+    available_models, display_name} and keeps the newest generation; only
+    those scalar fields leave this function.
+    """
+    generation = payload.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        generation = None
+    models = payload.get("available_models")
+    return {
+        "generation": generation,
+        "selected_model": optional_text(payload.get("selected_model")),
+        "default_model": optional_text(payload.get("default_model")),
+        "available_models": [m for m in models
+                             if isinstance(m, str) and "\x00" not in m]
+        if isinstance(models, list) else [],
+        "display_name": optional_text(payload.get("display_name")),
+    }
 
 
 def activity_rows(client, config, timeout_ms, config_dir=None):
@@ -3143,6 +3174,26 @@ class Adapter:
             if not isinstance(records, list):
                 raise BridgeFailure("protocol_error")
             return {"events": _project_live_events(records)}
+        if request["op"] == "model_get":
+            # The selected-model read the web UI performs on load ({}):
+            # the service's generation wins over anything cached, so the
+            # answer carries the generation plus the scalar selection.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json("model.get", timeout=20)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            return _project_model(payload)
+        if request["op"] == "model_set":
+            # Name one model; the service answers with the generation its
+            # own store settled on. The caller keeps the answer only when
+            # its generation is newer than what it already holds.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "model.set", body={"model": request["model"]},
+                    timeout=20)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            return _project_model(payload)
         if request["op"] == "grants":
             # Paged issued-access inventory, projected to the scalar fields
             # the web UI's own validator reads. The cursor travels opaque:
