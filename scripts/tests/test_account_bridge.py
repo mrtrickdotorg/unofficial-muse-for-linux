@@ -325,6 +325,152 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result[-1]["text"], "partial and more")
         self.assertEqual(result[-1]["status"], "completed")
 
+    def test_watch_returns_early_on_a_terminal_live_status(self):
+        # The 12.1 client holds one chat.subscribe for the session: a finished
+        # turn is visible as a terminal live status even when the transcript
+        # read has not caught up yet. A watch that only fingerprints history
+        # sleeps through that and answers at its deadline, which is why a
+        # finished answer could sit for a full watch window before printing.
+        import time
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        user = {"message_id": "a", "seq": 1, "role": "user", "text": "hi"}
+        reply = {"message_id": "b", "seq": 2, "role": "assistant", "text": "partial"}
+        class Live(FakeClient):
+            def __init__(self):
+                self.history_calls = 0
+                self.methods = []
+            def history(self, **kwargs):
+                self.history_calls += 1
+                return [user, reply]
+            @contextmanager
+            def _gateway(self, config):
+                outer = self
+                class Gateway:
+                    def subscribe_json(self, method, **kwargs):
+                        outer.methods.append(method)
+                        return [{"event": "agent.status", "seq": 9,
+                                 "payload": {"status": "completed",
+                                             "session_id": "s1"}}]
+                yield Gateway()
+        client = Live()
+        started = time.monotonic()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 30000})
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        self.assertEqual(result[-1]["text"], "partial")
+        self.assertEqual(client.methods, ["chat.subscribe"])
+        # One baseline probe plus the final confirming read: no polling to
+        # the deadline happened.
+        self.assertEqual(client.history_calls, 2)
+
+    def test_watch_ignores_a_working_live_status_and_polls_to_its_deadline(self):
+        # A non-terminal status is presence, not a finished turn: the watch
+        # must keep polling history instead of answering on it.
+        import time
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        user = {"message_id": "a", "seq": 1, "role": "user", "text": "hi"}
+        reply = {"message_id": "b", "seq": 2, "role": "assistant", "text": "partial"}
+        class Live(FakeClient):
+            def __init__(self):
+                self.history_calls = 0
+                self.methods = []
+            def history(self, **kwargs):
+                self.history_calls += 1
+                return [user, reply]
+            @contextmanager
+            def _gateway(self, config):
+                outer = self
+                class Gateway:
+                    def subscribe_json(self, method, **kwargs):
+                        outer.methods.append(method)
+                        return [{"event": "agent.status", "seq": 9,
+                                 "payload": {"status": "Is working",
+                                             "session_id": "s1"}}]
+                yield Gateway()
+        client = Live()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 2000})
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        self.assertEqual(client.methods, ["chat.subscribe"])
+        # The status did not end the watch: history kept being polled.
+        self.assertGreaterEqual(client.history_calls, 3)
+
+    def test_watch_listener_opens_its_own_connection(self):
+        # One frame consumer per connection: a listener sharing the probes'
+        # connection would steal their frames and corrupt the Noise decrypt.
+        # When the client offers a fresh connection, the listener must use
+        # it and never touch the shared one.
+        import time
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        user = {"message_id": "a", "seq": 1, "role": "user", "text": "hi"}
+        reply = {"message_id": "b", "seq": 2, "role": "assistant", "text": "partial"}
+        class Live(FakeClient):
+            def __init__(self):
+                self.history_calls = 0
+                self.methods = []
+            def history(self, **kwargs):
+                self.history_calls += 1
+                return [user, reply]
+            @contextmanager
+            def _gateway(self, config):
+                raise AssertionError("the live listener must not share the probes' connection")
+                yield
+            @contextmanager
+            def gateway_fresh(self, config):
+                outer = self
+                class Gateway:
+                    def subscribe_json(self, method, **kwargs):
+                        outer.methods.append(method)
+                        return [{"event": "agent.status", "seq": 9,
+                                 "payload": {"status": "completed",
+                                             "session_id": "s1"}}]
+                yield Gateway()
+        client = Live()
+        started = time.monotonic()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 30000})
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        self.assertEqual(client.methods, ["chat.subscribe"])
+        self.assertEqual(client.history_calls, 2)
+
+    def test_watch_ignores_a_terminal_status_from_an_already_settled_turn(self):
+        # A subscribe opened mid-watch replays recent events: a terminal
+        # status from a turn the transcript already shows as settled must
+        # not end the watch.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        user = {"message_id": "a", "seq": 1, "role": "user", "text": "hi"}
+        settled = {"message_id": "b", "seq": 2, "role": "assistant",
+                   "text": "done", "raw": {"payload": {"status": "complete"}}}
+        class Live(FakeClient):
+            def __init__(self):
+                self.history_calls = 0
+                self.methods = []
+            def history(self, **kwargs):
+                self.history_calls += 1
+                return [user, settled]
+            @contextmanager
+            def _gateway(self, config):
+                outer = self
+                class Gateway:
+                    def subscribe_json(self, method, **kwargs):
+                        outer.methods.append(method)
+                        return [{"event": "agent.status", "seq": 9,
+                                 "payload": {"status": "completed",
+                                             "session_id": "s1"}}]
+                yield Gateway()
+        client = Live()
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "watch", "limit": 20, "timeout": 2000})
+        self.assertEqual([r["message_id"] for r in result], ["a", "b"])
+        self.assertEqual(client.methods, ["chat.subscribe"])
+        self.assertGreaterEqual(client.history_calls, 3)
+
     def test_watch_probes_cheaply_and_returns_the_requested_window(self):
         # Ticks read a small tail so a long conversation is not re-read in
         # full twice a second; the rows a watch returns are one read at the

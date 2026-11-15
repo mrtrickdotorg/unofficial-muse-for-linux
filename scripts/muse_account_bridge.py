@@ -1077,6 +1077,17 @@ def community_client(config):
             with super()._gateway(config) as gateway:
                 yield gateway
 
+        @contextmanager
+        def gateway_fresh(self, config):
+            # A live listener must never share the request's connection: the
+            # transport keeps one frame consumer per connection, so a
+            # background subscribe reader would steal frames that belong to
+            # the probes' streams and corrupt the stateful Noise decrypt.
+            # The shipped 12.1 client likewise opens a dedicated socket for
+            # its session subscription.
+            with super()._gateway(config) as gateway:
+                yield gateway
+
         def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
             # Dispatch only: open the chat stream, write the prompt, return.
             # An earlier version read the stream's response to its end to
@@ -1493,6 +1504,50 @@ def _describe_fetch_answer(raw):
         return "bytes", "form=bytes bytes={} magic={}".format(
             len(raw), _image_magic(bytes(raw)))
     return "other", "form=other"
+
+
+# Live statuses that close a turn. The shipped 12.1 client holds one
+# chat.subscribe for the session and treats these as the end of the agent's
+# turn; a watch that only fingerprints history sleeps through them.
+TERMINAL_LIVE_STATUSES = frozenset({
+    "completed", "complete", "done", "interrupted", "cancelled", "failed",
+})
+
+
+def live_terminal_status(records):
+    """The first terminal live status in subscribe records, if any.
+
+    A bare status string is presence, not a finished turn: only the statuses
+    the service uses to close a turn count. Anything else (notably a working
+    pulse) keeps the caller polling.
+    """
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        status = payload.get("status") or payload.get("activity_text")
+        if isinstance(status, str) and status.strip().lower() in TERMINAL_LIVE_STATUSES:
+            return status.strip()
+    return None
+
+
+def transcript_awaits_reply(rows):
+    """Whether the transcript still shows an unfinished assistant turn.
+
+    Guards the live-status shortcut against stale backlog: a subscribe opened
+    mid-watch replays recent events, and a terminal status from an already
+    settled turn must not end the watch.
+    """
+    if not rows:
+        return False
+    last = rows[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return False
+    status = last.get("status")
+    return not (isinstance(status, str)
+                and status.strip().lower() in TERMINAL_LIVE_STATUSES)
 
 
 def cookie_header(config):
@@ -3245,6 +3300,8 @@ class Adapter:
             # Hold the request open on one connection and re-read cheaply: a
             # fresh history read per tick costs a handshake, which is what made
             # an answer take seconds to appear.
+            import contextlib
+            import queue
             import time
             timeout = request["timeout"] / 1000.0
             began = time.monotonic()
@@ -3303,19 +3360,79 @@ class Adapter:
                         last["status"], last["text"])
 
             baseline = None
-            while True:
-                rows = probe()
-                probes[0] += 1
-                mark = fingerprint(rows)
-                if baseline is None:
-                    if after is not None and (mark is None or mark[1] != after):
-                        return done("after", full() or rows)
-                    baseline = mark
-                elif mark != baseline:
-                    return done("change", full() or rows)
-                if time.monotonic() >= deadline:
-                    return done("deadline", full() or rows)
-                time.sleep(0.4)
+            # A live chat.subscribe listener on its own connection, the way
+            # the shipped client holds one subscription for the session: a
+            # finished turn is visible as a terminal live status even when
+            # the transcript read has not caught up yet. The listener must
+            # not share the probes' connection (one frame consumer per
+            # connection), so it opens a fresh one. A client without either
+            # opener (older fakes) simply gets today's history polling.
+            fresh = getattr(self.client, "gateway_fresh", None)
+            shared = getattr(self.client, "_gateway", None)
+            open_live = fresh if fresh is not None else shared
+            live = queue.Queue()
+
+            def listen(live_gateway):
+                try:
+                    live.put(live_gateway.subscribe_json(
+                        "chat.subscribe", body={"capabilities": {}},
+                        max_records=200, idle_timeout=timeout,
+                        overall_timeout=timeout))
+                except Exception:
+                    # A dead listener degrades to history polling, which is
+                    # today's behavior; the history path still classifies a
+                    # dead connection the usual way.
+                    pass
+
+            def live_status():
+                try:
+                    records = live.get_nowait()
+                except queue.Empty:
+                    return None
+                return live_terminal_status(records)
+
+            outcome = None
+            open_context = (open_live(self.config) if open_live is not None
+                            else contextlib.nullcontext(None))
+            with open_context as live_gateway:
+                worker = None
+                if live_gateway is not None:
+                    worker = threading.Thread(target=listen, args=(live_gateway,),
+                                              daemon=True)
+                    worker.start()
+                while True:
+                    rows = probe()
+                    probes[0] += 1
+                    mark = fingerprint(rows)
+                    if baseline is None:
+                        if after is not None and (mark is None or mark[1] != after):
+                            outcome = done("after", full() or rows)
+                            break
+                        baseline = mark
+                    elif mark != baseline:
+                        outcome = done("change", full() or rows)
+                        break
+                    status = live_status()
+                    if status is not None and transcript_awaits_reply(rows):
+                        # Confirm with a fresh full read: the status arrived
+                        # ahead of the transcript, so answer on new rows.
+                        started = time.monotonic()
+                        rows = history_rows(self.client.history(
+                            thread=request.get("thread"), limit=request["limit"]),
+                            config_dir=request.get("config_dir"))
+                        full_ms.append(int((time.monotonic() - started) * 1000))
+                        outcome = done("status", rows)
+                        break
+                    if time.monotonic() >= deadline:
+                        outcome = done("deadline", full() or rows)
+                        break
+                    time.sleep(0.4)
+                # Leaving the block closes the listener's connection, which
+                # releases its blocked subscribe read; the daemon thread then
+                # exits on its own.
+                if worker is not None:
+                    worker.join(2.0)
+            return outcome
         if request["op"] == "send":
             import time
             send_began = time.monotonic()
