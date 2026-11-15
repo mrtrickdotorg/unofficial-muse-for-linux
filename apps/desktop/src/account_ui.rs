@@ -14,6 +14,9 @@ enum Operation {
     Permissions,
     Revoke,
     DeleteTask,
+    RunTask,
+    HistoryWindow,
+    ScopedPermissions,
     StartSession,
     SessionOp,
     MarkSeen,
@@ -114,6 +117,20 @@ struct Controller<A, H, T> {
     /// The schedule whose deletion is in flight, so its row stops accepting
     /// presses while the service is unanswered.
     deleting: Option<String>,
+    /// The schedule whose run is in flight, so its row stops accepting
+    /// a second press while the first is unanswered.
+    running: Option<String>,
+    /// The (scope_type, scope_id) whose permission map is showing or
+    /// loading under its schedule row. Collapsing clears both this and
+    /// the map; a fresh press re-reads rather than reusing a stale one.
+    scoped_scope: Option<(String, String)>,
+    /// The last scope map the service returned, kept whole so the row
+    /// renders from the service's own answer.
+    scoped: Option<muse_account::ScopedPermissions>,
+    /// Why the last scope read failed, if it did. Empty on success.
+    scoped_notice: String,
+    /// The service said there is nothing older than what is loaded.
+    history_older_exhausted: bool,
     /// The schedule armed for deletion by a first press. Deleting a schedule
     /// is permanent and has no undo, so the press that arms and the press
     /// that sends are two different presses.
@@ -465,11 +482,77 @@ impl<A, H, T> Default for Controller<A, H, T> {
             grant_notice: String::new(),
             revoking: None,
             deleting: None,
+            running: None,
+            scoped_scope: None,
+            scoped: None,
+            scoped_notice: String::new(),
+            // The service said there is nothing older than what is
+            // loaded: further older-window reads would only re-ask a
+            // settled question, so the Load-older path stays off.
+            history_older_exhausted: false,
             confirming_delete: None,
             session_op: None,
             attach_probe: None,
             stream_probe: None,
             mark_seen: None,
+        }
+    }
+}
+
+impl
+    Controller<
+        muse_account::AccountSnapshot,
+        muse_account::HistoryMessage,
+        muse_account::TasksSnapshot,
+    >
+{
+    /// Merge one older window ahead of what is shown. Rows the reader
+    /// already has -- the anchor row included -- are dropped by id, so
+    /// an overlapping answer can never duplicate the transcript; the
+    /// survivors prepend in seq order. The service's has_older latches:
+    /// once it says there is nothing older, further older reads stay
+    /// off until a fresh full read or a thread switch re-anchors.
+    fn finish_window(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::HistoryWindow, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        match result {
+            Ok(window) => {
+                let mut known: std::collections::HashSet<String> = self
+                    .history
+                    .iter()
+                    .map(|row| row.message_id.clone())
+                    .collect();
+                let mut older: Vec<muse_account::HistoryMessage> = Vec::new();
+                for row in window.messages {
+                    if known.insert(row.message_id.clone()) {
+                        older.push(row);
+                    }
+                }
+                older.sort_by(|a, b| (a.seq, &a.message_id).cmp(&(b.seq, &b.message_id)));
+                let fresh = older.len();
+                older.extend(std::mem::take(&mut self.history));
+                self.history = older;
+                self.history_older_exhausted = !window.has_older;
+                self.cache_history();
+                self.history_detail = format!(
+                    "{} messages loaded; {} arrived in the last older window.",
+                    self.history.len(),
+                    fresh,
+                );
+                self.history_notice.clear();
+                true
+            }
+            Err(error) => {
+                self.history_notice = format!(
+                    "Older messages failed: {error}. What is shown is unchanged; try again for the older window."
+                );
+                false
+            }
         }
     }
 }
@@ -667,6 +750,7 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         self.polling = None;
         self.scope = scope;
         self.history.clear();
+        self.history_older_exhausted = false;
         self.limit = 50;
         self.history_detail = "Selected conversation. History has not loaded yet.".into();
         self.history_notice.clear();
@@ -686,6 +770,19 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         } else {
             Operation::History
         })
+    }
+
+    /// Take the busy slot for one older-window read. Only one flies at
+    /// a time, none flies after the service said there is nothing
+    /// older, and none flies before anything is loaded to anchor the
+    /// window to. The anchor itself travels with the launcher, which
+    /// sees the oldest loaded row.
+    fn begin_window(&mut self) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.busy.is_some() || self.history_older_exhausted || self.history.is_empty() {
+            return None;
+        }
+        self.issue(Operation::HistoryWindow)
     }
 
     /// Take the busy slot for a stop request. A stop is a write the user asked
@@ -1147,6 +1244,94 @@ impl<A, H: Clone, T> Controller<A, H, T> {
         }
     }
 
+    /// Take the busy slot for one schedule run. A run is not destructive,
+    /// so unlike a deletion it needs no arming -- but it does take the
+    /// shared slot, so a second press while one run is in flight cannot
+    /// run the schedule twice.
+    fn begin_run_task(&mut self, job_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        let ticket = self.issue(Operation::RunTask)?;
+        self.running = Some(job_id.to_owned());
+        Some(ticket)
+    }
+
+    /// Record a schedule run's answer. Acceptance is not a run: only the
+    /// refreshed run list proves a run appeared, so the wording sends
+    /// the reader there instead of claiming anything started.
+    fn finish_run_task(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::RunAnswer, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        self.running = None;
+        match result {
+            Ok(answer) => {
+                self.tasks_notice = if answer.accepted {
+                    "The service accepted the run. Refreshing to confirm a run appears in the list."
+                        .into()
+                } else {
+                    "The service did not accept the run. No new run was queued.".into()
+                };
+                answer.accepted
+            }
+            Err(error) => {
+                self.tasks_notice = format!(
+                    "Run failed: {error}. No run was queued by this press; refresh instead of pressing twice."
+                );
+                false
+            }
+        }
+    }
+
+    /// Take the busy slot for one scope permission read. Only one flies
+    /// at a time, and none flies without a linked account. The scope
+    /// address is the web's own: schedules read under ("schedule", id).
+    fn begin_scoped(&mut self, scope_type: &str, scope_id: &str) -> Option<Ticket> {
+        self.account.as_ref()?;
+        if self.busy.is_some() {
+            return None;
+        }
+        let ticket = self.issue(Operation::ScopedPermissions)?;
+        self.scoped_scope = Some((scope_type.to_owned(), scope_id.to_owned()));
+        Some(ticket)
+    }
+
+    /// Record one scope map read. The map renders from the service's own
+    /// answer; a failure keeps whatever map was showing and says which
+    /// scope did not arrive.
+    fn finish_scoped(
+        &mut self,
+        ticket: &Ticket,
+        result: Result<muse_account::ScopedPermissions, String>,
+    ) -> bool {
+        if !self.accept(ticket) {
+            return false;
+        }
+        match result {
+            Ok(map) => {
+                self.scoped_notice.clear();
+                self.scoped = Some(map);
+                true
+            }
+            Err(error) => {
+                self.scoped_notice =
+                    format!("Scope permissions unread: {error}. Showing the previous map, if any.");
+                false
+            }
+        }
+    }
+
+    /// Collapse an expanded scope without touching the service: the next
+    /// press re-reads rather than reusing what is hidden.
+    fn collapse_scoped(&mut self) {
+        self.scoped_scope = None;
+        self.scoped = None;
+        self.scoped_notice.clear();
+    }
+
     /// True the first time a live status says the agent is waiting for an
     /// approval. Keyed to that exact status text, so the alternating live reads
     /// cannot turn an unanswered request into a poll loop.
@@ -1320,6 +1505,7 @@ impl<A, H: Clone, T> Controller<A, H, T> {
                 );
                 self.history_notice.clear();
                 self.history = history;
+                self.history_older_exhausted = false;
                 self.cache_history();
             }
             Err(error) => {
@@ -1666,6 +1852,10 @@ mod native {
         /// (Nov 13, 2026).
         history_rows: RefCell<gtk::Box>,
         bubble_box: gtk::Box,
+        /// Load older messages: reveals cached rows first, then pages
+        /// older windows from the service until it says there is nothing
+        /// older. Hidden while there is nothing to page from.
+        older_button: gtk::Button,
         /// The slot inside the transcript column that holds the
         /// attached conversation's rows box, and the per-scope
         /// widget cache behind it: up to four visited
@@ -1750,6 +1940,9 @@ mod native {
         Permissions(Result<muse_account::ActiveGrants, String>),
         Revoke(Result<muse_account::RevokeAnswer, String>),
         DeleteTask(Result<muse_account::DeleteAnswer, String>),
+        RunTask(Result<muse_account::RunAnswer, String>),
+        Scoped(Result<muse_account::ScopedPermissions, String>),
+        Window(Result<muse_account::HistoryWindow, String>),
         StartSession(Result<muse_account::StartedSession, String>),
         SessionOp(Result<muse_account::SessionOpAnswer, String>),
         AttachProbe(Result<muse_account::AttachProbeAnswer, String>),
@@ -2742,6 +2935,10 @@ mod native {
             .hscrollbar_policy(gtk::PolicyType::External)
             .build();
         scroll.set_child(Some(&history));
+        let older_button = gtk::Button::with_label("Load older");
+        older_button.set_widget_name("load-older");
+        older_button.set_visible(false);
+        column.append(&older_button);
         column.append(&scroll);
         let history_notice = label("");
         history_notice.add_css_class("chat-status");
@@ -2794,8 +2991,8 @@ mod native {
         task_column.set_size_request(crate::READING_COLUMN_START_PX, -1);
         task_page.append(&task_column);
         crate::bind_reading_column(task_page.upcast_ref(), &task_column);
-        task_column.append(&label("Shared schedules & recent runs · read-only"));
-        task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit, cancel or retry tasks. The idle refresh keeps it current."));
+        task_column.append(&label("Shared schedules & recent runs"));
+        task_column.append(&label("These are the existing account's service-provided schedules and run records, not Linux-local jobs. This pane cannot create, edit or cancel tasks; a schedule runs on its Run now button. The idle refresh keeps it current."));
         let tasks_notice = label("");
         task_column.append(&tasks_notice);
         let tasks = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -2944,6 +3141,7 @@ mod native {
             live_turn: std::cell::Cell::new(true),
             history,
             history_rows: RefCell::new(history_rows),
+            older_button,
             bubble_box,
             rows_slot,
             transcript_cache: RefCell::new(std::collections::HashMap::new()),
@@ -2990,6 +3188,14 @@ mod native {
                     "Set HOME or XDG_CONFIG_HOME before choosing a local Muse session.".into()
                 };
                 u.render();
+            });
+        }
+        {
+            let weak = Rc::downgrade(&ui);
+            ui.older_button.connect_clicked(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.load_older();
+                }
             });
         }
         {
@@ -3820,6 +4026,87 @@ mod native {
             });
         }
 
+        /// One older window past what is loaded, anchored at the oldest
+        /// loaded row. The window merges ahead of the transcript; the
+        /// reader's place is left alone by the was-at-bottom follow in
+        /// render, and the same account verification that guards a plain
+        /// read guards this one.
+        fn read_window(self: &Rc<Self>) {
+            let anchor = self.state.borrow().history.first().map(|row| row.seq);
+            let Some(anchor) = anchor else {
+                return;
+            };
+            let Some(client) = self.client.borrow().clone() else {
+                return;
+            };
+            let Some(identity) = self.expected_identity() else {
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_window() else {
+                return;
+            };
+            let request = ticket.clone();
+            self.launch(ticket, move || {
+                let (check, (window_auth_expired, window)) = std::thread::scope(|scope| {
+                    let verify = scope.spawn(|| {
+                        let raw = client.identity();
+                        super::verification(
+                            &raw,
+                            |a: &muse_account::AccountIdentity| {
+                                (a.identity_name.as_str(), a.vm_id.as_str())
+                            },
+                            &identity,
+                        )
+                    });
+                    let window = scope.spawn(|| {
+                        match client.history_window(request.scope.as_deref(), anchor, 50, 1) {
+                            Ok(page) => (false, Ok(page)),
+                            Err(error) if error.code == ErrorCode::AuthRequired => {
+                                (true, Err(error.to_string()))
+                            }
+                            Err(error) => (false, Err(error.to_string())),
+                        }
+                    });
+                    (
+                        verify.join().unwrap_or_else(|_| {
+                            super::Verification::Failed(
+                                "Account worker stopped unexpectedly.".into(),
+                            )
+                        }),
+                        window.join().unwrap_or_else(|_| {
+                            (false, Err("History worker stopped unexpectedly.".into()))
+                        }),
+                    )
+                });
+                match check {
+                    super::Verification::Verified => {
+                        if window_auth_expired {
+                            Reply::AuthExpired
+                        } else {
+                            Reply::Window(window)
+                        }
+                    }
+                    super::Verification::AuthExpired => Reply::AuthExpired,
+                    super::Verification::AccountChanged => Reply::AccountChanged,
+                    super::Verification::Failed(error) => {
+                        Reply::Window(Err(format!("account verification failed: {error}")))
+                    }
+                }
+            });
+        }
+
+        /// Load older: first reveal the cached rows the slice hides, then
+        /// page older windows from the service. The first press never
+        /// touches the service; later presses each fetch one window.
+        fn load_older(self: &Rc<Self>) {
+            if !self.slice_revealed.get() {
+                self.slice_revealed.set(true);
+                self.render();
+                return;
+            }
+            self.read_window();
+        }
+
         /// History only, and never in the `busy` slot: a poll runs in the
         /// background so the composer stays usable while an answer is awaited.
         /// Each request holds one connection and returns the moment anything
@@ -3993,6 +4280,68 @@ mod native {
                 Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
                 Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
                 Err(error) => Reply::DeleteTask(Err(error.to_string())),
+            });
+        }
+
+        /// Run one scheduled task now. A run queues work rather than
+        /// destroying anything, so one press sends -- but it still takes
+        /// the shared slot, so a second press while one run is in flight
+        /// cannot queue it twice.
+        fn run_task(self: &Rc<Self>, job_id: String) {
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().tasks_notice =
+                    "Not connected. Connect your Muse session before running a schedule.".into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_run_task(&job_id) else {
+                return;
+            };
+            self.launch(ticket, move || match client.tasks_run(&job_id) {
+                Ok(answer) => Reply::RunTask(Ok(answer)),
+                Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                Err(error) => Reply::RunTask(Err(error.to_string())),
+            });
+        }
+
+        /// Show one schedule's permission map, or hide it again. Showing
+        /// reads the scope the web reads for a schedule -- ("schedule",
+        /// id) -- and renders the service's own answer; hiding only
+        /// collapses, so the next press re-reads rather than reusing a
+        /// hidden map.
+        fn scoped_perms(self: &Rc<Self>, job_id: String) {
+            {
+                let state = self.state.borrow();
+                let expanded_here = state
+                    .scoped_scope
+                    .as_ref()
+                    .is_some_and(|(kind, id)| kind == "schedule" && id == &job_id);
+                if expanded_here {
+                    drop(state);
+                    self.state.borrow_mut().collapse_scoped();
+                    self.render();
+                    return;
+                }
+            }
+            let Some(client) = self.client.borrow().clone() else {
+                self.state.borrow_mut().tasks_notice =
+                    "Not connected. Connect your Muse session before reading scope permissions."
+                        .into();
+                self.render();
+                return;
+            };
+            let Some(ticket) = self.state.borrow_mut().begin_scoped("schedule", &job_id) else {
+                return;
+            };
+            let scope_id = job_id.clone();
+            self.launch(ticket, move || {
+                match client.scoped_permissions("schedule", &scope_id, &[]) {
+                    Ok(answer) => Reply::Scoped(Ok(answer)),
+                    Err(error) if error.code == ErrorCode::AccountChanged => Reply::AccountChanged,
+                    Err(error) if error.code == ErrorCode::AuthRequired => Reply::AuthExpired,
+                    Err(error) => Reply::Scoped(Err(error.to_string())),
+                }
             });
         }
 
@@ -4683,6 +5032,15 @@ mod native {
                         Operation::DeleteTask => {
                             Reply::DeleteTask(Err("Deletion worker stopped unexpectedly.".into()))
                         }
+                        Operation::RunTask => {
+                            Reply::RunTask(Err("Run worker stopped unexpectedly.".into()))
+                        }
+                        Operation::ScopedPermissions => {
+                            Reply::Scoped(Err("Scope worker stopped unexpectedly.".into()))
+                        }
+                        Operation::HistoryWindow => {
+                            Reply::Window(Err("History worker stopped unexpectedly.".into()))
+                        }
                         Operation::StartSession => Reply::StartSession(Err(
                             "Session-start worker stopped unexpectedly.".into(),
                         )),
@@ -4718,9 +5076,10 @@ mod native {
         fn verification_effect(reply: &Reply) -> Option<bool> {
             match reply {
                 Reply::AccountChanged | Reply::AuthExpired => Some(false),
-                Reply::Connect(Ok(_), _) | Reply::Refresh(Ok(_), _, _) | Reply::History(Ok(_)) => {
-                    Some(true)
-                }
+                Reply::Connect(Ok(_), _)
+                | Reply::Refresh(Ok(_), _, _)
+                | Reply::History(Ok(_))
+                | Reply::Window(Ok(_)) => Some(true),
                 _ => None,
             }
         }
@@ -4891,6 +5250,24 @@ mod native {
                         if state.finish_delete_task(ticket, result) {
                             refresh_after = true;
                         }
+                    }
+                    Reply::RunTask(result) => {
+                        // Acceptance is not a run: refresh asks the service
+                        // what runs exist rather than trusting our own copy
+                        // after a write.
+                        if state.finish_run_task(ticket, result) {
+                            refresh_after = true;
+                        }
+                    }
+                    Reply::Scoped(result) => {
+                        // A map is a report: it renders from the service's
+                        // own answer, with no refresh after it.
+                        state.finish_scoped(ticket, result);
+                    }
+                    Reply::Window(result) => {
+                        // The merge is local: the window prepends, so no
+                        // refresh follows -- the rows are already shown.
+                        state.finish_window(ticket, result);
                     }
                     Reply::StartSession(result) => {
                         // The press asked for a new chat to land in:
@@ -5658,6 +6035,9 @@ mod native {
                     Operation::Permissions => " \u{b7} reading grants in force\u{2026}",
                     Operation::Revoke => " \u{b7} sending your revocation\u{2026}",
                     Operation::DeleteTask => " \u{b7} deleting the scheduled task\u{2026}",
+                    Operation::RunTask => " \u{b7} running the scheduled task\u{2026}",
+                    Operation::ScopedPermissions => " \u{b7} reading scope permissions\u{2026}",
+                    Operation::HistoryWindow => " \u{b7} loading older messages\u{2026}",
                     Operation::StartSession => " \u{b7} starting a new side chat\u{2026}",
                     Operation::SessionOp => " \u{b7} updating the side chat\u{2026}",
                     Operation::MarkSeen => " \u{b7} marking the chat read\u{2026}",
@@ -6064,6 +6444,24 @@ mod native {
             } else {
                 Self::transcript_slice_floor(&state.history)
             };
+            {
+                // The button above the transcript: reveal cached rows
+                // first, then page older windows until the service says
+                // there is nothing older.
+                let can_page = !state.history.is_empty() && state.account.is_some();
+                let (label, active) = if !can_page {
+                    ("Load older", false)
+                } else if floor > 0 {
+                    ("Load older", true)
+                } else if state.history_older_exhausted {
+                    ("Beginning of conversation", false)
+                } else {
+                    ("Load older messages", state.busy.is_none())
+                };
+                self.older_button.set_label(label);
+                self.older_button.set_sensitive(active);
+                self.older_button.set_visible(can_page);
+            }
             // The assistant's circle carries the identity's own initial
             // (his agent is "Lotus", not a generic M), and consecutive rows
             // of one turn group tightly without repeating the avatar.
@@ -6433,6 +6831,10 @@ mod native {
                 idle.hash(h);
                 state.confirming_delete.hash(h);
                 state.deleting.is_some().hash(h);
+                state.running.is_some().hash(h);
+                state.scoped_scope.hash(h);
+                state.scoped.is_some().hash(h);
+                state.scoped_notice.hash(h);
                 match &state.tasks {
                     Some(tasks) => {
                         for schedule in &tasks.schedules {
@@ -6501,10 +6903,73 @@ mod native {
                         }
                     });
                     row.append(&delete);
+                    // A run queues work rather than destroying anything, so
+                    // one press sends it -- no arming.
+                    let run = gtk::Button::with_label("Run now");
+                    run.set_sensitive(
+                        connected && idle && state.running.is_none() && schedule.enabled,
+                    );
+                    let weak = self.self_weak.borrow().clone();
+                    let id = schedule.id.clone();
+                    run.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.run_task(id.clone());
+                        }
+                    });
+                    row.append(&run);
+                    // The web reads a schedule's permission map from the
+                    // same ("schedule", id) scope; the toggle collapses
+                    // without a re-read.
+                    let expanded = state
+                        .scoped_scope
+                        .as_ref()
+                        .is_some_and(|(kind, id)| kind == "schedule" && id == &schedule.id);
+                    let perms = gtk::Button::with_label(if expanded {
+                        "Hide permissions"
+                    } else {
+                        "Permissions"
+                    });
+                    perms.set_widget_name(&format!("scope-perms:{}", schedule.id));
+                    perms.set_sensitive(connected && idle && state.running.is_none());
+                    let weak = self.self_weak.borrow().clone();
+                    let id = schedule.id.clone();
+                    perms.connect_clicked(move |_| {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.scoped_perms(id.clone());
+                        }
+                    });
+                    row.append(&perms);
+                    if expanded {
+                        if let Some(map) = state.scoped.as_ref() {
+                            for group in &map.groups {
+                                let methods = if group.methods.is_empty() {
+                                    "no methods listed".to_string()
+                                } else {
+                                    group.methods.join(", ")
+                                };
+                                let caption = match &group.label {
+                                    Some(name) => format!("{name}: {methods}"),
+                                    None => format!("{}: {methods}", group.key),
+                                };
+                                let line = label(&caption);
+                                line.add_css_class("dim-label");
+                                row.append(&line);
+                            }
+                        } else if !state.scoped_notice.is_empty() {
+                            let line = label(&state.scoped_notice);
+                            line.add_css_class("dim-label");
+                            row.append(&line);
+                        } else {
+                            let line = label("Reading scope permissions\u{2026}");
+                            line.add_css_class("dim-label");
+                            row.append(&line);
+                        }
+                    }
                     self.tasks.append(&row);
                 }
-                self.tasks
-                    .append(&label("Recent task runs (no retry controls)"));
+                self.tasks.append(&label(
+                    "Recent task runs (a schedule runs from its own Run now button)",
+                ));
                 for run in &tasks.runs {
                     let item = label(&format!(
                         "{} · job {} · {}\nScheduled: {}\n{}{}",
@@ -6731,6 +7196,98 @@ mod native {
             assert_eq!(attachment_icon(&attachment), "\u{1f5bc}\u{fe0f}");
             attachment.mime_type = Some("text/plain".into());
             assert_eq!(attachment_icon(&attachment), "\u{1f4c4}");
+        }
+
+        fn window_row(id: &str, seq: u64) -> HistoryMessage {
+            HistoryMessage {
+                message_id: id.into(),
+                seq,
+                role: "assistant".into(),
+                text: format!("row {id}"),
+                timestamp: None,
+                status: None,
+                options: Vec::new(),
+                selected_option: None,
+                attachments: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn an_older_window_prepends_new_rows_and_drops_what_is_already_shown() {
+            let mut state: State = Controller {
+                account: Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: Vec::new(),
+                }),
+                history: vec![window_row("m8", 8), window_row("m9", 9)],
+                ..Controller::default()
+            };
+            let ticket = state.begin_window().expect("ticket");
+            // The slot is held: a second older read waits for the first.
+            assert!(state.begin_window().is_none());
+            assert!(state.finish_window(
+                &ticket,
+                Ok(muse_account::HistoryWindow {
+                    messages: vec![window_row("m7", 7), window_row("m8", 8)],
+                    has_older: true,
+                    has_newer: false,
+                    newest_seq: Some(12),
+                    transcript_revision: None,
+                })
+            ));
+            let ids: Vec<&str> = state
+                .history
+                .iter()
+                .map(|row| row.message_id.as_str())
+                .collect();
+            assert_eq!(ids, ["m7", "m8", "m9"]);
+            assert!(!state.history_older_exhausted);
+            // The service saying there is nothing older latches the button
+            // off: further older reads would only re-ask a settled question.
+            let later = state.begin_window().expect("ticket");
+            assert!(state.finish_window(
+                &later,
+                Ok(muse_account::HistoryWindow {
+                    messages: vec![],
+                    has_older: false,
+                    has_newer: false,
+                    newest_seq: None,
+                    transcript_revision: None,
+                })
+            ));
+            assert!(state.history_older_exhausted);
+            assert!(state.begin_window().is_none());
+        }
+
+        #[test]
+        fn a_window_read_needs_an_account_loaded_rows_and_room() {
+            let mut state: State = Controller::default();
+            assert!(state.begin_window().is_none());
+            state.account = Some(AccountSnapshot {
+                identity_name: "Lotus".into(),
+                vm_id: "fake-vm".into(),
+                threads: Vec::new(),
+            });
+            // Nothing loaded: there is no anchor to page from.
+            assert!(state.begin_window().is_none());
+        }
+
+        #[test]
+        fn a_failed_window_keeps_what_is_shown_and_says_so() {
+            let mut state: State = Controller {
+                account: Some(AccountSnapshot {
+                    identity_name: "Lotus".into(),
+                    vm_id: "fake-vm".into(),
+                    threads: Vec::new(),
+                }),
+                history: vec![window_row("m9", 9)],
+                ..Controller::default()
+            };
+            let ticket = state.begin_window().expect("ticket");
+            assert!(!state.finish_window(&ticket, Err("timeout".into())));
+            assert_eq!(state.history.len(), 1);
+            assert!(state.history_notice.contains("Older messages"));
         }
 
         #[test]
@@ -9719,6 +10276,95 @@ mod tests {
         assert!(!state.finish_delete_task(&ticket, Err("timeout".into())));
         assert!(state.deleting.is_none());
         assert!(state.tasks_notice.contains("instead of pressing twice"));
+    }
+
+    #[test]
+    fn a_schedule_run_sends_on_one_press_and_refreshes_for_proof() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        // A run is not destructive, so unlike a deletion it needs no
+        // arming: one press takes the slot. A second press while it is
+        // in flight gets no slot, so one press can never run it twice.
+        let ticket = state.begin_run_task("job-1").expect("ticket");
+        assert_eq!(state.running.as_deref(), Some("job-1"));
+        assert!(state.begin_run_task("job-1").is_none());
+        assert!(state.finish_run_task(
+            &ticket,
+            Ok(muse_account::RunAnswer {
+                job_id: "job-1".into(),
+                accepted: true,
+            })
+        ));
+        assert!(state.running.is_none());
+        // Acceptance is not a run: the wording sends the reader to the
+        // refreshed run list for proof, and never claims a run started.
+        assert!(state.tasks_notice.contains("accepted"));
+        assert!(state.tasks_notice.contains("Refresh"));
+    }
+
+    #[test]
+    fn an_unanswered_run_reports_and_clears_the_flight() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        let ticket = state.begin_run_task("job-1").expect("ticket");
+        assert!(!state.finish_run_task(&ticket, Err("timeout".into())));
+        assert!(state.running.is_none());
+        assert!(state.tasks_notice.contains("instead of pressing twice"));
+    }
+
+    #[test]
+    fn a_scope_read_needs_a_linked_account_and_a_free_slot() {
+        let mut state: State = Controller::default();
+        assert!(state.begin_scoped("schedule", "job-1").is_none());
+    }
+
+    #[test]
+    fn a_scope_read_stores_the_map_and_a_second_press_waits() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        let ticket = state.begin_scoped("schedule", "job-1").expect("ticket");
+        assert!(state.begin_scoped("schedule", "job-1").is_none());
+        assert!(state.finish_scoped(
+            &ticket,
+            Ok(muse_account::ScopedPermissions {
+                scope_type: "schedule".into(),
+                scope_id: "job-1".into(),
+                groups: vec![muse_account::ScopedGroup {
+                    key: "read".into(),
+                    label: Some("Read".into()),
+                    category: None,
+                    methods: vec!["chat.read_history".into()],
+                }],
+            })
+        ));
+        let scoped = state.scoped.as_ref().expect("stored map");
+        assert_eq!(scoped.scope_id, "job-1");
+        assert_eq!(scoped.groups.len(), 1);
+        assert!(state.scoped_notice.is_empty());
+    }
+
+    #[test]
+    fn a_failed_scope_read_keeps_the_old_map_and_says_so() {
+        let mut state: State = Controller {
+            account: Some("account".into()),
+            ..Controller::default()
+        };
+        let ticket = state.begin_scoped("schedule", "job-1").expect("ticket");
+        assert!(!state.finish_scoped(&ticket, Err("timeout".into())));
+        assert!(state.scoped.is_none());
+        assert!(state.scoped_notice.contains("Scope"));
+    }
+
+    #[test]
+    fn running_needs_a_linked_account_like_every_other_write() {
+        let mut state: State = Controller::default();
+        assert!(state.begin_run_task("job-1").is_none());
     }
 
     #[test]
