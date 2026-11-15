@@ -1377,12 +1377,26 @@ for line in sys.stdin:
             std::thread::sleep(Duration::from_millis(5));
         }
     }
+    /// Pump until a grant is visible AND its worker has fully
+    /// wound down. The broker records the grant on the worker
+    /// thread, so grants() can read non-empty while the worker
+    /// still has to deliver its completion and drop its guard --
+    /// and start() rightly refuses while any worker is alive.
+    /// On the AppImage builder that gap lost the race twice on
+    /// Nov 15, 2026 (two different tests in this module, the
+    /// same start() refusal), while the faster Rust workflow
+    /// stayed green.
+    fn pump_until_granted(host: &mut Controller) {
+        pump(host, |h| {
+            !h.broker.grants().is_empty() && h.workers.load(Ordering::SeqCst) == 0
+        });
+    }
     #[test]
     fn real_transport_broker_approval_creates_only_after_allow_and_delivers_result() {
         let f = Fixture::new("files.create_text", "exact full content\n", 30000);
         let mut host = Controller::new();
         host.grant(f.0.clone(), true, true).unwrap();
-        pump(&mut host, |h| !h.broker.grants().is_empty());
+        pump_until_granted(&mut host);
         host.start(Some(f.config()), true).unwrap();
         assert_eq!(host.phase, Phase::Connecting);
         assert!(host.device().is_none());
@@ -1567,7 +1581,7 @@ for line in sys.stdin:
             );
             let mut host = Controller::new();
             host.grant(f.0.clone(), true, true).unwrap();
-            pump(&mut host, |h| !h.broker.grants().is_empty());
+            pump_until_granted(&mut host);
             host.start(Some(f.config()), true).unwrap();
             pump(&mut host, |h| !h.cards.is_empty());
             let id = host.cards[0].request.approval_id.clone();
@@ -1633,7 +1647,7 @@ for line in sys.stdin:
         let f = Fixture::new("files.create_text", "exact full content\n", 30000);
         let mut host = Controller::new();
         host.grant(f.0.clone(), true, true).unwrap();
-        pump(&mut host, |h| !h.broker.grants().is_empty());
+        pump_until_granted(&mut host);
         host.start(Some(f.config()), true).unwrap();
         pump(&mut host, |h| !h.cards.is_empty());
         let approval_id = host.cards[0].request.approval_id.clone();
@@ -1699,7 +1713,7 @@ for line in sys.stdin:
         let f = Fixture::new("files.create_text", "never", 500);
         let mut host = Controller::new();
         host.grant(f.0.clone(), true, true).unwrap();
-        pump(&mut host, |h| !h.broker.grants().is_empty());
+        pump_until_granted(&mut host);
         host.start(Some(f.config()), true).unwrap();
         pump(&mut host, |h| !h.cards.is_empty());
         std::thread::sleep(Duration::from_millis(550));
@@ -1718,7 +1732,7 @@ for line in sys.stdin:
         let f = Fixture::new("files.create_text", "never", 30000);
         let mut host = Controller::new();
         host.grant(f.0.clone(), true, true).unwrap();
-        pump(&mut host, |h| !h.broker.grants().is_empty());
+        pump_until_granted(&mut host);
         host.start(Some(f.config()), true).unwrap();
         pump(&mut host, |h| !h.cards.is_empty());
         let epoch = host.epoch;
