@@ -1440,6 +1440,7 @@ class BridgeTests(unittest.TestCase):
             jar.write_text("synthetic-cookie")
             jar.chmod(0o600)
             (directory / "config.json").write_text(json.dumps({"node_id": "local", "aliases": {"bad": "other"}}))
+            (directory / "config.json").chmod(0o600)
             before = (directory / "config.json").read_bytes()
             with bridge.secure_config(directory) as config:
                 jar.unlink()

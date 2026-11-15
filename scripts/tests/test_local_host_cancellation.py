@@ -11,7 +11,10 @@ from test_local_host import START, module
 
 class QueuedSendCancellationTests(unittest.TestCase):
     def test_stop_discards_dequeued_registration_and_private_result(self):
-        import muse
+        try:
+            import muse
+        except ImportError:
+            self.skipTest("selected community runtime required for protobuf tests")
 
         for target in ("request", "link.register", "link.result"):
             with self.subTest(target=target):

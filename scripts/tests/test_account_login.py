@@ -29,6 +29,7 @@ server = socket.socket()
 server.bind(('127.0.0.1', 0))
 server.listen()
 (profile / 'DevToolsActivePort').write_text(str(server.getsockname()[1]) + '\n/devtools/browser/fake-browser-token\n')
+os.chmod((profile / 'DevToolsActivePort'), 0o600)
 connection, peer = server.accept()
 if os.environ.get('MUSE_FAKE_MODE') == 'redirect':
     connection.sendall(b'HTTP/1.1 302 Found\r\nLocation: ws://127.0.0.1:1/forbidden-redirect\r\nContent-Length: 0\r\n\r\n')
@@ -208,6 +209,7 @@ class LoginTests(unittest.TestCase):
             launched = time.time_ns()
             active = profile / "DevToolsActivePort"
             active.write_text(str(port) + "\n/devtools/browser/fake-process-token\n")
+            os.chmod(active, 0o600)
             process = type("Process", (), {"pid": os.getpid(), "poll": lambda self: None})()
             try:
                 url = helper.read_devtools_endpoint(fd, process, launched)
@@ -232,6 +234,7 @@ class LoginTests(unittest.TestCase):
                     helper.read_devtools_endpoint(fd, process, launched)
                 active.unlink()
                 active.write_text(str(port) + "\n/devtools/browser/fake\n")
+                os.chmod(active, 0o600)
                 with subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"]) as stranger:
                     try:
                         with self.assertRaises(helper.LoginError):

@@ -1,8 +1,10 @@
 """Offline host behavior: no network, no credentials, no real session."""
 import importlib.util
+import itertools
 import json
 import os
 import pathlib
+import shutil
 import socket
 import subprocess
 import sys
@@ -19,6 +21,29 @@ def load(name, filename):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_socket_counter = itertools.count()
+
+
+def short_runtime_dir(cleanup):
+    """A short per-test XDG_RUNTIME_DIR base for the host socket.
+
+    AF_UNIX paths cap at 107 usable chars, so a long TMPDIR (or a deep
+    HOME) blows the socket budget when the runtime dir nests under a
+    temp dir. Both ends derive the same path from this base, so
+    shortening only the base keeps client and host in agreement.
+    """
+    tag = "umfl-sock-{}-{}".format(os.getpid(), next(_socket_counter))
+    for base in ("/tmp", tempfile.gettempdir()):
+        path = pathlib.Path(base, tag)
+        try:
+            path.mkdir(mode=0o700)
+        except OSError:
+            continue
+        cleanup(lambda: shutil.rmtree(path, ignore_errors=True))
+        return str(path)
+    raise AssertionError("no writable temp base for the host socket")
 
 
 class FakeBridge:
@@ -282,7 +307,8 @@ class HostTests(unittest.TestCase):
 
     def test_the_socket_is_private_and_serves_a_request(self):
         module, host, fake, _jar, root = self.host()
-        environ = {"XDG_RUNTIME_DIR": str(root / "run"), "HOME": str(root)}
+        runtime = short_runtime_dir(self.addCleanup)
+        environ = {"XDG_RUNTIME_DIR": runtime, "HOME": str(root)}
         path = pathlib.Path(module.socket_path(str(root), environ))
         stop = threading.Event()
         thread = threading.Thread(target=module.serve, args=(host, str(path), stop), daemon=True)
@@ -311,7 +337,8 @@ class HostTests(unittest.TestCase):
 
     def test_an_oversized_line_is_refused_and_the_connection_closed(self):
         module, host, _fake, _jar, root = self.host()
-        environ = {"XDG_RUNTIME_DIR": str(root / "run"), "HOME": str(root)}
+        runtime = short_runtime_dir(self.addCleanup)
+        environ = {"XDG_RUNTIME_DIR": runtime, "HOME": str(root)}
         path = pathlib.Path(module.socket_path(str(root), environ))
         stop = threading.Event()
         thread = threading.Thread(target=module.serve, args=(host, str(path), stop), daemon=True)
@@ -397,11 +424,11 @@ class HostTests(unittest.TestCase):
         module = load("account_host_exit", "muse_account_host.py")
         with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR") or pathlib.Path.home()) as tmp:
             root = pathlib.Path(tmp)
-            runtime = root / "run"
+            runtime = short_runtime_dir(self.addCleanup)
             config = root / "cfg"
             config.mkdir(mode=0o700)
-            environ = dict(os.environ, XDG_RUNTIME_DIR=str(runtime))
-            path = pathlib.Path(module.socket_path(str(config), {"XDG_RUNTIME_DIR": str(runtime)}))
+            environ = dict(os.environ, XDG_RUNTIME_DIR=runtime)
+            path = pathlib.Path(module.socket_path(str(config), {"XDG_RUNTIME_DIR": runtime}))
             process = subprocess.Popen(
                 [sys.executable, "-I", str(ROOT / "muse_account_host.py"),
                  "--config-dir", str(config), "--idle-seconds", "60"],
