@@ -293,6 +293,117 @@ pub fn bridge_script(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("/usr/share/unofficial-muse-for-linux/account").join(name)
 }
 
+/// Roots under which a session folder is fragile: a cache cleaner or
+/// a temp sweep can delete the sign-in the app depends on. Ported from
+/// the shipped client (found Nov 10, 2026): a saved preference pointing
+/// there was a fallback, never a real choice.
+pub fn fragile_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = vec![
+        std::env::temp_dir(),
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .unwrap_or_else(|| {
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|home| home.join(".cache"))
+                    .unwrap_or_default()
+            }),
+    ];
+    if let Some(tmpdir) = std::env::var_os("TMPDIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        roots.push(tmpdir);
+    }
+    roots
+}
+
+/// True when `path` sits under a cache or temp root.
+pub fn is_fragile_session_dir(path: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+/// Copy the session files from `old` into `new` (created 0700, files
+/// 0600). When `new` already holds a cookies file at least as fresh as
+/// the old one, the destination is the live session and nothing is
+/// copied. Fails only when the old folder holds a cookies file the copy
+/// could not reproduce: relocation must never strand a working sign-in
+/// in an empty folder.
+pub fn copy_session_dir(old: &std::path::Path, new: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(new).map_err(|_| "could not create the app session folder")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o700));
+    }
+    let modified = |base: &std::path::Path| {
+        std::fs::metadata(base.join("cookies.txt"))
+            .and_then(|meta| meta.modified())
+            .ok()
+    };
+    if let (Some(source), Some(dest)) = (modified(old), modified(new))
+        && dest >= source
+    {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(old) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()), // No old folder: nothing to carry over.
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let dest = new.join(entry.file_name());
+        if std::fs::copy(&path, &dest).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    if old.join("cookies.txt").is_file() && !new.join("cookies.txt").is_file() {
+        return Err("could not copy the saved session into the app folder".into());
+    }
+    Ok(())
+}
+
+/// The session folder the app should actually use for a saved link. A
+/// fragile (cache/temp) location relocates to the app's own folder,
+/// carrying the session with it, and the link is re-saved so the move
+/// happens once. Any failure leaves the saved path untouched: a working
+/// sign-in in a bad place beats a broken sign-in in a good one.
+pub fn effective_config_dir(
+    python: &std::path::Path,
+    saved: &std::path::Path,
+    consent: bool,
+) -> std::path::PathBuf {
+    if !is_fragile_session_dir(saved, &fragile_roots()) {
+        return saved.to_owned();
+    }
+    let Some(app_dir) = account_dir() else {
+        return saved.to_owned();
+    };
+    if app_dir == saved {
+        return saved.to_owned();
+    }
+    match copy_session_dir(saved, &app_dir) {
+        Ok(()) => {
+            let link = SavedConnection {
+                python: python.to_owned(),
+                config_dir: app_dir.clone(),
+                consent,
+            };
+            let _ = save_saved_connection_in(&app_dir, &link);
+            app_dir
+        }
+        Err(_) => saved.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +460,49 @@ mod tests {
         let back = load_saved_connection_in(&root).expect("load");
         assert_eq!(back, connection);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn unique_root(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "muse-session-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn cache_and_temp_session_dirs_count_as_fragile() {
+        let roots = fragile_roots();
+        // Whatever the environment calls temp, a session under it is fragile.
+        let fragile = std::env::temp_dir().join("muse-session");
+        assert!(is_fragile_session_dir(&fragile, &roots));
+        assert!(!is_fragile_session_dir(
+            std::path::Path::new("/home/test/.config/muse"),
+            &roots
+        ));
+    }
+
+    #[test]
+    fn session_copy_carries_cookies_and_leaves_the_live_one_alone() {
+        let old = unique_root("copy-old");
+        let new = unique_root("copy-new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("cookies.txt"), "live-session").unwrap();
+        copy_session_dir(&old, &new).expect("copy");
+        assert_eq!(
+            std::fs::read_to_string(new.join("cookies.txt")).unwrap(),
+            "live-session"
+        );
+        // A destination already holding a live session is not clobbered.
+        copy_session_dir(&new, &new).expect("no-op");
+        assert_eq!(
+            std::fs::read_to_string(new.join("cookies.txt")).unwrap(),
+            "live-session"
+        );
+        std::fs::remove_dir_all(&old).ok();
+        std::fs::remove_dir_all(&new).ok();
     }
 
     #[test]

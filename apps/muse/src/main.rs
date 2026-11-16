@@ -10,6 +10,7 @@ mod chat;
 mod chat_view;
 mod composer;
 mod session;
+mod signin;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
 const DEFAULT_WINDOW_WIDTH: i32 = 1100;
@@ -44,18 +45,29 @@ fn build_ui(app: &adw::Application) {
     split.set_sidebar(Some(&sidebar));
     // Transcript structure is built eagerly (cheap widgets); history
     // rows fill in lazily when the first read lands.
-    let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    let chat = app::Chat::install(&page);
-    // App-lifetime singleton: the signal handlers and idle sources
-    // hold only weak references, so the strong reference lives here,
-    // leaked for the life of the process.
-    std::mem::forget(chat);
-    let content = page;
-    content.set_halign(gtk4::Align::Center);
-    content.set_valign(gtk4::Align::Center);
-    content.set_vexpand(true);
-    content.set_hexpand(true);
-    split.set_content(Some(&content));
+    let linked = session::load_saved_link().filter(|link| link.consent);
+    if linked.is_some() {
+        eprintln!("muse: saved link found, opening chat");
+        let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        let chat = app::Chat::install(&page);
+        // App-lifetime singleton: the signal handlers and idle sources
+        // hold only weak references, so the strong reference lives here,
+        // leaked for the life of the process.
+        std::mem::forget(chat);
+        split.set_content(Some(&page));
+    } else {
+        eprintln!("muse: no saved link, showing sign-in");
+        let form = signin::SignIn::build({
+            let split = split.clone();
+            move |_| {
+                let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                let chat = app::Chat::install(&page);
+                std::mem::forget(chat);
+                split.set_content(Some(&page));
+            }
+        });
+        split.set_content(Some(form.widget()));
+    }
     window.set_content(Some(&split));
     window.present();
     eprintln!(
