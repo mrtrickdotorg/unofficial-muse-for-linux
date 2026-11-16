@@ -69,3 +69,31 @@
     border-radius: 9999px;
     padding: 4px 6px 4px 10px;
 }
+
+/* The Mac sidebar: pale grey well, white pill for the selected row,
+ * small caps section names, blue avatar dot for the profile. */
+.muse-side {
+    background: #f5f6f8;
+    border-radius: 12px;
+}
+
+.muse-side row:selected {
+    background: #ffffff;
+    border-radius: 10px;
+}
+
+.muse-section {
+    color: #65676b;
+    font-size: 12px;
+    font-weight: bold;
+    margin-top: 4px;
+}
+
+.muse-avatar {
+    background: #0084ff;
+    color: #ffffff;
+    border-radius: 9999px;
+    min-width: 28px;
+    min-height: 28px;
+    font-weight: bold;
+}

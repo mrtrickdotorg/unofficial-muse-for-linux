@@ -98,6 +98,26 @@ fn build_ui(app: &adw::Application) {
 /// on first visit and refills on every visit.
 fn show_main(split: &adw::OverlaySplitView) {
     split.set_show_sidebar(true);
+    // The Mac idiom: icon tools on top, the page list, the History
+    // section with the thread listing, and the profile row at the
+    // bottom. The page list keeps its index order, so the select/show
+    // recursion guard keeps working untouched.
+    let side = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    side.add_css_class("muse-side");
+    side.set_margin_start(8);
+    side.set_margin_end(8);
+    side.set_margin_top(8);
+    side.set_margin_bottom(8);
+    let tools = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let search_button = gtk4::Button::with_label("🔍");
+    search_button.add_css_class("flat");
+    search_button.set_tooltip_text(Some("Search"));
+    let new_button = gtk4::Button::with_label("✎");
+    new_button.add_css_class("flat");
+    new_button.set_tooltip_text(Some("New chat"));
+    tools.append(&search_button);
+    tools.append(&new_button);
+    side.append(&tools);
     let sidebar = gtk4::ListBox::new();
     for name in pages::PAGES {
         let row = gtk4::ListBoxRow::new();
@@ -106,7 +126,29 @@ fn show_main(split: &adw::OverlaySplitView) {
         row.set_child(Some(&label));
         sidebar.append(&row);
     }
-    split.set_sidebar(Some(&sidebar));
+    side.append(&sidebar);
+    let section = gtk4::Label::new(Some("History"));
+    section.set_halign(gtk4::Align::Start);
+    section.add_css_class("muse-section");
+    side.append(&section);
+    let history = gtk4::ListBox::new();
+    history.set_vexpand(true);
+    side.append(&history);
+    let profile = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let avatar = gtk4::Label::new(Some("✦"));
+    avatar.add_css_class("muse-avatar");
+    let profile_name = gtk4::Label::new(Some("Sign in"));
+    profile_name.set_hexpand(true);
+    profile_name.set_halign(gtk4::Align::Start);
+    profile_name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    let gear = gtk4::Button::with_label("⚙");
+    gear.add_css_class("flat");
+    gear.set_tooltip_text(Some("Settings"));
+    profile.append(&avatar);
+    profile.append(&profile_name);
+    profile.append(&gear);
+    side.append(&profile);
+    split.set_sidebar(Some(&side));
     let stack = gtk4::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
@@ -123,6 +165,8 @@ fn show_main(split: &adw::OverlaySplitView) {
         chat: weak_chat,
         stack: stack.clone(),
         sidebar: sidebar.clone(),
+        history: history.clone(),
+        profile_name: profile_name.clone(),
         updates: std::rc::Rc::new(std::cell::RefCell::new(update::UpdateCheck::default())),
         show_signin: {
             let split = split.clone();
@@ -130,13 +174,53 @@ fn show_main(split: &adw::OverlaySplitView) {
         },
     };
     let ctx = Rc::new(ctx);
+    let nav_ctx = ctx.clone();
     sidebar.connect_row_selected(move |_, row| {
         let Some(row) = row else { return };
         let index = row.index();
         if let Some(name) = pages::PAGES.get(index as usize) {
-            pages::show(&ctx, name);
+            pages::show(&nav_ctx, name);
         }
     });
+    // The History section opens threads the same way the Threads page
+    // does: the row name carries the id, a `None` row would mean new.
+    {
+        let ctx = ctx.clone();
+        history.connect_row_selected(move |list, row| {
+            let Some(row) = row else { return };
+            // The refill's own mark echoes through this same signal;
+            // only a reader press opens anything.
+            let marking = pages::MARKING_HISTORY.with(|marking| marking.get());
+            if marking {
+                return;
+            }
+            let name = row.widget_name();
+            let Some(id) = name.as_str().strip_prefix("thread:") else {
+                return;
+            };
+            let id = id.to_owned();
+            list.select_row(None::<&gtk4::ListBoxRow>);
+            pages::open_thread(&ctx, Some(id));
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        new_button.connect_clicked(move |_| {
+            pages::open_thread(&ctx, None);
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        search_button.connect_clicked(move |_| {
+            pages::show(&ctx, "search");
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        gear.connect_clicked(move |_| {
+            pages::show(&ctx, "settings");
+        });
+    }
     stack.set_visible_child_name("chat");
     if let Some(first) = sidebar.row_at_index(0) {
         sidebar.select_row(Some(&first));
