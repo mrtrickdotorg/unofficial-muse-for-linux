@@ -13,7 +13,6 @@
 }
 
 .muse-assistant-text {
-    color: #1c1e21;
     background: transparent;
 }
 
@@ -31,6 +30,13 @@
     background: transparent;
     padding: 8px 10px;
     font-size: 14px;
+    /* The card is always white, so the text must be dark even on a
+     * dark system theme -- otherwise the draft is white-on-white. */
+    color: #1c1e21;
+}
+
+.muse-ask placeholder {
+    color: #65676b;
 }
 
 .muse-send {
