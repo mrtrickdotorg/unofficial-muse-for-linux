@@ -193,11 +193,30 @@ pub fn download_staged(info: &ReleaseInfo) -> Result<PathBuf, String> {
 /// Exiting into a failed launch is exactly the "go find the AppImage"
 /// outcome this exists to prevent. The staged file stays in the cache
 /// dir; the next update overwrites it. Blocking; run on a worker.
+///
+/// Marker the relauncher sets on the new copy only. It takes the
+/// staged file as an independent instance instead of forwarding its
+/// launch to this (still-running) one and exiting -- which is the
+/// "app closed and never re-opened" outcome verbatim.
+pub const UPDATING_ENV: &str = "MUSE_UPDATING";
+
+pub fn updating_relaunch() -> bool {
+    std::env::var_os(UPDATING_ENV).as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 pub fn relaunch_verified(staged: &Path) -> Result<(), String> {
     let mut child = std::process::Command::new(staged)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        // The new copy takes over: it must not forward to this one.
+        .env(UPDATING_ENV, "1")
+        // An AppImage child inherits the old mount's runtime paths;
+        // the new version would load the old version's libraries and
+        // die on startup. The runtime rebuilds these for itself.
+        .env_remove("APPDIR")
+        .env_remove("APPIMAGE")
+        .env_remove("LD_LIBRARY_PATH")
         .spawn()
         .map_err(|_| {
             "Could not start the updated app. It is staged and executable — see the path below."
