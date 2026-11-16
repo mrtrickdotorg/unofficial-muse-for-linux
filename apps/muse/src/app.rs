@@ -23,7 +23,7 @@ use super::session::{Op, Session, bridge_script, load_saved_link};
 /// non-`Send` handle ever crosses threads; the worker only sends its
 /// answer back through the channel. A dead worker (disconnect with no
 /// answer) simply drops the source.
-fn dispatch<T, W, D>(chat: &Rc<Chat>, work: W, done: D)
+pub(crate) fn dispatch<T, W, D>(chat: &Rc<Chat>, work: W, done: D)
 where
     T: Send + 'static,
     W: FnOnce() -> T + Send + 'static,
@@ -278,6 +278,23 @@ impl Chat {
             self.older_button
                 .set_sensitive(self.client.borrow().is_some());
         }
+    }
+
+    /// The linked client, for pages that read on the shared page slot.
+    pub fn client_handle(&self) -> Option<AccountClient> {
+        self.client.borrow().clone()
+    }
+
+    /// Take the shared page slot for one secondary read. A second
+    /// page pressing while the slot is held waits instead of stacking
+    /// a duplicate dispatch.
+    pub fn page_begin(&self) -> Option<super::session::Ticket> {
+        self.session.borrow_mut().try_begin(Op::Page)
+    }
+
+    /// Release the page slot for a completion carrying its own ticket.
+    pub fn page_accept(&self, ticket: &super::session::Ticket) -> bool {
+        self.session.borrow_mut().accept(ticket)
     }
 
     /// The open thread's scope for service calls, if any.

@@ -11,8 +11,9 @@ use std::rc::{Rc, Weak};
 
 use adw::prelude::*;
 
-use super::app::Chat;
+use super::app::{Chat, dispatch};
 use super::session::account_dir;
+use muse_account::{ArtifactSummary, Schedule, TaskRun};
 
 /// What a page needs: the chat for reads, the stack to navigate, and
 /// a way back to the sign-in screen when the link goes away.
@@ -93,6 +94,19 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 }
             });
         }
+        "tasks" => {
+            let schedules = gtk4::ListBox::new();
+            schedules.set_widget_name("tasks-schedules");
+            page.append(&schedules);
+            let runs = gtk4::ListBox::new();
+            runs.set_widget_name("tasks-runs");
+            page.append(&runs);
+        }
+        "library" => {
+            let list = gtk4::ListBox::new();
+            list.set_widget_name("library-list");
+            page.append(&list);
+        }
         "settings" => {
             let info = gtk4::Label::new(None);
             info.set_widget_name("settings-info");
@@ -127,12 +141,43 @@ fn fill(ctx: &Ctx, name: &str) {
     let page: gtk4::Box = page.downcast().expect("page box");
     match name {
         "threads" => fill_threads(ctx, &page),
+        "tasks" => fill_tasks(ctx, &page),
+        "library" => fill_library(ctx, &page),
         "settings" => fill_settings(&page),
         _ => {}
     }
 }
 
-fn first_list(page: &gtk4::Box, name: &str) -> Option<gtk4::ListBox> {
+/// One-line schedule label: title plus state, never the raw id.
+pub fn schedule_label(schedule: &Schedule) -> String {
+    if schedule.enabled {
+        format!("{} (on)", schedule.title)
+    } else {
+        format!("{} (off)", schedule.title)
+    }
+}
+
+/// One-line run label: status plus the human summary when one exists.
+pub fn run_label(run: &TaskRun) -> String {
+    match run.result_summary.as_deref() {
+        Some(summary) if !summary.is_empty() => {
+            format!("{}: {}", run.status, summary)
+        }
+        _ => run.status.clone(),
+    }
+}
+
+/// One-line artifact label: title plus kind when the service names one.
+pub fn artifact_label(artifact: &ArtifactSummary) -> String {
+    match artifact.kind.as_deref() {
+        Some(kind) if !kind.is_empty() => {
+            format!("{} [{}]", artifact.title, kind)
+        }
+        _ => artifact.title.clone(),
+    }
+}
+
+fn named_list(page: &gtk4::Box, name: &str) -> Option<gtk4::ListBox> {
     let mut child = page.first_child();
     while let Some(widget) = child {
         if widget.widget_name() == name {
@@ -143,8 +188,128 @@ fn first_list(page: &gtk4::Box, name: &str) -> Option<gtk4::ListBox> {
     None
 }
 
+fn clear_list(list: &gtk4::ListBox) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+}
+
+/// Fill the tasks page: schedules with a Run button each, plus the run
+/// history. "Run now" is single-press like send: the run holds the
+/// shared page slot, so a double press waits instead of starting two
+/// runs of the same job.
+fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(schedules) = named_list(page, "tasks-schedules") else {
+        return;
+    };
+    let Some(runs) = named_list(page, "tasks-runs") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let chat_strong = chat.clone();
+    dispatch(
+        &chat,
+        move || client.tasks(),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(snapshot) = answer else { return };
+            clear_list(&schedules);
+            for schedule in &snapshot.schedules {
+                let row = gtk4::ListBoxRow::new();
+                let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                let label = gtk4::Label::new(Some(&schedule_label(schedule)));
+                label.set_hexpand(true);
+                label.set_xalign(0.0);
+                line.append(&label);
+                let run = gtk4::Button::with_label("Run now");
+                let job_id = schedule.id.clone();
+                let weak = Rc::downgrade(&chat_strong);
+                run.connect_clicked(move |_| {
+                    let Some(chat) = weak.upgrade() else { return };
+                    run_schedule(&chat, &job_id);
+                });
+                line.append(&run);
+                row.set_child(Some(&line));
+                schedules.append(&row);
+            }
+            clear_list(&runs);
+            for run in &snapshot.runs {
+                runs.append(&gtk4::Label::new(Some(&run_label(run))));
+            }
+        },
+    );
+}
+
+/// Start exactly one run of a schedule: the ticket makes a double
+/// press wait, and the refill proves what actually started.
+fn run_schedule(chat: &Rc<Chat>, job_id: &str) {
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let job_id = job_id.to_owned();
+    dispatch(
+        chat,
+        move || client.tasks_run(&job_id),
+        move |chat, answer| {
+            // Release the slot whatever the outcome; the runs list
+            // refills on the next visit and proves what started.
+            chat.page_accept(&ticket);
+            let _ = answer;
+        },
+    );
+}
+
+/// Fill the library page: the artifact listing, pinned first.
+fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "library-list") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    dispatch(
+        &chat,
+        move || client.artifacts(),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(listing) = answer else { return };
+            clear_list(&list);
+            for artifact in &listing.artifacts {
+                list.append(&gtk4::Label::new(Some(&artifact_label(artifact))));
+            }
+        },
+    );
+}
+
 fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(list) = first_list(page, "threads-list") else {
+    let Some(list) = named_list(page, "threads-list") else {
         return;
     };
     while let Some(child) = list.first_child() {
@@ -199,5 +364,69 @@ fn fill_settings(page: &gtk4::Box) {
             link.config_dir.display()
         )),
         None => info.set_text("No saved link."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn schedule(title: &str, enabled: bool) -> Schedule {
+        Schedule {
+            id: "job-1".to_owned(),
+            title: title.to_owned(),
+            enabled,
+            timezone: None,
+            next_run_at_utc: None,
+        }
+    }
+
+    #[test]
+    fn page_labels_name_state_never_raw_ids() {
+        assert_eq!(schedule_label(&schedule("Nightly", true)), "Nightly (on)");
+        assert_eq!(schedule_label(&schedule("Nightly", false)), "Nightly (off)");
+    }
+
+    #[test]
+    fn run_labels_prefer_the_human_summary() {
+        let plain = TaskRun {
+            run_id: "r".to_owned(),
+            job_id: "j".to_owned(),
+            status: "done".to_owned(),
+            result_summary: None,
+            error_text: None,
+            scheduled_for_utc: None,
+        };
+        assert_eq!(run_label(&plain), "done");
+        let summarized = TaskRun {
+            result_summary: Some("3 files".to_owned()),
+            ..plain
+        };
+        assert_eq!(run_label(&summarized), "done: 3 files");
+    }
+
+    #[test]
+    fn artifact_labels_show_kind_only_when_named() {
+        let bare = ArtifactSummary {
+            artifact_ref: "a".to_owned(),
+            title: "Notes".to_owned(),
+            kind: None,
+            format: None,
+            status: None,
+            placement: None,
+            path: None,
+            target_kind: None,
+            slug: None,
+            updated_at_ms: None,
+            pinned: false,
+            can_open: false,
+            can_share: false,
+        };
+        assert_eq!(artifact_label(&bare), "Notes");
+        let kinded = ArtifactSummary {
+            kind: Some("doc".to_owned()),
+            ..bare
+        };
+        assert_eq!(artifact_label(&kinded), "Notes [doc]");
     }
 }
