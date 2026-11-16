@@ -17,6 +17,7 @@ mod pages;
 mod session;
 mod signin;
 mod update;
+mod widget;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
 const DEFAULT_WINDOW_WIDTH: i32 = 1100;
