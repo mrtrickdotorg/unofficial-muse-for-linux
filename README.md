@@ -60,7 +60,7 @@ cargo fmt --all -- --check
 cargo build --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo run -p unofficial-muse-for-linux
+cargo run -p muse
 ```
 
 The workspace separates filesystem policy (`muse-linux-core`), the account subprocess adapter (`muse-account`), experimental developer-API/runtime crates (experiments, not account sign-in), and the native GTK4 app. See [building](docs/building.md), [architecture](docs/architecture.md), and the [full-port goal](docs/full-port-goal.md).

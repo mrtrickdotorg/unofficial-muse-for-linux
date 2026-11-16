@@ -39,6 +39,6 @@ jobs:
     - name: Run native account GUI smoke test
       env:
         TMPDIR: ${{ runner.temp }}
-      run: xvfb-run -a cargo test -p unofficial-muse-for-linux native_account_page_consent_failure_and_disconnect_signal_smoke --locked -- --ignored --test-threads=1
+      run: xvfb-run -a cargo test -p muse --locked -- --ignored --test-threads=1
     - name: Lint
       run: cargo clippy --workspace --all-targets --locked -- -D warnings
