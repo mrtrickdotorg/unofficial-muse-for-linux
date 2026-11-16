@@ -13,7 +13,9 @@ use adw::prelude::*;
 
 use super::app::{Chat, dispatch};
 use super::session::account_dir;
-use muse_account::{ArtifactSummary, GrantItem, ListingItem, MemoryHit, Schedule, TaskRun};
+use muse_account::{
+    ActiveGrant, ArtifactSummary, GrantItem, ListingItem, MemoryHit, Schedule, TaskRun,
+};
 
 /// What a page needs: the chat for reads, the stack to navigate, and
 /// a way back to the sign-in screen when the link goes away.
@@ -170,6 +172,15 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             page.append(&list);
         }
         "policy" => {
+            let notice = gtk4::Label::new(None);
+            notice.set_widget_name("policy-notice");
+            notice.set_wrap(true);
+            notice.set_xalign(0.0);
+            notice.set_visible(false);
+            page.append(&notice);
+            let active = gtk4::ListBox::new();
+            active.set_widget_name("policy-active");
+            page.append(&active);
             let list = gtk4::ListBox::new();
             list.set_widget_name("policy-list");
             page.append(&list);
@@ -593,40 +604,6 @@ fn fill_memory(chat: &Rc<Chat>, page: &gtk4::Box) {
     );
 }
 
-/// Fill the policy page: the issued-access inventory, read-only. Grant
-/// changes stay in the shipped client until this surface grows its own
-/// armed write path.
-fn fill_policy(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(list) = named_list(page, "policy-list") else {
-        return;
-    };
-    let Some(chat) = ctx.chat.upgrade() else {
-        return;
-    };
-    let ticket = match chat.page_begin() {
-        Some(ticket) => ticket,
-        None => return,
-    };
-    let Some(client) = chat.client_handle() else {
-        chat.page_accept(&ticket);
-        return;
-    };
-    dispatch(
-        &chat,
-        move || client.grants(50, None, false),
-        move |chat, answer| {
-            if !chat.page_accept(&ticket) {
-                return;
-            }
-            let Ok(inventory) = answer else { return };
-            clear_list(&list);
-            for grant in &inventory.grants {
-                list.append(&gtk4::Label::new(Some(&grant_label(grant))));
-            }
-        },
-    );
-}
-
 /// One service listing behind one list widget: ideas, goals, and any
 /// future read-only list. The fetcher runs on a worker; the painter
 /// runs on the main thread and only applies through the shared page
@@ -776,6 +753,157 @@ fn go_chat(ctx: &Ctx) {
     }
 }
 
+/// One active grant: what it covers, in the service's own words.
+/// Only revocable rows grow a button; the service's mark decides.
+pub fn active_grant_label(grant: &ActiveGrant) -> String {
+    let mut meta: Vec<&str> = [
+        &grant.kind,
+        &grant.mode,
+        &grant.policy_subject,
+        &grant.lifetime,
+    ]
+    .into_iter()
+    .flatten()
+    .map(String::as_str)
+    .filter(|text| !text.is_empty())
+    .collect();
+    if !grant.revocable {
+        meta.push("service-marked irrevocable");
+    }
+    if meta.is_empty() {
+        grant.permission_id.clone()
+    } else {
+        format!("{}\n{}", grant.permission_id, meta.join(" \u{00b7} "))
+    }
+}
+
+/// The revoke outcome line: acceptance removes the row locally and the
+/// refill proves it; anything else names the failure and warns the
+/// grant may still be in force.
+pub fn revoke_notice(accepted: bool) -> &'static str {
+    if accepted {
+        "The service accepted the revocation. Reading the list again to confirm the grant is gone."
+    } else {
+        "The service did not accept the revocation. The grant is still in force."
+    }
+}
+
+/// Fill the policy page: revocable active grants with one-press
+/// Revoke buttons, plus the read-only issued inventory. A revocation
+/// holds the shared page slot, so a second press waits; the refill
+/// after an accepted revoke proves the grant is gone.
+fn fill_policy(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(active) = named_list(page, "policy-active") else {
+        return;
+    };
+    let Some(list) = named_list(page, "policy-list") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let ctx = ctx.clone();
+    let page_weak = page.downgrade();
+    dispatch(
+        &chat,
+        move || (client.permissions(), client.grants(50, None, false)),
+        move |chat, (permissions, inventory)| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            clear_list(&active);
+            if let Ok(grants) = permissions {
+                for grant in &grants.grants {
+                    let row = gtk4::ListBoxRow::new();
+                    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                    let label = gtk4::Label::new(Some(&active_grant_label(grant)));
+                    label.set_hexpand(true);
+                    label.set_xalign(0.0);
+                    label.set_wrap(true);
+                    line.append(&label);
+                    if grant.revocable {
+                        let revoke = gtk4::Button::with_label("Revoke");
+                        let id = grant.permission_id.clone();
+                        let ctx = ctx.clone();
+                        let page_weak = page_weak.clone();
+                        revoke.connect_clicked(move |_| {
+                            let Some(page) = page_weak.upgrade() else {
+                                return;
+                            };
+                            let Some(chat) = ctx.chat.upgrade() else {
+                                return;
+                            };
+                            do_revoke(&ctx, &chat, &page, &id);
+                        });
+                        line.append(&revoke);
+                    }
+                    row.set_child(Some(&line));
+                    active.append(&row);
+                }
+            }
+            clear_list(&list);
+            if let Ok(inventory) = inventory {
+                for grant in &inventory.grants {
+                    list.append(&gtk4::Label::new(Some(&grant_label(grant))));
+                }
+            }
+        },
+    );
+}
+
+/// Send exactly the revocation the reader pressed, once. Acceptance
+/// removes nothing by itself: the refill re-reads the list, and a
+/// grant still in force comes back in plain sight.
+fn do_revoke(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box, permission_id: &str) {
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let id = permission_id.to_owned();
+    let ctx = ctx.clone();
+    let page_strong: gtk4::Box = page.clone();
+    dispatch(
+        chat,
+        move || client.revoke(&id),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let text = match &answer {
+                Ok(answer) => revoke_notice(answer.accepted).to_owned(),
+                Err(error) => format!(
+                    "Revocation failed: {error}. The grant may still be in force; read the list again instead of pressing twice."
+                ),
+            };
+            let mut child = page_strong.first_child();
+            while let Some(widget) = child {
+                if widget.widget_name() == "policy-notice" {
+                    if let Ok(notice) = widget.downcast::<gtk4::Label>() {
+                        notice.set_text(&text);
+                        notice.set_visible(true);
+                    }
+                    break;
+                }
+                child = widget.next_sibling();
+            }
+            let _ = &ctx;
+            fill_policy(&ctx, &page_strong);
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,6 +975,34 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(memory_hit_label(&short), "hi");
+    }
+
+    #[test]
+    fn active_grants_name_coverage_and_revocability() {
+        let grant = ActiveGrant {
+            permission_id: "p-1".to_owned(),
+            kind: Some("files".to_owned()),
+            lifetime: None,
+            mode: Some("write".to_owned()),
+            policy_subject: None,
+            expires_at_ms: None,
+            revocable: true,
+            title: String::new(),
+        };
+        let label = active_grant_label(&grant);
+        assert!(label.contains("p-1") && label.contains("files"));
+        assert!(!label.contains("irrevocable"));
+        let locked = ActiveGrant {
+            revocable: false,
+            ..grant
+        };
+        assert!(active_grant_label(&locked).contains("service-marked irrevocable"));
+    }
+
+    #[test]
+    fn revoke_outcomes_name_acceptance_or_warn_plainly() {
+        assert!(revoke_notice(true).contains("accepted"));
+        assert!(revoke_notice(false).contains("still in force"));
     }
 
     #[test]
