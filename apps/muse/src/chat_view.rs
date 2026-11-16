@@ -37,8 +37,17 @@ pub fn row_widget(
             text,
             options,
             attachments,
+            selected_option,
             ..
-        } => message_widget(role, text, options, attachments, on_option, previews),
+        } => message_widget(
+            role,
+            text,
+            options,
+            selected_option.as_deref(),
+            attachments,
+            on_option,
+            previews,
+        ),
         TranscriptRow::Notice { text } => {
             let widget = gtk4::Label::new(Some(text));
             widget.set_halign(gtk4::Align::Center);
@@ -55,6 +64,7 @@ fn message_widget(
     role: &Role,
     text: &str,
     options: &[String],
+    selected: Option<&str>,
     attachments: &[MessageAttachment],
     on_option: &std::rc::Rc<dyn Fn(String)>,
     previews: &std::collections::HashMap<
@@ -88,7 +98,20 @@ fn message_widget(
         choices.set_selection_mode(gtk4::SelectionMode::None);
         choices.set_max_children_per_line(4);
         for option in options {
-            let button = gtk4::Button::with_label(option);
+            // The web marks the reader's pick with a check; the class
+            // draws the blue edge. Both ride the service's own
+            // selected_option, never a local guess.
+            let picked = selected == Some(option.as_str());
+            let label = if picked {
+                format!("{option} ✓")
+            } else {
+                option.clone()
+            };
+            let button = gtk4::Button::with_label(&label);
+            button.add_css_class("muse-option");
+            if picked {
+                button.add_css_class("muse-option-selected");
+            }
             let callback = on_option.clone();
             let text = option.clone();
             button.connect_clicked(move |_| callback(text.clone()));

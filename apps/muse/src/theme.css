@@ -1,26 +1,22 @@
-/* Mac-signature surfaces for the rewrite: the floating composer card,
- * grey user bubbles, pill chips, and the solid blue send circle, taken
- * from the Meta AI for Mac product shots (floating prompt bar, 3:4.5
- * assistant panel). These are brand surfaces with fixed Mac hex
- * values, not theme followers: the blue send circle is blue in both
- * modes, and the grey bubble is grey in both modes. */
+/* meta.ai web dark theme for the rewrite: the client follows the
+ * system theme now (the forced-light experiment lost to a dark GNOME
+ * box that paints dark whatever the manager claims). These are the
+ * web client's own dark surfaces, taken from the meta.ai dark UI:
+ * near-black app, dark grey assistant bubbles, solid blue user pills,
+ * dark option pills with a marked selection, dark floating composer.
+ * Fixed hex values throughout; nothing here follows the system. */
 
-/* Deterministic light chrome: the Mac client is light even on dark
- * systems, and the style manager alone proved insufficient on at
- * least one dark GNOME box. These rules pin the app's own surfaces
- * to light values however the toolkit is configured; the manager
- * calls in main.rs stay as the sanctioned switch. Brand classes
- * below (more specific) always win over these base rules. */
+/* App chrome: near-black ground, light text, dark header. */
 window,
 .background {
-    background-color: #ffffff;
-    color: #1c1e21;
+    background-color: #0f0f0f;
+    color: #e4e6eb;
 }
 
 headerbar {
-    background-color: #f5f6f8;
-    color: #1c1e21;
-    border-color: #e4e6eb;
+    background-color: #141414;
+    color: #e4e6eb;
+    border-color: rgba(255, 255, 255, 0.08);
 }
 
 listbox {
@@ -28,59 +24,81 @@ listbox {
 }
 
 listbox row {
-    color: #1c1e21;
+    color: #e4e6eb;
 }
 
 popover {
-    background-color: #ffffff;
-    color: #1c1e21;
+    background-color: #1e1e1e;
+    color: #e4e6eb;
 }
 
 entry,
 textview {
-    background-color: #ffffff;
-    color: #1c1e21;
+    background-color: #1e1e1e;
+    color: #e4e6eb;
     caret-color: #0084ff;
 }
 
 entry placeholder,
 textview placeholder {
-    color: #65676b;
+    color: #9aa0ab;
 }
 
 button {
-    background-color: #f0f2f5;
-    color: #1c1e21;
-    border-color: #d3e0fd;
+    background-color: #212121;
+    color: #e4e6eb;
+    border-color: rgba(255, 255, 255, 0.1);
 }
 
 button:hover {
-    background-color: #e4e9f2;
+    background-color: #2a2a2a;
 }
 
 button:active {
-    background-color: #d9e0ee;
+    background-color: #333333;
 }
 
+button:disabled {
+    color: #6e747d;
+}
+
+/* The reader's words: solid blue pill, white text, right side. */
 .muse-user-bubble {
-    background: #f0f2f5;
-    color: #1c1e21;
-    border: 1px solid #c9d9fb;
+    background: #0084ff;
+    color: #ffffff;
     border-radius: 16px;
     padding: 8px 12px;
 }
 
+/* The assistant's words: dark grey bubble, light text. */
 .muse-assistant-text {
-    color: #1c1e21;
-    background: transparent;
+    background: #1e1e1e;
+    color: #e4e6eb;
+    border-radius: 16px;
+    padding: 8px 12px;
 }
 
+/* Option pills: dark with a visible edge; the reader's pick carries
+ * a blue edge and a check, like the web's selected option. */
+.muse-option {
+    background: #1e1e1e;
+    color: #e4e6eb;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 9999px;
+    padding: 8px 16px;
+}
+
+.muse-option-selected {
+    border: 1px solid #0084ff;
+}
+
+/* The floating composer: dark card, entry on top, controls below. */
 .muse-composer-card {
-    background: #ffffff;
-    border: 1px solid #c9d9fb;
-    border-radius: 18px;
+    background: #1e1e1e;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 22px;
     padding: 10px 10px 8px;
-    box-shadow: 0 4px 16px rgba(0, 100, 224, 0.12);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
 .muse-ask {
@@ -89,15 +107,14 @@ button:active {
     background: transparent;
     padding: 8px 10px;
     font-size: 14px;
-    /* The card is always white, so the text must be dark even on a
-     * dark system theme -- otherwise the draft is white-on-white. */
-    color: #1c1e21;
+    color: #e4e6eb;
 }
 
 .muse-ask placeholder {
-    color: #65676b;
+    color: #9aa0ab;
 }
 
+/* The blue send circle never changes. */
 .muse-send {
     background: #0084ff;
     color: #ffffff;
@@ -111,36 +128,40 @@ button:active {
     border-radius: 9999px;
     min-width: 32px;
     min-height: 32px;
-    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: #2a2a2a;
+    color: #e4e6eb;
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .muse-pill {
     border-radius: 9999px;
     padding: 4px 12px;
-    border: 1px solid rgba(0, 0, 0, 0.12);
+    background: #2a2a2a;
+    color: #e4e6eb;
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .muse-chip {
-    background: #f1f2f4;
-    color: #1c1e21;
+    background: #2a2a2a;
+    color: #e4e6eb;
     border-radius: 9999px;
     padding: 4px 6px 4px 10px;
 }
 
-/* The Mac sidebar: pale grey well, white pill for the selected row,
- * small caps section names, blue avatar dot for the profile. */
+/* The sidebar: dark well, lighter pill for the selected row, dim
+ * section names, blue avatar dot for the profile. */
 .muse-side {
-    background: #f5f6f8;
+    background: #141414;
     border-radius: 12px;
 }
 
 .muse-side row:selected {
-    background: #ffffff;
+    background: #2a2a2a;
     border-radius: 10px;
 }
 
 .muse-section {
-    color: #65676b;
+    color: #9aa0ab;
     font-size: 12px;
     font-weight: bold;
     margin-top: 4px;
@@ -155,16 +176,15 @@ button:active {
     font-weight: bold;
 }
 
-/* The Mac panel's link cards: white, blue-edged, rounded, thumbnail
- * on the left and the title above the source line. */
+/* Link cards: dark, subtle edge, thumbnail left, title above source. */
 .muse-link-card {
-    background: #ffffff;
-    border: 1px solid #c9d9fb;
+    background: #1e1e1e;
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 12px;
     padding: 10px;
 }
 
 .muse-link-title {
     font-weight: bold;
-    color: #1c1e21;
+    color: #e4e6eb;
 }
