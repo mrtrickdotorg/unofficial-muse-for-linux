@@ -11,6 +11,7 @@ mod app;
 mod chat;
 mod chat_view;
 mod composer;
+mod login;
 mod pages;
 mod session;
 mod signin;
