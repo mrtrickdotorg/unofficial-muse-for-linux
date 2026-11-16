@@ -65,6 +65,7 @@ pub struct ComposerRow {
     pub entry: gtk4::Entry,
     pub send: gtk4::Button,
     pub stop: gtk4::Button,
+    pub delete: gtk4::Button,
     row: gtk4::Box,
 }
 
@@ -82,13 +83,16 @@ impl ComposerRow {
         send.add_css_class("suggested-action");
         let stop = gtk4::Button::with_label("Stop");
         stop.set_sensitive(false);
+        let delete = gtk4::Button::with_label("Delete turn");
         row.append(&entry);
         row.append(&send);
         row.append(&stop);
+        row.append(&delete);
         Self {
             entry,
             send,
             stop,
+            delete,
             row,
         }
     }
@@ -102,6 +106,17 @@ impl ComposerRow {
     pub fn refresh(&self, composer: &Composer) {
         self.send.set_sensitive(composer.can_send());
         self.stop.set_sensitive(composer.sending());
+    }
+
+    /// The delete button names its own state: the first press arms
+    /// ("Confirm delete turn"), the second press on the same turn
+    /// dispatches. A new turn disarms it.
+    pub fn set_delete_armed(&self, armed: bool) {
+        self.delete.set_label(if armed {
+            "Confirm delete turn"
+        } else {
+            "Delete turn"
+        });
     }
 }
 

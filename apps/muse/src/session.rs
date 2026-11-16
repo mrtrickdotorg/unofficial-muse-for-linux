@@ -143,6 +143,10 @@ pub struct Session {
     serial: u64,
     pub account: Option<muse_account::AccountSnapshot>,
     pub history: Vec<muse_account::HistoryMessage>,
+    /// The latest usage-limit sentence the service sent, verbatim. Feeds
+    /// the notice line so every at-limit send visibly returns the
+    /// service's own reset message even before the next history lands.
+    pub latest_quota: Option<String>,
 }
 
 impl Session {
@@ -154,6 +158,7 @@ impl Session {
             serial: 0,
             account: None,
             history: Vec::new(),
+            latest_quota: None,
         }
     }
 
@@ -236,6 +241,12 @@ impl Session {
         combined.extend(fresh);
         combined.append(&mut self.history);
         self.history = combined;
+    }
+
+    /// Remember the service's usage-limit sentence verbatim. Only the
+    /// recognized sentence lands here, never reader text.
+    pub fn note_quota(&mut self, text: String) {
+        self.latest_quota = Some(text);
     }
 
     /// Record a finished history read: the rows land only on success.
@@ -555,6 +566,14 @@ mod tests {
             .map(|row| row.message_id.as_str())
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn quota_cache_holds_the_services_own_sentence() {
+        let mut session = Session::new();
+        assert!(session.latest_quota.is_none());
+        session.note_quota("limit reached".to_owned());
+        assert_eq!(session.latest_quota.as_deref(), Some("limit reached"));
     }
 
     #[test]

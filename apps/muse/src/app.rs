@@ -57,6 +57,25 @@ where
 /// An option button's press, delivered as the reader's next message.
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
 
+/// What a delete-turn press means against the held history and the
+/// armed target. The first press arms, the second press on the same
+/// latest turn confirms, anything else (no history, a moved-on
+/// transcript) does nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteAction {
+    Nothing,
+    Arm(String),
+    Confirm(String),
+}
+
+fn delete_action(latest: Option<&str>, armed: Option<&str>) -> DeleteAction {
+    match (latest, armed) {
+        (Some(id), Some(armed)) if id == armed => DeleteAction::Confirm(id.to_owned()),
+        (Some(id), _) => DeleteAction::Arm(id.to_owned()),
+        (None, _) => DeleteAction::Nothing,
+    }
+}
+
 /// Shared chat state: the session plus every widget a completion
 /// touches. Reference-counted because idle callbacks own it.
 pub struct Chat {
@@ -69,6 +88,8 @@ pub struct Chat {
     older_exhausted: RefCell<bool>,
     live_tx: RefCell<Option<std::sync::mpsc::Sender<()>>>,
     on_option: RefCell<Option<OptionCallback>>,
+    notice: gtk4::Label,
+    armed_delete: RefCell<Option<String>>,
 }
 
 impl Chat {
@@ -80,6 +101,14 @@ impl Chat {
             composer_row,
             client: RefCell::new(None),
             older_button: gtk4::Button::with_label("Load older"),
+            notice: {
+                let notice = gtk4::Label::new(None);
+                notice.set_wrap(true);
+                notice.set_halign(gtk4::Align::Center);
+                notice.set_visible(false);
+                notice
+            },
+            armed_delete: RefCell::new(None),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -121,7 +150,16 @@ impl Chat {
         chat.refresh_older();
         content.append(&chat.older_button);
         content.append(&scrolled);
+        content.append(&chat.notice);
         content.append(chat.composer_row.widget());
+        {
+            let weak = Rc::downgrade(&chat);
+            chat.composer_row.delete.connect_clicked(move |_| {
+                if let Some(chat) = weak.upgrade() {
+                    chat.delete_pressed();
+                }
+            });
+        }
         if let Some(link) = load_saved_link()
             && link.consent
         {
@@ -182,9 +220,46 @@ impl Chat {
     fn render(&self) {
         if let Some(on_option) = self.on_option.borrow().clone() {
             let rows = build_rows(&self.session.borrow().history);
+            for row in &rows {
+                if let super::chat::TranscriptRow::Notice { text } = row {
+                    self.session.borrow_mut().note_quota(text.clone());
+                }
+            }
             populate(&self.transcript, &rows, &on_option);
         }
         self.refresh_older();
+        self.refresh_notice();
+        self.refresh_delete_arm();
+    }
+
+    /// The notice line shows the service's latest limit sentence while
+    /// one is remembered, hidden otherwise.
+    fn refresh_notice(&self) {
+        match self.session.borrow().latest_quota.clone() {
+            Some(text) => {
+                self.notice.set_text(&text);
+                self.notice.set_visible(true);
+            }
+            None => self.notice.set_visible(false),
+        }
+    }
+
+    /// A new turn disarms a pending delete: the armed press must name
+    /// the latest turn, never a stale one.
+    fn refresh_delete_arm(&self) {
+        let latest = self
+            .session
+            .borrow()
+            .history
+            .last()
+            .map(|row| row.message_id.clone());
+        let armed = self.armed_delete.borrow().clone();
+        if armed.is_some() && armed != latest {
+            *self.armed_delete.borrow_mut() = None;
+        }
+        let armed = self.armed_delete.borrow().clone();
+        self.composer_row
+            .set_delete_armed(armed.is_some() && armed == latest);
     }
 
     /// The older button names its own state: loading, exhausted, or
@@ -290,9 +365,18 @@ impl Chat {
             self.composer_row.refresh(&self.composer.borrow());
             return;
         };
+        let verified = self
+            .session
+            .borrow()
+            .account
+            .clone()
+            .map(|account| (account.vm_id.clone(), account.identity_name.clone()));
         dispatch(
             self,
-            move || client.send(None, &draft),
+            move || match verified {
+                Some((vm_id, identity)) => client.send_verified(None, &draft, &vm_id, &identity),
+                None => client.send(None, &draft),
+            },
             move |chat, answer| {
                 chat.session.borrow_mut().accept(&ticket);
                 chat.composer.borrow_mut().finish_send();
@@ -322,6 +406,50 @@ impl Chat {
                 }
             },
         );
+    }
+
+    /// Armed two-press turn delete. The first press arms the latest
+    /// turn, the second press on the same turn dispatches; the re-read
+    /// proves the removal. Acceptance is not absence.
+    fn delete_pressed(self: &Rc<Self>) {
+        let latest = self
+            .session
+            .borrow()
+            .history
+            .last()
+            .map(|row| row.message_id.clone());
+        let armed = self.armed_delete.borrow().clone();
+        match delete_action(latest.as_deref(), armed.as_deref()) {
+            DeleteAction::Nothing => {}
+            DeleteAction::Arm(id) => {
+                *self.armed_delete.borrow_mut() = Some(id);
+                self.refresh_delete_arm();
+            }
+            DeleteAction::Confirm(id) => {
+                *self.armed_delete.borrow_mut() = None;
+                self.composer_row.set_delete_armed(false);
+                let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
+                    Some(ticket) => ticket,
+                    None => return,
+                };
+                let Some(client) = self.client.borrow().clone() else {
+                    self.session.borrow_mut().accept(&ticket);
+                    return;
+                };
+                dispatch(
+                    self,
+                    move || client.chat_delete("turn", &id),
+                    move |chat, answer| {
+                        chat.session.borrow_mut().accept(&ticket);
+                        if answer.map(|answer| answer.accepted).unwrap_or(false) {
+                            // Prove by re-read: only the refreshed
+                            // history shows the turn is gone.
+                            chat.reload_history();
+                        }
+                    },
+                );
+            }
+        }
     }
 
     /// Stop cancels outside the ticket slot: it must fire while a
@@ -395,6 +523,30 @@ impl Chat {
                     chat.render();
                 }
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_arms_first_confirms_same_and_ignores_the_rest() {
+        assert_eq!(delete_action(None, None), DeleteAction::Nothing);
+        assert_eq!(delete_action(None, Some("a")), DeleteAction::Nothing);
+        assert_eq!(
+            delete_action(Some("a"), None),
+            DeleteAction::Arm("a".to_owned())
+        );
+        assert_eq!(
+            delete_action(Some("a"), Some("a")),
+            DeleteAction::Confirm("a".to_owned())
+        );
+        // A moved-on transcript re-arms instead of confirming stale.
+        assert_eq!(
+            delete_action(Some("b"), Some("a")),
+            DeleteAction::Arm("b".to_owned())
         );
     }
 }
