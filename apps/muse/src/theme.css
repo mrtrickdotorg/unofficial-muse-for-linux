@@ -63,6 +63,17 @@ button:disabled {
     color: #6e747d;
 }
 
+/* The transcript bed is pure black: only the bubbles stand out in
+ * the middle section. The list paints nothing of its own, so the
+ * bed shows through between rows. */
+.muse-transcript {
+    background-color: #000000;
+}
+
+.muse-transcript listbox {
+    background-color: transparent;
+}
+
 /* The reader's words: solid blue pill, white text, right side. */
 .muse-user-bubble {
     background: #0084ff;

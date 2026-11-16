@@ -122,12 +122,14 @@ pub struct Chat {
     panel_fetch: RefCell<bool>,
     panel_at: RefCell<Option<std::time::Instant>>,
     panel_tasks: RefCell<Option<muse_account::TasksSnapshot>>,
+    panel_placed: RefCell<bool>,
 }
 
 impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
         let scrolled = gtk4::ScrolledWindow::new();
         scrolled.set_child(Some(&transcript));
+        scrolled.add_css_class("muse-transcript");
         // The transcript never scrolls sideways: anything wide wraps
         // to the viewport instead of pushing the column off-screen.
         scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
@@ -223,6 +225,7 @@ impl Chat {
             panel_fetch: RefCell::new(false),
             panel_at: RefCell::new(None),
             panel_tasks: RefCell::new(None),
+            panel_placed: RefCell::new(false),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -276,8 +279,14 @@ impl Chat {
         left.append(&clamp);
         left.append(&chat.notice);
         left.append(chat.composer_row.widget());
-        content.append(&left);
-        content.append(&chat.panel);
+        // The divider between transcript and panel drags: the panel
+        // opens at 300px and then holds wherever the reader puts it.
+        let split = gtk4::Paned::new(gtk4::Orientation::Horizontal);
+        split.set_wide_handle(true);
+        split.set_start_child(Some(&left));
+        split.set_end_child(Some(&chat.panel));
+        split.set_shrink_end_child(false);
+        content.append(&split);
         {
             let weak = Rc::downgrade(&chat);
             chat.delete.connect_clicked(move |_| {
@@ -294,6 +303,17 @@ impl Chat {
             let content_weak = content.downgrade();
             gtk4::glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
                 if let (Some(chat), Some(content)) = (weak.upgrade(), content_weak.upgrade()) {
+                    // The panel divider opens at 300px once the page
+                    // knows its width, then holds wherever dragged.
+                    if !*chat.panel_placed.borrow()
+                        && let Some(split) = chat.panel.parent()
+                        && split.allocated_width() > 400
+                    {
+                        if let Some(paned) = split.downcast_ref::<gtk4::Paned>() {
+                            paned.set_position(split.allocated_width() - 300);
+                        }
+                        *chat.panel_placed.borrow_mut() = true;
+                    }
                     let hadj = chat.scrolled.hadjustment();
                     eprintln!(
                         "muse layout: page={} panel={} hadj upper={:.0} page={:.0}",
