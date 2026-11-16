@@ -91,6 +91,7 @@ pub struct Chat {
     notice: gtk4::Label,
     armed_delete: RefCell<Option<String>>,
     thread: RefCell<Option<String>>,
+    model_combo: gtk4::ComboBoxText,
 }
 
 impl Chat {
@@ -111,6 +112,7 @@ impl Chat {
             },
             armed_delete: RefCell::new(None),
             thread: RefCell::new(None),
+            model_combo: gtk4::ComboBoxText::new(),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -150,6 +152,8 @@ impl Chat {
             });
         }
         chat.refresh_older();
+        chat.model_combo.set_halign(gtk4::Align::Start);
+        content.append(&chat.model_combo);
         content.append(&chat.older_button);
         content.append(&scrolled);
         content.append(&chat.notice);
@@ -193,6 +197,69 @@ impl Chat {
         chat
     }
 
+    /// The model picker: the service's listing fills it, a change
+    /// dispatches a select. The generation guard in the session keeps
+    /// a late listing from moving the picker backwards.
+    fn refresh_model(&self) {
+        let session = self.session.borrow();
+        self.model_combo.remove_all();
+        for model in &session.available_models {
+            self.model_combo.append_text(model);
+        }
+        if let Some(selected) = session.selected_model.as_deref() {
+            self.model_combo.set_active_id(Some(selected));
+        }
+    }
+
+    /// Read the selected-model state after connect, then fill the picker.
+    fn load_model(self: &Rc<Self>) {
+        let ticket = match self.session.borrow_mut().try_begin(Op::Model) {
+            Some(ticket) => ticket,
+            None => return,
+        };
+        let Some(client) = self.client.borrow().clone() else {
+            self.session.borrow_mut().accept(&ticket);
+            return;
+        };
+        dispatch(
+            self,
+            move || client.model_get(),
+            move |chat, answer| {
+                if chat.session.borrow_mut().accept(&ticket)
+                    && let Ok(info) = answer
+                {
+                    chat.session.borrow_mut().note_model(&info);
+                    chat.refresh_model();
+                }
+            },
+        );
+    }
+
+    /// Select one model by its service id. The id comes from the
+    /// picker's listing, never a guess.
+    fn set_model(self: &Rc<Self>, model: String) {
+        let ticket = match self.session.borrow_mut().try_begin(Op::Model) {
+            Some(ticket) => ticket,
+            None => return,
+        };
+        let Some(client) = self.client.borrow().clone() else {
+            self.session.borrow_mut().accept(&ticket);
+            return;
+        };
+        dispatch(
+            self,
+            move || client.model_set(&model),
+            move |chat, answer| {
+                if chat.session.borrow_mut().accept(&ticket)
+                    && let Ok(info) = answer
+                {
+                    chat.session.borrow_mut().note_model(&info);
+                    chat.refresh_model();
+                }
+            },
+        );
+    }
+
     fn wire(self: &Rc<Self>) {
         let weak = Rc::downgrade(self);
         self.composer_row.send.connect_clicked(move |_| {
@@ -214,6 +281,20 @@ impl Chat {
             }
         });
         self.composer_row.refresh(&self.composer.borrow());
+        let weak = Rc::downgrade(self);
+        self.model_combo.connect_changed(move |combo| {
+            let Some(chat) = weak.upgrade() else {
+                return;
+            };
+            let Some(id) = combo.active_id() else {
+                return;
+            };
+            // Programmatic fills echo the held selection; only a real
+            // change dispatches.
+            if chat.session.borrow().selected_model.as_deref() != Some(id.as_str()) {
+                chat.set_model(id.to_string());
+            }
+        });
     }
 
     /// Rebuild the transcript rows from the held history. The single
@@ -345,6 +426,7 @@ impl Chat {
             move |chat, answer| {
                 if chat.session.borrow_mut().finish_connect(&ticket, answer) {
                     chat.reload_history();
+                    chat.load_model();
                     chat.start_live();
                 }
             },

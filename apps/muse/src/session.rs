@@ -19,6 +19,9 @@ pub enum Op {
     /// Shared by every secondary page: only the visible page reads,
     /// so one slot covers them all.
     Page,
+    /// The model picker read and write. One slot: a set never races
+    /// a listing.
+    Model,
 }
 
 /// A held in-flight slot. Only the completion carrying a matching ticket
@@ -150,6 +153,13 @@ pub struct Session {
     /// the notice line so every at-limit send visibly returns the
     /// service's own reset message even before the next history lands.
     pub latest_quota: Option<String>,
+    /// Model picker state: the selection plus the generation it came
+    /// with. A listing only lands when its generation is newer than
+    /// what is held, so a late answer can never move the picker
+    /// backwards.
+    pub model_generation: Option<i64>,
+    pub selected_model: Option<String>,
+    pub available_models: Vec<String>,
 }
 
 impl Session {
@@ -162,6 +172,9 @@ impl Session {
             account: None,
             history: Vec::new(),
             latest_quota: None,
+            model_generation: None,
+            selected_model: None,
+            available_models: Vec::new(),
         }
     }
 
@@ -250,6 +263,24 @@ impl Session {
     /// recognized sentence lands here, never reader text.
     pub fn note_quota(&mut self, text: String) {
         self.latest_quota = Some(text);
+    }
+
+    /// Record a model listing when its generation is newer than what
+    /// is held. Stale answers own nothing.
+    pub fn note_model(&mut self, info: &muse_account::ModelInfo) {
+        let newer = match (self.model_generation, info.generation) {
+            (_, None) => true,
+            (None, Some(_)) => true,
+            (Some(held), Some(seen)) => seen > held,
+        };
+        if newer {
+            self.model_generation = info.generation;
+            self.selected_model = info
+                .selected_model
+                .clone()
+                .or_else(|| info.default_model.clone());
+            self.available_models = info.available_models.clone();
+        }
     }
 
     /// Record a finished history read: the rows land only on success.
@@ -569,6 +600,36 @@ mod tests {
             .map(|row| row.message_id.as_str())
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn model_listings_land_only_on_newer_generations() {
+        use muse_account::ModelInfo;
+        let mut session = Session::new();
+        session.note_model(&ModelInfo {
+            generation: Some(3),
+            selected_model: Some("m3".to_owned()),
+            default_model: None,
+            available_models: Vec::new(),
+            display_name: None,
+        });
+        assert_eq!(session.selected_model.as_deref(), Some("m3"));
+        session.note_model(&ModelInfo {
+            generation: Some(2),
+            selected_model: Some("m2".to_owned()),
+            default_model: None,
+            available_models: Vec::new(),
+            display_name: None,
+        });
+        assert_eq!(session.selected_model.as_deref(), Some("m3"));
+        session.note_model(&ModelInfo {
+            generation: None,
+            selected_model: Some("m0".to_owned()),
+            default_model: None,
+            available_models: Vec::new(),
+            display_name: None,
+        });
+        assert_eq!(session.selected_model.as_deref(), Some("m0"));
     }
 
     #[test]
