@@ -15,7 +15,7 @@ cargo test --workspace --locked
 # Requires Xvfb and xauth; TMPDIR must be a writable test scratch directory.
 xvfb-run -a cargo test -p unofficial-muse-for-linux native_account_page_consent_failure_and_disconnect_signal_smoke --locked -- --ignored --test-threads=1
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo run -p unofficial-muse-for-linux
+cargo run -p muse
 ```
 
 `test-account.sh` syntax-checks all shell scripts under `scripts/`, compiles Python source without writing bytecode, parses the installer's embedded Python via `--help`, and runs all offline unittest cases with the explicitly selected `MUSE_ACCOUNT_TEST_PYTHON`. The gate fails if any test is skipped. Account/login tests use controlled fakes; local-host wire tests use the pinned external runtime's real protobuf classes with fake gateway IO. No account credentials, live service, or actual installed browser are used. Installing the dependency requires network access; running these tests does not.
@@ -30,7 +30,7 @@ needs no root and installs nothing:
 
 ```sh
 . "$HOME/.local/share/muse-toolbox/env.sh"   # GTK4 pkg-config, linker, TMPDIR
-cargo build -p unofficial-muse-for-linux --locked
+cargo build -p muse --locked
 ```
 
 The `#[ignore]`d tests then drive the real widgets in-process: they construct the

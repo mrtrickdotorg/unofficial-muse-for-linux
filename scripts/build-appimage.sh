@@ -43,13 +43,13 @@ fetch_pinned \
 cd "$ROOT"
 ./scripts/test-account.sh
 cargo test --workspace --locked
-cargo build --release --locked -p unofficial-muse-for-linux
+cargo build --release --locked -p muse
 cargo build --release --locked -p muse-reminder-runner
 
 rm -rf -- "$APPDIR"
 ACCOUNT_DIR="$APPDIR/usr/share/unofficial-muse-for-linux/account"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/metainfo" "$ACCOUNT_DIR"
-install -m 755 "$ROOT/target/release/unofficial-muse-for-linux" "$APPDIR/usr/bin/unofficial-muse-for-linux"
+install -m 755 "$ROOT/target/release/muse" "$APPDIR/usr/bin/muse"
 # The reminder runner ships in the image so AppImage users can extract it
 # and install the user service (scripts/install-reminder-service.sh); the
 # image itself cannot register a systemd unit.
