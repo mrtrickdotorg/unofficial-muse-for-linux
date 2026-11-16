@@ -330,12 +330,38 @@ impl Chat {
             }
         });
         let weak = Rc::downgrade(self);
-        self.composer_row.entry.connect_changed(move |entry| {
-            if let Some(chat) = weak.upgrade() {
-                chat.composer.borrow_mut().set_text(&entry.text());
-                chat.composer_row.refresh(&chat.composer.borrow());
+        self.composer_row
+            .input
+            .buffer()
+            .connect_changed(move |buffer| {
+                if let Some(chat) = weak.upgrade() {
+                    let start = buffer.start_iter();
+                    let end = buffer.end_iter();
+                    chat.composer
+                        .borrow_mut()
+                        .set_text(&buffer.text(&start, &end, false));
+                    chat.composer_row.sync_placeholder();
+                    chat.composer_row.refresh(&chat.composer.borrow());
+                }
+            });
+        // Enter sends; Shift+Enter keeps a newline. The web's bar
+        // behaves the same way.
+        let weak = Rc::downgrade(self);
+        let send_key = gtk4::EventControllerKey::new();
+        send_key.connect_key_pressed(move |_, keyval, _, modifiers| {
+            let Some(chat) = weak.upgrade() else {
+                return gtk4::glib::Propagation::Proceed;
+            };
+            if keyval != gtk4::gdk::Key::Return && keyval != gtk4::gdk::Key::KP_Enter {
+                return gtk4::glib::Propagation::Proceed;
             }
+            if modifiers.contains(gtk4::gdk::ModifierType::SHIFT_MASK) {
+                return gtk4::glib::Propagation::Proceed;
+            }
+            chat.send_pressed();
+            gtk4::glib::Propagation::Stop
         });
+        self.composer_row.input.add_controller(send_key);
         // Clipboard pictures: Ctrl+V claims the press when the
         // clipboard offers an image, stages the bytes as a chip, and
         // stops the entry from swallowing it. Text pastes are never
@@ -358,7 +384,7 @@ impl Chat {
                 gtk4::glib::Propagation::Proceed
             }
         });
-        self.composer_row.entry.add_controller(paste);
+        self.composer_row.input.add_controller(paste);
         let weak = Rc::downgrade(self);
         self.composer_row.attach.connect_clicked(move |_| {
             if let Some(chat) = weak.upgrade()
@@ -729,7 +755,7 @@ impl Chat {
             Some(dispatch) => dispatch,
             None => return,
         };
-        self.composer_row.entry.set_text("");
+        self.composer_row.set_input_text("");
         // A fresh send clears yesterday's send note; the outcome of
         // this one writes its own.
         *self.send_note.borrow_mut() = None;
@@ -745,7 +771,7 @@ impl Chat {
         if self.composer.borrow().sending() {
             return false;
         }
-        let clipboard = self.composer_row.entry.clipboard();
+        let clipboard = self.composer_row.input.clipboard();
         if !clipboard
             .formats()
             .contains_type(gtk4::gdk::Texture::static_type())
@@ -846,7 +872,7 @@ impl Chat {
                                 format!("{} {}", draft.trim_end(), words.trim())
                             };
                             chat.composer.borrow_mut().set_text(&joined);
-                            chat.composer_row.entry.set_text(&joined);
+                            chat.composer_row.set_input_text(&joined);
                             chat.composer_row.refresh(&chat.composer.borrow());
                             *chat.send_note.borrow_mut() = None;
                             chat.refresh_notice();

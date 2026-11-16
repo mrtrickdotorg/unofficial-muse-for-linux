@@ -171,7 +171,8 @@ impl Composer {
 /// composer state; call `refresh` after every state change and
 /// `paint_chips` after every stage or remove.
 pub struct ComposerRow {
-    pub entry: gtk4::Entry,
+    pub input: gtk4::TextView,
+    pub placeholder: gtk4::Label,
     pub attach: gtk4::Button,
     pub send: gtk4::Button,
     pub stop: gtk4::Button,
@@ -245,50 +246,70 @@ impl ComposerRow {
         let chips = gtk4::FlowBox::new();
         chips.set_selection_mode(gtk4::SelectionMode::None);
         chips.set_visible(false);
-        // The floating card: entry on top, controls below, like the
-        // Mac panel's composer.
-        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        // The floating card, single row like the web's composer bar:
+        // attach, the growing input, Thinking, mic, send. Staged
+        // picture chips hover above the card.
+        let card = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         card.add_css_class("muse-composer-card");
-        let entry = gtk4::Entry::new();
-        entry.set_hexpand(true);
-        entry.set_placeholder_text(Some("Ask Meta AI..."));
-        entry.add_css_class("muse-ask");
-        let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         let attach = gtk4::Button::with_label("+");
+        attach.set_valign(gtk4::Align::Start);
         attach.add_css_class("muse-circle");
         attach.set_tooltip_text(Some("Paste a picture from the clipboard"));
+        // A growing multi-line input under an "Ask Meta AI…" overlay,
+        // one line tall at rest, scrolling past six.
+        let input = gtk4::TextView::new();
+        input.set_hexpand(true);
+        input.set_wrap_mode(gtk4::WrapMode::WordChar);
+        input.set_accepts_tab(false);
+        input.add_css_class("muse-ask");
+        let scroll = gtk4::ScrolledWindow::new();
+        scroll.set_child(Some(&input));
+        scroll.set_min_content_height(40);
+        scroll.set_max_content_height(168);
+        scroll.set_propagate_natural_height(true);
+        scroll.set_hexpand(true);
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&scroll));
+        let placeholder = gtk4::Label::new(Some("Ask Meta AI…"));
+        placeholder.set_halign(gtk4::Align::Start);
+        placeholder.set_valign(gtk4::Align::Start);
+        placeholder.set_margin_top(10);
+        placeholder.set_margin_start(4);
+        placeholder.add_css_class("dim-label");
+        overlay.add_overlay(&placeholder);
         let send = gtk4::Button::with_label("↑");
+        send.set_valign(gtk4::Align::End);
         send.add_css_class("muse-send");
         send.set_tooltip_text(Some("Send"));
         let stop = gtk4::Button::with_label("■");
+        stop.set_valign(gtk4::Align::End);
         stop.add_css_class("muse-circle");
         stop.set_tooltip_text(Some("Stop"));
         stop.set_sensitive(false);
+        stop.set_visible(false);
         // Thinking is the service's own model picker in a pill face:
         // the listing fills it, a change dispatches a select.
         let thinking = gtk4::ComboBoxText::new();
+        thinking.set_valign(gtk4::Align::End);
         thinking.add_css_class("muse-pill");
         thinking.set_tooltip_text(Some("Thinking mode"));
         // Voice dictation: records the microphone, then asks the
         // service what it heard. The pill is real on both legs.
         let mic = gtk4::Button::with_label("🎤");
+        mic.set_valign(gtk4::Align::End);
         mic.add_css_class("muse-circle");
         mic.set_tooltip_text(Some("Dictate"));
-        controls.append(&attach);
-        // The send circle sits at the row's end, like the Mac panel.
-        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        controls.append(&spacer);
-        controls.append(&stop);
-        controls.append(&thinking);
-        controls.append(&mic);
-        controls.append(&send);
-        card.append(&entry);
-        card.append(&controls);
+        card.append(&attach);
+        card.append(&overlay);
+        card.append(&thinking);
+        card.append(&mic);
+        card.append(&stop);
+        card.append(&send);
         outer.append(&chips);
         outer.append(&card);
-        Self {
-            entry,
+        let row = Self {
+            input,
+            placeholder,
             attach,
             send,
             stop,
@@ -296,7 +317,26 @@ impl ComposerRow {
             mic,
             outer,
             chips,
-        }
+        };
+        row.sync_placeholder();
+        row
+    }
+
+    /// The draft text, trimmed of the trailing newline Enter leaves
+    /// behind when it dispatches.
+    pub fn input_text(&self) -> String {
+        let start = self.input.buffer().start_iter();
+        let end = self.input.buffer().end_iter();
+        self.input.buffer().text(&start, &end, false).to_string()
+    }
+
+    pub fn set_input_text(&self, text: &str) {
+        self.input.buffer().set_text(text);
+        self.sync_placeholder();
+    }
+
+    pub(crate) fn sync_placeholder(&self) {
+        self.placeholder.set_visible(self.input_text().is_empty());
     }
 
     pub fn widget(&self) -> &gtk4::Box {
