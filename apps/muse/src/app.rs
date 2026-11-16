@@ -128,6 +128,9 @@ impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
         let scrolled = gtk4::ScrolledWindow::new();
         scrolled.set_child(Some(&transcript));
+        // The transcript never scrolls sideways: anything wide wraps
+        // to the viewport instead of pushing the column off-screen.
+        scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
         // The Mac panel names its thread up top, centered, with the
         // turn menu behind a "…" button at the row's end.
         let heading = gtk4::Label::new(Some("New chat"));
@@ -281,6 +284,26 @@ impl Chat {
                 if let Some(chat) = weak.upgrade() {
                     chat.delete_pressed();
                 }
+            });
+        }
+        // Temporary geometry probe: one line with the real widths so a
+        // shifted or overflowing column reports itself instead of
+        // getting described from a screenshot.
+        {
+            let weak = Rc::downgrade(&chat);
+            let content_weak = content.downgrade();
+            gtk4::glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
+                if let (Some(chat), Some(content)) = (weak.upgrade(), content_weak.upgrade()) {
+                    let hadj = chat.scrolled.hadjustment();
+                    eprintln!(
+                        "muse layout: page={} panel={} hadj upper={:.0} page={:.0}",
+                        content.allocated_width(),
+                        chat.panel.allocated_width(),
+                        hadj.upper(),
+                        hadj.page_size(),
+                    );
+                }
+                gtk4::glib::ControlFlow::Break
             });
         }
         if let Some(link) = load_saved_link()
@@ -622,6 +645,7 @@ impl Chat {
             let title = gtk4::Label::new(Some(&schedule.title));
             title.set_xalign(0.0);
             title.set_wrap(true);
+            title.set_max_width_chars(28);
             let next = gtk4::Label::new(Some(&super::pages::next_run_label(
                 schedule.next_run_at_utc,
                 now,
@@ -648,6 +672,7 @@ impl Chat {
             what.set_xalign(0.0);
             what.set_wrap(true);
             what.set_lines(2);
+            what.set_max_width_chars(28);
             what.set_ellipsize(gtk4::pango::EllipsizeMode::End);
             line.append(&what);
             if let Some(status) = agent.status.as_deref()
