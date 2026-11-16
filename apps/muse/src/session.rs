@@ -22,6 +22,9 @@ pub enum Op {
     /// The model picker read and write. One slot: a set never races
     /// a listing.
     Model,
+    /// A dictation turn: the recorded take out, the transcript back.
+    /// Its own slot so talking never blocks a send.
+    Voice,
 }
 
 /// A held in-flight slot. Only the completion carrying a matching ticket

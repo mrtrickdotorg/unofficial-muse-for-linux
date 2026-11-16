@@ -176,6 +176,8 @@ pub struct ComposerRow {
     pub send: gtk4::Button,
     pub stop: gtk4::Button,
     pub delete: gtk4::Button,
+    pub thinking: gtk4::ComboBoxText,
+    pub mic: gtk4::Button,
     outer: gtk4::Box,
     chips: gtk4::FlowBox,
 }
@@ -265,6 +267,16 @@ impl ComposerRow {
         stop.set_sensitive(false);
         let delete = gtk4::Button::with_label("Delete turn");
         delete.add_css_class("muse-pill");
+        // Thinking is the service's own model picker in a pill face:
+        // the listing fills it, a change dispatches a select.
+        let thinking = gtk4::ComboBoxText::new();
+        thinking.add_css_class("muse-pill");
+        thinking.set_tooltip_text(Some("Thinking mode"));
+        // Voice dictation: records the microphone, then asks the
+        // service what it heard. The pill is real on both legs.
+        let mic = gtk4::Button::with_label("🎤");
+        mic.add_css_class("muse-circle");
+        mic.set_tooltip_text(Some("Dictate"));
         controls.append(&attach);
         // The send circle sits at the row's end, like the Mac panel.
         let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -272,6 +284,8 @@ impl ComposerRow {
         controls.append(&spacer);
         controls.append(&stop);
         controls.append(&delete);
+        controls.append(&thinking);
+        controls.append(&mic);
         controls.append(&send);
         card.append(&entry);
         card.append(&controls);
@@ -283,6 +297,8 @@ impl ComposerRow {
             send,
             stop,
             delete,
+            thinking,
+            mic,
             outer,
             chips,
         }
