@@ -43,28 +43,12 @@ fn main() {
 /// built on first visit, never up front -- eager construction of
 /// every surface is what made the old shell slow to first paint.
 fn build_ui(app: &adw::Application) {
-    // Mac parity first: the Mac client is light, so the app is light
-    // regardless of the system theme. Dark mode comes later. This
-    // must run after Adwaita initializes -- the default style manager
-    // panics before the application exists.
-    app.style_manager()
-        .set_color_scheme(adw::ColorScheme::ForceLight);
-    // Belt and braces: the style manager is the sanctioned switch,
-    // but the dark bit readers actually paint from lives on
-    // GtkSettings. Set both, then log what the manager believes so a
-    // still-dark window arrives with a diagnosis instead of a shrug.
-    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
-    if let Some(settings) = gtk4::Settings::default() {
-        settings.set_gtk_application_prefer_dark_theme(false);
-    }
-    eprintln!(
-        "muse: color-scheme set={:?} dark={} high-contrast={}",
-        app.style_manager().color_scheme(),
-        app.style_manager().is_dark(),
-        app.style_manager().is_high_contrast(),
-    );
-    // Permanent cold-start probe: build timestamp vs first present, so a
-    // startup-cost regression shows up in logs instead of as a complaint.
+    // The client follows the system theme: the forced-light
+    // experiment lost to a dark GNOME box that paints dark whatever
+    // the manager claims, so the stylesheet carries the meta.ai dark
+    // surfaces as fixed values instead.
+    // Permanent cold-start probe: build timestamp vs first present, so
+    // a startup-cost regression shows up in logs, not as a complaint.
     let started = std::time::Instant::now();
     // Plain ApplicationWindow: AdwApplicationWindow refuses a manually
     // set titlebar, and without one the window has no drag handle or
