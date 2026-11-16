@@ -80,12 +80,15 @@ fn message_widget(
     column.set_margin_start(12);
     column.set_margin_end(12);
 
-    let bubble = gtk4::Label::new(Some(text));
+    let bubble = gtk4::Label::new(None);
+    bubble.set_markup(&super::chat::render_markup(text));
     bubble.set_wrap(true);
+    bubble.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
     bubble.set_selectable(true);
     bubble.set_xalign(0.0);
-    // The Mac panel: the reader's words sit in a grey bubble, the
-    // assistant's in plain text. The class carries the Mac surface.
+    // The web's split: the reader's words in a blue pill, the
+    // assistant's in a dark grey bubble. The classes carry the web
+    // surfaces; the text itself renders markdown to Pango above.
     if matches!(role, Role::User) {
         bubble.add_css_class("muse-user-bubble");
     } else {

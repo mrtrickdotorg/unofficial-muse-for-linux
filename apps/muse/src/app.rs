@@ -206,7 +206,12 @@ impl Chat {
         chat.refresh_older();
         content.append(&chat.header);
         content.append(&chat.older_button);
-        content.append(&chat.scrolled);
+        // The web's transcript is a centered column, never full-bleed:
+        // the clamp caps its width and centers it on wide windows.
+        let clamp = adw::Clamp::new();
+        clamp.set_maximum_size(800);
+        clamp.set_child(Some(&chat.scrolled));
+        content.append(&clamp);
         content.append(&chat.notice);
         content.append(chat.composer_row.widget());
         {

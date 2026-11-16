@@ -25,6 +25,7 @@ listbox {
 
 listbox row {
     color: #e4e6eb;
+    padding: 10px 12px;
 }
 
 popover {
@@ -66,16 +67,20 @@ button:disabled {
 .muse-user-bubble {
     background: #0084ff;
     color: #ffffff;
-    border-radius: 16px;
-    padding: 8px 12px;
+    border-radius: 18px;
+    padding: 10px 16px;
+    font-size: 15px;
+    line-height: 1.55;
 }
 
 /* The assistant's words: dark grey bubble, light text. */
 .muse-assistant-text {
     background: #1e1e1e;
     color: #e4e6eb;
-    border-radius: 16px;
-    padding: 8px 12px;
+    border-radius: 18px;
+    padding: 12px 16px;
+    font-size: 15px;
+    line-height: 1.55;
 }
 
 /* Option pills: dark with a visible edge; the reader's pick carries
@@ -96,8 +101,8 @@ button:disabled {
 .muse-composer-card {
     background: #1e1e1e;
     border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 22px;
-    padding: 10px 10px 8px;
+    border-radius: 24px;
+    padding: 12px 12px 10px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
