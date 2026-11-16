@@ -42,6 +42,12 @@ fn main() {
 /// built on first visit, never up front -- eager construction of
 /// every surface is what made the old shell slow to first paint.
 fn build_ui(app: &adw::Application) {
+    // Mac parity first: the Mac client is light, so the app is light
+    // regardless of the system theme. Dark mode comes later. This
+    // must run after Adwaita initializes -- the default style manager
+    // panics before the application exists.
+    app.style_manager()
+        .set_color_scheme(adw::ColorScheme::ForceLight);
     // Permanent cold-start probe: build timestamp vs first present, so a
     // startup-cost regression shows up in logs instead of as a complaint.
     let started = std::time::Instant::now();
