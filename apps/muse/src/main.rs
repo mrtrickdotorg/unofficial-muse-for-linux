@@ -33,12 +33,21 @@ fn build_ui(app: &adw::Application) {
     // Permanent cold-start probe: build timestamp vs first present, so a
     // startup-cost regression shows up in logs instead of as a complaint.
     let started = std::time::Instant::now();
-    let window = adw::ApplicationWindow::builder()
+    // Plain ApplicationWindow: AdwApplicationWindow refuses a manually
+    // set titlebar, and without one the window has no drag handle or
+    // window controls.
+    let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .title("Muse")
         .default_width(DEFAULT_WINDOW_WIDTH)
         .default_height(DEFAULT_WINDOW_HEIGHT)
         .build();
+    // Client-side decorations: without a titlebar the window has no
+    // drag handle, no resize grip, and no min/max buttons -- it sits
+    // stuck wherever the compositor puts it.
+    let header = adw::HeaderBar::new();
+    header.set_title_widget(Some(&gtk4::Label::new(Some("Muse"))));
+    window.set_titlebar(Some(&header));
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
     let linked = session::load_saved_link().filter(|link| link.consent);
     if linked.is_some() {
@@ -48,7 +57,7 @@ fn build_ui(app: &adw::Application) {
         eprintln!("muse: no saved link, showing sign-in");
         show_signin(&split);
     }
-    window.set_content(Some(&split));
+    window.set_child(Some(&split));
     window.present();
     eprintln!(
         "muse cold-start: first present {:?} after build",
