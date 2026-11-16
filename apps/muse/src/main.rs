@@ -3,12 +3,15 @@
 //! navigation skeleton with a cold-start budget (first paint fast,
 //! pages built lazily).
 
+use std::rc::Rc;
+
 use adw::prelude::*;
 
 mod app;
 mod chat;
 mod chat_view;
 mod composer;
+mod pages;
 mod session;
 mod signin;
 
@@ -22,8 +25,8 @@ fn main() {
     app.run();
 }
 
-/// Shell only: sidebar navigation plus an empty content stack. Pages
-/// are built on first visit, never up front -- eager construction of
+/// Shell only: sidebar navigation plus a content stack. Pages are
+/// built on first visit, never up front -- eager construction of
 /// every surface is what made the old shell slow to first paint.
 fn build_ui(app: &adw::Application) {
     // Permanent cold-start probe: build timestamp vs first present, so a
@@ -36,37 +39,13 @@ fn build_ui(app: &adw::Application) {
         .default_height(DEFAULT_WINDOW_HEIGHT)
         .build();
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
-    let sidebar = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    for name in ["Chat", "Tasks", "Library", "Feed", "Memory", "Settings"] {
-        let row = gtk4::Label::new(Some(name));
-        row.set_halign(gtk4::Align::Start);
-        sidebar.append(&row);
-    }
-    split.set_sidebar(Some(&sidebar));
-    // Transcript structure is built eagerly (cheap widgets); history
-    // rows fill in lazily when the first read lands.
     let linked = session::load_saved_link().filter(|link| link.consent);
     if linked.is_some() {
         eprintln!("muse: saved link found, opening chat");
-        let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        let chat = app::Chat::install(&page);
-        // App-lifetime singleton: the signal handlers and idle sources
-        // hold only weak references, so the strong reference lives here,
-        // leaked for the life of the process.
-        std::mem::forget(chat);
-        split.set_content(Some(&page));
+        show_main(&split);
     } else {
         eprintln!("muse: no saved link, showing sign-in");
-        let form = signin::SignIn::build({
-            let split = split.clone();
-            move |_| {
-                let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-                let chat = app::Chat::install(&page);
-                std::mem::forget(chat);
-                split.set_content(Some(&page));
-            }
-        });
-        split.set_content(Some(form.widget()));
+        show_signin(&split);
     }
     window.set_content(Some(&split));
     window.present();
@@ -74,4 +53,64 @@ fn build_ui(app: &adw::Application) {
         "muse cold-start: first present {:?} after build",
         started.elapsed()
     );
+}
+
+/// The main surface: sidebar plus a lazily-filled page stack. Only the
+/// chat page builds up front (cheap widgets); every other page builds
+/// on first visit and refills on every visit.
+fn show_main(split: &adw::OverlaySplitView) {
+    split.set_show_sidebar(true);
+    let sidebar = gtk4::ListBox::new();
+    for name in pages::PAGES {
+        let row = gtk4::ListBoxRow::new();
+        let label = gtk4::Label::new(Some(pages::title(name)));
+        label.set_halign(gtk4::Align::Start);
+        row.set_child(Some(&label));
+        sidebar.append(&row);
+    }
+    split.set_sidebar(Some(&sidebar));
+    let stack = gtk4::Stack::new();
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    let chat_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    stack.add_named(&chat_box, Some("chat"));
+    let chat = app::Chat::install(&chat_box);
+    // App-lifetime singletons: the signal handlers and idle sources
+    // hold only weak references, so the strong references live here,
+    // leaked for the life of the process.
+    let weak_chat = Rc::downgrade(&chat);
+    std::mem::forget(chat);
+    split.set_content(Some(&stack));
+    let ctx = pages::Ctx {
+        chat: weak_chat,
+        stack: stack.clone(),
+        sidebar: sidebar.clone(),
+        show_signin: {
+            let split = split.clone();
+            Rc::new(move || show_signin(&split))
+        },
+    };
+    let ctx = Rc::new(ctx);
+    sidebar.connect_row_selected(move |_, row| {
+        let Some(row) = row else { return };
+        let index = row.index();
+        if let Some(name) = pages::PAGES.get(index as usize) {
+            pages::show(&ctx, name);
+        }
+    });
+    stack.set_visible_child_name("chat");
+    if let Some(first) = sidebar.row_at_index(0) {
+        sidebar.select_row(Some(&first));
+    }
+}
+
+/// The sign-in screen, shown with no usable saved link and after an
+/// explicit sign-out. A linked form swaps back to the main surface.
+fn show_signin(split: &adw::OverlaySplitView) {
+    split.set_show_sidebar(false);
+    let form = signin::SignIn::build({
+        let split = split.clone();
+        move |_| show_main(&split)
+    });
+    split.set_content(Some(form.widget()));
 }

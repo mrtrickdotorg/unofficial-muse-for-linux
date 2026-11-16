@@ -90,6 +90,7 @@ pub struct Chat {
     on_option: RefCell<Option<OptionCallback>>,
     notice: gtk4::Label,
     armed_delete: RefCell<Option<String>>,
+    thread: RefCell<Option<String>>,
 }
 
 impl Chat {
@@ -109,6 +110,7 @@ impl Chat {
                 notice
             },
             armed_delete: RefCell::new(None),
+            thread: RefCell::new(None),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -278,6 +280,34 @@ impl Chat {
         }
     }
 
+    /// The open thread's scope for service calls, if any.
+    fn thread_scope(&self) -> Option<String> {
+        self.thread.borrow().clone()
+    }
+
+    /// The linked account's thread listing, for the threads page.
+    pub fn threads(&self) -> Vec<muse_account::Thread> {
+        self.session
+            .borrow()
+            .account
+            .clone()
+            .map(|account| account.threads)
+            .unwrap_or_default()
+    }
+
+    /// Switch the open thread: the held rows clear (they belong to the
+    /// old thread) and the new thread loads. Never mixes two threads'
+    /// rows in one transcript.
+    pub fn switch_thread(self: &Rc<Self>, thread: Option<String>) {
+        *self.thread.borrow_mut() = thread;
+        self.session.borrow_mut().history.clear();
+        self.session.borrow_mut().latest_quota = None;
+        *self.older_exhausted.borrow_mut() = false;
+        *self.armed_delete.borrow_mut() = None;
+        self.render();
+        self.reload_history();
+    }
+
     /// Link the saved account and load the transcript: connect proves
     /// the link, history fills the rows. Each step holds the ticket
     /// slot only while its own read is in flight.
@@ -371,11 +401,14 @@ impl Chat {
             .account
             .clone()
             .map(|account| (account.vm_id.clone(), account.identity_name.clone()));
+        let scope = self.thread_scope();
         dispatch(
             self,
             move || match verified {
-                Some((vm_id, identity)) => client.send_verified(None, &draft, &vm_id, &identity),
-                None => client.send(None, &draft),
+                Some((vm_id, identity)) => {
+                    client.send_verified(scope.as_deref(), &draft, &vm_id, &identity)
+                }
+                None => client.send(scope.as_deref(), &draft),
             },
             move |chat, answer| {
                 chat.session.borrow_mut().accept(&ticket);
@@ -487,9 +520,10 @@ impl Chat {
             return;
         };
         self.refresh_older();
+        let scope = self.thread_scope();
         dispatch(
             self,
-            move || client.history_window(None, anchor, 20, 1),
+            move || client.history_window(scope.as_deref(), anchor, 20, 1),
             move |chat, answer| match answer {
                 Ok(window) => {
                     if chat.session.borrow_mut().accept(&ticket) {
@@ -515,9 +549,10 @@ impl Chat {
             self.session.borrow_mut().accept(&ticket);
             return;
         };
+        let scope = self.thread_scope();
         dispatch(
             self,
-            move || client.history(None, 32),
+            move || client.history(scope.as_deref(), 32),
             move |chat, answer| {
                 if chat.session.borrow_mut().finish_history(&ticket, answer) {
                     chat.render();
