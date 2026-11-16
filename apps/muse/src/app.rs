@@ -109,10 +109,11 @@ pub struct Chat {
     notice: gtk4::Label,
     send_note: RefCell<Option<String>>,
     armed_delete: RefCell<Option<String>>,
-    painted: RefCell<Option<(usize, Option<String>)>>,
+    painted: RefCell<Option<(usize, Option<String>, u64)>>,
     thread: RefCell<Option<String>>,
     model_combo: gtk4::ComboBoxText,
     recording: RefCell<Option<super::voice::Recording>>,
+    preview_fetch: RefCell<bool>,
 }
 
 impl Chat {
@@ -165,6 +166,7 @@ impl Chat {
             thread: RefCell::new(None),
             model_combo,
             recording: RefCell::new(None),
+            preview_fetch: RefCell::new(false),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -396,6 +398,81 @@ impl Chat {
         });
     }
 
+    /// Link cards resolve off the main thread: the first few urls in
+    /// assistant messages that hold no card yet fetch in one worker.
+    /// Arrivals land in the session and bump its version, which
+    /// repaints their rows; failures leave the text-only row standing.
+    fn fetch_previews(self: &Rc<Self>) {
+        if *self.preview_fetch.borrow() {
+            return;
+        }
+        let missing: Vec<String> = {
+            let session = self.session.borrow();
+            let mut missing = Vec::new();
+            for message in session.history.iter().rev() {
+                if missing.len() >= 4 {
+                    break;
+                }
+                if message.role.as_str() == "user" {
+                    continue;
+                }
+                for link in super::chat::extract_links(&message.text, 2) {
+                    if missing.len() >= 4 {
+                        break;
+                    }
+                    if !session.previews.contains_key(&link)
+                        && !missing.iter().any(|known| known == &link)
+                    {
+                        missing.push(link);
+                    }
+                }
+            }
+            missing
+        };
+        if missing.is_empty() {
+            return;
+        }
+        let Some(client) = self.client.borrow().clone() else {
+            return;
+        };
+        *self.preview_fetch.borrow_mut() = true;
+        dispatch(
+            self,
+            move || {
+                let mut filled = Vec::new();
+                for url in missing {
+                    let Ok(preview) = client.preview_link(&url) else {
+                        continue;
+                    };
+                    let thumb = preview
+                        .image_url
+                        .as_deref()
+                        .and_then(super::images::fetch_hero);
+                    filled.push((url, preview, thumb));
+                }
+                filled
+            },
+            move |chat,
+                  filled: Vec<(
+                String,
+                muse_account::LinkPreview,
+                Option<std::path::PathBuf>,
+            )>| {
+                *chat.preview_fetch.borrow_mut() = false;
+                if filled.is_empty() {
+                    return;
+                }
+                {
+                    let mut session = chat.session.borrow_mut();
+                    for (url, preview, thumb) in filled {
+                        session.previews.insert(url, (preview, thumb));
+                    }
+                    session.preview_version += 1;
+                }
+                chat.render();
+            },
+        );
+    }
     /// True when the transcript shows its newest row: a repaint may
     /// follow to the bottom. Otherwise the reader is back-reading and
     /// the repaint holds still instead of yanking them down.
@@ -409,7 +486,7 @@ impl Chat {
     /// can never disagree with the rows. Follows to the newest row
     /// when the reader was already there; opening a thread lands at
     /// the bottom because a cleared transcript starts at the bottom.
-    fn render(&self) {
+    fn render(self: &Rc<Self>) {
         let follow = self.at_bottom();
         let fingerprint = self.session.borrow().history_fingerprint();
         // Unchanged history means identical rows: skip the full
@@ -417,16 +494,27 @@ impl Chat {
         // ListBox reconstruction is what stalled long threads.
         if *self.painted.borrow() != Some(fingerprint.clone()) {
             if let Some(on_option) = self.on_option.borrow().clone() {
-                let rows = build_rows(&self.session.borrow().history);
-                for row in &rows {
-                    if let super::chat::TranscriptRow::Notice { text } = row {
-                        self.session.borrow_mut().note_quota(text.clone());
-                    }
+                let session = self.session.borrow();
+                let rows = build_rows(&session.history);
+                let quotas: Vec<String> = rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        super::chat::TranscriptRow::Notice { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let previews = session.previews.clone();
+                drop(session);
+                for text in quotas {
+                    self.session.borrow_mut().note_quota(text);
                 }
-                populate(&self.transcript, &rows, &on_option);
+                populate(&self.transcript, &rows, &on_option, &previews);
             }
             *self.painted.borrow_mut() = Some(fingerprint);
         }
+        // Link cards resolve a render behind: the row shows text-only
+        // first, the card version repaints when the fetch lands.
+        self.fetch_previews();
         self.refresh_older();
         self.refresh_notice();
         self.refresh_title();

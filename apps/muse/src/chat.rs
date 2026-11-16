@@ -45,6 +45,30 @@ pub enum TranscriptRow {
     Notice { text: String },
 }
 
+/// Links worth a Mac-style preview card, pulled from an assistant
+/// message's text. Plain token scan, no regex crate: whitespace
+/// split, trailing punctuation stripped, http(s) only, deduped and
+/// capped. Pure, so the capping and trimming are unit-tested.
+pub fn extract_links(text: &str, cap: usize) -> Vec<String> {
+    let mut links = Vec::new();
+    for token in text.split_whitespace() {
+        if links.len() >= cap {
+            break;
+        }
+        let trimmed = token
+            .trim_matches(|mark: char| ".,;:!?)]}'\"".contains(mark))
+            .trim_start_matches('(')
+            .trim_start_matches('<');
+        if (trimmed.starts_with("https://") || trimmed.starts_with("http://"))
+            && trimmed.len() <= 2048
+            && !links.iter().any(|known| known == trimmed)
+        {
+            links.push(trimmed.to_owned());
+        }
+    }
+    links
+}
+
 /// The shipped usage-limit sentence, recognized case-insensitively by its
 /// three load-bearing phrases. Ported from the shipped client's quota
 /// fallback: the notice must surface on every at-limit send.
@@ -102,6 +126,29 @@ pub fn build_rows(history: &[HistoryMessage]) -> Vec<TranscriptRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_extraction_trims_caps_and_dedupes() {
+        assert!(extract_links("no links here", 2).is_empty());
+        assert_eq!(
+            extract_links("see (https://example.com/a).", 2),
+            vec!["https://example.com/a".to_owned()]
+        );
+        assert_eq!(
+            extract_links(
+                "https://a.example/x https://a.example/x http://b.example/y",
+                2
+            ),
+            vec![
+                "https://a.example/x".to_owned(),
+                "http://b.example/y".to_owned()
+            ]
+        );
+        assert_eq!(
+            extract_links("ftp://c.example/z https://d.example/w", 5),
+            vec!["https://d.example/w".to_owned()]
+        );
+    }
 
     fn message(id: &str, role: &str, text: &str, timestamp: Option<&str>) -> HistoryMessage {
         HistoryMessage {

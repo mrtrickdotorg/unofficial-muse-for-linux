@@ -97,3 +97,17 @@
     min-height: 28px;
     font-weight: bold;
 }
+
+/* The Mac panel's link cards: white, blue-edged, rounded, thumbnail
+ * on the left and the title above the source line. */
+.muse-link-card {
+    background: #ffffff;
+    border: 1px solid #c9d9fb;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.muse-link-title {
+    font-weight: bold;
+    color: #1c1e21;
+}

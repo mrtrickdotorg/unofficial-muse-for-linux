@@ -12,8 +12,17 @@ use muse_account::MessageAttachment;
 
 use super::chat::{Role, TranscriptRow};
 
-/// One rendered row, ready to append to the transcript list.
-pub fn row_widget(row: &TranscriptRow, on_option: &std::rc::Rc<dyn Fn(String)>) -> gtk4::Widget {
+/// One rendered row, ready to append to the transcript list. Held link
+/// cards ride along so an assistant row paints its previews with the
+/// row; urls with no held card stay text-only until a fetch lands.
+pub fn row_widget(
+    row: &TranscriptRow,
+    on_option: &std::rc::Rc<dyn Fn(String)>,
+    previews: &std::collections::HashMap<
+        String,
+        (muse_account::LinkPreview, Option<std::path::PathBuf>),
+    >,
+) -> gtk4::Widget {
     match row {
         TranscriptRow::DayDivider { label } => {
             let widget = gtk4::Label::new(Some(label));
@@ -29,7 +38,7 @@ pub fn row_widget(row: &TranscriptRow, on_option: &std::rc::Rc<dyn Fn(String)>) 
             options,
             attachments,
             ..
-        } => message_widget(role, text, options, attachments, on_option),
+        } => message_widget(role, text, options, attachments, on_option, previews),
         TranscriptRow::Notice { text } => {
             let widget = gtk4::Label::new(Some(text));
             widget.set_halign(gtk4::Align::Center);
@@ -48,6 +57,10 @@ fn message_widget(
     options: &[String],
     attachments: &[MessageAttachment],
     on_option: &std::rc::Rc<dyn Fn(String)>,
+    previews: &std::collections::HashMap<
+        String,
+        (muse_account::LinkPreview, Option<std::path::PathBuf>),
+    >,
 ) -> gtk4::Widget {
     let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     match role {
@@ -86,6 +99,16 @@ fn message_widget(
     for attachment in attachments {
         column.append(&attachment_card(attachment));
     }
+    // The Mac panel cards linked pages under the assistant's words.
+    // Only held cards paint: a url with no fetched card stays a plain
+    // link in the text until its fetch lands and repaints the row.
+    if !matches!(role, Role::User) {
+        for link in super::chat::extract_links(text, 2) {
+            if let Some((preview, thumb)) = previews.get(&link) {
+                column.append(&link_card(preview, &link, thumb.as_deref()));
+            }
+        }
+    }
     column.upcast()
 }
 
@@ -116,17 +139,64 @@ pub fn attachment_card(attachment: &MessageAttachment) -> gtk4::Widget {
     card.upcast()
 }
 
+/// One link-preview card: the thumbnail when its artwork fetched,
+/// then the title, the description, and the url. A thin answer is a
+/// thin card: whatever fields are missing simply do not paint.
+pub fn link_card(
+    preview: &muse_account::LinkPreview,
+    link: &str,
+    thumb: Option<&std::path::Path>,
+) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    card.add_css_class("muse-link-card");
+    if let Some(path) = thumb {
+        let picture = gtk4::Picture::for_filename(path);
+        picture.set_size_request(96, 96);
+        picture.set_can_shrink(true);
+        card.append(&picture);
+    }
+    let facts = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    facts.set_hexpand(true);
+    let title = preview.title.as_deref().unwrap_or(link);
+    let headline = gtk4::Label::new(Some(title));
+    headline.set_xalign(0.0);
+    headline.set_wrap(true);
+    headline.add_css_class("muse-link-title");
+    facts.append(&headline);
+    if let Some(description) = preview.description.as_deref()
+        && !description.is_empty()
+    {
+        let blurb = gtk4::Label::new(Some(description));
+        blurb.set_xalign(0.0);
+        blurb.set_wrap(true);
+        blurb.set_lines(3);
+        blurb.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        facts.append(&blurb);
+    }
+    let source = gtk4::Label::new(Some(preview.site_name.as_deref().unwrap_or(link)));
+    source.set_xalign(0.0);
+    source.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    source.add_css_class("dim-label");
+    facts.append(&source);
+    card.append(&facts);
+    card.upcast()
+}
+
 /// Replace the transcript list contents with freshly built rows.
 pub fn populate(
     list: &gtk4::ListBox,
     rows: &[TranscriptRow],
     on_option: &std::rc::Rc<dyn Fn(String)>,
+    previews: &std::collections::HashMap<
+        String,
+        (muse_account::LinkPreview, Option<std::path::PathBuf>),
+    >,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
     for row in rows {
-        list.append(&row_widget(row, on_option));
+        list.append(&row_widget(row, on_option, previews));
     }
 }
 
@@ -159,7 +229,8 @@ mod tests {
         let rows = build_rows(&history());
         let list = gtk4::ListBox::new();
         let on_option: std::rc::Rc<dyn Fn(String)> = std::rc::Rc::new(|_| {});
-        populate(&list, &rows, &on_option);
+        let previews = std::collections::HashMap::new();
+        populate(&list, &rows, &on_option, &previews);
         let mut count = 0;
         let mut child = list.first_child();
         while child.is_some() {
@@ -182,5 +253,23 @@ mod tests {
         assert!(!built.send.is_visible());
         assert!(built.stop.is_sensitive());
         assert!(built.stop.is_visible());
+
+        // A held card paints beside the row; a thin answer paints
+        // only what it carries.
+        let preview = muse_account::LinkPreview {
+            title: Some("Ovenbird Cookware".to_owned()),
+            description: Some("Cast iron goods".to_owned()),
+            image_url: None,
+            url: Some("https://example.com/pot".to_owned()),
+            site_name: Some("example.com".to_owned()),
+            keys: vec!["title".to_owned()],
+        };
+        let card = link_card(&preview, "https://example.com/pot", None);
+        let facts = card
+            .downcast::<gtk4::Box>()
+            .expect("card is a box")
+            .last_child()
+            .expect("card has facts");
+        assert!(facts.first_child().is_some());
     }
 }
