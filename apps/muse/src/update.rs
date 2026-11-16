@@ -188,16 +188,43 @@ pub fn download_staged(info: &ReleaseInfo) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-/// Relaunch from the staged file: spawn it detached and stop this
-/// process. The staged file stays in the cache dir; the next update
-/// overwrites it.
-pub fn relaunch(staged: &Path) -> ! {
-    let _ = std::process::Command::new(staged)
+/// Relaunch from the staged file, verified: the new process must
+/// still be alive a few seconds after spawn before this one exits.
+/// Exiting into a failed launch is exactly the "go find the AppImage"
+/// outcome this exists to prevent. The staged file stays in the cache
+/// dir; the next update overwrites it. Blocking; run on a worker.
+pub fn relaunch_verified(staged: &Path) -> Result<(), String> {
+    let mut child = std::process::Command::new(staged)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
-    std::process::exit(0);
+        .spawn()
+        .map_err(|_| {
+            "Could not start the updated app. It is staged and executable — see the path below."
+                .to_string()
+        })?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        match child.try_wait() {
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "The updated app exited during startup ({status}). This copy keeps running; the staged file is below."
+                ));
+            }
+            Err(_) => {
+                return Err(
+                    "Could not confirm the updated app started. This copy keeps running."
+                        .to_string(),
+                );
+            }
+        }
+    }
 }
 
 /// The updates panel state, shared by the settings page builds.
