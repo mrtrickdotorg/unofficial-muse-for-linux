@@ -54,6 +54,9 @@ where
     });
 }
 
+/// An option button's press, delivered as the reader's next message.
+type OptionCallback = std::rc::Rc<dyn Fn(String)>;
+
 /// Shared chat state: the session plus every widget a completion
 /// touches. Reference-counted because idle callbacks own it.
 pub struct Chat {
@@ -62,6 +65,9 @@ pub struct Chat {
     transcript: gtk4::ListBox,
     composer_row: ComposerRow,
     client: RefCell<Option<AccountClient>>,
+    older_button: gtk4::Button,
+    older_exhausted: RefCell<bool>,
+    on_option: RefCell<Option<OptionCallback>>,
 }
 
 impl Chat {
@@ -72,7 +78,18 @@ impl Chat {
             transcript,
             composer_row,
             client: RefCell::new(None),
+            older_button: gtk4::Button::with_label("Load older"),
+            older_exhausted: RefCell::new(false),
+            on_option: RefCell::new(None),
         });
+        let weak = Rc::downgrade(&chat);
+        *chat.on_option.borrow_mut() = Some(std::rc::Rc::new(move |text: String| {
+            if let Some(chat) = weak.upgrade() {
+                // An option press sends its text as the reader's next
+                // message -- the same single-press path as the composer.
+                chat.send_text(text);
+            }
+        }) as OptionCallback);
         chat.wire();
         chat
     }
@@ -89,9 +106,20 @@ impl Chat {
             .hexpand(true)
             .build();
         let composer_row = ComposerRow::build();
-        content.append(&scrolled);
-        content.append(composer_row.widget());
         let chat = Self::build(transcript, composer_row);
+        chat.older_button.set_halign(gtk4::Align::Center);
+        {
+            let weak = Rc::downgrade(&chat);
+            chat.older_button.connect_clicked(move |_| {
+                if let Some(chat) = weak.upgrade() {
+                    chat.load_older();
+                }
+            });
+        }
+        chat.refresh_older();
+        content.append(&chat.older_button);
+        content.append(&scrolled);
+        content.append(chat.composer_row.widget());
         if let Some(link) = load_saved_link()
             && link.consent
         {
@@ -135,6 +163,33 @@ impl Chat {
         self.composer_row.refresh(&self.composer.borrow());
     }
 
+    /// Rebuild the transcript rows from the held history. The single
+    /// place completions repaint, so option presses and attachments
+    /// can never disagree with the rows.
+    fn render(&self) {
+        if let Some(on_option) = self.on_option.borrow().clone() {
+            let rows = build_rows(&self.session.borrow().history);
+            populate(&self.transcript, &rows, &on_option);
+        }
+        self.refresh_older();
+    }
+
+    /// The older button names its own state: loading, exhausted, or
+    /// ready. Never a second dispatch while one is in flight.
+    fn refresh_older(&self) {
+        if *self.older_exhausted.borrow() {
+            self.older_button.set_label("No older messages");
+            self.older_button.set_sensitive(false);
+        } else if self.session.borrow().is_busy() {
+            self.older_button.set_label("Loading older\u{2026}");
+            self.older_button.set_sensitive(false);
+        } else {
+            self.older_button.set_label("Load older");
+            self.older_button
+                .set_sensitive(self.client.borrow().is_some());
+        }
+    }
+
     /// Link the saved account and load the transcript: connect proves
     /// the link, history fills the rows. Each step holds the ticket
     /// slot only while its own read is in flight.
@@ -170,6 +225,13 @@ impl Chat {
         };
         self.composer_row.entry.set_text("");
         self.composer_row.refresh(&self.composer.borrow());
+        self.send_text(draft);
+    }
+
+    /// Dispatch one message text: the composer's draft or an option
+    /// button's text. One press dispatches once; a press while the
+    /// slot is held releases the composer instead of queueing.
+    fn send_text(self: &Rc<Self>, draft: String) {
         let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
             Some(ticket) => ticket,
             None => {
@@ -194,6 +256,24 @@ impl Chat {
                 if answer.is_ok() {
                     // Prove by re-read: the reply (or the limit notice)
                     // comes from the service, never from the dispatch.
+                    // A short quick-poll burst (5 x 2s) watches the reply
+                    // land; the 8s poll resumes after. Each round no-ops
+                    // while the slot is held.
+                    let weak = Rc::downgrade(chat);
+                    let rounds: std::rc::Rc<std::cell::Cell<u8>> =
+                        std::rc::Rc::new(std::cell::Cell::new(5));
+                    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+                        let left = rounds.get();
+                        rounds.set(left.saturating_sub(1));
+                        if let Some(chat) = weak.upgrade() {
+                            chat.reload_history();
+                        }
+                        if left > 1 {
+                            glib::ControlFlow::Continue
+                        } else {
+                            glib::ControlFlow::Break
+                        }
+                    });
                     chat.reload_history();
                 }
             },
@@ -211,6 +291,49 @@ impl Chat {
         }
     }
 
+    /// Page one older window past what is loaded, anchored at the
+    /// oldest held row. The window merges ahead of the transcript; the
+    /// reader's place is left alone.
+    fn load_older(self: &Rc<Self>) {
+        let anchor = match self
+            .session
+            .borrow()
+            .history
+            .iter()
+            .map(|row| row.seq)
+            .min()
+        {
+            Some(anchor) => anchor,
+            None => return,
+        };
+        let ticket = match self.session.borrow_mut().try_begin(Op::History) {
+            Some(ticket) => ticket,
+            None => return,
+        };
+        let Some(client) = self.client.borrow().clone() else {
+            self.session.borrow_mut().accept(&ticket);
+            return;
+        };
+        self.refresh_older();
+        dispatch(
+            self,
+            move || client.history_window(None, anchor, 20, 1),
+            move |chat, answer| match answer {
+                Ok(window) => {
+                    if chat.session.borrow_mut().accept(&ticket) {
+                        *chat.older_exhausted.borrow_mut() = !window.has_older;
+                        chat.session.borrow_mut().prepend_history(window.messages);
+                        chat.render();
+                    }
+                }
+                Err(_) => {
+                    chat.session.borrow_mut().accept(&ticket);
+                    chat.refresh_older();
+                }
+            },
+        );
+    }
+
     fn reload_history(self: &Rc<Self>) {
         let ticket = match self.session.borrow_mut().try_begin(Op::History) {
             Some(ticket) => ticket,
@@ -225,8 +348,7 @@ impl Chat {
             move || client.history(None, 32),
             move |chat, answer| {
                 if chat.session.borrow_mut().finish_history(&ticket, answer) {
-                    let rows = build_rows(&chat.session.borrow().history);
-                    populate(&chat.transcript, &rows);
+                    chat.render();
                 }
             },
         );

@@ -13,7 +13,7 @@ use muse_account::MessageAttachment;
 use super::chat::{Role, TranscriptRow};
 
 /// One rendered row, ready to append to the transcript list.
-pub fn row_widget(row: &TranscriptRow) -> gtk4::Widget {
+pub fn row_widget(row: &TranscriptRow, on_option: &std::rc::Rc<dyn Fn(String)>) -> gtk4::Widget {
     match row {
         TranscriptRow::DayDivider { label } => {
             let widget = gtk4::Label::new(Some(label));
@@ -27,8 +27,9 @@ pub fn row_widget(row: &TranscriptRow) -> gtk4::Widget {
             role,
             text,
             options,
+            attachments,
             ..
-        } => message_widget(role, text, options),
+        } => message_widget(role, text, options, attachments, on_option),
         TranscriptRow::Notice { text } => {
             let widget = gtk4::Label::new(Some(text));
             widget.set_halign(gtk4::Align::Center);
@@ -41,7 +42,13 @@ pub fn row_widget(row: &TranscriptRow) -> gtk4::Widget {
     }
 }
 
-fn message_widget(role: &Role, text: &str, options: &[String]) -> gtk4::Widget {
+fn message_widget(
+    role: &Role,
+    text: &str,
+    options: &[String],
+    attachments: &[MessageAttachment],
+    on_option: &std::rc::Rc<dyn Fn(String)>,
+) -> gtk4::Widget {
     let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     match role {
         Role::User => column.set_halign(gtk4::Align::End),
@@ -62,9 +69,15 @@ fn message_widget(role: &Role, text: &str, options: &[String]) -> gtk4::Widget {
         choices.set_max_children_per_line(4);
         for option in options {
             let button = gtk4::Button::with_label(option);
+            let callback = on_option.clone();
+            let text = option.clone();
+            button.connect_clicked(move |_| callback(text.clone()));
             choices.append(&button);
         }
         column.append(&choices);
+    }
+    for attachment in attachments {
+        column.append(&attachment_card(attachment));
     }
     column.upcast()
 }
@@ -87,12 +100,16 @@ pub fn attachment_card(attachment: &MessageAttachment) -> gtk4::Widget {
 }
 
 /// Replace the transcript list contents with freshly built rows.
-pub fn populate(list: &gtk4::ListBox, rows: &[TranscriptRow]) {
+pub fn populate(
+    list: &gtk4::ListBox,
+    rows: &[TranscriptRow],
+    on_option: &std::rc::Rc<dyn Fn(String)>,
+) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
     for row in rows {
-        list.append(&row_widget(row));
+        list.append(&row_widget(row, on_option));
     }
 }
 
@@ -124,7 +141,8 @@ mod tests {
         gtk4::init().expect("gtk init");
         let rows = build_rows(&history());
         let list = gtk4::ListBox::new();
-        populate(&list, &rows);
+        let on_option: std::rc::Rc<dyn Fn(String)> = std::rc::Rc::new(|_| {});
+        populate(&list, &rows, &on_option);
         let mut count = 0;
         let mut child = list.first_child();
         while child.is_some() {

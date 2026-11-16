@@ -157,6 +157,11 @@ impl Session {
         }
     }
 
+    /// True while any read holds the slot.
+    pub fn is_busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
     /// Take the in-flight slot for one read. A second press while the
     /// slot is held gets nothing -- it waits instead of dispatching
     /// twice.
@@ -211,6 +216,26 @@ impl Session {
             }
             Err(_) => false,
         }
+    }
+
+    /// Prepend an older window ahead of the loaded rows, dropping rows
+    /// already held. Used by Load-older; the ticket discipline is the
+    /// caller's (the window read holds the History slot).
+    pub fn prepend_history(&mut self, rows: Vec<muse_account::HistoryMessage>) {
+        use std::collections::HashSet;
+        let known: HashSet<&str> = self
+            .history
+            .iter()
+            .map(|row| row.message_id.as_str())
+            .collect();
+        let fresh: Vec<_> = rows
+            .into_iter()
+            .filter(|row| !known.contains(row.message_id.as_str()))
+            .collect();
+        let mut combined = Vec::with_capacity(fresh.len() + self.history.len());
+        combined.extend(fresh);
+        combined.append(&mut self.history);
+        self.history = combined;
     }
 
     /// Record a finished history read: the rows land only on success.
@@ -503,6 +528,33 @@ mod tests {
         );
         std::fs::remove_dir_all(&old).ok();
         std::fs::remove_dir_all(&new).ok();
+    }
+
+    fn history_row(id: &str, seq: u64) -> muse_account::HistoryMessage {
+        muse_account::HistoryMessage {
+            message_id: id.to_owned(),
+            seq,
+            role: "user".to_owned(),
+            text: id.to_owned(),
+            timestamp: None,
+            status: None,
+            options: Vec::new(),
+            selected_option: None,
+            attachments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn older_windows_prepend_without_duplicating_held_rows() {
+        let mut session = Session::new();
+        session.history = vec![history_row("b", 2), history_row("c", 3)];
+        session.prepend_history(vec![history_row("a", 1), history_row("b", 2)]);
+        let ids: Vec<&str> = session
+            .history
+            .iter()
+            .map(|row| row.message_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
     }
 
     #[test]
