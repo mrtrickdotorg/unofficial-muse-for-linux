@@ -581,18 +581,18 @@ fn do_check(ctx: &Ctx, page: &gtk4::Box) {
     });
     let ctx = ctx.clone();
     let page_strong: gtk4::Box = page.clone();
-    glib::idle_add_local(move || {
+    gtk4::glib::idle_add_local(move || {
         let answer = match done_rx.try_recv() {
             Ok(answer) => answer,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                return glib::ControlFlow::Continue;
+                return gtk4::glib::ControlFlow::Continue;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 let mut state = ctx.updates.borrow_mut();
                 state.busy = false;
                 state.status = "Update check stopped without an answer.".to_owned();
                 paint_updates(&ctx, &page_strong);
-                return glib::ControlFlow::Break;
+                return gtk4::glib::ControlFlow::Break;
             }
         };
         {
@@ -616,7 +616,7 @@ fn do_check(ctx: &Ctx, page: &gtk4::Box) {
             }
         }
         paint_updates(&ctx, &page_strong);
-        glib::ControlFlow::Break
+        gtk4::glib::ControlFlow::Break
     });
 }
 
@@ -648,18 +648,18 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
         });
         let ctx = ctx.clone();
         let page_strong: gtk4::Box = page.clone();
-        glib::idle_add_local(move || {
+        gtk4::glib::idle_add_local(move || {
             let answer = match done_rx.try_recv() {
                 Ok(answer) => answer,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    return glib::ControlFlow::Continue;
+                    return gtk4::glib::ControlFlow::Continue;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     let mut state = ctx.updates.borrow_mut();
                     state.busy = false;
                     state.status = "Restart check stopped without an answer.".to_owned();
                     paint_updates(&ctx, &page_strong);
-                    return glib::ControlFlow::Break;
+                    return gtk4::glib::ControlFlow::Break;
                 }
             };
             match answer {
@@ -672,7 +672,7 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
                     paint_updates(&ctx, &page_strong);
                 }
             }
-            glib::ControlFlow::Break
+            gtk4::glib::ControlFlow::Break
         });
         return;
     }
@@ -694,18 +694,18 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
     });
     let ctx = ctx.clone();
     let page_strong: gtk4::Box = page.clone();
-    glib::idle_add_local(move || {
+    gtk4::glib::idle_add_local(move || {
         let answer = match done_rx.try_recv() {
             Ok(answer) => answer,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                return glib::ControlFlow::Continue;
+                return gtk4::glib::ControlFlow::Continue;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 let mut state = ctx.updates.borrow_mut();
                 state.busy = false;
                 state.status = "Update download stopped without an answer.".to_owned();
                 paint_updates(&ctx, &page_strong);
-                return glib::ControlFlow::Break;
+                return gtk4::glib::ControlFlow::Break;
             }
         };
         {
@@ -725,7 +725,7 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
             }
         }
         paint_updates(&ctx, &page_strong);
-        glib::ControlFlow::Break
+        gtk4::glib::ControlFlow::Break
     });
 }
 
