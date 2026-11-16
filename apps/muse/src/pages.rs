@@ -25,6 +25,7 @@ pub struct Ctx {
     pub stack: gtk4::Stack,
     pub sidebar: gtk4::ListBox,
     pub show_signin: Rc<dyn Fn()>,
+    pub updates: Rc<std::cell::RefCell<super::update::UpdateCheck>>,
 }
 
 /// Page names in sidebar order.
@@ -196,6 +197,37 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             info.set_wrap(true);
             info.set_xalign(0.0);
             page.append(&info);
+            let updates_title = gtk4::Label::new(Some("Updates"));
+            updates_title.set_widget_name("updates-title");
+            updates_title.set_xalign(0.0);
+            page.append(&updates_title);
+            let updates_status = gtk4::Label::new(None);
+            updates_status.set_widget_name("updates-status");
+            updates_status.set_wrap(true);
+            updates_status.set_xalign(0.0);
+            page.append(&updates_status);
+            let check = gtk4::Button::with_label("Check for updates");
+            check.set_widget_name("updates-check");
+            page.append(&check);
+            let action = gtk4::Button::with_label("Download update");
+            action.set_widget_name("updates-action");
+            page.append(&action);
+            let ctx_check = ctx.clone();
+            let page_weak = page.downgrade();
+            check.connect_clicked(move |_| {
+                let Some(page) = page_weak.upgrade() else {
+                    return;
+                };
+                do_check(&ctx_check, &page);
+            });
+            let ctx_action = ctx.clone();
+            let page_weak = page.downgrade();
+            action.connect_clicked(move |_| {
+                let Some(page) = page_weak.upgrade() else {
+                    return;
+                };
+                do_update_action(&ctx_action, &page);
+            });
             let sign_out = gtk4::Button::with_label("Sign out");
             page.append(&sign_out);
             let show_signin = ctx.show_signin.clone();
@@ -232,7 +264,7 @@ fn fill(ctx: &Ctx, name: &str) {
         "feed" => fill_feed(ctx, &page),
         "memory" => fill_memory_opt(ctx, &page),
         "policy" => fill_policy(ctx, &page),
-        "settings" => fill_settings(&page),
+        "settings" => fill_settings(ctx, &page),
         _ => {}
     }
 }
@@ -431,7 +463,7 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
     }
 }
 
-fn fill_settings(page: &gtk4::Box) {
+fn fill_settings(ctx: &Ctx, page: &gtk4::Box) {
     let Some(info) = ({
         let mut child = page.first_child();
         let mut found = None;
@@ -454,6 +486,184 @@ fn fill_settings(page: &gtk4::Box) {
         )),
         None => info.set_text("No saved link."),
     }
+    paint_updates(ctx, page);
+    // Check on visit when due: the feed read is cheap and the result
+    // waits on the settings page instead of interrupting anything.
+    if super::update::running_as_appimage()
+        && super::update::check_due(super::update::now_epoch())
+        && !ctx.updates.borrow().busy
+        && ctx.updates.borrow().info.is_none()
+    {
+        do_check(ctx, page);
+    }
+}
+
+/// Paint the updates section from the shared panel state.
+fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
+    let find = |name: &str| {
+        let mut child = page.first_child();
+        let mut found = None;
+        while let Some(widget) = child {
+            if widget.widget_name() == name {
+                found = Some(widget);
+                break;
+            }
+            child = widget.next_sibling();
+        }
+        found
+    };
+    let state = ctx.updates.borrow();
+    if let Some(widget) = find("updates-status")
+        && let Ok(label) = widget.downcast::<gtk4::Label>()
+    {
+        let text = if state.status.is_empty() {
+            if super::update::running_as_appimage() {
+                "Updates come from the rolling AppImage release."
+            } else {
+                "This copy updates through its own channel (store or checkout), not here."
+            }
+        } else {
+            &state.status
+        };
+        label.set_text(text);
+    }
+    if let Some(widget) = find("updates-check")
+        && let Ok(button) = widget.downcast::<gtk4::Button>()
+    {
+        button.set_sensitive(!state.busy && super::update::running_as_appimage());
+    }
+    if let Some(widget) = find("updates-action")
+        && let Ok(button) = widget.downcast::<gtk4::Button>()
+    {
+        if state.staged.is_some() {
+            button.set_label("Relaunch to update");
+            button.set_visible(true);
+            button.set_sensitive(!state.busy);
+        } else if state.info.is_some() {
+            button.set_label("Download update");
+            button.set_visible(true);
+            button.set_sensitive(!state.busy);
+        } else {
+            button.set_visible(false);
+        }
+    }
+}
+
+/// Ask the feed whether a newer build exists. One worker, one answer;
+/// the panel repaints whatever it says, including failures.
+fn do_check(ctx: &Ctx, page: &gtk4::Box) {
+    {
+        let mut state = ctx.updates.borrow_mut();
+        if state.busy {
+            return;
+        }
+        state.busy = true;
+        state.status = "Checking for updates…".to_owned();
+    }
+    paint_updates(ctx, page);
+    let (done_tx, done_rx) =
+        std::sync::mpsc::channel::<Result<super::update::ReleaseInfo, String>>();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(super::update::fetch_latest());
+    });
+    let ctx = ctx.clone();
+    let page_strong: gtk4::Box = page.clone();
+    glib::idle_add_local(move || {
+        let answer = match done_rx.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                return glib::ControlFlow::Continue;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let mut state = ctx.updates.borrow_mut();
+                state.busy = false;
+                state.status = "Update check stopped without an answer.".to_owned();
+                paint_updates(&ctx, &page_strong);
+                return glib::ControlFlow::Break;
+            }
+        };
+        {
+            let mut state = ctx.updates.borrow_mut();
+            state.busy = false;
+            match answer {
+                Ok(info) => {
+                    super::update::note_check_done(super::update::now_epoch());
+                    if super::update::update_available(super::update::local_sha(), &info) {
+                        state.status = "A newer build is available.".to_owned();
+                        state.info = Some(info);
+                    } else {
+                        state.status = "This build is up to date.".to_owned();
+                        state.info = None;
+                    }
+                }
+                Err(message) => {
+                    state.status = message;
+                    state.info = None;
+                }
+            }
+        }
+        paint_updates(&ctx, &page_strong);
+        glib::ControlFlow::Break
+    });
+}
+
+/// The action button: download the staged build, or relaunch into it.
+fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
+    let (info, staged) = {
+        let state = ctx.updates.borrow();
+        (state.info.clone(), state.staged.clone())
+    };
+    if let Some(staged) = staged {
+        super::update::relaunch(&staged);
+    }
+    let Some(info) = info else {
+        return;
+    };
+    {
+        let mut state = ctx.updates.borrow_mut();
+        if state.busy {
+            return;
+        }
+        state.busy = true;
+        state.status = "Downloading the update…".to_owned();
+    }
+    paint_updates(ctx, page);
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<std::path::PathBuf, String>>();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(super::update::download_staged(&info));
+    });
+    let ctx = ctx.clone();
+    let page_strong: gtk4::Box = page.clone();
+    glib::idle_add_local(move || {
+        let answer = match done_rx.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                return glib::ControlFlow::Continue;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let mut state = ctx.updates.borrow_mut();
+                state.busy = false;
+                state.status = "Update download stopped without an answer.".to_owned();
+                paint_updates(&ctx, &page_strong);
+                return glib::ControlFlow::Break;
+            }
+        };
+        {
+            let mut state = ctx.updates.borrow_mut();
+            state.busy = false;
+            match answer {
+                Ok(staged) => {
+                    state.status = "Update downloaded. Relaunch to switch to it.".to_owned();
+                    state.staged = Some(staged);
+                }
+                Err(message) => {
+                    state.status = message;
+                }
+            }
+        }
+        paint_updates(&ctx, &page_strong);
+        glib::ControlFlow::Break
+    });
 }
 
 /// One feed card: the title plus whatever framing the service gave
