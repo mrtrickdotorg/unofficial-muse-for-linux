@@ -9,14 +9,14 @@
 /* App chrome: near-black ground, light text, dark header. */
 window,
 .background {
-    background-color: #0f0f0f;
+    background-color: #0a0a0a;
     color: #e4e6eb;
 }
 
 headerbar {
-    background-color: #141414;
+    background-color: #0a0a0a;
     color: #e4e6eb;
-    border-color: rgba(255, 255, 255, 0.08);
+    border-color: transparent;
 }
 
 listbox {
@@ -63,11 +63,12 @@ button:disabled {
     color: #6e747d;
 }
 
-/* The transcript bed is pure black: only the bubbles stand out in
- * the middle section. The list paints nothing of its own, so the
- * bed shows through between rows. */
+/* The transcript bed matches the app ground exactly: chat window,
+ * left pane, and right pane are one continuous surface, and only
+ * the bubbles stand out in the middle section. The list paints
+ * nothing of its own, so the bed shows through between rows. */
 .muse-transcript {
-    background-color: #000000;
+    background-color: #0a0a0a;
 }
 
 .muse-transcript listbox {
@@ -164,11 +165,11 @@ button:disabled {
     padding: 4px 6px 4px 10px;
 }
 
-/* The sidebar: dark well, lighter pill for the selected row, dim
- * section names, blue avatar dot for the profile. */
+/* The sidebar: one continuous surface with the app ground, lighter
+ * pill for the selected row, dim section names, blue avatar dot. */
 .muse-side {
-    background: #141414;
-    border-radius: 12px;
+    background: #0a0a0a;
+    border-radius: 0;
 }
 
 .muse-side row:selected {
@@ -189,6 +190,16 @@ button:disabled {
     border-radius: 9999px;
     min-width: 28px;
     min-height: 28px;
+    font-weight: bold;
+}
+
+.muse-avatar-small {
+    background: #0084ff;
+    color: #ffffff;
+    border-radius: 9999px;
+    min-width: 22px;
+    min-height: 22px;
+    font-size: 12px;
     font-weight: bold;
 }
 
@@ -232,10 +243,10 @@ button:disabled {
     border-color: transparent;
 }
 
-/* The web's right panel: profile, scheduled tasks, Today. */
+/* The right panel: one continuous surface with the app ground. */
 .muse-panel {
-    background: #141414;
-    border-left: 1px solid rgba(255, 255, 255, 0.08);
+    background: #0a0a0a;
+    border-left: none;
 }
 
 .muse-avatar-large {

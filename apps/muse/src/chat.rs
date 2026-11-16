@@ -31,7 +31,8 @@ impl Role {
 pub enum TranscriptRow {
     /// A day divider heading a group of messages.
     DayDivider { label: String },
-    /// A chat bubble with its attachments and option buttons.
+    /// A chat bubble with its attachments and option buttons. `sent_at`
+    /// carries the service timestamp for the assistant header row.
     Message {
         id: String,
         role: Role,
@@ -39,6 +40,7 @@ pub enum TranscriptRow {
         attachments: Vec<MessageAttachment>,
         options: Vec<String>,
         selected_option: Option<String>,
+        sent_at: Option<String>,
     },
     /// A service notice (usage limit, errors): styled as a notice line,
     /// never as a chat bubble, so it cannot read as a reply.
@@ -248,6 +250,27 @@ fn replace_emphasis(segment: &str) -> String {
     out
 }
 
+/// A service timestamp (`2026-11-16T00:27:11Z`) as the reader reads
+/// it (`12:27 AM`) for the assistant header row. Pure string
+/// shaping: anything unparseable yields nothing, never a panic.
+pub fn format_time(stamp: Option<&str>) -> Option<String> {
+    let stamp = stamp?;
+    let (_, time) = stamp.split_once('T')?;
+    let mut parts = time.split(':');
+    let hour: u32 = parts.next()?.parse().ok()?;
+    let minute: u32 = parts.next()?.parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    let (twelve, meridiem) = match hour {
+        0 => (12, "AM"),
+        1..=11 => (hour, "AM"),
+        12 => (12, "PM"),
+        _ => (hour - 12, "PM"),
+    };
+    Some(format!("{twelve}:{minute:02} {meridiem}"))
+}
+
 /// One bubble's text to Pango markup: widget tokens stripped, lines
 /// kept, headers and list markers shaped, inline markdown rendered.
 /// The whole line is escaped first, so every tag in the output is one
@@ -347,6 +370,7 @@ pub fn build_rows(history: &[HistoryMessage]) -> Vec<TranscriptRow> {
             attachments: message.attachments.clone(),
             options: message.options.clone(),
             selected_option: message.selected_option.clone(),
+            sent_at: message.timestamp.clone(),
         });
     }
     rows
@@ -355,6 +379,25 @@ pub fn build_rows(history: &[HistoryMessage]) -> Vec<TranscriptRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamps_shape_for_the_assistant_header() {
+        assert_eq!(
+            format_time(Some("2026-11-16T00:27:11Z")).as_deref(),
+            Some("12:27 AM")
+        );
+        assert_eq!(
+            format_time(Some("2026-11-16T12:27:11Z")).as_deref(),
+            Some("12:27 PM")
+        );
+        assert_eq!(
+            format_time(Some("2026-11-16T23:05:00Z")).as_deref(),
+            Some("11:05 PM")
+        );
+        assert_eq!(format_time(None), None);
+        assert_eq!(format_time(Some("not a stamp")), None);
+        assert_eq!(format_time(Some("2026-11-16T25:00:00Z")), None);
+    }
 
     #[test]
     fn widget_tokens_strip_cleanly_with_or_without_a_closer() {

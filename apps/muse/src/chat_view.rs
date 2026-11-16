@@ -22,6 +22,7 @@ pub fn row_widget(
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
     >,
+    show_head: bool,
 ) -> gtk4::Widget {
     match row {
         TranscriptRow::DayDivider { label } => {
@@ -36,18 +37,22 @@ pub fn row_widget(
             role,
             text,
             options,
-            attachments,
             selected_option,
-            ..
-        } => message_widget(
-            role,
-            text,
-            options,
-            selected_option.as_deref(),
             attachments,
-            on_option,
-            previews,
-        ),
+            sent_at,
+            ..
+        } => {
+            let parts = MessageParts {
+                role,
+                text,
+                options,
+                selected: selected_option.as_deref(),
+                sent_at: sent_at.as_deref(),
+                show_head,
+                attachments,
+            };
+            message_widget(&parts, on_option, previews)
+        }
         TranscriptRow::Notice { text } => {
             let widget = gtk4::Label::new(Some(text));
             widget.set_halign(gtk4::Align::Center);
@@ -60,18 +65,36 @@ pub fn row_widget(
     }
 }
 
+/// What one message row needs to paint: the row's own fields plus
+/// whether it opens an assistant turn. A struct, not nine
+/// parameters.
+struct MessageParts<'a> {
+    role: &'a Role,
+    text: &'a str,
+    options: &'a [String],
+    selected: Option<&'a str>,
+    sent_at: Option<&'a str>,
+    show_head: bool,
+    attachments: &'a [MessageAttachment],
+}
+
 fn message_widget(
-    role: &Role,
-    text: &str,
-    options: &[String],
-    selected: Option<&str>,
-    attachments: &[MessageAttachment],
+    parts: &MessageParts,
     on_option: &std::rc::Rc<dyn Fn(String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
     >,
 ) -> gtk4::Widget {
+    let MessageParts {
+        role,
+        text,
+        options,
+        selected,
+        sent_at,
+        show_head,
+        attachments,
+    } = parts;
     let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     match role {
         Role::User => column.set_halign(gtk4::Align::End),
@@ -79,6 +102,24 @@ fn message_widget(
     }
     column.set_margin_start(12);
     column.set_margin_end(12);
+    // The web names the assistant above each answer: avatar, name,
+    // time. One header opens an assistant turn; follow-up rows in the
+    // same turn carry none.
+    if matches!(role, Role::Assistant) && *show_head {
+        let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let avatar = gtk4::Label::new(Some("✦"));
+        avatar.add_css_class("muse-avatar-small");
+        let name = gtk4::Label::new(Some("Muse"));
+        name.add_css_class("dim-label");
+        head.append(&avatar);
+        head.append(&name);
+        if let Some(time) = super::chat::format_time(*sent_at) {
+            let when = gtk4::Label::new(Some(&time));
+            when.add_css_class("dim-label");
+            head.append(&when);
+        }
+        column.append(&head);
+    }
 
     let bubble = gtk4::Label::new(None);
     bubble.set_markup(&super::chat::render_markup(text));
@@ -97,23 +138,28 @@ fn message_widget(
     column.append(&bubble);
 
     if !options.is_empty() {
-        let choices = gtk4::FlowBox::new();
-        choices.set_selection_mode(gtk4::SelectionMode::None);
-        choices.set_max_children_per_line(4);
-        for option in options {
+        // The web stacks options full-width, one row each; the
+        // reader's pick carries its check at the row's end.
+        let choices = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        for option in options.iter() {
             // The web marks the reader's pick with a check; the class
             // draws the blue edge. Both ride the service's own
             // selected_option, never a local guess.
-            let picked = selected == Some(option.as_str());
-            let label = if picked {
-                format!("{option} ✓")
-            } else {
-                option.clone()
-            };
-            let button = gtk4::Button::with_label(&label);
+            let picked = *selected == Some(option.as_str());
+            let button = gtk4::Button::new();
             button.add_css_class("muse-option");
             if picked {
                 button.add_css_class("muse-option-selected");
+                let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                let label = gtk4::Label::new(Some(option));
+                label.set_hexpand(true);
+                label.set_xalign(0.0);
+                let check = gtk4::Label::new(Some("✓"));
+                row.append(&label);
+                row.append(&check);
+                button.set_child(Some(&row));
+            } else {
+                button.set_label(option);
             }
             let callback = on_option.clone();
             let text = option.clone();
@@ -122,7 +168,7 @@ fn message_widget(
         }
         column.append(&choices);
     }
-    for attachment in attachments {
+    for attachment in attachments.iter() {
         column.append(&attachment_card(attachment));
     }
     // The Mac panel cards linked pages under the assistant's words.
@@ -221,8 +267,24 @@ pub fn populate(
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
+    // One assistant header opens each assistant turn: a row shows it
+    // when the row before it was not an assistant row.
+    let mut prev_assistant = false;
     for row in rows {
-        list.append(&row_widget(row, on_option, previews));
+        let assistant = matches!(
+            row,
+            TranscriptRow::Message {
+                role: Role::Assistant,
+                ..
+            }
+        );
+        list.append(&row_widget(
+            row,
+            on_option,
+            previews,
+            assistant && !prev_assistant,
+        ));
+        prev_assistant = assistant;
     }
 }
 
