@@ -26,8 +26,26 @@ pub struct Ctx {
     pub sidebar: gtk4::ListBox,
     pub history: gtk4::ListBox,
     pub profile_name: gtk4::Label,
+    /// The icon rail: (page, button) pairs so the open page's icon
+    /// reads selected beside the sidebar row.
+    pub rail: Vec<(String, gtk4::Button)>,
     pub show_signin: Rc<dyn Fn()>,
     pub updates: Rc<std::cell::RefCell<super::update::UpdateCheck>>,
+}
+
+/// The rail icon for a page, if it has one. The rail holds the new-chat
+/// action and the pages the web's own rail names; the rest live in
+/// the sidebar list only.
+pub fn rail_icon(page: &str) -> Option<&'static str> {
+    match page {
+        "chat" => Some("💬"),
+        "search" => Some("🔍"),
+        "library" => Some("📚"),
+        "ideas" => Some("💡"),
+        "tasks" => Some("✓"),
+        "feed" => Some("📰"),
+        _ => None,
+    }
 }
 
 /// Page names in sidebar order.
@@ -73,6 +91,14 @@ pub fn show(ctx: &Ctx, name: &str) {
     fill(ctx, name);
     ctx.stack.set_visible_child_name(name);
     fill_history(ctx);
+    // The rail echoes the page beside the sidebar row.
+    for (page, button) in &ctx.rail {
+        if page == name {
+            button.add_css_class("muse-rail-active");
+        } else {
+            button.remove_css_class("muse-rail-active");
+        }
+    }
     // Selecting the row re-fires row_selected, whose handler calls
     // straight back into show(): selecting an already-selected row
     // would recurse until the stack overflows. Only select on change.
@@ -271,6 +297,11 @@ fn fill(ctx: &Ctx, name: &str) {
     };
     let page: gtk4::Box = page.downcast().expect("page box");
     match name {
+        "chat" => {
+            if let Some(chat) = ctx.chat.upgrade() {
+                chat.refresh_panel();
+            }
+        }
         "threads" => fill_threads(ctx, &page),
         "tasks" => fill_tasks(ctx, &page),
         "library" => fill_library(ctx, &page),
@@ -292,6 +323,31 @@ pub fn schedule_label(schedule: &Schedule) -> String {
     } else {
         format!("{} (off)", schedule.title)
     }
+}
+
+/// A schedule's next run in the reader's words: due now, in Nh,
+/// tomorrow, in Nd, or in Nw. Pure over an explicit now so the
+/// phrasing is unit-tested without touching the clock.
+pub fn next_run_label(next_utc: Option<i64>, now_utc: i64) -> String {
+    let Some(next) = next_utc else {
+        return "no run scheduled".to_owned();
+    };
+    let delta = next - now_utc;
+    if delta <= 0 {
+        return "due now".to_owned();
+    }
+    let hours = delta / 3600;
+    if hours < 20 {
+        return format!("in {hours}h");
+    }
+    let days = hours / 24;
+    if days == 1 {
+        return "tomorrow".to_owned();
+    }
+    if days < 7 {
+        return format!("in {days}d");
+    }
+    format!("in {}w", days / 7)
 }
 
 /// One-line run label: status plus the human summary when one exists.
@@ -1337,6 +1393,29 @@ mod tests {
         assert!(needs_select(None, 2));
         assert!(needs_select(Some(1), 2));
         assert!(!needs_select(Some(2), 2));
+    }
+
+    #[test]
+    fn next_runs_read_in_plain_words() {
+        let now = 1_800_000_000;
+        assert_eq!(next_run_label(None, now), "no run scheduled");
+        assert_eq!(next_run_label(Some(now - 10), now), "due now");
+        assert_eq!(next_run_label(Some(now + 5 * 3600), now), "in 5h");
+        assert_eq!(next_run_label(Some(now + 30 * 3600), now), "tomorrow");
+        assert_eq!(next_run_label(Some(now + 3 * 86400), now), "in 3d");
+        assert_eq!(next_run_label(Some(now + 14 * 86400), now), "in 2w");
+    }
+
+    #[test]
+    fn rail_icons_name_real_pages_only() {
+        assert_eq!(rail_icon("chat"), Some("💬"));
+        assert_eq!(rail_icon("search"), Some("🔍"));
+        assert_eq!(rail_icon("library"), Some("📚"));
+        assert_eq!(rail_icon("ideas"), Some("💡"));
+        assert_eq!(rail_icon("tasks"), Some("✓"));
+        assert_eq!(rail_icon("feed"), Some("📰"));
+        assert_eq!(rail_icon("policy"), None);
+        assert_eq!(rail_icon("settings"), None);
     }
 
     #[test]

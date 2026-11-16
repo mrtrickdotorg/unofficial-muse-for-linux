@@ -114,6 +114,14 @@ pub struct Chat {
     model_combo: gtk4::ComboBoxText,
     recording: RefCell<Option<super::voice::Recording>>,
     preview_fetch: RefCell<bool>,
+    panel: gtk4::Box,
+    panel_name: gtk4::Label,
+    panel_status: gtk4::Label,
+    panel_schedules: gtk4::ListBox,
+    panel_today: gtk4::ListBox,
+    panel_fetch: RefCell<bool>,
+    panel_at: RefCell<Option<std::time::Instant>>,
+    panel_tasks: RefCell<Option<muse_account::TasksSnapshot>>,
 }
 
 impl Chat {
@@ -139,6 +147,43 @@ impl Chat {
             menu.set_popover(Some(&popover));
         }
         header.append(&menu);
+        // The web's right panel: profile, scheduled tasks, Today. It
+        // reads the same tasks snapshot as the Tasks page, refreshed
+        // beside the transcript instead of on a separate visit.
+        let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        panel.add_css_class("muse-panel");
+        panel.set_size_request(280, -1);
+        panel.set_margin_start(8);
+        panel.set_margin_end(12);
+        panel.set_margin_top(12);
+        panel.set_margin_bottom(12);
+        let avatar = gtk4::Label::new(Some("✦"));
+        avatar.set_halign(gtk4::Align::Center);
+        avatar.add_css_class("muse-avatar-large");
+        let panel_name = gtk4::Label::new(Some("Sign in"));
+        panel_name.set_halign(gtk4::Align::Center);
+        panel_name.add_css_class("title-4");
+        let panel_status = gtk4::Label::new(None);
+        panel_status.set_halign(gtk4::Align::Center);
+        panel_status.add_css_class("dim-label");
+        panel.append(&avatar);
+        panel.append(&panel_name);
+        panel.append(&panel_status);
+        let schedules_head = gtk4::Label::new(Some("Scheduled tasks"));
+        schedules_head.set_halign(gtk4::Align::Start);
+        schedules_head.add_css_class("muse-section");
+        panel.append(&schedules_head);
+        let panel_schedules = gtk4::ListBox::new();
+        panel_schedules.set_selection_mode(gtk4::SelectionMode::None);
+        panel.append(&panel_schedules);
+        let today_head = gtk4::Label::new(Some("Today"));
+        today_head.set_halign(gtk4::Align::Start);
+        today_head.add_css_class("muse-section");
+        panel.append(&today_head);
+        let panel_today = gtk4::ListBox::new();
+        panel_today.set_selection_mode(gtk4::SelectionMode::None);
+        panel_today.set_vexpand(true);
+        panel.append(&panel_today);
         // Thinking lives in the composer card: the pill IS the model
         // picker, filled from the service listing like before.
         let model_combo = composer_row.thinking.clone();
@@ -167,6 +212,14 @@ impl Chat {
             model_combo,
             recording: RefCell::new(None),
             preview_fetch: RefCell::new(false),
+            panel,
+            panel_name,
+            panel_status,
+            panel_schedules,
+            panel_today,
+            panel_fetch: RefCell::new(false),
+            panel_at: RefCell::new(None),
+            panel_tasks: RefCell::new(None),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -188,6 +241,8 @@ impl Chat {
     /// composer, linked to the saved account when one exists. No saved
     /// link, no dispatch -- the page simply waits for a sign-in.
     pub fn install(content: &gtk4::Box) -> Rc<Self> {
+        content.set_orientation(gtk4::Orientation::Horizontal);
+        content.set_spacing(0);
         let transcript = gtk4::ListBox::new();
         transcript.set_selection_mode(gtk4::SelectionMode::None);
         let composer_row = ComposerRow::build();
@@ -204,16 +259,22 @@ impl Chat {
             });
         }
         chat.refresh_older();
-        content.append(&chat.header);
-        content.append(&chat.older_button);
+        // The chat page is two columns like the web: the transcript
+        // on the left, the profile-and-tasks panel on the right.
+        let left = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        left.set_hexpand(true);
+        left.append(&chat.header);
+        left.append(&chat.older_button);
         // The web's transcript is a centered column, never full-bleed:
         // the clamp caps its width and centers it on wide windows.
         let clamp = adw::Clamp::new();
         clamp.set_maximum_size(800);
         clamp.set_child(Some(&chat.scrolled));
-        content.append(&clamp);
-        content.append(&chat.notice);
-        content.append(chat.composer_row.widget());
+        left.append(&clamp);
+        left.append(&chat.notice);
+        left.append(chat.composer_row.widget());
+        content.append(&left);
+        content.append(&chat.panel);
         {
             let weak = Rc::downgrade(&chat);
             chat.delete.connect_clicked(move |_| {
@@ -503,6 +564,103 @@ impl Chat {
                 chat.render();
             },
         );
+    }
+    /// The web's right panel beside the transcript: profile, scheduled
+    /// tasks, Today. Profile paints from held state on every visit;
+    /// the tasks snapshot refreshes beside it at most every two
+    /// minutes, so opening chat never waits on a read.
+    pub fn refresh_panel(self: &Rc<Self>) {
+        let name = self.session_name().unwrap_or_else(|| "Sign in".to_owned());
+        self.panel_name.set_text(&name);
+        let linked = self.client.borrow().is_some();
+        self.panel_status
+            .set_text(if linked { "● Connected" } else { "" });
+        if let Some(snapshot) = self.panel_tasks.borrow().clone() {
+            self.paint_panel(&snapshot);
+        }
+        let stale = self
+            .panel_at
+            .borrow()
+            .map(|at| at.elapsed() > std::time::Duration::from_secs(120))
+            .unwrap_or(true);
+        if !stale || *self.panel_fetch.borrow() {
+            return;
+        }
+        let Some(client) = self.client.borrow().clone() else {
+            return;
+        };
+        *self.panel_fetch.borrow_mut() = true;
+        dispatch(
+            self,
+            move || client.tasks(),
+            move |chat, answer| {
+                *chat.panel_fetch.borrow_mut() = false;
+                let Ok(snapshot) = answer else {
+                    return;
+                };
+                *chat.panel_at.borrow_mut() = Some(std::time::Instant::now());
+                *chat.panel_tasks.borrow_mut() = Some(snapshot.clone());
+                chat.paint_panel(&snapshot);
+            },
+        );
+    }
+
+    /// Fill the panel lists from a held snapshot: schedules with
+    /// their next runs, then today's agent activity. Rows are text;
+    /// the Runs themselves stay on the Tasks page.
+    fn paint_panel(&self, snapshot: &muse_account::TasksSnapshot) {
+        while let Some(child) = self.panel_schedules.first_child() {
+            self.panel_schedules.remove(&child);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|span| span.as_secs() as i64)
+            .unwrap_or(0);
+        for schedule in snapshot.schedules.iter().take(8) {
+            let row = gtk4::ListBoxRow::new();
+            let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+            let title = gtk4::Label::new(Some(&schedule.title));
+            title.set_xalign(0.0);
+            title.set_wrap(true);
+            let next = gtk4::Label::new(Some(&super::pages::next_run_label(
+                schedule.next_run_at_utc,
+                now,
+            )));
+            next.set_xalign(0.0);
+            next.add_css_class("dim-label");
+            line.append(&title);
+            line.append(&next);
+            row.set_child(Some(&line));
+            self.panel_schedules.append(&row);
+        }
+        while let Some(child) = self.panel_today.first_child() {
+            self.panel_today.remove(&child);
+        }
+        for agent in snapshot.agents.iter().take(8) {
+            let row = gtk4::ListBoxRow::new();
+            let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+            let prompt = if agent.prompt.is_empty() {
+                "(activity)".to_owned()
+            } else {
+                agent.prompt.clone()
+            };
+            let what = gtk4::Label::new(Some(&prompt));
+            what.set_xalign(0.0);
+            what.set_wrap(true);
+            what.set_lines(2);
+            what.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            line.append(&what);
+            if let Some(status) = agent.status.as_deref()
+                && !status.is_empty()
+            {
+                let state = gtk4::Label::new(Some(status));
+                state.set_xalign(0.0);
+                state.add_css_class("dim-label");
+                line.append(&state);
+            }
+            row.set_child(Some(&line));
+            self.panel_today.append(&row);
+        }
     }
     /// True when the transcript shows its newest row: a repaint may
     /// follow to the bottom. Otherwise the reader is back-reading and

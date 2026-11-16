@@ -193,3 +193,46 @@ button:disabled {
     font-weight: bold;
     color: #e4e6eb;
 }
+
+/* The web's far-left icon rail: transparent well, round icon buttons,
+ * blue pill behind the open page's icon. */
+.muse-rail {
+    background: transparent;
+    padding: 8px 4px;
+}
+
+.muse-rail-button {
+    border-radius: 9999px;
+    min-width: 36px;
+    min-height: 36px;
+    background: transparent;
+    border-color: transparent;
+    color: #e4e6eb;
+    font-size: 16px;
+}
+
+.muse-rail-button:hover {
+    background: #2a2a2a;
+}
+
+.muse-rail-active {
+    background: #0084ff;
+    color: #ffffff;
+    border-color: transparent;
+}
+
+/* The web's right panel: profile, scheduled tasks, Today. */
+.muse-panel {
+    background: #141414;
+    border-left: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.muse-avatar-large {
+    background: #0084ff;
+    color: #ffffff;
+    border-radius: 9999px;
+    min-width: 56px;
+    min-height: 56px;
+    font-size: 22px;
+    font-weight: bold;
+}

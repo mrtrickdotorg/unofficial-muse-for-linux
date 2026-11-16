@@ -146,7 +146,29 @@ fn show_main(split: &adw::OverlaySplitView) {
     profile.append(&profile_name);
     profile.append(&gear);
     side.append(&profile);
-    split.set_sidebar(Some(&side));
+    // The web's far-left icon rail: new chat plus one icon per railed
+    // page. The panel beside it keeps the full sidebar; the rail is a
+    // shortcut, never a second source of truth.
+    let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    rail.add_css_class("muse-rail");
+    let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
+    let new_button = gtk4::Button::with_label("✎");
+    new_button.add_css_class("muse-rail-button");
+    new_button.set_tooltip_text(Some("New chat"));
+    rail.append(&new_button);
+    for page in pages::PAGES {
+        if let Some(icon) = pages::rail_icon(page) {
+            let button = gtk4::Button::with_label(icon);
+            button.add_css_class("muse-rail-button");
+            button.set_tooltip_text(Some(pages::title(page)));
+            rail.append(&button);
+            rail_buttons.push((page.to_string(), button));
+        }
+    }
+    let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    shell.append(&rail);
+    shell.append(&side);
+    split.set_sidebar(Some(&shell));
     let stack = gtk4::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
@@ -165,6 +187,7 @@ fn show_main(split: &adw::OverlaySplitView) {
         sidebar: sidebar.clone(),
         history: history.clone(),
         profile_name: profile_name.clone(),
+        rail: rail_buttons,
         updates: std::rc::Rc::new(std::cell::RefCell::new(update::UpdateCheck::default())),
         show_signin: {
             let split = split.clone();
@@ -217,6 +240,21 @@ fn show_main(split: &adw::OverlaySplitView) {
         let ctx = ctx.clone();
         gear.connect_clicked(move |_| {
             pages::show(&ctx, "settings");
+        });
+    }
+    // The rail shortcuts: new chat opens a fresh thread on the chat
+    // page; an icon shows its page.
+    {
+        let ctx = ctx.clone();
+        new_button.connect_clicked(move |_| {
+            pages::open_thread(&ctx, None);
+        });
+    }
+    for (page, button) in &ctx.rail {
+        let ctx = ctx.clone();
+        let page = page.clone();
+        button.connect_clicked(move |_| {
+            pages::show(&ctx, &page);
         });
     }
     stack.set_visible_child_name("chat");
