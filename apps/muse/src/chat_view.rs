@@ -98,7 +98,7 @@ pub fn populate(list: &gtk4::ListBox, rows: &[TranscriptRow]) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::chat::{TranscriptRow, build_rows};
+    use super::super::chat::build_rows;
     use super::*;
 
     fn history() -> Vec<muse_account::HistoryMessage> {
@@ -115,7 +115,9 @@ mod tests {
         }]
     }
 
-    /// Needs a display: run under `xvfb-run --test-threads=1`.
+    /// Needs a display: run under `xvfb-run --test-threads=1`. The
+    /// suite's only `gtk::init`: GTK binds init to the calling thread,
+    /// so every widget assertion lives in this one test.
     #[test]
     #[ignore]
     fn transcript_renders_one_widget_per_row() {
@@ -130,5 +132,16 @@ mod tests {
             child = child.and_then(|visible| visible.next_sibling());
         }
         assert_eq!(count, rows.len());
+
+        let built = super::super::composer::ComposerRow::build();
+        let mut composer = super::super::composer::Composer::new();
+        composer.set_text("hi");
+        built.refresh(&composer);
+        assert!(built.send.is_sensitive());
+        assert!(!built.stop.is_sensitive());
+        composer.begin_send();
+        built.refresh(&composer);
+        assert!(!built.send.is_sensitive());
+        assert!(built.stop.is_sensitive());
     }
 }
