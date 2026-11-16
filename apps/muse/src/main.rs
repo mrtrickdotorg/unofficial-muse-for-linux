@@ -6,6 +6,7 @@
 use adw::prelude::*;
 
 mod chat;
+mod chat_view;
 mod session;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
@@ -39,7 +40,16 @@ fn build_ui(app: &adw::Application) {
         sidebar.append(&row);
     }
     split.set_sidebar(Some(&sidebar));
-    let content = gtk4::Label::new(Some("Chat"));
+    // Transcript structure is built eagerly (cheap widgets); history
+    // rows fill in lazily when the first read lands.
+    let transcript = gtk4::ListBox::new();
+    transcript.set_selection_mode(gtk4::SelectionMode::None);
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .child(&transcript)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+    let content = scrolled;
     content.set_halign(gtk4::Align::Center);
     content.set_valign(gtk4::Align::Center);
     content.set_vexpand(true);
