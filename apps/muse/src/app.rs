@@ -82,6 +82,7 @@ pub struct Chat {
     session: Rc<RefCell<Session>>,
     composer: Rc<RefCell<Composer>>,
     transcript: gtk4::ListBox,
+    scrolled: gtk4::ScrolledWindow,
     composer_row: ComposerRow,
     client: RefCell<Option<AccountClient>>,
     older_button: gtk4::Button,
@@ -96,10 +97,13 @@ pub struct Chat {
 
 impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
+        let scrolled = gtk4::ScrolledWindow::new();
+        scrolled.set_child(Some(&transcript));
         let chat = Rc::new(Self {
             session: Rc::new(RefCell::new(Session::new())),
             composer: Rc::new(RefCell::new(Composer::new())),
             transcript,
+            scrolled,
             composer_row,
             client: RefCell::new(None),
             older_button: gtk4::Button::with_label("Load older"),
@@ -135,13 +139,10 @@ impl Chat {
     pub fn install(content: &gtk4::Box) -> Rc<Self> {
         let transcript = gtk4::ListBox::new();
         transcript.set_selection_mode(gtk4::SelectionMode::None);
-        let scrolled = gtk4::ScrolledWindow::builder()
-            .child(&transcript)
-            .vexpand(true)
-            .hexpand(true)
-            .build();
         let composer_row = ComposerRow::build();
         let chat = Self::build(transcript, composer_row);
+        chat.scrolled.set_vexpand(true);
+        chat.scrolled.set_hexpand(true);
         chat.older_button.set_halign(gtk4::Align::Center);
         {
             let weak = Rc::downgrade(&chat);
@@ -155,7 +156,7 @@ impl Chat {
         chat.model_combo.set_halign(gtk4::Align::Start);
         content.append(&chat.model_combo);
         content.append(&chat.older_button);
-        content.append(&scrolled);
+        content.append(&chat.scrolled);
         content.append(&chat.notice);
         content.append(chat.composer_row.widget());
         {
@@ -297,10 +298,21 @@ impl Chat {
         });
     }
 
+    /// True when the transcript shows its newest row: a repaint may
+    /// follow to the bottom. Otherwise the reader is back-reading and
+    /// the repaint holds still instead of yanking them down.
+    fn at_bottom(&self) -> bool {
+        let adjustment = self.scrolled.vadjustment();
+        adjustment.value() + adjustment.page_size() >= adjustment.upper() - 2.0
+    }
+
     /// Rebuild the transcript rows from the held history. The single
     /// place completions repaint, so option presses and attachments
-    /// can never disagree with the rows.
+    /// can never disagree with the rows. Follows to the newest row
+    /// when the reader was already there; opening a thread lands at
+    /// the bottom because a cleared transcript starts at the bottom.
     fn render(&self) {
+        let follow = self.at_bottom();
         if let Some(on_option) = self.on_option.borrow().clone() {
             let rows = build_rows(&self.session.borrow().history);
             for row in &rows {
@@ -313,6 +325,11 @@ impl Chat {
         self.refresh_older();
         self.refresh_notice();
         self.refresh_delete_arm();
+        if follow {
+            let adjustment = self.scrolled.vadjustment();
+            adjustment
+                .set_value((adjustment.upper() - adjustment.page_size()).max(adjustment.lower()));
+        }
     }
 
     /// The notice line shows the service's latest limit sentence while
@@ -626,9 +643,18 @@ impl Chat {
             move |chat, answer| match answer {
                 Ok(window) => {
                     if chat.session.borrow_mut().accept(&ticket) {
+                        // Hold the reader's place: rows arrive above the
+                        // viewport, so shift down by exactly the growth.
+                        let adjustment = chat.scrolled.vadjustment();
+                        let before = adjustment.upper();
                         *chat.older_exhausted.borrow_mut() = !window.has_older;
                         chat.session.borrow_mut().prepend_history(window.messages);
                         chat.render();
+                        let grown = chat.scrolled.vadjustment().upper() - before;
+                        if grown > 0.0 {
+                            let adjustment = chat.scrolled.vadjustment();
+                            adjustment.set_value(adjustment.value() + grown);
+                        }
                     }
                 }
                 Err(_) => {

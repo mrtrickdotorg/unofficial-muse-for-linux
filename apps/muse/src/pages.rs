@@ -675,10 +675,14 @@ pub fn feed_item_label(item: &ListingItem) -> String {
         .map(String::as_str)
         .filter(|text| !text.is_empty())
         .collect();
+    let title = match item.icon.as_deref() {
+        Some(icon) if !icon.is_empty() => format!("{icon} {}", item.title),
+        _ => item.title.clone(),
+    };
     if meta.is_empty() {
-        item.title.clone()
+        title
     } else {
-        format!("{}\n{}", item.title, meta.join(" \u{00b7} "))
+        format!("{title}\n{}", meta.join(" \u{00b7} "))
     }
 }
 
@@ -829,6 +833,29 @@ fn fill_memory(chat: &Rc<Chat>, page: &gtk4::Box) {
 /// future read-only list. The fetcher runs on a worker; the painter
 /// runs on the main thread and only applies through the shared page
 /// slot, so a late answer from a left page owns nothing.
+/// One row of a listing: the hero picture when the service gave one
+/// (fetched and cached off-thread), always beside the text card.
+/// Pictures never block or fail the row: no bytes, text-only.
+pub fn listing_row(
+    item: &muse_account::ListingItem,
+    hero: Option<&std::path::Path>,
+) -> gtk4::Widget {
+    let label = gtk4::Label::new(Some(&feed_item_label(item)));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    let Some(hero) = hero else {
+        return label.upcast();
+    };
+    let picture = gtk4::Picture::for_filename(hero);
+    picture.set_can_shrink(true);
+    picture.set_size_request(240, -1);
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    row.append(&picture);
+    row.append(&label);
+    row.upcast()
+}
+
 fn fill_service_listing<F>(chat: &Rc<Chat>, list: &gtk4::ListBox, fetch: F)
 where
     F: FnOnce(
@@ -848,18 +875,37 @@ where
     let list = list.clone();
     dispatch(
         chat,
-        move || fetch(&client),
+        move || {
+            let listing = fetch(&client)?;
+            // Artwork prefetches here, off the main thread: the first
+            // few units with a hero URL get their cached files, and the
+            // painter below only ever reads the disk.
+            let heroes: Vec<Option<std::path::PathBuf>> = listing
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    if index < 8 {
+                        item.image_url
+                            .as_deref()
+                            .and_then(super::images::fetch_hero)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Ok::<_, muse_account::AccountError>((listing, heroes))
+        },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok(listing) = answer else { return };
+            let Ok((listing, heroes)) = answer else {
+                return;
+            };
             clear_list(&list);
-            for item in &listing.items {
-                let card = gtk4::Label::new(Some(&feed_item_label(item)));
-                card.set_wrap(true);
-                card.set_xalign(0.0);
-                list.append(&card);
+            for (item, hero) in listing.items.iter().zip(heroes.iter()) {
+                list.append(&listing_row(item, hero.as_deref()));
             }
         },
     );
@@ -933,25 +979,41 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
     let ctx = ctx.clone();
     dispatch(
         chat,
-        move || client.search(&query),
+        move || {
+            let found = client.search(&query)?;
+            let heroes: Vec<Option<std::path::PathBuf>> = found
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    if index < 8 {
+                        item.image_url
+                            .as_deref()
+                            .and_then(super::images::fetch_hero)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Ok::<_, muse_account::AccountError>((found, heroes))
+        },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok(found) = answer else { return };
+            let Ok((found, heroes)) = answer else { return };
             clear_list(&list);
             if found.items.is_empty() {
                 list.append(&gtk4::Label::new(Some("No matches.")));
                 return;
             }
-            for item in &found.items {
+            for (item, hero) in found.items.iter().zip(heroes.iter()) {
                 let id = item.id.clone().unwrap_or_default();
                 if id.is_empty() {
                     continue;
                 }
                 let open = gtk4::Button::new();
-                let label = feed_item_label(item);
-                open.set_label(&label);
+                open.set_child(Some(&listing_row(item, hero.as_deref())));
                 open.set_has_frame(false);
                 let ctx = ctx.clone();
                 open.connect_clicked(move |_| {
@@ -1177,6 +1239,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(feed_item_label(&framed), "Morning\nDigest \u{00b7} edition");
+        let iconed = ListingItem {
+            title: "Morning".to_owned(),
+            icon: Some("📰".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(feed_item_label(&iconed), "📰 Morning");
     }
 
     #[test]
