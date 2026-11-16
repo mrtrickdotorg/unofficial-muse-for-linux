@@ -67,6 +67,7 @@ pub struct Chat {
     client: RefCell<Option<AccountClient>>,
     older_button: gtk4::Button,
     older_exhausted: RefCell<bool>,
+    live_tx: RefCell<Option<std::sync::mpsc::Sender<()>>>,
     on_option: RefCell<Option<OptionCallback>>,
 }
 
@@ -79,6 +80,7 @@ impl Chat {
             composer_row,
             client: RefCell::new(None),
             older_button: gtk4::Button::with_label("Load older"),
+            live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
         });
@@ -125,14 +127,25 @@ impl Chat {
         {
             chat.load(&link.python, &link.config_dir);
         }
-        // Liveness is a bounded poll, not a push subscription: every 8s
-        // the slot is offered a history re-read, which no-ops while a
-        // send or connect holds it. Adopting the service's subscribe
-        // surface is a later milestone; the poll keeps this cheap and
-        // entirely within the ticket discipline.
+        // Liveness is push-woken polling: the live worker sends one
+        // wake per delivered subscription event, and an 8s fallback
+        // re-read covers a dead worker. Every round goes through the
+        // ticket slot, so each no-ops while a send or connect holds it.
+        let (live_tx, live_rx) = std::sync::mpsc::channel::<()>();
+        *chat.live_tx.borrow_mut() = Some(live_tx);
         let weak = Rc::downgrade(&chat);
-        glib::timeout_add_local(std::time::Duration::from_secs(8), move || {
-            if let Some(chat) = weak.upgrade() {
+        let mut ticks = 0u8;
+        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+            let mut woke = false;
+            while live_rx.try_recv().is_ok() {
+                woke = true;
+            }
+            ticks = ticks.wrapping_add(1);
+            let Some(chat) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if woke || ticks >= 8 {
+                ticks = 0;
                 chat.reload_history();
             }
             glib::ControlFlow::Continue
@@ -210,9 +223,40 @@ impl Chat {
             move |chat, answer| {
                 if chat.session.borrow_mut().finish_connect(&ticket, answer) {
                     chat.reload_history();
+                    chat.start_live();
                 }
             },
         );
+    }
+
+    /// Hold the conversation subscription open: each delivered event
+    /// only wakes a history re-read (the rows stay authoritative --
+    /// stream events carry no ids or roles to render from). The 8s poll
+    /// remains the fallback; a dead worker just stops waking it. The
+    /// loop ends with the chat: the worker holds a weak reference.
+    fn start_live(self: &Rc<Self>) {
+        let Some(client) = self.client.borrow().clone() else {
+            return;
+        };
+        let Some(live) = self.live_tx.borrow().clone() else {
+            return;
+        };
+        std::thread::spawn(move || {
+            // One wake per delivered event, nothing otherwise: the loop
+            // learns the page is gone from a failed wake and exits then.
+            // Until the first event it idles here, which costs one thread
+            // sleeping in 2s rounds for the life of the process.
+            loop {
+                // One wake per delivered event, nothing otherwise.
+                if let Ok(events) = client.subscribe("chat.subscribe", serde_json::json!({}), 50)
+                    && !events.is_empty()
+                    && live.send(()).is_err()
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        });
     }
 
     /// One press dispatches once. The entry clears on dispatch; the
