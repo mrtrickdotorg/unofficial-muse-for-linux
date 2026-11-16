@@ -5,8 +5,10 @@
 
 use adw::prelude::*;
 
+mod app;
 mod chat;
 mod chat_view;
+mod composer;
 mod session;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
@@ -42,14 +44,13 @@ fn build_ui(app: &adw::Application) {
     split.set_sidebar(Some(&sidebar));
     // Transcript structure is built eagerly (cheap widgets); history
     // rows fill in lazily when the first read lands.
-    let transcript = gtk4::ListBox::new();
-    transcript.set_selection_mode(gtk4::SelectionMode::None);
-    let scrolled = gtk4::ScrolledWindow::builder()
-        .child(&transcript)
-        .vexpand(true)
-        .hexpand(true)
-        .build();
-    let content = scrolled;
+    let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let chat = app::Chat::install(&page);
+    // App-lifetime singleton: the signal handlers and idle sources
+    // hold only weak references, so the strong reference lives here,
+    // leaked for the life of the process.
+    std::mem::forget(chat);
+    let content = page;
     content.set_halign(gtk4::Align::Center);
     content.set_valign(gtk4::Align::Center);
     content.set_vexpand(true);

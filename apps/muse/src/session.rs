@@ -15,6 +15,7 @@ pub enum Op {
     Connect,
     Identity,
     History,
+    Send,
 }
 
 /// A held in-flight slot. Only the completion carrying a matching ticket
@@ -235,6 +236,61 @@ impl Default for Session {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The account folder both clients share: `$XDG_CONFIG_HOME` (or
+/// `~/.config`) plus `unofficial-muse-for-linux/account`. The new app
+/// reads the same saved link, so signing in once links both.
+pub fn account_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".config"))
+        })?;
+    Some(base.join("unofficial-muse-for-linux/account"))
+}
+
+/// The saved link, when one exists and passes the permission checks.
+pub fn load_saved_link() -> Option<SavedConnection> {
+    load_saved_connection_in(&account_dir()?)
+}
+
+/// Locate a bridge script the way the shipped client does: packaged
+/// install first, source checkout second. Same search order, so the
+/// new app runs wherever the old one does.
+pub fn bridge_script(name: &str) -> std::path::PathBuf {
+    let mut roots = Vec::new();
+    if let Some(appdir) = std::env::var_os("APPDIR")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        roots.push(appdir);
+    }
+    if let Ok(executable) = std::env::current_exe() {
+        roots.extend(
+            executable
+                .ancestors()
+                .skip(1)
+                .map(std::path::Path::to_path_buf),
+        );
+    }
+    roots.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    for root in &roots {
+        for path in [
+            root.join("usr/share/unofficial-muse-for-linux/account")
+                .join(name),
+            root.join("scripts").join(name),
+        ] {
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    std::path::PathBuf::from("/usr/share/unofficial-muse-for-linux/account").join(name)
 }
 
 #[cfg(test)]
