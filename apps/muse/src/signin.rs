@@ -79,13 +79,16 @@ impl SignIn {
         page.append(&title);
 
         let hint = gtk4::Label::new(Some(
-            "Enter the Python interpreter the bridge setup printed and a private session folder. The app's own folder already qualifies.",
+            "The app finds your Python automatically; pick a private session folder. The app's own folder already qualifies.",
         ));
         hint.set_wrap(true);
         page.append(&hint);
 
         let python_entry = gtk4::Entry::new();
-        python_entry.set_placeholder_text(Some("Python interpreter, e.g. /usr/bin/python3"));
+        if let Some(detected) = super::session::detect_python() {
+            python_entry.set_text(&detected.display().to_string());
+        }
+        python_entry.set_placeholder_text(Some("Python interpreter"));
         page.append(&python_entry);
 
         let folder_entry = gtk4::Entry::new();

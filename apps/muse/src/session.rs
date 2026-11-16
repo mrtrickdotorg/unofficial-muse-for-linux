@@ -474,9 +474,97 @@ pub fn effective_config_dir(
     }
 }
 
+/// The bridge venv's interpreter, when the setup script has run:
+/// `<data-home>/unofficial-muse-for-linux/account-bridge/.venv/bin/python`.
+/// This one runs both the bridge and the login helper.
+pub fn bridge_venv_python() -> Option<std::path::PathBuf> {
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
+    bridge_venv_python_in(data_home, home)
+}
+
+/// The venv lookup with explicit roots, so tests never touch the
+/// process environment.
+pub fn bridge_venv_python_in(
+    data_home: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let base = data_home.or_else(|| home.map(|home| home.join(".local/share")))?;
+    let python = base.join("unofficial-muse-for-linux/account-bridge/.venv/bin/python");
+    python.is_file().then_some(python)
+}
+
+/// First `python3` found in the given directories. The login helper is
+/// stdlib-only, so any working python3 signs in; the bridge needs the
+/// venv above.
+pub fn find_python_in(dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join("python3"))
+        .find(|path| path.is_file())
+}
+
+/// System pythons in the usual places, plus whatever `PATH` offers.
+pub fn system_pythons() -> Vec<std::path::PathBuf> {
+    let mut roots = vec![
+        std::path::PathBuf::from("/usr/bin"),
+        std::path::PathBuf::from("/usr/local/bin"),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        roots.extend(std::env::split_paths(&path));
+    }
+    let mut seen = std::collections::HashSet::new();
+    roots
+        .into_iter()
+        .filter(|root| seen.insert(root.clone()))
+        .collect()
+}
+
+/// The interpreter to offer: the bridge venv when set up, else the
+/// first system python3. Nobody should have to know these paths.
+pub fn detect_python() -> Option<std::path::PathBuf> {
+    bridge_venv_python().or_else(|| find_python_in(&system_pythons()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_venv_python_is_found_under_a_temp_data_home() {
+        let root = unique_root("detect-venv");
+        let venv = root.join("data/unofficial-muse-for-linux/account-bridge/.venv/bin");
+        std::fs::create_dir_all(&venv).unwrap();
+        std::fs::write(venv.join("python"), "fake").unwrap();
+        assert_eq!(
+            bridge_venv_python_in(Some(root.join("data")), None),
+            Some(venv.join("python"))
+        );
+        assert_eq!(
+            bridge_venv_python_in(None, Some(root.clone())),
+            None,
+            "no venv seeded under this home"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn python_search_takes_the_first_hit_in_order() {
+        let root = unique_root("detect-path");
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("python3"), "fake").unwrap();
+        assert_eq!(
+            find_python_in(&[first.clone(), second]),
+            Some(first.join("python3"))
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn saved_connection_text_round_trips_python_config_dir_and_consent() {
