@@ -270,7 +270,7 @@ impl ComposerRow {
         scroll.set_hexpand(true);
         let overlay = gtk4::Overlay::new();
         overlay.set_child(Some(&scroll));
-        let placeholder = gtk4::Label::new(Some("Ask Meta AI…"));
+        let placeholder = gtk4::Label::new(Some("Message"));
         placeholder.set_halign(gtk4::Align::Start);
         placeholder.set_valign(gtk4::Align::Start);
         placeholder.set_margin_top(10);
