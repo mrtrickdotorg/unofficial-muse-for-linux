@@ -528,6 +528,17 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
             }
             let Ok(listing) = answer else { return };
             clear_list(&list);
+            if let Some(prompt) = listing
+                .feed_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.text.as_deref())
+                && !prompt.is_empty()
+            {
+                let card = gtk4::Label::new(Some(prompt));
+                card.set_wrap(true);
+                card.set_xalign(0.0);
+                list.append(&card);
+            }
             for item in &listing.items {
                 let card = gtk4::Label::new(Some(&feed_item_label(item)));
                 card.set_wrap(true);
