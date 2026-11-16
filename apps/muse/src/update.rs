@@ -274,9 +274,11 @@ mod tests {
     }
 
     #[test]
-    fn dev_builds_have_no_update_identity() {
-        // The test harness itself is never stamped: without an
-        // identity there is nothing to compare against.
-        assert!(option_env!("UMFL_BUILD_SHA").is_none_or(|sha| sha.is_empty()));
+    fn local_sha_reports_exactly_what_was_compiled_in() {
+        // CI stamps UMFL_BUILD_SHA; dev checkouts don't. Either way the
+        // accessor must report the compiled-in value verbatim, so the
+        // updater compares against the real identity.
+        let compiled: Option<&str> = option_env!("UMFL_BUILD_SHA");
+        assert_eq!(local_sha(), compiled.filter(|sha| !sha.is_empty()));
     }
 }
