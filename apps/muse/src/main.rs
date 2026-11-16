@@ -24,7 +24,16 @@ const DEFAULT_WINDOW_WIDTH: i32 = 1100;
 const DEFAULT_WINDOW_HEIGHT: i32 = 700;
 
 fn main() {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    // A staged update takes over as its own instance: the old copy is
+    // still holding the app name when the new one starts, and a unique
+    // instance would forward its launch to the old one and exit --
+    // the old one then exits, leaving nothing. Ordinary launches stay
+    // single-instance.
+    let mut builder = adw::Application::builder().application_id(APP_ID);
+    if update::updating_relaunch() {
+        builder = builder.flags(gtk4::gio::ApplicationFlags::NON_UNIQUE);
+    }
+    let app = builder.build();
     app.connect_activate(build_ui);
     app.run();
 }
