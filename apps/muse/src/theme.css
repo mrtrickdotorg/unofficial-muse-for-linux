@@ -5,6 +5,63 @@
  * values, not theme followers: the blue send circle is blue in both
  * modes, and the grey bubble is grey in both modes. */
 
+/* Deterministic light chrome: the Mac client is light even on dark
+ * systems, and the style manager alone proved insufficient on at
+ * least one dark GNOME box. These rules pin the app's own surfaces
+ * to light values however the toolkit is configured; the manager
+ * calls in main.rs stay as the sanctioned switch. Brand classes
+ * below (more specific) always win over these base rules. */
+window,
+.background {
+    background-color: #ffffff;
+    color: #1c1e21;
+}
+
+headerbar {
+    background-color: #f5f6f8;
+    color: #1c1e21;
+    border-color: #e4e6eb;
+}
+
+listbox {
+    background-color: transparent;
+}
+
+listbox row {
+    color: #1c1e21;
+}
+
+popover {
+    background-color: #ffffff;
+    color: #1c1e21;
+}
+
+entry,
+textview {
+    background-color: #ffffff;
+    color: #1c1e21;
+    caret-color: #0084ff;
+}
+
+entry placeholder,
+textview placeholder {
+    color: #65676b;
+}
+
+button {
+    background-color: #f0f2f5;
+    color: #1c1e21;
+    border-color: #d3e0fd;
+}
+
+button:hover {
+    background-color: #e4e9f2;
+}
+
+button:active {
+    background-color: #d9e0ee;
+}
+
 .muse-user-bubble {
     background: #f0f2f5;
     color: #1c1e21;
