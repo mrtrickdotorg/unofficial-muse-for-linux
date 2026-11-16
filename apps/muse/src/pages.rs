@@ -52,6 +52,14 @@ pub fn title(name: &str) -> &str {
     }
 }
 
+/// Whether showing a page needs a sidebar selection change. Selecting
+/// the already-selected row re-fires row_selected, whose handler calls
+/// straight back into show(): an unconditional select recurses until
+/// the stack overflows.
+pub fn needs_select(selected: Option<i32>, target: usize) -> bool {
+    selected != Some(target as i32)
+}
+
 /// Show a page: build its structure on first visit, refill on every
 /// visit, then navigate the stack and the sidebar together.
 pub fn show(ctx: &Ctx, name: &str) {
@@ -62,8 +70,13 @@ pub fn show(ctx: &Ctx, name: &str) {
     }
     fill(ctx, name);
     ctx.stack.set_visible_child_name(name);
+    // Selecting the row re-fires row_selected, whose handler calls
+    // straight back into show(): selecting an already-selected row
+    // would recurse until the stack overflows. Only select on change.
+    let selected = ctx.sidebar.selected_row().map(|row| row.index());
     for (index, page) in PAGES.iter().enumerate() {
         if *page == name
+            && needs_select(selected, index)
             && let Some(row) = ctx.sidebar.row_at_index(index as i32)
         {
             ctx.sidebar.select_row(Some(&row));
@@ -1256,6 +1269,13 @@ mod tests {
             timezone: None,
             next_run_at_utc: None,
         }
+    }
+
+    #[test]
+    fn sidebar_selects_only_on_change() {
+        assert!(needs_select(None, 2));
+        assert!(needs_select(Some(1), 2));
+        assert!(!needs_select(Some(2), 2));
     }
 
     #[test]
