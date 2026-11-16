@@ -6,10 +6,28 @@
  * dark option pills with a marked selection, dark floating composer.
  * Fixed hex values throughout; nothing here follows the system. */
 
-/* App chrome: near-black ground, light text, dark header. */
+/* Every structural surface, one continuous ground: the window, the
+ * split view's own sidebar container, the rail, the panel, the
+ * transcript bed, and every list in them. Specific widgets (selected
+ * rows, bubbles, cards) layer above this. */
+window,
+.background,
+.sidebar,
+.muse-side,
+.muse-panel,
+.muse-rail,
+.muse-transcript,
+listbox {
+    background-color: #0a0a0a;
+}
+
+listbox row {
+    background-color: transparent;
+}
+
+/* Text-bearing chrome keeps its colors; only grounds unified above. */
 window,
 .background {
-    background-color: #0a0a0a;
     color: #e4e6eb;
 }
 
@@ -17,10 +35,6 @@ headerbar {
     background-color: #0a0a0a;
     color: #e4e6eb;
     border-color: transparent;
-}
-
-listbox {
-    background-color: transparent;
 }
 
 listbox row {
