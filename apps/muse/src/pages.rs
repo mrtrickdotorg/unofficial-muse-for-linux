@@ -27,7 +27,8 @@ pub struct Ctx {
 
 /// Page names in sidebar order.
 pub const PAGES: &[&str] = &[
-    "chat", "threads", "tasks", "library", "feed", "memory", "policy", "settings",
+    "chat", "threads", "tasks", "library", "feed", "memory", "search", "ideas", "goals", "policy",
+    "settings",
 ];
 
 /// Human titles for the sidebar rows.
@@ -40,6 +41,9 @@ pub fn title(name: &str) -> &str {
         "feed" => "Feed",
         "memory" => "Memory",
         "policy" => "Policy",
+        "search" => "Search",
+        "ideas" => "Ideas",
+        "goals" => "Goals",
         "settings" => "Settings",
         _ => name,
     }
@@ -136,6 +140,35 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 fill_memory(&chat, &page);
             });
         }
+        "search" => {
+            let query = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let entry = gtk4::Entry::new();
+            entry.set_widget_name("search-query");
+            entry.set_hexpand(true);
+            entry.set_placeholder_text(Some("Search every conversation"));
+            query.append(&entry);
+            let go = gtk4::Button::with_label("Search");
+            query.append(&go);
+            page.append(&query);
+            let list = gtk4::ListBox::new();
+            list.set_widget_name("search-list");
+            page.append(&list);
+            let weak = ctx.chat.clone();
+            let ctx_search = ctx.clone();
+            let page_weak = page.downgrade();
+            go.connect_clicked(move |_| {
+                let Some(page) = page_weak.upgrade() else {
+                    return;
+                };
+                let Some(chat) = weak.upgrade() else { return };
+                do_search(&ctx_search, &chat, &page);
+            });
+        }
+        "ideas" | "goals" => {
+            let list = gtk4::ListBox::new();
+            list.set_widget_name(&format!("{name}-list"));
+            page.append(&list);
+        }
         "policy" => {
             let list = gtk4::ListBox::new();
             list.set_widget_name("policy-list");
@@ -182,6 +215,9 @@ fn fill(ctx: &Ctx, name: &str) {
         "threads" => fill_threads(ctx, &page),
         "tasks" => fill_tasks(ctx, &page),
         "library" => fill_library(ctx, &page),
+        "search" => fill_search_hint(&page),
+        "ideas" => fill_ideas(ctx, &page),
+        "goals" => fill_goals(ctx, &page),
         "feed" => fill_feed(ctx, &page),
         "memory" => fill_memory_opt(ctx, &page),
         "policy" => fill_policy(ctx, &page),
@@ -589,6 +625,155 @@ fn fill_policy(ctx: &Ctx, page: &gtk4::Box) {
             }
         },
     );
+}
+
+/// One service listing behind one list widget: ideas, goals, and any
+/// future read-only list. The fetcher runs on a worker; the painter
+/// runs on the main thread and only applies through the shared page
+/// slot, so a late answer from a left page owns nothing.
+fn fill_service_listing<F>(chat: &Rc<Chat>, list: &gtk4::ListBox, fetch: F)
+where
+    F: FnOnce(
+            &muse_account::AccountClient,
+        ) -> Result<muse_account::ServiceListing, muse_account::AccountError>
+        + Send
+        + 'static,
+{
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let list = list.clone();
+    dispatch(
+        chat,
+        move || fetch(&client),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(listing) = answer else { return };
+            clear_list(&list);
+            for item in &listing.items {
+                let card = gtk4::Label::new(Some(&feed_item_label(item)));
+                card.set_wrap(true);
+                card.set_xalign(0.0);
+                list.append(&card);
+            }
+        },
+    );
+}
+
+fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "ideas-list") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    fill_service_listing(&chat, &list, |client| client.ideas());
+}
+
+fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "goals-list") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    fill_service_listing(&chat, &list, |client| client.goals());
+}
+
+/// A search visit invites a query; nothing dispatches until Search.
+fn fill_search_hint(page: &gtk4::Box) {
+    let Some(list) = named_list(page, "search-list") else {
+        return;
+    };
+    clear_list(&list);
+    list.append(&gtk4::Label::new(Some(
+        "Search every conversation in the account. A result opens its conversation in Chat.",
+    )));
+}
+
+/// Run one account-wide conversation search. A result button opens
+/// its conversation: the id becomes the chat's thread scope, and the
+/// reader lands in Chat.
+fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "search-list") else {
+        return;
+    };
+    let query = {
+        let mut found = String::new();
+        let mut child = page.first_child();
+        while let Some(widget) = child {
+            if widget.widget_name() == "search-query" {
+                if let Ok(entry) = widget.downcast::<gtk4::Entry>() {
+                    found = entry.text().to_string();
+                }
+                break;
+            }
+            child = widget.next_sibling();
+        }
+        found
+    };
+    if query.trim().is_empty() {
+        clear_list(&list);
+        list.append(&gtk4::Label::new(Some("Type words to search for first.")));
+        return;
+    }
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let ctx = ctx.clone();
+    dispatch(
+        chat,
+        move || client.search(&query),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(found) = answer else { return };
+            clear_list(&list);
+            if found.items.is_empty() {
+                list.append(&gtk4::Label::new(Some("No matches.")));
+                return;
+            }
+            for item in &found.items {
+                let id = item.id.clone().unwrap_or_default();
+                if id.is_empty() {
+                    continue;
+                }
+                let open = gtk4::Button::new();
+                let label = feed_item_label(item);
+                open.set_label(&label);
+                open.set_has_frame(false);
+                let ctx = ctx.clone();
+                open.connect_clicked(move |_| {
+                    if let Some(chat) = ctx.chat.upgrade() {
+                        chat.switch_thread(Some(id.clone()));
+                    }
+                    go_chat(&ctx);
+                });
+                list.append(&open);
+            }
+        },
+    );
+}
+
+/// Land in Chat: show the page, select it in the sidebar.
+fn go_chat(ctx: &Ctx) {
+    ctx.stack.set_visible_child_name("chat");
+    if let Some(first) = ctx.sidebar.row_at_index(0) {
+        ctx.sidebar.select_row(Some(&first));
+    }
 }
 
 #[cfg(test)]
