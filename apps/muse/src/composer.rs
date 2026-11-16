@@ -164,17 +164,19 @@ impl Composer {
     }
 }
 
-/// The composer row: staged picture chips above the text entry plus
-/// Send and Stop. Sensitivity follows the composer state; call
-/// `refresh` after every state change and `paint_chips` after every
-/// stage or remove.
+/// The composer: staged picture chips above a floating Mac-style
+/// card. The card holds the entry on top and the controls below:
+/// `+` stages the clipboard picture, the blue circle sends, Stop
+/// halts a send, and the delete pill arms turn deletion. Sensitivity
+/// follows the composer state; call `refresh` after every state
+/// change and `paint_chips` after every stage or remove.
 pub struct ComposerRow {
     pub entry: gtk4::Entry,
+    pub attach: gtk4::Button,
     pub send: gtk4::Button,
     pub stop: gtk4::Button,
     pub delete: gtk4::Button,
     outer: gtk4::Box,
-    row: gtk4::Box,
     chips: gtk4::FlowBox,
 }
 
@@ -194,7 +196,7 @@ fn format_size(bytes: usize) -> String {
 /// size) so the paste is never silently eaten.
 fn chip(image: &StagedImage, on_remove: &super::app::RemoveCallback) -> gtk4::Box {
     let chip = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    chip.add_css_class("card");
+    chip.add_css_class("muse-chip");
     let loader = gtk4::gdk_pixbuf::PixbufLoader::new();
     let paintable: Option<gtk4::gdk::Texture> = loader
         .write(&image.bytes)
@@ -235,35 +237,53 @@ fn chip(image: &StagedImage, on_remove: &super::app::RemoveCallback) -> gtk4::Bo
 impl ComposerRow {
     pub fn build() -> Self {
         let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        outer.set_margin_start(12);
+        outer.set_margin_end(12);
+        outer.set_margin_top(4);
+        outer.set_margin_bottom(8);
         let chips = gtk4::FlowBox::new();
         chips.set_selection_mode(gtk4::SelectionMode::None);
         chips.set_visible(false);
-        let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        row.set_margin_top(8);
-        row.set_margin_bottom(8);
+        // The floating card: entry on top, controls below, like the
+        // Mac panel's composer.
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        card.add_css_class("muse-composer-card");
         let entry = gtk4::Entry::new();
         entry.set_hexpand(true);
-        entry.set_placeholder_text(Some("Message Muse"));
-        let send = gtk4::Button::with_label("Send");
-        send.add_css_class("suggested-action");
-        let stop = gtk4::Button::with_label("Stop");
+        entry.set_placeholder_text(Some("Ask Meta AI..."));
+        entry.add_css_class("muse-ask");
+        let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let attach = gtk4::Button::with_label("+");
+        attach.add_css_class("muse-circle");
+        attach.set_tooltip_text(Some("Paste a picture from the clipboard"));
+        let send = gtk4::Button::with_label("↑");
+        send.add_css_class("muse-send");
+        send.set_tooltip_text(Some("Send"));
+        let stop = gtk4::Button::with_label("■");
+        stop.add_css_class("muse-circle");
+        stop.set_tooltip_text(Some("Stop"));
         stop.set_sensitive(false);
         let delete = gtk4::Button::with_label("Delete turn");
-        row.append(&entry);
-        row.append(&send);
-        row.append(&stop);
-        row.append(&delete);
+        delete.add_css_class("muse-pill");
+        controls.append(&attach);
+        // The send circle sits at the row's end, like the Mac panel.
+        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        controls.append(&spacer);
+        controls.append(&stop);
+        controls.append(&delete);
+        controls.append(&send);
+        card.append(&entry);
+        card.append(&controls);
         outer.append(&chips);
-        outer.append(&row);
+        outer.append(&card);
         Self {
             entry,
+            attach,
             send,
             stop,
             delete,
             outer,
-            row,
             chips,
         }
     }

@@ -61,6 +61,13 @@ fn message_widget(
     bubble.set_wrap(true);
     bubble.set_selectable(true);
     bubble.set_xalign(0.0);
+    // The Mac panel: the reader's words sit in a grey bubble, the
+    // assistant's in plain text. The class carries the Mac surface.
+    if matches!(role, Role::User) {
+        bubble.add_css_class("muse-user-bubble");
+    } else {
+        bubble.add_css_class("muse-assistant-text");
+    }
     column.append(&bubble);
 
     if !options.is_empty() {
