@@ -530,6 +530,24 @@ impl Chat {
         self.thread.borrow().clone()
     }
 
+    /// The open thread's id, for the sidebar's History mark and the
+    /// repeat-press guard. None before anything is picked.
+    pub fn current_thread(&self) -> Option<String> {
+        self.thread.borrow().clone()
+    }
+
+    /// The linked identity's display name, for the sidebar profile row.
+    /// None before the account loads.
+    pub fn session_name(&self) -> Option<String> {
+        self.session.borrow().account.clone().map(|account| {
+            if account.identity_name.is_empty() {
+                "Muse".to_owned()
+            } else {
+                account.identity_name
+            }
+        })
+    }
+
     /// The linked account's thread listing, for the threads page.
     pub fn threads(&self) -> Vec<muse_account::Thread> {
         self.session

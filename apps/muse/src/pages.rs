@@ -24,6 +24,8 @@ pub struct Ctx {
     pub chat: Weak<Chat>,
     pub stack: gtk4::Stack,
     pub sidebar: gtk4::ListBox,
+    pub history: gtk4::ListBox,
+    pub profile_name: gtk4::Label,
     pub show_signin: Rc<dyn Fn()>,
     pub updates: Rc<std::cell::RefCell<super::update::UpdateCheck>>,
 }
@@ -70,6 +72,7 @@ pub fn show(ctx: &Ctx, name: &str) {
     }
     fill(ctx, name);
     ctx.stack.set_visible_child_name(name);
+    fill_history(ctx);
     // Selecting the row re-fires row_selected, whose handler calls
     // straight back into show(): selecting an already-selected row
     // would recurse until the stack overflows. Only select on change.
@@ -474,6 +477,64 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
         row.set_child(Some(&label));
         list.append(&row);
     }
+}
+
+/// Open a thread from the sidebar history (or a fresh one for a `None`
+/// id): switch, then land on the chat page. A repeat press on the open
+/// thread only lands; it never reloads what is already showing.
+pub fn open_thread(ctx: &Ctx, id: Option<String>) {
+    if let Some(chat) = ctx.chat.upgrade()
+        && chat.current_thread() != id
+    {
+        chat.switch_thread(id);
+    }
+    show(ctx, "chat");
+}
+
+// True while the history refill is marking the open thread. Marking
+// re-fires row_selected, whose handler calls straight back into
+// show(): the mark is a refill echo, never a reader press.
+thread_local! {
+    pub(crate) static MARKING_HISTORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The sidebar's History section: the thread listing, pinned first,
+/// with the open thread marked. Refilled on every page visit, so a
+/// new or renamed thread appears without a restart. The profile row
+/// names the linked identity beside it.
+fn fill_history(ctx: &Ctx) {
+    while let Some(child) = ctx.history.first_child() {
+        ctx.history.remove(&child);
+    }
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let mut threads = chat.threads();
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
+    let current = chat.current_thread();
+    for thread in &threads {
+        let row = gtk4::ListBoxRow::new();
+        row.set_widget_name(&format!("thread:{}", thread.session_id));
+        let label = gtk4::Label::new(Some(if thread.title.is_empty() {
+            "(untitled)"
+        } else {
+            &thread.title
+        }));
+        label.set_xalign(0.0);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        if thread.pinned {
+            label.set_text(&format!("\u{1f4cc} {}", label.text()));
+        }
+        row.set_child(Some(&label));
+        ctx.history.append(&row);
+        if current.as_deref() == Some(thread.session_id.as_str()) {
+            MARKING_HISTORY.set(true);
+            ctx.history.select_row(Some(&row));
+            MARKING_HISTORY.set(false);
+        }
+    }
+    let name = chat.session_name().unwrap_or_else(|| "Sign in".to_owned());
+    ctx.profile_name.set_text(&name);
 }
 
 fn fill_settings(ctx: &Ctx, page: &gtk4::Box) {
