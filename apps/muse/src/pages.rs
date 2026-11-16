@@ -13,7 +13,7 @@ use adw::prelude::*;
 
 use super::app::{Chat, dispatch};
 use super::session::account_dir;
-use muse_account::{ArtifactSummary, Schedule, TaskRun};
+use muse_account::{ArtifactSummary, GrantItem, ListingItem, MemoryHit, Schedule, TaskRun};
 
 /// What a page needs: the chat for reads, the stack to navigate, and
 /// a way back to the sign-in screen when the link goes away.
@@ -102,6 +102,45 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             runs.set_widget_name("tasks-runs");
             page.append(&runs);
         }
+        "feed" => {
+            let prompt = gtk4::Label::new(None);
+            prompt.set_widget_name("feed-prompt");
+            prompt.set_wrap(true);
+            prompt.set_xalign(0.0);
+            page.append(&prompt);
+            let list = gtk4::ListBox::new();
+            list.set_widget_name("feed-list");
+            page.append(&list);
+        }
+        "memory" => {
+            let search = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let entry = gtk4::Entry::new();
+            entry.set_widget_name("memory-query");
+            entry.set_hexpand(true);
+            entry.set_placeholder_text(Some("Search memory"));
+            search.append(&entry);
+            let go = gtk4::Button::with_label("Search");
+            go.set_widget_name("memory-go");
+            search.append(&go);
+            page.append(&search);
+            let list = gtk4::ListBox::new();
+            list.set_widget_name("memory-list");
+            page.append(&list);
+            let weak = ctx.chat.clone();
+            let page_weak = page.downgrade();
+            go.connect_clicked(move |_| {
+                let Some(page) = page_weak.upgrade() else {
+                    return;
+                };
+                let Some(chat) = weak.upgrade() else { return };
+                fill_memory(&chat, &page);
+            });
+        }
+        "policy" => {
+            let list = gtk4::ListBox::new();
+            list.set_widget_name("policy-list");
+            page.append(&list);
+        }
         "library" => {
             let list = gtk4::ListBox::new();
             list.set_widget_name("library-list");
@@ -143,6 +182,9 @@ fn fill(ctx: &Ctx, name: &str) {
         "threads" => fill_threads(ctx, &page),
         "tasks" => fill_tasks(ctx, &page),
         "library" => fill_library(ctx, &page),
+        "feed" => fill_feed(ctx, &page),
+        "memory" => fill_memory_opt(ctx, &page),
+        "policy" => fill_policy(ctx, &page),
         "settings" => fill_settings(&page),
         _ => {}
     }
@@ -367,6 +409,188 @@ fn fill_settings(page: &gtk4::Box) {
     }
 }
 
+/// One feed card: the title plus whatever framing the service gave
+/// (kicker, kind, stamp), each optional.
+pub fn feed_item_label(item: &ListingItem) -> String {
+    let meta: Vec<&str> = [&item.kicker, &item.kind, &item.stamp]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if meta.is_empty() {
+        item.title.clone()
+    } else {
+        format!("{}\n{}", item.title, meta.join(" \u{00b7} "))
+    }
+}
+
+/// One memory hit: the passage truncated to a readable length plus its
+/// location when the service gave one.
+pub fn memory_hit_label(hit: &MemoryHit) -> String {
+    const LIMIT: usize = 200;
+    let text: String = hit.text.chars().take(LIMIT + 1).collect();
+    let text = if text.chars().count() > LIMIT {
+        format!("{}…", text.chars().take(LIMIT).collect::<String>())
+    } else {
+        text
+    };
+    match hit.path.as_deref() {
+        Some(path) if !path.is_empty() => format!("{}\n{}", text, path),
+        _ => text,
+    }
+}
+
+/// One grant row: who holds what, with the capability count.
+pub fn grant_label(grant: &GrantItem) -> String {
+    format!(
+        "{} {} ({} {})",
+        grant.subject_kind,
+        grant.subject_id,
+        grant.capabilities.len(),
+        if grant.capabilities.len() == 1 {
+            "capability"
+        } else {
+            "capabilities"
+        }
+    )
+}
+
+/// Fill the feed page: the generating prompt card plus the units.
+fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "feed-list") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    dispatch(
+        &chat,
+        move || client.feed(),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(listing) = answer else { return };
+            clear_list(&list);
+            for item in &listing.items {
+                let card = gtk4::Label::new(Some(&feed_item_label(item)));
+                card.set_wrap(true);
+                card.set_xalign(0.0);
+                list.append(&card);
+            }
+        },
+    );
+}
+
+/// Memory fills on demand: a visit with a query runs it, a visit
+/// without one only invites a query. Blank queries never dispatch --
+/// the service rejects them.
+fn fill_memory_opt(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    fill_memory(&chat, page);
+}
+
+fn fill_memory(chat: &Rc<Chat>, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "memory-list") else {
+        return;
+    };
+    let query = {
+        let mut found = String::new();
+        let mut child = page.first_child();
+        while let Some(widget) = child {
+            if widget.widget_name() == "memory-query" {
+                if let Ok(entry) = widget.downcast::<gtk4::Entry>() {
+                    found = entry.text().to_string();
+                }
+                break;
+            }
+            child = widget.next_sibling();
+        }
+        found
+    };
+    if query.trim().is_empty() {
+        clear_list(&list);
+        list.append(&gtk4::Label::new(Some(
+            "Type a query above and press Search.",
+        )));
+        return;
+    }
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    dispatch(
+        chat,
+        move || client.memory_search(&query),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(found) = answer else { return };
+            clear_list(&list);
+            if found.hits.is_empty() {
+                list.append(&gtk4::Label::new(Some("No matches.")));
+                return;
+            }
+            for hit in &found.hits {
+                let card = gtk4::Label::new(Some(&memory_hit_label(hit)));
+                card.set_wrap(true);
+                card.set_xalign(0.0);
+                list.append(&card);
+            }
+        },
+    );
+}
+
+/// Fill the policy page: the issued-access inventory, read-only. Grant
+/// changes stay in the shipped client until this surface grows its own
+/// armed write path.
+fn fill_policy(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "policy-list") else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    dispatch(
+        &chat,
+        move || client.grants(50, None, false),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(inventory) = answer else { return };
+            clear_list(&list);
+            for grant in &inventory.grants {
+                list.append(&gtk4::Label::new(Some(&grant_label(grant))));
+            }
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +627,63 @@ mod tests {
             ..plain
         };
         assert_eq!(run_label(&summarized), "done: 3 files");
+    }
+
+    #[test]
+    fn feed_cards_frame_the_title_with_service_meta() {
+        let bare = ListingItem {
+            title: "Morning".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(feed_item_label(&bare), "Morning");
+        let framed = ListingItem {
+            title: "Morning".to_owned(),
+            kicker: Some("Digest".to_owned()),
+            kind: Some("edition".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(feed_item_label(&framed), "Morning\nDigest \u{00b7} edition");
+    }
+
+    #[test]
+    fn memory_hits_truncate_long_passages_and_name_places() {
+        let long = MemoryHit {
+            memory_uri: "memory://x".to_owned(),
+            text: "y".repeat(300),
+            path: Some("/notes".to_owned()),
+            ..Default::default()
+        };
+        let label = memory_hit_label(&long);
+        assert!(label.ends_with("\n/notes"));
+        assert!(label.chars().count() < 300);
+        let short = MemoryHit {
+            memory_uri: "memory://x".to_owned(),
+            text: "hi".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(memory_hit_label(&short), "hi");
+    }
+
+    #[test]
+    fn grant_rows_count_capabilities_with_right_plural() {
+        let one = GrantItem {
+            grant_id: "g".to_owned(),
+            subject_kind: "connector".to_owned(),
+            subject_id: "drive".to_owned(),
+            capabilities: vec!["read".to_owned()],
+            revision: None,
+            not_before_ms: None,
+            expires_at_ms: None,
+            revoked_at_ms: None,
+            provenance: None,
+            created_at_ms: None,
+        };
+        assert_eq!(grant_label(&one), "connector drive (1 capability)");
+        let many = GrantItem {
+            capabilities: vec!["a".to_owned(), "b".to_owned()],
+            ..one
+        };
+        assert_eq!(grant_label(&many), "connector drive (2 capabilities)");
     }
 
     #[test]
