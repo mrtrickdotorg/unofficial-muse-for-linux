@@ -87,11 +87,21 @@ fn message_widget(
 /// here that could leak a local path.
 pub fn attachment_card(attachment: &MessageAttachment) -> gtk4::Widget {
     let mut lines = vec![attachment.filename.clone()];
+    if let (Some(width), Some(height)) = (attachment.width, attachment.height) {
+        lines.push(format!("{width} × {height}"));
+    }
     if let Some(size) = attachment.bytes_len {
         lines.push(format!("{} bytes", size));
     }
-    if let Some(caption) = attachment.caption.as_deref() {
+    if let Some(caption) = attachment.caption.as_deref()
+        && !caption.is_empty()
+    {
         lines.push(caption.to_owned());
+    }
+    if let Some(transcription) = attachment.transcription.as_deref()
+        && !transcription.is_empty()
+    {
+        lines.push(transcription.to_owned());
     }
     let card = gtk4::Label::new(Some(&lines.join("\n")));
     card.set_xalign(0.0);
