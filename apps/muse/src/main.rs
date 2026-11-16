@@ -15,6 +15,7 @@ mod login;
 mod pages;
 mod session;
 mod signin;
+mod update;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
 const DEFAULT_WINDOW_WIDTH: i32 = 1100;
@@ -95,6 +96,7 @@ fn show_main(split: &adw::OverlaySplitView) {
         chat: weak_chat,
         stack: stack.clone(),
         sidebar: sidebar.clone(),
+        updates: std::rc::Rc::new(std::cell::RefCell::new(update::UpdateCheck::default())),
         show_signin: {
             let split = split.clone();
             Rc::new(move || show_signin(&split))
