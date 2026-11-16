@@ -208,7 +208,7 @@ impl SignIn {
                     });
                     let _ = done_tx.send(saved);
                 });
-                glib::idle_add_local({
+                gtk4::glib::idle_add_local({
                     let browser_btn = browser_btn.clone();
                     let cancel_btn = cancel_btn.clone();
                     let status_label = status_label.clone();
@@ -218,7 +218,7 @@ impl SignIn {
                         let answer = match done_rx.try_recv() {
                             Ok(answer) => answer,
                             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                return glib::ControlFlow::Continue;
+                                return gtk4::glib::ControlFlow::Continue;
                             }
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                                 browser_btn.set_sensitive(true);
@@ -226,7 +226,7 @@ impl SignIn {
                                 status_label.set_text("");
                                 error_label
                                     .set_text("The sign-in helper stopped without answering.");
-                                return glib::ControlFlow::Break;
+                                return gtk4::glib::ControlFlow::Break;
                             }
                         };
                         browser_btn.set_sensitive(true);
@@ -236,7 +236,7 @@ impl SignIn {
                             Ok(link) => {
                                 let Some(dir) = super::session::account_dir() else {
                                     error_label.set_text("No config home to save the link into.");
-                                    return glib::ControlFlow::Break;
+                                    return gtk4::glib::ControlFlow::Break;
                                 };
                                 match super::session::save_saved_connection_in(&dir, &link) {
                                     Ok(()) => linked(link),
@@ -245,7 +245,7 @@ impl SignIn {
                             }
                             Err(message) => error_label.set_text(&message),
                         }
-                        glib::ControlFlow::Break
+                        gtk4::glib::ControlFlow::Break
                     }
                 });
             }

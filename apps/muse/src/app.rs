@@ -15,7 +15,7 @@ use muse_account::AccountClient;
 
 use super::chat::build_rows;
 use super::chat_view::populate;
-use super::composer::{Composer, ComposerRow};
+use super::composer::{Composer, ComposerRow, StagedImage};
 use super::session::{Op, Session, bridge_script, load_saved_link};
 
 /// Run `work` on a worker thread, then `done` on the main thread. The
@@ -35,14 +35,14 @@ where
     });
     let weak = Rc::downgrade(chat);
     let mut done = Some(done);
-    glib::idle_add_local(move || {
+    gtk4::glib::idle_add_local(move || {
         let answer = match rx.try_recv() {
             Ok(answer) => answer,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                return glib::ControlFlow::Continue;
+                return gtk4::glib::ControlFlow::Continue;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return glib::ControlFlow::Break;
+                return gtk4::glib::ControlFlow::Break;
             }
         };
         if let Some(done) = done.take()
@@ -50,12 +50,13 @@ where
         {
             done(&chat, answer);
         }
-        glib::ControlFlow::Break
+        gtk4::glib::ControlFlow::Break
     });
 }
 
 /// An option button's press, delivered as the reader's next message.
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
+pub(crate) type RemoveCallback = std::rc::Rc<dyn Fn(String)>;
 
 /// What a delete-turn press means against the held history and the
 /// armed target. The first press arms, the second press on the same
@@ -89,7 +90,9 @@ pub struct Chat {
     older_exhausted: RefCell<bool>,
     live_tx: RefCell<Option<std::sync::mpsc::Sender<()>>>,
     on_option: RefCell<Option<OptionCallback>>,
+    on_remove: RefCell<Option<RemoveCallback>>,
     notice: gtk4::Label,
+    send_note: RefCell<Option<String>>,
     armed_delete: RefCell<Option<String>>,
     painted: RefCell<Option<(usize, Option<String>)>>,
     thread: RefCell<Option<String>>,
@@ -116,19 +119,21 @@ impl Chat {
                 notice
             },
             armed_delete: RefCell::new(None),
+            send_note: RefCell::new(None),
             painted: RefCell::new(None),
             thread: RefCell::new(None),
             model_combo: gtk4::ComboBoxText::new(),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
+            on_remove: RefCell::new(None),
         });
         let weak = Rc::downgrade(&chat);
         *chat.on_option.borrow_mut() = Some(std::rc::Rc::new(move |text: String| {
             if let Some(chat) = weak.upgrade() {
                 // An option press sends its text as the reader's next
                 // message -- the same single-press path as the composer.
-                chat.send_text(text);
+                chat.send_text(text, Vec::new());
             }
         }) as OptionCallback);
         chat.wire();
@@ -182,20 +187,20 @@ impl Chat {
         *chat.live_tx.borrow_mut() = Some(live_tx);
         let weak = Rc::downgrade(&chat);
         let mut ticks = 0u8;
-        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+        gtk4::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
             let mut woke = false;
             while live_rx.try_recv().is_ok() {
                 woke = true;
             }
             ticks = ticks.wrapping_add(1);
             let Some(chat) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
+                return gtk4::glib::ControlFlow::Break;
             };
             if woke || ticks >= 8 {
                 ticks = 0;
                 chat.reload_history();
             }
-            glib::ControlFlow::Continue
+            gtk4::glib::ControlFlow::Continue
         });
         chat
     }
@@ -283,6 +288,62 @@ impl Chat {
                 chat.composer_row.refresh(&chat.composer.borrow());
             }
         });
+        // Clipboard pictures: Ctrl+V claims the press when the
+        // clipboard offers an image, stages the bytes as a chip, and
+        // stops the entry from swallowing it. Text pastes are never
+        // touched -- the press falls through to the entry.
+        let weak = Rc::downgrade(self);
+        let paste = gtk4::EventControllerKey::new();
+        let entry_clipboard = self.composer_row.entry.clipboard();
+        paste.connect_key_pressed(move |_, keyval, _, modifiers| {
+            let Some(chat) = weak.upgrade() else {
+                return gtk4::glib::Propagation::Proceed;
+            };
+            if keyval != gtk4::gdk::Key::v
+                || !modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+            {
+                return gtk4::glib::Propagation::Proceed;
+            }
+            if chat.composer.borrow().sending() {
+                return gtk4::glib::Propagation::Proceed;
+            }
+            let clipboard = entry_clipboard.clone();
+            if !clipboard
+                .formats()
+                .contains_type(gtk4::gdk::Texture::static_type())
+            {
+                return gtk4::glib::Propagation::Proceed;
+            }
+            let weak = Rc::downgrade(&chat);
+            gtk4::glib::spawn_future_local(async move {
+                match clipboard.read_texture_future().await {
+                    Ok(Some(texture)) => {
+                        if let Some(chat) = weak.upgrade() {
+                            let bytes = texture.save_to_png_bytes().to_vec();
+                            chat.stage_pasted(bytes, texture.width(), texture.height());
+                        }
+                    }
+                    _ => {
+                        if let Some(chat) = weak.upgrade() {
+                            chat.say_send_note("The clipboard picture could not be read.");
+                        }
+                    }
+                }
+            });
+            gtk4::glib::Propagation::Stop
+        });
+        self.composer_row.entry.add_controller(paste);
+        // The chip's remove button hands the picture's name back.
+        let weak = Rc::downgrade(self);
+        let on_remove: RemoveCallback = std::rc::Rc::new(move |name: String| {
+            if let Some(chat) = weak.upgrade() {
+                chat.composer.borrow_mut().unstage(&name);
+                chat.paint_chips();
+                chat.composer_row.refresh(&chat.composer.borrow());
+            }
+        });
+        *self.on_remove.borrow_mut() = Some(on_remove);
+        self.paint_chips();
         self.composer_row.refresh(&self.composer.borrow());
         let weak = Rc::downgrade(self);
         self.model_combo.connect_changed(move |combo| {
@@ -341,9 +402,15 @@ impl Chat {
         }
     }
 
-    /// The notice line shows the service's latest limit sentence while
-    /// one is remembered, hidden otherwise.
+    /// The notice line names the newest send outcome (paste refused,
+    /// picture mismatch, send failed) while one stands; otherwise it
+    /// shows the service's latest limit sentence, hidden when neither.
     fn refresh_notice(&self) {
+        if let Some(note) = self.send_note.borrow().clone() {
+            self.notice.set_text(&note);
+            self.notice.set_visible(true);
+            return;
+        }
         match self.session.borrow().latest_quota.clone() {
             Some(text) => {
                 self.notice.set_text(&text);
@@ -493,23 +560,64 @@ impl Chat {
     /// reply reloads history, and a quota-limited send lands as the
     /// service's own notice row through the transcript builders.
     fn send_pressed(self: &Rc<Self>) {
-        let draft = match self.composer.borrow_mut().begin_send() {
-            Some(draft) => draft,
+        let dispatch = match self.composer.borrow_mut().begin_send() {
+            Some(dispatch) => dispatch,
             None => return,
         };
         self.composer_row.entry.set_text("");
+        // A fresh send clears yesterday's send note; the outcome of
+        // this one writes its own.
+        *self.send_note.borrow_mut() = None;
+        self.paint_chips();
         self.composer_row.refresh(&self.composer.borrow());
-        self.send_text(draft);
+        self.send_text(dispatch.text, dispatch.images);
     }
 
-    /// Dispatch one message text: the composer's draft or an option
-    /// button's text. One press dispatches once; a press while the
-    /// slot is held releases the composer instead of queueing.
-    fn send_text(self: &Rc<Self>, draft: String) {
+    /// One pasted picture lands as a chip above the composer. The
+    /// error names the limit instead of eating the paste.
+    fn stage_pasted(&self, bytes: Vec<u8>, width: i32, height: i32) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|span| span.as_nanos())
+            .unwrap_or(0);
+        let name = super::composer::staged_name(nanos, "image/png");
+        let staged = match name {
+            Some(name) => self.composer.borrow_mut().stage(name, bytes, width, height),
+            None => Err("that picture format is not sendable"),
+        };
+        if let Err(limit) = staged {
+            self.say_send_note(&format!("Picture not staged: {limit}."));
+        }
+        self.paint_chips();
+        self.composer_row.refresh(&self.composer.borrow());
+    }
+
+    /// Repaint the staged picture chips from the composer state.
+    fn paint_chips(&self) {
+        if let Some(on_remove) = self.on_remove.borrow().clone() {
+            self.composer_row
+                .paint_chips(self.composer.borrow().staged(), &on_remove);
+        }
+    }
+
+    /// A send outcome in the reader's own words. Wins over the quota
+    /// line until the next send; cleared by a fresh press.
+    fn say_send_note(&self, note: &str) {
+        *self.send_note.borrow_mut() = Some(note.to_owned());
+        self.refresh_notice();
+    }
+
+    /// Dispatch one message: the composer's draft, an option button's
+    /// text, staged pictures, or text with pictures. One press
+    /// dispatches once; a press while the slot is held releases the
+    /// composer instead of queueing.
+    fn send_text(self: &Rc<Self>, draft: String, images: Vec<StagedImage>) {
         let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
             Some(ticket) => ticket,
             None => {
                 self.composer.borrow_mut().finish_send();
+                self.composer.borrow_mut().restore(images);
+                self.paint_chips();
                 self.composer_row.refresh(&self.composer.borrow());
                 return;
             }
@@ -517,6 +625,8 @@ impl Chat {
         let Some(client) = self.client.borrow().clone() else {
             self.session.borrow_mut().accept(&ticket);
             self.composer.borrow_mut().finish_send();
+            self.composer.borrow_mut().restore(images);
+            self.paint_chips();
             self.composer_row.refresh(&self.composer.borrow());
             return;
         };
@@ -526,41 +636,105 @@ impl Chat {
             .account
             .clone()
             .map(|account| (account.vm_id.clone(), account.identity_name.clone()));
+        // Pictures without an identity have nowhere verified to go:
+        // hand them back instead of dropping them down the plain path.
+        if !images.is_empty() && verified.is_none() {
+            self.session.borrow_mut().accept(&ticket);
+            self.composer.borrow_mut().finish_send();
+            self.composer.borrow_mut().restore(images);
+            self.paint_chips();
+            self.say_send_note("Sign in before sending pictures.");
+            self.composer_row.refresh(&self.composer.borrow());
+            return;
+        }
         let scope = self.thread_scope();
         dispatch(
             self,
-            move || match verified {
-                Some((vm_id, identity)) => {
-                    client.send_verified(scope.as_deref(), &draft, &vm_id, &identity)
-                }
-                None => client.send(scope.as_deref(), &draft),
+            move || {
+                let account_images: Vec<muse_account::StagedImage> = images
+                    .iter()
+                    .map(|image| muse_account::StagedImage {
+                        name: image.name.clone(),
+                        bytes: image.bytes.clone(),
+                    })
+                    .collect();
+                let with_images = !account_images.is_empty();
+                let answer = match verified {
+                    Some((vm_id, identity)) if with_images => client.send_images_verified(
+                        scope.as_deref(),
+                        &draft,
+                        &account_images,
+                        &vm_id,
+                        &identity,
+                    ),
+                    Some((vm_id, identity)) => {
+                        client.send_verified(scope.as_deref(), &draft, &vm_id, &identity)
+                    }
+                    None => client.send(scope.as_deref(), &draft),
+                };
+                // The pictures ride back out with the answer: a failed
+                // send restores exactly what it took, dims and all.
+                (answer, images, with_images)
             },
-            move |chat, answer| {
+            move |chat, (answer, images, with_images)| {
                 chat.session.borrow_mut().accept(&ticket);
                 chat.composer.borrow_mut().finish_send();
                 chat.composer_row.refresh(&chat.composer.borrow());
-                if answer.is_ok() {
-                    // Prove by re-read: the reply (or the limit notice)
-                    // comes from the service, never from the dispatch.
-                    // A short quick-poll burst (5 x 2s) watches the reply
-                    // land; the 8s poll resumes after. Each round no-ops
-                    // while the slot is held.
-                    let weak = Rc::downgrade(chat);
-                    let rounds: std::rc::Rc<std::cell::Cell<u8>> =
-                        std::rc::Rc::new(std::cell::Cell::new(5));
-                    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-                        let left = rounds.get();
-                        rounds.set(left.saturating_sub(1));
-                        if let Some(chat) = weak.upgrade() {
-                            chat.reload_history();
+                match answer {
+                    Ok(receipt) => {
+                        // The verified send checks the landed row's
+                        // attachments byte-for-byte: a mismatch names
+                        // itself instead of claiming success.
+                        if receipt.stored_mismatch {
+                            chat.say_send_note(
+                                "Sent, but the service stored a different picture \
+                                 than the one pasted. The text landed; \
+                                 re-paste the picture to retry it.",
+                            );
                         }
-                        if left > 1 {
-                            glib::ControlFlow::Continue
-                        } else {
-                            glib::ControlFlow::Break
+                        // Prove by re-read: the reply (or the limit notice)
+                        // comes from the service, never from the dispatch.
+                        // A short quick-poll burst (5 x 2s) watches the reply
+                        // land; the 8s poll resumes after. Each round no-ops
+                        // while the slot is held.
+                        let weak = Rc::downgrade(chat);
+                        let rounds: std::rc::Rc<std::cell::Cell<u8>> =
+                            std::rc::Rc::new(std::cell::Cell::new(5));
+                        gtk4::glib::timeout_add_local(
+                            std::time::Duration::from_secs(2),
+                            move || {
+                                let left = rounds.get();
+                                rounds.set(left.saturating_sub(1));
+                                if let Some(chat) = weak.upgrade() {
+                                    chat.reload_history();
+                                }
+                                if left > 1 {
+                                    gtk4::glib::ControlFlow::Continue
+                                } else {
+                                    gtk4::glib::ControlFlow::Break
+                                }
+                            },
+                        );
+                        chat.reload_history();
+                    }
+                    Err(error) => {
+                        // A failed picture send hands the pictures back:
+                        // the paste survives to retry.
+                        if with_images {
+                            chat.composer.borrow_mut().restore(images);
+                            chat.paint_chips();
+                            chat.composer_row.refresh(&chat.composer.borrow());
                         }
-                    });
-                    chat.reload_history();
+                        chat.say_send_note(&format!(
+                            "Send failed ({:?}{}).",
+                            error.code,
+                            if error.uncertain {
+                                "; it may or may not have landed"
+                            } else {
+                                ""
+                            }
+                        ));
+                    }
                 }
             },
         );
