@@ -5,6 +5,7 @@
 
 use adw::prelude::*;
 
+mod chat;
 mod session;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
