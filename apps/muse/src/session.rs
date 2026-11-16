@@ -163,6 +163,13 @@ pub struct Session {
     pub model_generation: Option<i64>,
     pub selected_model: Option<String>,
     pub available_models: Vec<String>,
+    /// Held link-preview cards by url: the card plus its cached
+    /// thumbnail file, if the artwork fetched. Cards repaint with the
+    /// transcript; the version bumps on every fill so an arrival
+    /// repaints rows that already showed text-only.
+    pub previews:
+        std::collections::HashMap<String, (muse_account::LinkPreview, Option<std::path::PathBuf>)>,
+    pub preview_version: u64,
 }
 
 impl Session {
@@ -178,6 +185,8 @@ impl Session {
             model_generation: None,
             selected_model: None,
             available_models: Vec::new(),
+            previews: std::collections::HashMap::new(),
+            preview_version: 0,
         }
     }
 
@@ -286,13 +295,15 @@ impl Session {
         }
     }
 
-    /// A cheap fingerprint of the held history: row count plus the
-    /// newest row's id. The transcript skips its full widget rebuild
-    /// when this is unchanged -- rebuilding hundreds of labels every
-    /// poll is what made long threads stutter.
-    pub fn history_fingerprint(&self) -> (usize, Option<String>) {
+    /// A cheap fingerprint of the held history: row count, the newest
+    /// row's id, and the preview version. The transcript skips its
+    /// full widget rebuild when this is unchanged -- rebuilding
+    /// hundreds of labels every poll is what made long threads
+    /// stutter. A newly arrived link card bumps the version so its
+    /// row repaints without a history change.
+    pub fn history_fingerprint(&self) -> (usize, Option<String>, u64) {
         let last = self.history.last().map(|row| row.message_id.clone());
-        (self.history.len(), last)
+        (self.history.len(), last, self.preview_version)
     }
 
     /// Record a finished history read: the rows land only on success.
@@ -744,6 +755,8 @@ mod tests {
         assert_ne!(loaded, older);
         assert_eq!(older.0, 3);
         assert_eq!(older.1.as_deref(), Some("c"));
+        session.preview_version += 1;
+        assert_ne!(older, session.history_fingerprint());
     }
 
     #[test]

@@ -3766,3 +3766,58 @@ class AttachProbeBinaryTests(unittest.TestCase):
                      "sample_rate_hz": 16000, "extra": 1}):
             with self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(dict(bad))
+
+    def test_link_preview_posts_the_url_and_projects_fields(self):
+        # link_preview (Mac route table, POST /api/link-preview): the
+        # url goes out as JSON, the card fields ride back. The shape is
+        # lenient -- every field is optional -- because the response
+        # shape is not recorded, only the route and the body.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                return {"title": "Ovenbird Cookware",
+                        "description": "Cast iron goods",
+                        "image_url": "https://example.com/pot.jpg",
+                        "extra": {"nested": True}}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        answer = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "link_preview", "url": "https://example.com/pot"})
+        self.assertEqual(seen["method"], "link_preview")
+        self.assertEqual(seen["body"], {"url": "https://example.com/pot"})
+        self.assertEqual(answer["title"], "Ovenbird Cookware")
+        self.assertEqual(answer["description"], "Cast iron goods")
+        self.assertEqual(answer["image_url"], "https://example.com/pot.jpg")
+        self.assertIn("title", answer["keys"])
+
+    def test_link_preview_projects_a_wordless_answer_as_empty(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                return {"unrelated": 1}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        answer = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "link_preview", "url": "https://example.com/pot"})
+        self.assertIsNone(answer["title"])
+        self.assertIsNone(answer["image_url"])
+        self.assertEqual(answer["keys"], ["unrelated"])
+
+    def test_link_preview_validation_rejects_guesswork(self):
+        bridge = load_bridge()
+        for bad in ({"op": "link_preview"},
+                    {"op": "link_preview", "url": "ftp://example.com/x"},
+                    {"op": "link_preview", "url": "https://example.com/x",
+                     "profile": "ok", "extra": 1},
+                    {"op": "link_preview", "url": ""}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad))

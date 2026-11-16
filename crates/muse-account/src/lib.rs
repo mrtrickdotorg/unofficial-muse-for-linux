@@ -36,6 +36,7 @@ fn deadline_for(op: Option<&str>) -> Duration {
         Some("stream_probe") => Duration::from_secs(60),
         Some("send_images") => Duration::from_secs(90),
         Some("dictate") => Duration::from_secs(90),
+        Some("link_preview") => Duration::from_secs(30),
         Some("activity") => Duration::from_secs(35),
         _ => Duration::from_secs(45),
     }
@@ -49,6 +50,25 @@ fn deadline_for(op: Option<&str>) -> Duration {
 pub struct DictationVerdict {
     #[serde(default)]
     pub transcript: Option<String>,
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+/// A link-preview card: whatever scalar fields the service returned
+/// for a url, each optional because the response shape is not
+/// recorded. A thin answer is a thin card, never a failed row.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct LinkPreview {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image_url: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub site_name: Option<String>,
     #[serde(default)]
     pub keys: Vec<String>,
 }
@@ -1765,6 +1785,23 @@ impl AccountClient {
         Ok(verdict)
     }
 
+    /// A link-preview card for one url: whatever scalar fields the
+    /// service returned. Only http(s) urls travel; anything else is a
+    /// local refusal, never a service round trip.
+    pub fn preview_link(&self, url: &str) -> Result<LinkPreview, AccountError> {
+        if url.len() > 2048 || !(url.starts_with("https://") || url.starts_with("http://")) {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let preview: LinkPreview = self.request(
+            serde_json::json!({
+                "op": "link_preview",
+                "url": url,
+            }),
+            true,
+        )?;
+        Ok(preview)
+    }
+
     pub fn send_from_device_verified(
         &self,
         thread: Option<&str>,
@@ -2671,6 +2708,26 @@ mod deadline_tests {
                 .expect("sparse verdicts keep parsing");
         assert_eq!(verdict.transcript.as_deref(), Some("hi"));
         assert!(verdict.keys.is_empty());
+    }
+
+    #[test]
+    fn preview_link_validation_fires_before_any_subprocess() {
+        use std::path::PathBuf;
+        let client = super::AccountClient::new(super::BridgeConfig {
+            python: PathBuf::from("/unused/python"),
+            script: PathBuf::from("/unused/bridge.py"),
+            config_dir: PathBuf::from("/unused"),
+        });
+        for url in ["", "ftp://example.com/x", &"x".repeat(2049)] {
+            let error = client
+                .preview_link(url)
+                .expect_err("validation must fire before any subprocess");
+            assert_eq!(error.code, super::ErrorCode::InvalidRequest);
+        }
+        let preview: super::LinkPreview = serde_json::from_value(serde_json::json!({"title": "T"}))
+            .expect("sparse previews keep parsing");
+        assert_eq!(preview.title.as_deref(), Some("T"));
+        assert!(preview.image_url.is_none());
     }
 
     #[test]

@@ -712,7 +712,8 @@ def validate_request(request):
                                "expect_vm_id", "expect_identity_name"},
                "attach_probe": {"thread"},
                "stream_probe": {"thread"},
-               "dictate": {"pcm_b64", "sample_rate_hz"}}
+               "dictate": {"pcm_b64", "sample_rate_hz"},
+               "link_preview": {"url", "profile"}}
     if not isinstance(op, str) or op not in allowed:
         raise BridgeFailure("invalid_request")
     if set(request) - ({"op", "config_dir"} | allowed[op]):
@@ -816,6 +817,23 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
         rate = request.get("sample_rate_hz")
         if rate not in (8000, 16000):
+            raise BridgeFailure("invalid_request")
+    if op == "link_preview":
+        # link_preview (Mac route table, POST /api/link-preview):
+        # the url goes out as JSON, the card fields ride back. Only
+        # http(s) urls travel; the profile overrides per the web's
+        # `{url, profile?}` body shape.
+        url = request.get("url")
+        if (not isinstance(url, str) or not 1 <= len(url) <= 2048
+                or "\x00" in url
+                or not (url.startswith("https://")
+                        or url.startswith("http://"))):
+            raise BridgeFailure("invalid_request")
+        profile = request.get("profile")
+        if (profile is not None
+                and (not isinstance(profile, str)
+                     or not 1 <= len(profile) <= 256
+                     or "\x00" in profile)):
             raise BridgeFailure("invalid_request")
     if op == "model_set":
         # The id is the service's own, taken from a model.get listing or
@@ -1405,6 +1423,19 @@ def _project_live_events(records, limit=200):
         if len(rows) >= limit:
             break
     return rows
+
+
+def _project_link_preview(payload):
+    """Project a link-preview answer: the card fields the service
+    returned, each capped like every other display string. Unknown
+    fields are not dropped silently -- the key list names them, so a
+    richer answer stays describable."""
+    card = {}
+    for key in ("title", "description", "image_url", "url", "site_name"):
+        value = payload.get(key)
+        card[key] = value[:500] if isinstance(value, str) and value else None
+    card["keys"] = sorted(key for key in payload if isinstance(key, str))[:32]
+    return card
 
 
 def _project_dictation(raw):
@@ -3234,6 +3265,21 @@ class Adapter:
             if not isinstance(payload, dict):
                 raise BridgeFailure("protocol_error")
             return _project_model(payload)
+        if request["op"] == "link_preview":
+            # The Hatch chat card (title, description, artwork) behind
+            # the service's own validator. The response shape is not
+            # recorded, so the projection keeps whatever scalar fields
+            # arrive and names the keys; a thin answer is a thin card,
+            # never a failed row.
+            body = {"url": request["url"]}
+            if request.get("profile") is not None:
+                body["profile"] = request["profile"]
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "link_preview", body=body, timeout=30)
+            if not isinstance(payload, dict):
+                raise BridgeFailure("protocol_error")
+            return _project_link_preview(payload)
         if request["op"] == "dictate":
             # Voice dictation: the recorded bytes go out raw with the
             # rate in the query, per the route template. Dictation is
