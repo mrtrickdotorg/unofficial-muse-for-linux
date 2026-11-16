@@ -51,6 +51,15 @@ fn build_ui(app: &adw::Application) {
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&gtk4::Label::new(Some("Muse"))));
     window.set_titlebar(Some(&header));
+    // Mac-signature surfaces (floating composer card, grey bubbles,
+    // blue send circle): fixed brand values, loaded once per display.
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_data(include_str!("theme.css"));
+    gtk4::style_context_add_provider_for_display(
+        &gtk4::prelude::RootExt::display(&window),
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
     let linked = session::load_saved_link().filter(|link| link.consent);
     if linked.is_some() {

@@ -291,10 +291,10 @@ impl Chat {
         // Clipboard pictures: Ctrl+V claims the press when the
         // clipboard offers an image, stages the bytes as a chip, and
         // stops the entry from swallowing it. Text pastes are never
-        // touched -- the press falls through to the entry.
+        // touched -- the press falls through to the entry. The `+`
+        // button is the same path on demand.
         let weak = Rc::downgrade(self);
         let paste = gtk4::EventControllerKey::new();
-        let entry_clipboard = self.composer_row.entry.clipboard();
         paste.connect_key_pressed(move |_, keyval, _, modifiers| {
             let Some(chat) = weak.upgrade() else {
                 return gtk4::glib::Propagation::Proceed;
@@ -304,35 +304,21 @@ impl Chat {
             {
                 return gtk4::glib::Propagation::Proceed;
             }
-            if chat.composer.borrow().sending() {
-                return gtk4::glib::Propagation::Proceed;
+            if chat.paste_from_clipboard() {
+                gtk4::glib::Propagation::Stop
+            } else {
+                gtk4::glib::Propagation::Proceed
             }
-            let clipboard = entry_clipboard.clone();
-            if !clipboard
-                .formats()
-                .contains_type(gtk4::gdk::Texture::static_type())
-            {
-                return gtk4::glib::Propagation::Proceed;
-            }
-            let weak = Rc::downgrade(&chat);
-            gtk4::glib::spawn_future_local(async move {
-                match clipboard.read_texture_future().await {
-                    Ok(Some(texture)) => {
-                        if let Some(chat) = weak.upgrade() {
-                            let bytes = texture.save_to_png_bytes().to_vec();
-                            chat.stage_pasted(bytes, texture.width(), texture.height());
-                        }
-                    }
-                    _ => {
-                        if let Some(chat) = weak.upgrade() {
-                            chat.say_send_note("The clipboard picture could not be read.");
-                        }
-                    }
-                }
-            });
-            gtk4::glib::Propagation::Stop
         });
         self.composer_row.entry.add_controller(paste);
+        let weak = Rc::downgrade(self);
+        self.composer_row.attach.connect_clicked(move |_| {
+            if let Some(chat) = weak.upgrade()
+                && !chat.paste_from_clipboard()
+            {
+                chat.say_send_note("The clipboard holds no picture to stage.");
+            }
+        });
         // The chip's remove button hands the picture's name back.
         let weak = Rc::downgrade(self);
         let on_remove: RemoveCallback = std::rc::Rc::new(move |name: String| {
@@ -571,6 +557,39 @@ impl Chat {
         self.paint_chips();
         self.composer_row.refresh(&self.composer.borrow());
         self.send_text(dispatch.text, dispatch.images);
+    }
+
+    /// Stage the clipboard's picture as a chip. Returns whether the
+    /// press was claimed: only when a picture is actually offered.
+    /// Text clipboards are never touched.
+    fn paste_from_clipboard(self: &Rc<Self>) -> bool {
+        if self.composer.borrow().sending() {
+            return false;
+        }
+        let clipboard = self.composer_row.entry.clipboard();
+        if !clipboard
+            .formats()
+            .contains_type(gtk4::gdk::Texture::static_type())
+        {
+            return false;
+        }
+        let weak = Rc::downgrade(self);
+        gtk4::glib::spawn_future_local(async move {
+            match clipboard.read_texture_future().await {
+                Ok(Some(texture)) => {
+                    if let Some(chat) = weak.upgrade() {
+                        let bytes = texture.save_to_png_bytes().to_vec();
+                        chat.stage_pasted(bytes, texture.width(), texture.height());
+                    }
+                }
+                _ => {
+                    if let Some(chat) = weak.upgrade() {
+                        chat.say_send_note("The clipboard picture could not be read.");
+                    }
+                }
+            }
+        });
+        true
     }
 
     /// One pasted picture lands as a chip above the composer. The
