@@ -1074,6 +1074,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "libadwaita",
+ "libc",
  "muse-account",
  "serde",
  "serde_json",
