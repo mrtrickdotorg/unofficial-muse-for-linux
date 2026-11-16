@@ -91,6 +91,7 @@ pub struct Chat {
     on_option: RefCell<Option<OptionCallback>>,
     notice: gtk4::Label,
     armed_delete: RefCell<Option<String>>,
+    painted: RefCell<Option<(usize, Option<String>)>>,
     thread: RefCell<Option<String>>,
     model_combo: gtk4::ComboBoxText,
 }
@@ -115,6 +116,7 @@ impl Chat {
                 notice
             },
             armed_delete: RefCell::new(None),
+            painted: RefCell::new(None),
             thread: RefCell::new(None),
             model_combo: gtk4::ComboBoxText::new(),
             live_tx: RefCell::new(None),
@@ -313,14 +315,21 @@ impl Chat {
     /// the bottom because a cleared transcript starts at the bottom.
     fn render(&self) {
         let follow = self.at_bottom();
-        if let Some(on_option) = self.on_option.borrow().clone() {
-            let rows = build_rows(&self.session.borrow().history);
-            for row in &rows {
-                if let super::chat::TranscriptRow::Notice { text } = row {
-                    self.session.borrow_mut().note_quota(text.clone());
+        let fingerprint = self.session.borrow().history_fingerprint();
+        // Unchanged history means identical rows: skip the full
+        // teardown and rebuild. The labels below are cheap; the
+        // ListBox reconstruction is what stalled long threads.
+        if *self.painted.borrow() != Some(fingerprint.clone()) {
+            if let Some(on_option) = self.on_option.borrow().clone() {
+                let rows = build_rows(&self.session.borrow().history);
+                for row in &rows {
+                    if let super::chat::TranscriptRow::Notice { text } = row {
+                        self.session.borrow_mut().note_quota(text.clone());
+                    }
                 }
+                populate(&self.transcript, &rows, &on_option);
             }
-            populate(&self.transcript, &rows, &on_option);
+            *self.painted.borrow_mut() = Some(fingerprint);
         }
         self.refresh_older();
         self.refresh_notice();

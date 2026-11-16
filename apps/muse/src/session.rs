@@ -283,6 +283,15 @@ impl Session {
         }
     }
 
+    /// A cheap fingerprint of the held history: row count plus the
+    /// newest row's id. The transcript skips its full widget rebuild
+    /// when this is unchanged -- rebuilding hundreds of labels every
+    /// poll is what made long threads stutter.
+    pub fn history_fingerprint(&self) -> (usize, Option<String>) {
+        let last = self.history.last().map(|row| row.message_id.clone());
+        (self.history.len(), last)
+    }
+
     /// Record a finished history read: the rows land only on success.
     pub fn finish_history(
         &mut self,
@@ -718,6 +727,20 @@ mod tests {
             display_name: None,
         });
         assert_eq!(session.selected_model.as_deref(), Some("m0"));
+    }
+
+    #[test]
+    fn history_fingerprint_moves_with_new_rows_only() {
+        let mut session = Session::new();
+        let empty = session.history_fingerprint();
+        session.history = vec![history_row("b", 2), history_row("c", 3)];
+        let loaded = session.history_fingerprint();
+        assert_ne!(empty, loaded);
+        session.prepend_history(vec![history_row("a", 1)]);
+        let older = session.history_fingerprint();
+        assert_ne!(loaded, older);
+        assert_eq!(older.0, 3);
+        assert_eq!(older.1.as_deref(), Some("c"));
     }
 
     #[test]
