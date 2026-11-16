@@ -97,12 +97,16 @@ pub struct Chat {
     painted: RefCell<Option<(usize, Option<String>)>>,
     thread: RefCell<Option<String>>,
     model_combo: gtk4::ComboBoxText,
+    recording: RefCell<Option<super::voice::Recording>>,
 }
 
 impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
         let scrolled = gtk4::ScrolledWindow::new();
         scrolled.set_child(Some(&transcript));
+        // Thinking lives in the composer card: the pill IS the model
+        // picker, filled from the service listing like before.
+        let model_combo = composer_row.thinking.clone();
         let chat = Rc::new(Self {
             session: Rc::new(RefCell::new(Session::new())),
             composer: Rc::new(RefCell::new(Composer::new())),
@@ -122,7 +126,8 @@ impl Chat {
             send_note: RefCell::new(None),
             painted: RefCell::new(None),
             thread: RefCell::new(None),
-            model_combo: gtk4::ComboBoxText::new(),
+            model_combo,
+            recording: RefCell::new(None),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -160,8 +165,6 @@ impl Chat {
             });
         }
         chat.refresh_older();
-        chat.model_combo.set_halign(gtk4::Align::Start);
-        content.append(&chat.model_combo);
         content.append(&chat.older_button);
         content.append(&chat.scrolled);
         content.append(&chat.notice);
@@ -317,6 +320,14 @@ impl Chat {
                 && !chat.paste_from_clipboard()
             {
                 chat.say_send_note("The clipboard holds no picture to stage.");
+            }
+        });
+        // The mic pill starts and stops a dictation take; the second
+        // press sends the take to the service for transcription.
+        let weak = Rc::downgrade(self);
+        self.composer_row.mic.connect_clicked(move |_| {
+            if let Some(chat) = weak.upgrade() {
+                chat.toggle_dictation();
             }
         });
         // The chip's remove button hands the picture's name back.
@@ -590,6 +601,98 @@ impl Chat {
             }
         });
         true
+    }
+
+    /// The mic pill: first press starts a take, second press stops it
+    /// and sends it for transcription. A take runs thirty seconds max,
+    /// then stops itself the same way.
+    fn toggle_dictation(self: &Rc<Self>) {
+        if self.recording.borrow().is_some() {
+            self.finish_dictation();
+            return;
+        }
+        match super::voice::Recording::start() {
+            Ok(recording) => {
+                *self.recording.borrow_mut() = Some(recording);
+                self.composer_row.mic.set_label("■");
+                self.say_send_note("Listening — press again to stop.");
+                let weak = Rc::downgrade(self);
+                gtk4::glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
+                    if let Some(chat) = weak.upgrade()
+                        && chat.recording.borrow().is_some()
+                    {
+                        chat.finish_dictation();
+                    }
+                    gtk4::glib::ControlFlow::Break
+                });
+            }
+            Err(reason) => self.say_send_note(&format!("Dictation unavailable: {reason}.")),
+        }
+    }
+
+    /// Stop the take and ask the service what it heard. Words land in
+    /// the composer as an editable draft -- dictation proposes, never
+    /// sends. No words, or a refusal, is reported in the same line.
+    fn finish_dictation(self: &Rc<Self>) {
+        let recording = self.recording.borrow_mut().take();
+        self.composer_row.mic.set_label("🎤");
+        let Some(recording) = recording else {
+            return;
+        };
+        let (pcm, rate) = match recording.stop() {
+            Ok(take) => take,
+            Err(reason) => {
+                self.say_send_note(&format!("Dictation dropped: {reason}."));
+                return;
+            }
+        };
+        self.transcribe(pcm, rate);
+    }
+
+    fn transcribe(self: &Rc<Self>, pcm: Vec<u8>, rate: u32) {
+        let ticket = match self.session.borrow_mut().try_begin(Op::Voice) {
+            Some(ticket) => ticket,
+            None => {
+                self.say_send_note("A dictation is already running.");
+                return;
+            }
+        };
+        let Some(client) = self.client.borrow().clone() else {
+            self.session.borrow_mut().accept(&ticket);
+            self.say_send_note("Sign in before dictating.");
+            return;
+        };
+        self.say_send_note("Hearing the take back…");
+        dispatch(
+            self,
+            move || client.dictate(&pcm, rate),
+            move |chat, answer| {
+                chat.session.borrow_mut().accept(&ticket);
+                match answer {
+                    Ok(verdict) => match verdict.transcript {
+                        Some(words) if !words.trim().is_empty() => {
+                            let draft = chat.composer.borrow().text().to_owned();
+                            let joined = if draft.trim().is_empty() {
+                                words.trim().to_owned()
+                            } else {
+                                format!("{} {}", draft.trim_end(), words.trim())
+                            };
+                            chat.composer.borrow_mut().set_text(&joined);
+                            chat.composer_row.entry.set_text(&joined);
+                            chat.composer_row.refresh(&chat.composer.borrow());
+                            *chat.send_note.borrow_mut() = None;
+                            chat.refresh_notice();
+                        }
+                        _ => {
+                            chat.say_send_note("The service took the audio but returned no words.")
+                        }
+                    },
+                    Err(error) => {
+                        chat.say_send_note(&format!("Dictation failed ({:?}).", error.code))
+                    }
+                }
+            },
+        );
     }
 
     /// One pasted picture lands as a chip above the composer. The

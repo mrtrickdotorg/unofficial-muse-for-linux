@@ -3705,3 +3705,64 @@ class AttachProbeBinaryTests(unittest.TestCase):
                          bridge.PROBE_PNG_B64)
         self.assertEqual(bodies["attach-probe-bin-0.png"]["encoding"],
                          "base64")
+
+    def test_dictate_posts_raw_pcm_with_a_sample_rate(self):
+        # voice.dictation (Mac route table): raw audio bytes in the
+        # body, the rate in the query the path template names. The
+        # fake records the framing; the transcript rides back.
+        import base64
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        pcm = bytes(range(256)) * 64
+        seen = {}
+        class Gateway:
+            def request(self, method, body=None, **kwargs):
+                seen["method"] = method
+                seen["body"] = body
+                seen["kwargs"] = kwargs
+                return {"transcript": "hello there"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        answer = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "dictate", "pcm_b64": base64.b64encode(pcm).decode("ascii"),
+             "sample_rate_hz": 16000})
+        self.assertEqual(seen["method"], "voice.dictation")
+        self.assertEqual(seen["body"], pcm)
+        self.assertEqual(seen["kwargs"].get("path_params"),
+                         {"sample_rate_hz": "16000"})
+        self.assertEqual(answer["transcript"], "hello there")
+
+    def test_dictate_reports_an_empty_answer_as_no_words(self):
+        # Dictation is a noise-mode route: success may carry nothing.
+        # No words is an answer, not a transport failure.
+        from contextlib import contextmanager
+        import base64
+        bridge = load_bridge()
+        class Gateway:
+            def request(self, method, body=None, **kwargs):
+                return None
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        answer = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "dictate", "pcm_b64": base64.b64encode(b"\x00\x01").decode("ascii"),
+             "sample_rate_hz": 16000})
+        self.assertIsNone(answer["transcript"])
+        self.assertEqual(answer["keys"], [])
+
+    def test_dictate_validation_rejects_guesswork(self):
+        import base64
+        bridge = load_bridge()
+        for bad in ({"op": "dictate"},
+                    {"op": "dictate", "pcm_b64": "!!!", "sample_rate_hz": 16000},
+                    {"op": "dictate",
+                     "pcm_b64": base64.b64encode(b"\x00").decode("ascii"),
+                     "sample_rate_hz": 44100},
+                    {"op": "dictate",
+                     "pcm_b64": base64.b64encode(b"\x00").decode("ascii"),
+                     "sample_rate_hz": 16000, "extra": 1}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad))

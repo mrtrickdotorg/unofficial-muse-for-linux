@@ -35,9 +35,46 @@ fn deadline_for(op: Option<&str>) -> Duration {
         Some("attach_probe") => Duration::from_secs(60),
         Some("stream_probe") => Duration::from_secs(60),
         Some("send_images") => Duration::from_secs(90),
+        Some("dictate") => Duration::from_secs(90),
         Some("activity") => Duration::from_secs(35),
         _ => Duration::from_secs(45),
     }
+}
+
+/// What the service heard in a dictation turn: the transcript when
+/// it heard words, else the answered key list so the shape stays
+/// describable. A noise-mode route may answer nothing at all; that
+/// projects as heard nothing, never as a transport failure.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct DictationVerdict {
+    #[serde(default)]
+    pub transcript: Option<String>,
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+/// The base64 the stdio frame needs for raw audio bytes. No new
+/// dependency: the alphabet is fixed and the padding is arithmetic.
+pub fn encode_b64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let mut word = chunk
+            .iter()
+            .fold(0u32, |word, byte| (word << 8) | *byte as u32);
+        // Left-align: a short final chunk's bytes sit at the top, so
+        // the sextet picks line up with the full-chunk positions.
+        word <<= 8 * (3 - chunk.len());
+        let padded = chunk.len();
+        for index in 0..4 {
+            if index <= padded {
+                out.push(ALPHABET[((word >> (18 - 6 * index)) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1702,6 +1739,32 @@ impl AccountClient {
     ) -> Result<DispatchReceipt, AccountError> {
         self.send_checked(thread, message, None, Some((vm_id, identity_name)))
     }
+
+    /// Voice dictation: the recorded bytes go out raw with the rate in
+    /// the query, per the route template. Only the rates the client
+    /// records; empty audio and oversize clips are refused locally.
+    pub fn dictate(
+        &self,
+        pcm: &[u8],
+        sample_rate_hz: u32,
+    ) -> Result<DictationVerdict, AccountError> {
+        if pcm.is_empty()
+            || pcm.len() > 8 * 1024 * 1024
+            || (sample_rate_hz != 8000 && sample_rate_hz != 16000)
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        let verdict: DictationVerdict = self.request(
+            serde_json::json!({
+                "op": "dictate",
+                "pcm_b64": encode_b64(pcm),
+                "sample_rate_hz": sample_rate_hz,
+            }),
+            true,
+        )?;
+        Ok(verdict)
+    }
+
     pub fn send_from_device_verified(
         &self,
         thread: Option<&str>,
@@ -2573,6 +2636,41 @@ mod deadline_tests {
             .expect("sparse model answers keep parsing");
         assert_eq!(info.generation, Some(7));
         assert!(info.available_models.is_empty());
+    }
+
+    #[test]
+    fn base64_vectors_round_trip_without_a_dependency() {
+        assert_eq!(super::encode_b64(b""), "");
+        assert_eq!(super::encode_b64(b"f"), "Zg==");
+        assert_eq!(super::encode_b64(b"fo"), "Zm8=");
+        assert_eq!(super::encode_b64(b"foo"), "Zm9v");
+        assert_eq!(super::encode_b64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(super::encode_b64(&[0xff, 0x00, 0x80]), "/wCA");
+    }
+
+    #[test]
+    fn dictate_validation_fires_before_any_subprocess() {
+        use std::path::PathBuf;
+        let client = super::AccountClient::new(super::BridgeConfig {
+            python: PathBuf::from("/unused/python"),
+            script: PathBuf::from("/unused/bridge.py"),
+            config_dir: PathBuf::from("/unused"),
+        });
+        for (pcm, rate) in [
+            (vec![], 16000),
+            (vec![0u8; 8 * 1024 * 1024 + 1], 16000),
+            (vec![1u8], 44100),
+        ] {
+            let error = client
+                .dictate(&pcm, rate)
+                .expect_err("validation must fire before any subprocess");
+            assert_eq!(error.code, super::ErrorCode::InvalidRequest);
+        }
+        let verdict: super::DictationVerdict =
+            serde_json::from_value(serde_json::json!({"transcript": "hi"}))
+                .expect("sparse verdicts keep parsing");
+        assert_eq!(verdict.transcript.as_deref(), Some("hi"));
+        assert!(verdict.keys.is_empty());
     }
 
     #[test]

@@ -711,7 +711,8 @@ def validate_request(request):
                "send_images": {"thread", "message", "images", "device_id",
                                "expect_vm_id", "expect_identity_name"},
                "attach_probe": {"thread"},
-               "stream_probe": {"thread"}}
+               "stream_probe": {"thread"},
+               "dictate": {"pcm_b64", "sample_rate_hz"}}
     if not isinstance(op, str) or op not in allowed:
         raise BridgeFailure("invalid_request")
     if set(request) - ({"op", "config_dir"} | allowed[op]):
@@ -799,6 +800,23 @@ def validate_request(request):
                         raise BridgeFailure("invalid_request")
                     continue
                 raise BridgeFailure("invalid_request")
+    if op == "dictate":
+        # voice.dictation (Mac route table, POST /api/voice/dictation
+        # ?sample_rate_hz={...}): raw audio bytes in the body, the
+        # rate in the query the path template names. Only the two
+        # rates the client records; anything else is guesswork.
+        import base64 as _b64
+        encoded = request.get("pcm_b64")
+        try:
+            pcm = _b64.b64decode(encoded, validate=True) if isinstance(
+                encoded, str) else None
+        except Exception:
+            pcm = None
+        if not pcm or len(pcm) > 8 * 1024 * 1024:
+            raise BridgeFailure("invalid_request")
+        rate = request.get("sample_rate_hz")
+        if rate not in (8000, 16000):
+            raise BridgeFailure("invalid_request")
     if op == "model_set":
         # The id is the service's own, taken from a model.get listing or
         # the picker; anything else would be selecting a guess.
@@ -1387,6 +1405,23 @@ def _project_live_events(records, limit=200):
         if len(rows) >= limit:
             break
     return rows
+
+
+def _project_dictation(raw):
+    """Project a dictation answer: the transcript when the service
+    heard words, else the key list so the shape stays describable.
+    Non-dict answers (noise mode may answer nothing) project as heard
+    nothing; content stays on the service side of this frame."""
+    if not isinstance(raw, dict):
+        return {"transcript": None, "keys": []}
+    transcript = None
+    for key in ("transcript", "text"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            transcript = value.strip()[:2000]
+            break
+    keys = sorted(key for key in raw if isinstance(key, str))[:32]
+    return {"transcript": transcript, "keys": keys}
 
 
 def _project_model(payload):
@@ -3199,6 +3234,26 @@ class Adapter:
             if not isinstance(payload, dict):
                 raise BridgeFailure("protocol_error")
             return _project_model(payload)
+        if request["op"] == "dictate":
+            # Voice dictation: the recorded bytes go out raw with the
+            # rate in the query, per the route template. Dictation is
+            # a noise-mode route, so an empty answer is a real one --
+            # heard nothing -- not a transport failure. A refusal
+            # raises like any other route; the caller reports the code,
+            # never a transcript it did not hear.
+            import base64 as _b64dict
+            pcm = _b64dict.b64decode(request["pcm_b64"], validate=True)
+            with self.client._gateway(self.config) as gateway:
+                raw = gateway.request(
+                    "voice.dictation", body=pcm,
+                    path_params={"sample_rate_hz": str(
+                        request["sample_rate_hz"])},
+                    timeout=60)
+            timing_log(request.get("config_dir"),
+                       "dictate rate:%s bytes:%d answered:%s" % (
+                           request["sample_rate_hz"], len(pcm),
+                           isinstance(raw, dict)))
+            return _project_dictation(raw)
         if request["op"] == "grants":
             # Paged issued-access inventory, projected to the scalar fields
             # the web UI's own validator reads. The cursor travels opaque:
