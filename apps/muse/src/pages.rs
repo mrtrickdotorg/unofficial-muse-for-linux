@@ -536,7 +536,7 @@ fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
         && let Ok(button) = widget.downcast::<gtk4::Button>()
     {
         if state.staged.is_some() {
-            button.set_label("Relaunch to update");
+            button.set_label("Restart to update");
             button.set_visible(true);
             button.set_sensitive(!state.busy);
         } else if state.info.is_some() {
@@ -607,14 +607,61 @@ fn do_check(ctx: &Ctx, page: &gtk4::Box) {
     });
 }
 
-/// The action button: download the staged build, or relaunch into it.
+/// The action button: download the staged build, or restart into it.
+/// The restart is verified on a worker (the new copy must stay up
+/// before this one exits); a failed restart reports in the panel with
+/// the staged path instead of leaving the reader with nothing.
 fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
     let (info, staged) = {
         let state = ctx.updates.borrow();
         (state.info.clone(), state.staged.clone())
     };
     if let Some(staged) = staged {
-        super::update::relaunch(&staged);
+        {
+            let mut state = ctx.updates.borrow_mut();
+            if state.busy {
+                return;
+            }
+            state.busy = true;
+            state.status = "Restarting into the update…".to_owned();
+        }
+        paint_updates(ctx, page);
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(
+                super::update::relaunch_verified(&staged)
+                    .map_err(|message| format!("{message} Staged file: {}", staged.display())),
+            );
+        });
+        let ctx = ctx.clone();
+        let page_strong: gtk4::Box = page.clone();
+        glib::idle_add_local(move || {
+            let answer = match done_rx.try_recv() {
+                Ok(answer) => answer,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    return glib::ControlFlow::Continue;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    let mut state = ctx.updates.borrow_mut();
+                    state.busy = false;
+                    state.status = "Restart check stopped without an answer.".to_owned();
+                    paint_updates(&ctx, &page_strong);
+                    return glib::ControlFlow::Break;
+                }
+            };
+            match answer {
+                // The new copy proved it stays up: this one goes.
+                Ok(()) => std::process::exit(0),
+                Err(message) => {
+                    let mut state = ctx.updates.borrow_mut();
+                    state.busy = false;
+                    state.status = message;
+                    paint_updates(&ctx, &page_strong);
+                }
+            }
+            glib::ControlFlow::Break
+        });
+        return;
     }
     let Some(info) = info else {
         return;
@@ -653,7 +700,10 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
             state.busy = false;
             match answer {
                 Ok(staged) => {
-                    state.status = "Update downloaded. Relaunch to switch to it.".to_owned();
+                    state.status = format!(
+                        "Update downloaded to {}. Restart to switch to it.",
+                        staged.display()
+                    );
                     state.staged = Some(staged);
                 }
                 Err(message) => {
