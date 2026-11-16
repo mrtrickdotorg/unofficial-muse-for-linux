@@ -16,6 +16,9 @@ pub enum Op {
     Identity,
     History,
     Send,
+    /// Shared by every secondary page: only the visible page reads,
+    /// so one slot covers them all.
+    Page,
 }
 
 /// A held in-flight slot. Only the completion carrying a matching ticket
