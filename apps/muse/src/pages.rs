@@ -836,10 +836,17 @@ fn fill_memory(chat: &Rc<Chat>, page: &gtk4::Box) {
 /// One row of a listing: the hero picture when the service gave one
 /// (fetched and cached off-thread), always beside the text card.
 /// Pictures never block or fail the row: no bytes, text-only.
+/// A live widget frame leads whenever the service sent markup -- that
+/// is the Mac's own order: frame first, hero and text as fallback.
 pub fn listing_row(
     item: &muse_account::ListingItem,
     hero: Option<&std::path::Path>,
 ) -> gtk4::Widget {
+    if let Some(html) = item.widget_html.as_deref()
+        && !html.is_empty()
+    {
+        return super::widget::widget_frame(html, item.widget_text.as_deref());
+    }
     let label = gtk4::Label::new(Some(&feed_item_label(item)));
     label.set_wrap(true);
     label.set_xalign(0.0);
