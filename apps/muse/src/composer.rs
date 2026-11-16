@@ -167,15 +167,14 @@ impl Composer {
 /// The composer: staged picture chips above a floating Mac-style
 /// card. The card holds the entry on top and the controls below:
 /// `+` stages the clipboard picture, the blue circle sends, Stop
-/// halts a send, and the delete pill arms turn deletion. Sensitivity
-/// follows the composer state; call `refresh` after every state
-/// change and `paint_chips` after every stage or remove.
+/// halts a send while one is in flight. Sensitivity follows the
+/// composer state; call `refresh` after every state change and
+/// `paint_chips` after every stage or remove.
 pub struct ComposerRow {
     pub entry: gtk4::Entry,
     pub attach: gtk4::Button,
     pub send: gtk4::Button,
     pub stop: gtk4::Button,
-    pub delete: gtk4::Button,
     pub thinking: gtk4::ComboBoxText,
     pub mic: gtk4::Button,
     outer: gtk4::Box,
@@ -265,8 +264,6 @@ impl ComposerRow {
         stop.add_css_class("muse-circle");
         stop.set_tooltip_text(Some("Stop"));
         stop.set_sensitive(false);
-        let delete = gtk4::Button::with_label("Delete turn");
-        delete.add_css_class("muse-pill");
         // Thinking is the service's own model picker in a pill face:
         // the listing fills it, a change dispatches a select.
         let thinking = gtk4::ComboBoxText::new();
@@ -283,7 +280,6 @@ impl ComposerRow {
         spacer.set_hexpand(true);
         controls.append(&spacer);
         controls.append(&stop);
-        controls.append(&delete);
         controls.append(&thinking);
         controls.append(&mic);
         controls.append(&send);
@@ -296,7 +292,6 @@ impl ComposerRow {
             attach,
             send,
             stop,
-            delete,
             thinking,
             mic,
             outer,
@@ -320,22 +315,14 @@ impl ComposerRow {
         self.chips.set_visible(!images.is_empty());
     }
 
-    /// Send is armed for a non-blank draft with no send in flight;
-    /// Stop is armed exactly while a send is in flight.
+    /// Send shows while idle; Stop takes its place while a send is in
+    /// flight. The Mac panel swaps the same circle; two static buttons
+    /// would crowd the card.
     pub fn refresh(&self, composer: &Composer) {
         self.send.set_sensitive(composer.can_send());
+        self.send.set_visible(!composer.sending());
         self.stop.set_sensitive(composer.sending());
-    }
-
-    /// The delete button names its own state: the first press arms
-    /// ("Confirm delete turn"), the second press on the same turn
-    /// dispatches. A new turn disarms it.
-    pub fn set_delete_armed(&self, armed: bool) {
-        self.delete.set_label(if armed {
-            "Confirm delete turn"
-        } else {
-            "Delete turn"
-        });
+        self.stop.set_visible(composer.sending());
     }
 }
 

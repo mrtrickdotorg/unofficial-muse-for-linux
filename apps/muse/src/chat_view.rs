@@ -173,14 +173,14 @@ mod tests {
         composer.set_text("hi");
         built.refresh(&composer);
         assert!(built.send.is_sensitive());
+        assert!(built.send.is_visible());
         assert!(!built.stop.is_sensitive());
+        assert!(!built.stop.is_visible());
         composer.begin_send();
         built.refresh(&composer);
         assert!(!built.send.is_sensitive());
+        assert!(!built.send.is_visible());
         assert!(built.stop.is_sensitive());
-        built.set_delete_armed(false);
-        assert_eq!(built.delete.label().as_deref(), Some("Delete turn"));
-        built.set_delete_armed(true);
-        assert_eq!(built.delete.label().as_deref(), Some("Confirm delete turn"));
+        assert!(built.stop.is_visible());
     }
 }
