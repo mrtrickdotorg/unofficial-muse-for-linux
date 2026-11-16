@@ -58,6 +58,18 @@ where
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
 pub(crate) type RemoveCallback = std::rc::Rc<dyn Fn(String)>;
 
+/// The delete turn button names its own state: the first press arms
+/// ("Confirm delete turn"), the second press on the same turn
+/// dispatches. A new turn disarms it. Pure, so the arming rule is
+/// testable without a display.
+pub fn delete_label(armed: bool) -> &'static str {
+    if armed {
+        "Confirm delete turn"
+    } else {
+        "Delete turn"
+    }
+}
+
 /// What a delete-turn press means against the held history and the
 /// armed target. The first press arms, the second press on the same
 /// latest turn confirms, anything else (no history, a moved-on
@@ -85,6 +97,9 @@ pub struct Chat {
     transcript: gtk4::ListBox,
     scrolled: gtk4::ScrolledWindow,
     composer_row: ComposerRow,
+    header: gtk4::Box,
+    heading: gtk4::Label,
+    delete: gtk4::Button,
     client: RefCell<Option<AccountClient>>,
     older_button: gtk4::Button,
     older_exhausted: RefCell<bool>,
@@ -104,6 +119,25 @@ impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
         let scrolled = gtk4::ScrolledWindow::new();
         scrolled.set_child(Some(&transcript));
+        // The Mac panel names its thread up top, centered, with the
+        // turn menu behind a "…" button at the row's end.
+        let heading = gtk4::Label::new(Some("New chat"));
+        heading.set_hexpand(true);
+        heading.set_halign(gtk4::Align::Center);
+        heading.add_css_class("title-4");
+        let delete = gtk4::Button::with_label("Delete turn");
+        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        header.append(&heading);
+        let menu = gtk4::MenuButton::new();
+        menu.set_label("…");
+        menu.add_css_class("flat");
+        menu.set_tooltip_text(Some("Turn options"));
+        {
+            let popover = gtk4::Popover::new();
+            popover.set_child(Some(&delete));
+            menu.set_popover(Some(&popover));
+        }
+        header.append(&menu);
         // Thinking lives in the composer card: the pill IS the model
         // picker, filled from the service listing like before.
         let model_combo = composer_row.thinking.clone();
@@ -113,6 +147,9 @@ impl Chat {
             transcript,
             scrolled,
             composer_row,
+            header,
+            heading,
+            delete,
             client: RefCell::new(None),
             older_button: gtk4::Button::with_label("Load older"),
             notice: {
@@ -165,13 +202,14 @@ impl Chat {
             });
         }
         chat.refresh_older();
+        content.append(&chat.header);
         content.append(&chat.older_button);
         content.append(&chat.scrolled);
         content.append(&chat.notice);
         content.append(chat.composer_row.widget());
         {
             let weak = Rc::downgrade(&chat);
-            chat.composer_row.delete.connect_clicked(move |_| {
+            chat.delete.connect_clicked(move |_| {
                 if let Some(chat) = weak.upgrade() {
                     chat.delete_pressed();
                 }
@@ -391,6 +429,7 @@ impl Chat {
         }
         self.refresh_older();
         self.refresh_notice();
+        self.refresh_title();
         self.refresh_delete_arm();
         if follow {
             let adjustment = self.scrolled.vadjustment();
@@ -431,8 +470,26 @@ impl Chat {
             *self.armed_delete.borrow_mut() = None;
         }
         let armed = self.armed_delete.borrow().clone();
-        self.composer_row
-            .set_delete_armed(armed.is_some() && armed == latest);
+        self.delete
+            .set_label(delete_label(armed.is_some() && armed == latest));
+    }
+
+    /// The heading names the open thread from the service listing, or
+    /// "New chat" before anything is picked. Cheap enough to repaint
+    /// on every render; the label only changes on a thread switch.
+    fn refresh_title(&self) {
+        let thread = self.thread.borrow().clone();
+        let title = thread.as_deref().and_then(|id| {
+            self.session.borrow().account.clone().and_then(|account| {
+                account
+                    .threads
+                    .iter()
+                    .find(|row| row.session_id == id)
+                    .map(|row| row.title.clone())
+            })
+        });
+        self.heading
+            .set_text(title.as_deref().unwrap_or("New chat"));
     }
 
     /// The older button names its own state: loading, exhausted, or
@@ -881,7 +938,7 @@ impl Chat {
             }
             DeleteAction::Confirm(id) => {
                 *self.armed_delete.borrow_mut() = None;
-                self.composer_row.set_delete_armed(false);
+                self.delete.set_label(delete_label(false));
                 let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
                     Some(ticket) => ticket,
                     None => return,
@@ -995,6 +1052,12 @@ impl Chat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_button_names_its_armed_state() {
+        assert_eq!(delete_label(false), "Delete turn");
+        assert_eq!(delete_label(true), "Confirm delete turn");
+    }
 
     #[test]
     fn delete_arms_first_confirms_same_and_ignores_the_rest() {
