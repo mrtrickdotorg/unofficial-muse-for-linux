@@ -38,7 +38,7 @@ textview placeholder {
     color: #ffffff;
     border-radius: 18px;
     padding: 10px 16px;
-    font-size: 15px;
+    font-size: 12pt;
     line-height: 1.55;
 }
 
@@ -47,7 +47,7 @@ textview placeholder {
     background: @card_bg_color;
     border-radius: 18px;
     padding: 12px 16px;
-    font-size: 15px;
+    font-size: 12pt;
     line-height: 1.55;
 }
 
@@ -79,7 +79,7 @@ textview placeholder {
     box-shadow: none;
     background: transparent;
     padding: 8px 10px;
-    font-size: 14px;
+    font-size: 11.5pt;
 }
 
 .muse-ask placeholder {
@@ -130,7 +130,7 @@ textview placeholder {
 
 .muse-section {
     color: alpha(@window_fg_color, 0.55);
-    font-size: 12px;
+    font-size: 9.5pt;
     font-weight: bold;
     margin-top: 4px;
 }
@@ -150,7 +150,7 @@ textview placeholder {
     border-radius: 9999px;
     min-width: 22px;
     min-height: 22px;
-    font-size: 12px;
+    font-size: 9.5pt;
     font-weight: bold;
 }
 
@@ -180,7 +180,7 @@ textview placeholder {
     min-height: 36px;
     background: transparent;
     border-color: transparent;
-    font-size: 16px;
+    font-size: 12.5pt;
 }
 
 .muse-rail-button:hover {
@@ -204,6 +204,6 @@ textview placeholder {
     border-radius: 9999px;
     min-width: 56px;
     min-height: 56px;
-    font-size: 22px;
+    font-size: 17pt;
     font-weight: bold;
 }
