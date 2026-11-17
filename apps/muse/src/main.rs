@@ -18,9 +18,14 @@ mod session;
 mod signin;
 mod update;
 mod voice;
-mod widget;
+pub(crate) mod widget;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
+/// Where the bundled libwebkit looks for its helper processes (see
+/// scripts/patch-webkit-path.py): the app points this path at the
+/// bundle's helpers on every launch. A WebView with no helpers
+/// aborts the process, so frames check it before constructing one.
+pub(crate) const WEBKIT_STAGING: &str = "/tmp/.webkitgtk-6.0-umfl";
 const DEFAULT_WINDOW_WIDTH: i32 = 1100;
 const DEFAULT_WINDOW_HEIGHT: i32 = 700;
 
@@ -36,6 +41,11 @@ fn main() {
     // SAFETY: main() is single-threaded here and nothing has spawned
     // a thread or touched the environment yet.
     unsafe { std::env::remove_var("GTK_THEME") };
+    // The bundled libwebkit finds its helpers only through the
+    // staging symlink (see WEBKIT_STAGING): without it the first
+    // WebView aborts the process. Staged before Gtk starts, and a
+    // no-op everywhere except inside the bundle.
+    stage_webkit_helpers();
     // A staged update takes over as its own instance: the old copy is
     // still holding the app name when the new one starts, and a unique
     // instance would forward its launch to the old one and exit --
@@ -48,6 +58,42 @@ fn main() {
     let app = builder.build();
     app.connect_activate(build_ui);
     app.run();
+}
+
+/// Point WEBKIT_STAGING at the bundle's helpers. Inside the AppImage
+/// the helpers ride beside the binary (`usr/lib/webkitgtk-6.0` next
+/// to `usr/bin/muse`); outside it there is nothing to stage and this
+/// is a silent no-op. Failures only log: a missing stage means widget
+/// frames fall back to text instead of aborting the process.
+fn stage_webkit_helpers() {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("muse: cannot locate its own binary: {error}");
+            return;
+        }
+    };
+    let helpers = match exe.parent().and_then(|bin| bin.parent()) {
+        Some(prefix) => prefix.join("lib/webkitgtk-6.0"),
+        None => return,
+    };
+    if !helpers.join("WebKitNetworkProcess").is_file() {
+        return;
+    }
+    let stage = std::path::Path::new(WEBKIT_STAGING);
+    if std::fs::read_link(stage).ok().as_deref() == Some(helpers.as_path()) {
+        return;
+    }
+    let _ = std::fs::remove_file(stage);
+    // A stale directory (an older broken stage) must go before the
+    // link lands; its absence is the common case, not an error.
+    if stage.is_dir() && std::fs::remove_dir_all(stage).is_err() {
+        eprintln!("muse: cannot clear {}", stage.display());
+        return;
+    }
+    if std::os::unix::fs::symlink(&helpers, stage).is_err() {
+        eprintln!("muse: cannot stage WebKit helpers at {}", stage.display());
+    }
 }
 
 /// Shell only: sidebar navigation plus a content stack. Pages are
