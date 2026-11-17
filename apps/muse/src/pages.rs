@@ -773,7 +773,21 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
         std::thread::spawn(move || {
             let _ = done_tx.send(
                 super::update::relaunch_verified(&staged)
-                    .map_err(|message| format!("{message} Staged file: {}", staged.display())),
+                    .map_err(|message| format!("{message} Staged file: {}", staged.display()))
+                    .and_then(|()| {
+                        // The new copy is verified alive: refresh the
+                        // launched file so the launcher opens it next
+                        // time. A refresh failure keeps this copy up
+                        // and says so instead of exiting into a stale
+                        // launcher.
+                        super::update::refresh_launcher_copy(&staged).map(|_| ()).map_err(
+                            |message| {
+                                format!(
+                                    "The update is running, but the launcher copy kept its old build: {message}"
+                                )
+                            },
+                        )
+                    }),
             );
         });
         let ctx = ctx.clone();
