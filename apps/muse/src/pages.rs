@@ -114,15 +114,15 @@ pub fn show(ctx: &Ctx, name: &str) {
 }
 
 fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
-    let page = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
-    page.set_margin_start(16);
-    page.set_margin_end(16);
-    page.set_margin_top(12);
+    let inner = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    inner.set_margin_start(16);
+    inner.set_margin_end(16);
+    inner.set_margin_top(12);
     match name {
         "threads" => {
             let list = gtk4::ListBox::new();
             list.set_widget_name("threads-list");
-            page.append(&list);
+            inner.append(&list);
             let weak = ctx.chat.clone();
             let stack = ctx.stack.clone();
             let sidebar = ctx.sidebar.clone();
@@ -146,20 +146,20 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
         "tasks" => {
             let schedules = gtk4::ListBox::new();
             schedules.set_widget_name("tasks-schedules");
-            page.append(&schedules);
+            inner.append(&schedules);
             let runs = gtk4::ListBox::new();
             runs.set_widget_name("tasks-runs");
-            page.append(&runs);
+            inner.append(&runs);
         }
         "feed" => {
             let prompt = gtk4::Label::new(None);
             prompt.set_widget_name("feed-prompt");
             prompt.set_wrap(true);
             prompt.set_xalign(0.0);
-            page.append(&prompt);
+            inner.append(&prompt);
             let list = gtk4::ListBox::new();
             list.set_widget_name("feed-list");
-            page.append(&list);
+            inner.append(&list);
         }
         "memory" => {
             let search = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
@@ -171,18 +171,18 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             let go = gtk4::Button::with_label("Search");
             go.set_widget_name("memory-go");
             search.append(&go);
-            page.append(&search);
+            inner.append(&search);
             let list = gtk4::ListBox::new();
             list.set_widget_name("memory-list");
-            page.append(&list);
+            inner.append(&list);
             let weak = ctx.chat.clone();
-            let page_weak = page.downgrade();
+            let page_weak = inner.downgrade();
             go.connect_clicked(move |_| {
-                let Some(page) = page_weak.upgrade() else {
+                let Some(inner) = page_weak.upgrade() else {
                     return;
                 };
                 let Some(chat) = weak.upgrade() else { return };
-                fill_memory(&chat, &page);
+                fill_memory(&chat, &inner);
             });
         }
         "search" => {
@@ -194,25 +194,25 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             query.append(&entry);
             let go = gtk4::Button::with_label("Search");
             query.append(&go);
-            page.append(&query);
+            inner.append(&query);
             let list = gtk4::ListBox::new();
             list.set_widget_name("search-list");
-            page.append(&list);
+            inner.append(&list);
             let weak = ctx.chat.clone();
             let ctx_search = ctx.clone();
-            let page_weak = page.downgrade();
+            let page_weak = inner.downgrade();
             go.connect_clicked(move |_| {
-                let Some(page) = page_weak.upgrade() else {
+                let Some(inner) = page_weak.upgrade() else {
                     return;
                 };
                 let Some(chat) = weak.upgrade() else { return };
-                do_search(&ctx_search, &chat, &page);
+                do_search(&ctx_search, &chat, &inner);
             });
         }
         "ideas" | "goals" => {
             let list = gtk4::ListBox::new();
             list.set_widget_name(&format!("{name}-list"));
-            page.append(&list);
+            inner.append(&list);
         }
         "policy" => {
             let notice = gtk4::Label::new(None);
@@ -220,58 +220,58 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             notice.set_wrap(true);
             notice.set_xalign(0.0);
             notice.set_visible(false);
-            page.append(&notice);
+            inner.append(&notice);
             let active = gtk4::ListBox::new();
             active.set_widget_name("policy-active");
-            page.append(&active);
+            inner.append(&active);
             let list = gtk4::ListBox::new();
             list.set_widget_name("policy-list");
-            page.append(&list);
+            inner.append(&list);
         }
         "library" => {
             let list = gtk4::ListBox::new();
             list.set_widget_name("library-list");
-            page.append(&list);
+            inner.append(&list);
         }
         "settings" => {
             let info = gtk4::Label::new(None);
             info.set_widget_name("settings-info");
             info.set_wrap(true);
             info.set_xalign(0.0);
-            page.append(&info);
+            inner.append(&info);
             let updates_title = gtk4::Label::new(Some("Updates"));
             updates_title.set_widget_name("updates-title");
             updates_title.set_xalign(0.0);
-            page.append(&updates_title);
+            inner.append(&updates_title);
             let updates_status = gtk4::Label::new(None);
             updates_status.set_widget_name("updates-status");
             updates_status.set_wrap(true);
             updates_status.set_xalign(0.0);
-            page.append(&updates_status);
+            inner.append(&updates_status);
             let check = gtk4::Button::with_label("Check for updates");
             check.set_widget_name("updates-check");
-            page.append(&check);
+            inner.append(&check);
             let action = gtk4::Button::with_label("Download update");
             action.set_widget_name("updates-action");
-            page.append(&action);
+            inner.append(&action);
             let ctx_check = ctx.clone();
-            let page_weak = page.downgrade();
+            let page_weak = inner.downgrade();
             check.connect_clicked(move |_| {
-                let Some(page) = page_weak.upgrade() else {
+                let Some(inner) = page_weak.upgrade() else {
                     return;
                 };
-                do_check(&ctx_check, &page);
+                do_check(&ctx_check, &inner);
             });
             let ctx_action = ctx.clone();
-            let page_weak = page.downgrade();
+            let page_weak = inner.downgrade();
             action.connect_clicked(move |_| {
-                let Some(page) = page_weak.upgrade() else {
+                let Some(inner) = page_weak.upgrade() else {
                     return;
                 };
-                do_update_action(&ctx_action, &page);
+                do_update_action(&ctx_action, &inner);
             });
             let sign_out = gtk4::Button::with_label("Sign out");
-            page.append(&sign_out);
+            inner.append(&sign_out);
             let show_signin = ctx.show_signin.clone();
             sign_out.connect_clicked(move |_| {
                 if let Some(dir) = account_dir() {
@@ -285,9 +285,18 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             label.set_halign(gtk4::Align::Center);
             label.set_valign(gtk4::Align::Center);
             label.set_vexpand(true);
-            page.append(&label);
+            inner.append(&label);
         }
     }
+    // Pages scroll as a whole: without this, a long list (threads,
+    // schedules, Today) sets the window's minimum height and the
+    // window opens taller than the screen and cannot shrink.
+    let scroll = gtk4::ScrolledWindow::new();
+    scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&inner));
+    let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    page.append(&scroll);
     page
 }
 
@@ -371,14 +380,24 @@ pub fn artifact_label(artifact: &ArtifactSummary) -> String {
 }
 
 fn named_list(page: &gtk4::Box, name: &str) -> Option<gtk4::ListBox> {
-    let mut child = page.first_child();
-    while let Some(widget) = child {
-        if widget.widget_name() == name {
-            return widget.downcast::<gtk4::ListBox>().ok();
+    // Pages wrap their content in a scrolled window, so lists can sit
+    // two or three levels deep. Walk the whole subtree.
+    fn visit(widget: &gtk4::Widget, name: &str) -> Option<gtk4::ListBox> {
+        if widget.widget_name() == name
+            && let Ok(list) = widget.clone().downcast::<gtk4::ListBox>()
+        {
+            return Some(list);
         }
-        child = widget.next_sibling();
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            if let Some(found) = visit(&next, name) {
+                return Some(found);
+            }
+            child = next.next_sibling();
+        }
+        None
     }
-    None
+    visit(page.upcast_ref(), name)
 }
 
 fn clear_list(list: &gtk4::ListBox) {
