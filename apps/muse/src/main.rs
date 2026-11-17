@@ -50,13 +50,15 @@ fn main() {
     // namespace cannot see the FUSE mount this AppImage runs from: the
     // staged helpers then die with "cannot open shared object file"
     // even though the bundle is complete (proven against the release
-    // artifact: RUNPATH and files verified, loader fails only inside
-    // the sandbox). Outside the bundle the system manages its own
-    // helpers and the sandbox stays on.
+    // artifact: files, RUNPATH, and $ORIGIN resolution all verified,
+    // and a scrubbed unsandboxed probe of the same binaries passes).
+    // Outside the bundle the system manages its own helpers and the
+    // sandbox stays on.
     // SAFETY: same single-threaded window as above.
     if std::env::var_os("APPIMAGE").is_some() {
-        unsafe { std::env::set_var("WEBKIT_FORCE_SANDBOX", "0") };
-        eprintln!("muse: WebKit sandbox off inside the bundle (FUSE mount is sandbox-blind)");
+        unsafe { std::env::remove_var("WEBKIT_FORCE_SANDBOX") };
+        unsafe { std::env::set_var("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1") };
+        eprintln!("muse: WebKit sandbox disabled inside the bundle (FUSE mount is sandbox-blind)");
     }
     // The bundled libwebkit finds its helpers only through the
     // staging symlink (see WEBKIT_STAGING): without it the first
