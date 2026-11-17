@@ -177,18 +177,27 @@ impl Chat {
         let schedules_head = gtk4::Label::new(Some("Scheduled tasks"));
         schedules_head.set_halign(gtk4::Align::Start);
         schedules_head.add_css_class("muse-section");
-        panel.append(&schedules_head);
-        let panel_schedules = gtk4::ListBox::new();
-        panel_schedules.set_selection_mode(gtk4::SelectionMode::None);
-        panel.append(&panel_schedules);
         let today_head = gtk4::Label::new(Some("Today"));
         today_head.set_halign(gtk4::Align::Start);
         today_head.add_css_class("muse-section");
-        panel.append(&today_head);
+        // The lists below hold the running day: unbounded natural
+        // height would set the window's minimum height, opening the
+        // app taller than the screen with no way to shrink it. The
+        // body scrolls instead.
+        let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        body.append(&schedules_head);
+        let panel_schedules = gtk4::ListBox::new();
+        panel_schedules.set_selection_mode(gtk4::SelectionMode::None);
+        body.append(&panel_schedules);
+        body.append(&today_head);
         let panel_today = gtk4::ListBox::new();
         panel_today.set_selection_mode(gtk4::SelectionMode::None);
-        panel_today.set_vexpand(true);
-        panel.append(&panel_today);
+        body.append(&panel_today);
+        let body_scroll = gtk4::ScrolledWindow::new();
+        body_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+        body_scroll.set_vexpand(true);
+        body_scroll.set_child(Some(&body));
+        panel.append(&body_scroll);
         // Thinking lives in the composer card: the pill IS the model
         // picker, filled from the service listing like before.
         let model_combo = composer_row.thinking.clone();
