@@ -30,6 +30,14 @@ fn main() {
     // instance would forward its launch to the old one and exit --
     // the old one then exits, leaving nothing. Ordinary launches stay
     // single-instance.
+    // The client is a fixed dark design: its stylesheet carries the
+    // meta.ai dark surfaces as fixed values and follows nothing about
+    // the system. Left to follow the system, the toolkit still paints
+    // the unpinned surfaces from the system scheme -- near-white on a
+    // light desktop, mid-grey (#2d2d2d views, #303030 sidebars) on a
+    // dark one -- so the scheme is forced dark here, before any
+    // window exists, and the grounds below stay black on every seat.
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
     let mut builder = adw::Application::builder().application_id(APP_ID);
     if update::updating_relaunch() {
         builder = builder.flags(gtk4::gio::ApplicationFlags::NON_UNIQUE);
@@ -69,10 +77,15 @@ fn build_ui(app: &adw::Application) {
     // blue send circle): fixed brand values, loaded once per display.
     let provider = gtk4::CssProvider::new();
     provider.load_from_data(include_str!("theme.css"));
+    // USER priority, not APPLICATION: a desktop theme layer (KDE's
+    // gtk.css, a user stylesheet) loads at USER priority and would
+    // otherwise repaint the grounds from its own palette no matter
+    // what this provider says. Registered after it, at the same
+    // priority, the app's fixed values win the ties.
     gtk4::style_context_add_provider_for_display(
         &gtk4::prelude::RootExt::display(&window),
         &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        gtk4::STYLE_PROVIDER_PRIORITY_USER,
     );
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
     let linked = session::load_saved_link().filter(|link| link.consent);
