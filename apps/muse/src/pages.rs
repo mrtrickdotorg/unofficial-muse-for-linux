@@ -1055,12 +1055,16 @@ pub fn feed_body_markup(body: &str) -> String {
 
 /// One feed card: the web's shape — source icon, bold title, relative
 /// time, linkified body, hero picture, and the unit's widget graphic.
-/// The graphic mounts on an explicit press, never on page load: the
-/// renderer runs the service's markup, and a bad unit must not take
-/// the page with it. Until pressed, the service's extracted text
-/// carries the card. Pictures never block or fail the card: no bytes,
-/// no picture.
-fn feed_card(item: &ListingItem, now: i64, hero: Option<&std::path::Path>) -> gtk4::Widget {
+/// Live graphics mount only where `widget_available` proved the
+/// helpers load; anywhere else the service's extracted text carries
+/// the card, and no press can construct a crashing frame. Pictures
+/// never block or fail the card: no bytes, no picture.
+fn feed_card(
+    item: &ListingItem,
+    now: i64,
+    hero: Option<&std::path::Path>,
+    live: bool,
+) -> gtk4::Widget {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     card.add_css_class("muse-feed-card");
     let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
@@ -1100,7 +1104,12 @@ fn feed_card(item: &ListingItem, now: i64, hero: Option<&std::path::Path>) -> gt
     if let Some(html) = item.widget_html.as_deref()
         && !html.is_empty()
     {
-        if let Some(text) = item.widget_text.as_deref()
+        if live {
+            card.append(&super::widget::widget_frame(
+                html,
+                item.widget_text.as_deref(),
+            ));
+        } else if let Some(text) = item.widget_text.as_deref()
             && !text.is_empty()
         {
             let graphic = gtk4::Label::new(Some(text));
@@ -1109,20 +1118,6 @@ fn feed_card(item: &ListingItem, now: i64, hero: Option<&std::path::Path>) -> gt
             graphic.add_css_class("dim-label");
             card.append(&graphic);
         }
-        let slot = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        card.append(&slot);
-        let show = gtk4::Button::with_label("Show graphic");
-        show.set_halign(gtk4::Align::Start);
-        {
-            let html = html.to_owned();
-            let fallback = item.widget_text.clone();
-            let slot = slot.clone();
-            show.connect_clicked(move |button| {
-                slot.append(&super::widget::widget_frame(&html, fallback.as_deref()));
-                button.set_visible(false);
-            });
-        }
-        card.append(&show);
     }
     card.upcast()
 }
@@ -1211,8 +1206,28 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                         .and_then(super::images::fetch_hero)
                 })
                 .collect();
+            // Widget frames need working helpers: probe once per fill
+            // (the result caches per process) so a broken bundle
+            // paints text instead of aborting on a frame.
+            let graphics = super::widget::widget_available();
+            let mut live = 0;
             for (item, hero) in listing.items.iter().zip(heroes.iter()) {
-                list.append(&feed_card(item, now, hero.as_deref()));
+                // The first two graphics render live, and only where
+                // the helper probe passed; the rest read from the
+                // service's extracted text (see feed_card).
+                let frame = item
+                    .widget_html
+                    .as_deref()
+                    .is_some_and(|html| !html.is_empty());
+                if graphics && frame {
+                    live += 1;
+                }
+                list.append(&feed_card(
+                    item,
+                    now,
+                    hero.as_deref(),
+                    graphics && frame && live <= 2,
+                ));
             }
         },
     );
