@@ -11,11 +11,16 @@
 
 use std::rc::Rc;
 
-/// Wrap service markup in a minimal document shell.
+/// Wrap service markup in a minimal dark document shell. The shell
+/// kills the defaults that would frame the unit in white: the
+/// WebView paints white where nothing covers it, so the ground and
+/// the body margin are set, not left to the UA stylesheet.
 fn document(html: &str) -> String {
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\">\
-         <style>body{{font-family:system-ui,sans-serif;overflow:hidden}}</style>\
+        "<!doctype html><html><head><meta charset=\"utf-8\"> \
+         <style>html,body{{margin:0;padding:0;background:#1e1e1e;color:#e4e6eb}} \
+         body{{font-family:system-ui,sans-serif;overflow:hidden}} \
+         img{{max-width:100%}}</style> \
          </head><body>{html}</body></html>"
     )
 }
@@ -207,41 +212,45 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                     if let Ok(value) = result
                         && let Ok(height) = value.to_string().parse::<f64>()
                     {
-                        view_for_fit.set_size_request(1, height.clamp(48.0, 900.0) as i32);
+                        view_for_fit.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
                     }
                 },
             );
         }
     };
     // Content often lays out after the load events fire (styles,
-    // sub-resources): measure at commit, at finish, and twice more
-    // once the frame settles, or tall units stay clipped.
+    // sub-resources, computed rows): poll the settled height a few
+    // times instead of trusting one early measure, or tall units stay
+    // clipped. Idempotent: a settled frame just re-applies its size.
     let settle = {
         let view = view.clone();
         move || {
-            for delay in [300, 1200] {
-                let owner = view.clone();
-                gtk4::glib::timeout_add_local_once(
-                    std::time::Duration::from_millis(delay),
-                    move || {
-                        let view_for_settle = owner.clone();
-                        owner.evaluate_javascript(
-                            "String(Math.max(document.body ? document.body.scrollHeight : 0, \
-                             document.documentElement ? document.documentElement.scrollHeight : 0))",
-                            None,
-                            None,
-                            gtk4::gio::Cancellable::NONE,
-                            move |result| {
-                                if let Ok(value) = result
-                                    && let Ok(height) = value.to_string().parse::<f64>()
-                                {
-                                    view_for_settle.set_size_request(1, height.clamp(48.0, 900.0) as i32);
-                                }
-                            },
-                        );
+            let owner = view.clone();
+            let ticks = std::rc::Rc::new(std::cell::Cell::new(0));
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+                let seen = ticks.get() + 1;
+                ticks.set(seen);
+                let view_for_settle = owner.clone();
+                owner.evaluate_javascript(
+                    "String(Math.max(document.body ? document.body.scrollHeight : 0, \
+                         document.documentElement ? document.documentElement.scrollHeight : 0))",
+                    None,
+                    None,
+                    gtk4::gio::Cancellable::NONE,
+                    move |result| {
+                        if let Ok(value) = result
+                            && let Ok(height) = value.to_string().parse::<f64>()
+                        {
+                            view_for_settle.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
+                        }
                     },
                 );
-            }
+                if seen >= 8 {
+                    gtk4::glib::ControlFlow::Break
+                } else {
+                    gtk4::glib::ControlFlow::Continue
+                }
+            });
         }
     };
     view.connect_load_changed(move |_, event| {
