@@ -3,9 +3,11 @@
 //!
 //! Same contract, platform mechanism: read the rolling-release feed,
 //! compare the built commit against the one compiled into this binary,
-//! stage the new AppImage beside the running one, and relaunch.
-//! Flatpak installs never reach this module -- the store owns those
-//! updates, exactly like the App Store owns the Mac's.
+//! stage the new AppImage beside the running one, relaunch from the
+//! stage once the new copy proves it stays up, then refresh the
+//! launched file in place so the next launcher start opens the new
+//! build. Flatpak installs never reach this module -- the store owns
+//! those updates, exactly like the App Store owns the Mac's.
 //!
 //! Only pure shapes are unit-tested (feed parsing, version compare,
 //! check gating). The network runs on a worker thread and only the
@@ -246,6 +248,38 @@ pub fn relaunch_verified(staged: &Path) -> Result<(), String> {
     }
 }
 
+/// Copy the verified staged update over the launched file so the
+/// launcher entry (Gearlever, a .desktop, or a stray copy) opens the
+/// new build next time. Same-directory temp file plus rename: the
+/// running mount keeps its own inode while new launches see the new
+/// bytes. Pure filesystem work, covered below with temp files.
+pub fn refresh_launched_file(appimage: &Path, staged: &Path) -> Result<(), String> {
+    let tmp = appimage.with_extension("updating");
+    std::fs::copy(staged, &tmp)
+        .map_err(|_| "Could not write the refreshed launcher copy.".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(|_| "Could not make the refreshed launcher copy executable.".to_string())?;
+    }
+    std::fs::rename(&tmp, appimage)
+        .map_err(|_| "Could not install the refreshed launcher copy.".to_string())?;
+    Ok(())
+}
+
+/// Refresh the launched file when this process is an AppImage: the
+/// running copy knows its own path through `APPIMAGE`. Returns the
+/// refreshed path, or `None` outside a bundle (a checkout or system
+/// install has no launcher copy to keep current).
+pub fn refresh_launcher_copy(staged: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(appimage) = std::env::var_os("APPIMAGE") else {
+        return Ok(None);
+    };
+    let appimage = PathBuf::from(appimage);
+    refresh_launched_file(&appimage, staged)?;
+    Ok(Some(appimage))
+}
 /// The updates panel state, shared by the settings page builds.
 /// Plain data: workers only write it from the main-thread idle
 /// callback that applies their answer.
@@ -267,6 +301,30 @@ pub fn now_epoch() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_refresh_replaces_in_place_and_stays_executable() {
+        let dir = std::env::temp_dir().join(format!("muse-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe dir");
+        let launched = dir.join("muse-old.AppImage");
+        let staged = dir.join("staged.AppImage");
+        std::fs::write(&launched, b"old").expect("old copy");
+        std::fs::write(&staged, b"new").expect("staged copy");
+        refresh_launched_file(&launched, &staged).expect("refresh");
+        assert_eq!(std::fs::read(&launched).expect("read"), b"new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&launched)
+                .expect("meta")
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0);
+        }
+        assert!(!dir.join("muse-old.updating").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn feed(notes: &str) -> serde_json::Value {
         serde_json::json!({
