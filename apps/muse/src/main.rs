@@ -38,6 +38,11 @@ fn main() {
     // cleared before Gtk can read it. The settings, the portal, and
     // libadwaita's scheme following then decide the look, like any
     // other app on the seat.
+    // The build line ends stale-binary confusion: every diagnosis
+    // starts from the exact commit the log came from.
+    if let Some(sha) = update::local_sha() {
+        eprintln!("muse: build {sha}");
+    }
     // SAFETY: main() is single-threaded here and nothing has spawned
     // a thread or touched the environment yet.
     unsafe { std::env::remove_var("GTK_THEME") };
