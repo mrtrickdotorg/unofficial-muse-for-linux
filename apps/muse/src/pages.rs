@@ -965,9 +965,10 @@ pub fn relative_time(stamp: Option<&str>, now: i64) -> String {
     format!("{} {}", MONTHS[month], remaining + 1)
 }
 
-/// A feed body to Pango markup: escaped, bare URLs linkified, `**bold**`
-/// kept. The renderer's markdown pass is transcript-shaped; the feed
-/// needs links first, so this stays its own small shaper.
+/// A feed body to Pango markup: escaped, markdown `[text](url)` links
+/// and bare URLs linkified, `**bold**` kept. The renderer's markdown
+/// pass is transcript-shaped; the feed needs links first, so this
+/// stays its own small shaper.
 pub fn feed_body_markup(body: &str) -> String {
     let mut escaped = String::with_capacity(body.len());
     for mark in body.chars() {
@@ -978,17 +979,56 @@ pub fn feed_body_markup(body: &str) -> String {
             _ => escaped.push(mark),
         }
     }
-    let mut out = String::with_capacity(escaped.len());
-    for token in escaped.split_inclusive(char::is_whitespace) {
+    // Markdown links first: `[text](url)`. An image marker (`![alt]`)
+    // stays literal -- bodies carry no inline artwork.
+    let mut linked = String::with_capacity(escaped.len());
+    let chars: Vec<char> = escaped.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '['
+            && (index == 0 || chars[index - 1] != '!')
+            && let Some(close) = chars[index..].iter().position(|&mark| mark == ']')
+            && chars.get(index + close + 1) == Some(&'(')
+            && let Some(end) = chars[index + close + 1..]
+                .iter()
+                .position(|&mark| mark == ')')
+        {
+            let text: String = chars[index + 1..index + close].iter().collect();
+            let url: String = chars[index + close + 2..index + close + 1 + end]
+                .iter()
+                .collect();
+            let url = url.trim();
+            if (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 2048 {
+                linked.push_str(&format!("<a href=\"{url}\">{text}</a>"));
+            } else {
+                linked.push_str(
+                    &chars[index..index + close + 1 + end + 1]
+                        .iter()
+                        .collect::<String>(),
+                );
+            }
+            index += close + 1 + end + 1;
+            continue;
+        }
+        linked.push(chars[index]);
+        index += 1;
+    }
+    // Bare URLs: a whitespace-delimited address becomes a link, with
+    // trailing punctuation left outside it.
+    let mut out = String::with_capacity(linked.len());
+    for token in linked.split_inclusive(char::is_whitespace) {
         let word = token.trim_end_matches(char::is_whitespace);
         let trail = &token[word.len()..];
+        // Skip text already inside a link (its href or its label).
+        if word.starts_with("<a href=") || word.ends_with("</a>") {
+            out.push_str(token);
+            continue;
+        }
         let bare = word
             .trim_matches(|mark: char| ".,;:!?)]}'\"".contains(mark))
             .trim_start_matches('(');
         if (bare.starts_with("https://") || bare.starts_with("http://")) && bare.len() <= 2048 {
             out.push_str(&format!("<a href=\"{bare}\">{bare}</a>"));
-            // A stripped trailing mark (`)`, `.`) is punctuation, not
-            // address: paint it outside the link.
             out.push_str(&word[bare.len().min(word.len())..]);
         } else {
             out.push_str(word);
@@ -1014,11 +1054,13 @@ pub fn feed_body_markup(body: &str) -> String {
 }
 
 /// One feed card: the web's shape — source icon, bold title, relative
-/// time, linkified body, and the unit's widget graphic. The graphic
-/// mounts on an explicit press, never on page load: the renderer runs
-/// the service's markup, and a bad unit must not take the page with
-/// it. Until pressed, the service's extracted text carries the card.
-fn feed_card(item: &ListingItem, now: i64) -> gtk4::Widget {
+/// time, linkified body, hero picture, and the unit's widget graphic.
+/// The graphic mounts on an explicit press, never on page load: the
+/// renderer runs the service's markup, and a bad unit must not take
+/// the page with it. Until pressed, the service's extracted text
+/// carries the card. Pictures never block or fail the card: no bytes,
+/// no picture.
+fn feed_card(item: &ListingItem, now: i64, hero: Option<&std::path::Path>) -> gtk4::Widget {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     card.add_css_class("muse-feed-card");
     let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
@@ -1048,6 +1090,12 @@ fn feed_card(item: &ListingItem, now: i64) -> gtk4::Widget {
         words.set_wrap(true);
         words.set_xalign(0.0);
         card.append(&words);
+    }
+    if let Some(hero) = hero {
+        let picture = gtk4::Picture::for_filename(hero);
+        picture.set_can_shrink(true);
+        picture.set_halign(gtk4::Align::Start);
+        card.append(&picture);
     }
     if let Some(html) = item.widget_html.as_deref()
         && !html.is_empty()
@@ -1152,8 +1200,19 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|span| span.as_secs() as i64)
                 .unwrap_or(0);
-            for item in &listing.items {
-                list.append(&feed_card(item, now));
+            // Heroes ride the worker round-trip like the library's:
+            // cached files when they land, text-only when they don't.
+            let heroes: Vec<Option<std::path::PathBuf>> = listing
+                .items
+                .iter()
+                .map(|item| {
+                    item.image_url
+                        .as_deref()
+                        .and_then(super::images::fetch_hero)
+                })
+                .collect();
+            for (item, hero) in listing.items.iter().zip(heroes.iter()) {
+                list.append(&feed_card(item, now, hero.as_deref()));
             }
         },
     );
@@ -1700,6 +1759,17 @@ mod tests {
         // Trailing punctuation stays outside the link.
         let dotted = feed_body_markup("Go https://example.com/a, now.");
         assert!(dotted.ends_with("</a>, now."));
+        // Markdown links beat raw text: the label reads, the address hides.
+        let linked = feed_body_markup(
+            "An unauthenticated attacker can [bypass PowerStudio SCADA authentication](https://radar.offseq.com/threat-1) today.",
+        );
+        assert!(linked.contains("<a href=\"https://radar.offseq.com/threat-1\">bypass PowerStudio SCADA authentication</a>"));
+        assert!(!linked.contains("[bypass"));
+        // An image marker keeps its literal label; the address inside
+        // still links like any bare URL.
+        let image = feed_body_markup("See ![alt](https://example.com/a.png) here.");
+        assert!(!image.contains(">alt</a>"));
+        assert!(image.contains("https://example.com/a.png"));
     }
 
     #[test]

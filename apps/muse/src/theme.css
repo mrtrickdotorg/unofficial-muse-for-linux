@@ -175,10 +175,14 @@ textview placeholder {
 /* Feed cards: one rounded well per unit — icon, bold title, relative
  * time, linkified body, widget graphic — the web's shape. */
 .muse-feed-card {
-    background: #1e1e1e;
+    background: #232323;
     border-radius: 18px;
-    padding: 16px 18px;
-    margin-top: 12px;
+    padding: 18px 20px;
+    margin-top: 14px;
+}
+
+.muse-feed-card picture {
+    border-radius: 12px;
 }
 
 .muse-feed-icon {
