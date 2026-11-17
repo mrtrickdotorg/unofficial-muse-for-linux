@@ -213,9 +213,43 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
             );
         }
     };
+    // Content often lays out after the load events fire (styles,
+    // sub-resources): measure at commit, at finish, and twice more
+    // once the frame settles, or tall units stay clipped.
+    let settle = {
+        let view = view.clone();
+        move || {
+            for delay in [300, 1200] {
+                let owner = view.clone();
+                gtk4::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(delay),
+                    move || {
+                        let view_for_settle = owner.clone();
+                        owner.evaluate_javascript(
+                            "String(Math.max(document.body ? document.body.scrollHeight : 0, \
+                             document.documentElement ? document.documentElement.scrollHeight : 0))",
+                            None,
+                            None,
+                            gtk4::gio::Cancellable::NONE,
+                            move |result| {
+                                if let Ok(value) = result
+                                    && let Ok(height) = value.to_string().parse::<f64>()
+                                {
+                                    view_for_settle.set_size_request(1, height.clamp(48.0, 900.0) as i32);
+                                }
+                            },
+                        );
+                    },
+                );
+            }
+        }
+    };
     view.connect_load_changed(move |_, event| {
         if matches!(event, LoadEvent::Committed | LoadEvent::Finished) {
             fit();
+            if matches!(event, LoadEvent::Finished) {
+                settle();
+            }
         }
     });
     {
