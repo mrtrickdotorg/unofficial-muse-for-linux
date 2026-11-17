@@ -57,7 +57,11 @@ fn helpers_healthy() -> bool {
 fn probe_helper_health() -> bool {
     use std::process::Command;
     let binary = std::path::Path::new(crate::WEBKIT_STAGING).join("WebKitNetworkProcess");
-    let mut child = match Command::new(&binary).arg("--help").spawn() {
+    // Scrubbed exactly the way WebKit spawns its helpers: the probe
+    // must resolve libraries through RUNPATH alone. Inheriting this
+    // process's LD_LIBRARY_PATH (which names the bundle's lib dir)
+    // would pass a probe the real spawn then fails.
+    let mut child = match Command::new(&binary).env_clear().arg("--help").spawn() {
         Ok(child) => child,
         Err(_) => return false,
     };
