@@ -70,6 +70,66 @@ pub fn delete_label(armed: bool) -> &'static str {
     }
 }
 
+/// Days since the civil epoch for a calendar date (Howard Hinnant's
+/// algorithm): pure date math so activity groups without a date
+/// library.
+fn days_from_civil(year: i32, month: u32, day: u32) -> i32 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month_p = (month as i32 + 9).rem_euclid(12);
+    let day_of_year = (153 * month_p + 2) / 5 + day as i32 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146097 + day_of_era - 719468
+}
+
+/// Which panel section an activity belongs in against the local
+/// today (`YYYY-MM-DD`): today, yesterday, or anything older. Future
+/// stamps read as today; undated ones land in Earlier, never dropped.
+fn activity_bucket(day: Option<&str>, today: &str) -> &'static str {
+    let Some(day) = day else {
+        return "Earlier";
+    };
+    let parse = |date: &str| {
+        let (year, rest) = date.split_once('-')?;
+        let (month, day) = rest.split_once('-')?;
+        Some((
+            year.parse::<i32>().ok()?,
+            month.parse::<u32>().ok()?,
+            day.parse::<u32>().ok()?,
+        ))
+    };
+    let (today, day) = match (parse(today), parse(day)) {
+        (Some(today), Some(day)) => (today, day),
+        _ => return "Earlier",
+    };
+    let delta = days_from_civil(today.0, today.1, today.2) - days_from_civil(day.0, day.1, day.2);
+    match delta {
+        i32::MIN..=0 => "Today",
+        1 => "Yesterday",
+        _ => "Earlier",
+    }
+}
+
+/// The reader's local today as `YYYY-MM-DD` for the panel groups.
+fn local_today() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut broken = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // POSIX localtime_r: one call, no allocation, no timezone crate.
+    let broken = unsafe {
+        libc::localtime_r(&now, broken.as_mut_ptr());
+        &*broken.as_ptr()
+    };
+    format!(
+        "{:04}-{:02}-{:02}",
+        broken.tm_year + 1900,
+        broken.tm_mon + 1,
+        broken.tm_mday
+    )
+}
 /// What a delete-turn press means against the held history and the
 /// armed target. The first press arms, the second press on the same
 /// latest turn confirms, anything else (no history, a moved-on
@@ -117,6 +177,7 @@ pub struct Chat {
     panel: gtk4::Box,
     panel_name: gtk4::Label,
     panel_status: gtk4::Label,
+    panel_sched_head: gtk4::Label,
     panel_schedules: gtk4::ListBox,
     panel_today: gtk4::ListBox,
     panel_fetch: RefCell<bool>,
@@ -174,22 +235,18 @@ impl Chat {
         panel.append(&avatar);
         panel.append(&panel_name);
         panel.append(&panel_status);
-        let schedules_head = gtk4::Label::new(Some("Scheduled tasks"));
-        schedules_head.set_halign(gtk4::Align::Start);
-        schedules_head.add_css_class("muse-section");
-        let today_head = gtk4::Label::new(Some("Today"));
-        today_head.set_halign(gtk4::Align::Start);
-        today_head.add_css_class("muse-section");
+        let panel_sched_head = gtk4::Label::new(Some("Scheduled tasks"));
+        panel_sched_head.set_halign(gtk4::Align::Start);
+        panel_sched_head.add_css_class("muse-section");
         // The lists below hold the running day: unbounded natural
         // height would set the window's minimum height, opening the
         // app taller than the screen with no way to shrink it. The
         // body scrolls instead.
         let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
-        body.append(&schedules_head);
+        body.append(&panel_sched_head);
         let panel_schedules = gtk4::ListBox::new();
         panel_schedules.set_selection_mode(gtk4::SelectionMode::None);
         body.append(&panel_schedules);
-        body.append(&today_head);
         let panel_today = gtk4::ListBox::new();
         panel_today.set_selection_mode(gtk4::SelectionMode::None);
         body.append(&panel_today);
@@ -229,6 +286,7 @@ impl Chat {
             panel,
             panel_name,
             panel_status,
+            panel_sched_head,
             panel_schedules,
             panel_today,
             panel_fetch: RefCell::new(false),
@@ -627,6 +685,11 @@ impl Chat {
         let linked = self.client.borrow().is_some();
         self.panel_status
             .set_text(if linked { "● Connected" } else { "" });
+        // The web's green Connected reads at a glance; the class only
+        // ever layers on, never replaces the dim base.
+        if linked {
+            self.panel_status.add_css_class("muse-connected");
+        }
         if let Some(snapshot) = self.panel_tasks.borrow().clone() {
             self.paint_panel(&snapshot);
         }
@@ -658,17 +721,23 @@ impl Chat {
     }
 
     /// Fill the panel lists from a held snapshot: schedules with
-    /// their next runs, then today's agent activity. Rows are text;
-    /// the Runs themselves stay on the Tasks page.
+    /// their next runs, then agent activity grouped the way the web
+    /// groups it — Today, Yesterday, Earlier. Rows are text; the runs
+    /// themselves stay on the Tasks page.
     fn paint_panel(&self, snapshot: &muse_account::TasksSnapshot) {
         while let Some(child) = self.panel_schedules.first_child() {
             self.panel_schedules.remove(&child);
         }
+        let count = snapshot.schedules.len();
+        self.panel_sched_head.set_text(&match count {
+            1 => "1 scheduled task".to_owned(),
+            _ => format!("{count} scheduled tasks"),
+        });
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|span| span.as_secs() as i64)
             .unwrap_or(0);
-        for schedule in snapshot.schedules.iter().take(8) {
+        for schedule in &snapshot.schedules {
             let row = gtk4::ListBoxRow::new();
             let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
             let title = gtk4::Label::new(Some(&schedule.title));
@@ -689,7 +758,21 @@ impl Chat {
         while let Some(child) = self.panel_today.first_child() {
             self.panel_today.remove(&child);
         }
-        for agent in snapshot.agents.iter().take(8) {
+        let today = local_today();
+        let mut section: Option<&str> = None;
+        for agent in &snapshot.agents {
+            let day = agent
+                .created_at
+                .as_deref()
+                .and_then(|stamp| stamp.split_once('T').map(|(date, _)| date));
+            let bucket = activity_bucket(day, &today);
+            if section != Some(bucket) {
+                let head = gtk4::Label::new(Some(bucket));
+                head.set_halign(gtk4::Align::Start);
+                head.add_css_class("muse-section");
+                self.panel_today.append(&head);
+                section = Some(bucket);
+            }
             let row = gtk4::ListBoxRow::new();
             let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
             let prompt = if agent.prompt.is_empty() {
@@ -1401,6 +1484,27 @@ impl Chat {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_groups_read_today_yesterday_earlier() {
+        let today = "2026-11-17";
+        assert_eq!(activity_bucket(Some("2026-11-17"), today), "Today");
+        assert_eq!(activity_bucket(Some("2026-11-16"), today), "Yesterday");
+        assert_eq!(activity_bucket(Some("2026-11-10"), today), "Earlier");
+        assert_eq!(activity_bucket(Some("2026-11-18"), today), "Today");
+        assert_eq!(activity_bucket(None, today), "Earlier");
+        assert_eq!(activity_bucket(Some("not a date"), today), "Earlier");
+        // Month and year boundaries are real calendar math, not string
+        // prefixes: Nov 1's yesterday is Oct 31, Jan 1's is Dec 31.
+        assert_eq!(
+            activity_bucket(Some("2026-10-31"), "2026-11-01"),
+            "Yesterday"
+        );
+        assert_eq!(
+            activity_bucket(Some("2025-12-31"), "2026-01-01"),
+            "Yesterday"
+        );
+    }
 
     #[test]
     fn delete_button_names_its_armed_state() {
