@@ -7,10 +7,23 @@
  * dark option pills with a marked selection, dark floating composer.
  * Fixed hex values throughout; nothing here follows the system. */
 
+/* The named theme colors are the ground truth half the toolkit
+ * paints from: the split view's sidebar, every scrolled viewport
+ * (the .view node), and the headerbar all take these, whatever
+ * element rules say. Redefine them black here, in the app's own
+ * provider, so no system scheme can lighten a ground. */
+@define-color window_bg_color #000000;
+@define-color view_bg_color #000000;
+@define-color sidebar_bg_color #000000;
+@define-color headerbar_bg_color #000000;
+
 /* Every structural surface, one continuous ground: the window, the
  * split view's own sidebar container, the rail, the panel, the
- * transcript bed, and every list in them. Specific widgets (selected
- * rows, bubbles, cards) layer above this. */
+ * transcript bed, and every list in them. The bed itself is painted
+ * by the scrolled window's viewport (the .view node) -- the scrolled
+ * window draws nothing of its own -- so viewport and .view are named
+ * explicitly. Specific widgets (selected rows, bubbles, cards) layer
+ * above this. */
 window,
 .background,
 .sidebar,
@@ -18,6 +31,9 @@ window,
 .muse-panel,
 .muse-rail,
 .muse-transcript,
+scrolledwindow,
+viewport,
+.view,
 listbox {
     background-color: #000000;
 }
