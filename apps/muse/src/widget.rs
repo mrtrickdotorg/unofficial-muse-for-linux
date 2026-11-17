@@ -21,18 +21,81 @@ fn document(html: &str) -> String {
 }
 
 /// True when constructing a WebView is safe. Inside the AppImage the
-/// helpers must be staged (see `WEBKIT_STAGING`); a frame without
-/// helpers aborts the process, so callers show the fallback text
-/// instead. Outside the bundle the system manages its own helpers.
+/// helpers must be staged (see `WEBKIT_STAGING`) and actually
+/// executable; a frame without working helpers aborts the process, so
+/// callers show the fallback text instead. Outside the bundle the
+/// system manages its own helpers.
 fn helpers_present(dir: &std::path::Path) -> bool {
     dir.join("WebKitNetworkProcess").is_file()
+}
+
+/// Whether the staged helpers load: probed once per process by
+/// running the network helper and watching what happens to the child.
+/// A child that dies with 127 (the loader's "cannot open shared
+/// object file") or on a signal means broken helpers; anything else —
+/// including a child still alive at the deadline — means the
+/// libraries resolve and frames are safe to build. The probe child
+/// can never take this process down, which is the whole point: an
+/// `ld.so` failure aborts whoever loads, so only a disposable child
+/// may attempt it.
+fn helpers_healthy() -> bool {
+    use std::sync::atomic::{AtomicI8, Ordering};
+    static HEALTH: AtomicI8 = AtomicI8::new(-1);
+    match HEALTH.load(Ordering::Relaxed) {
+        1 => return true,
+        0 => return false,
+        _ => {}
+    }
+    let healthy = probe_helper_health();
+    HEALTH.store(if healthy { 1 } else { 0 }, Ordering::Relaxed);
+    if !healthy {
+        eprintln!("muse: WebKit helpers failed their load probe, graphics stay text-only");
+    }
+    healthy
+}
+
+fn probe_helper_health() -> bool {
+    use std::process::Command;
+    let binary = std::path::Path::new(crate::WEBKIT_STAGING).join("WebKitNetworkProcess");
+    let mut child = match Command::new(&binary).arg("--help").spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return true;
+                }
+                // 127 is the loader giving up; a signal is a crash.
+                // Any other quick exit means the binary ran.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt as _;
+                    if status.signal().is_some() {
+                        return false;
+                    }
+                }
+                return status.code() != Some(127);
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 pub(crate) fn widget_available() -> bool {
     if std::env::var_os("APPIMAGE").is_none() {
         return true;
     }
-    helpers_present(std::path::Path::new(crate::WEBKIT_STAGING))
+    helpers_present(std::path::Path::new(crate::WEBKIT_STAGING)) && helpers_healthy()
 }
 
 /// A widget frame for `html` with `fallback` shown when the renderer
