@@ -71,9 +71,8 @@ pub fn delete_label(armed: bool) -> &'static str {
 }
 
 /// Days since the civil epoch for a calendar date (Howard Hinnant's
-/// algorithm): pure date math so activity groups without a date
-/// library.
-fn days_from_civil(year: i32, month: u32, day: u32) -> i32 {
+/// algorithm): pure date math shared with the feed's relative times.
+pub(crate) fn days_from_civil(year: i32, month: u32, day: u32) -> i32 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let year_of_era = year.rem_euclid(400);

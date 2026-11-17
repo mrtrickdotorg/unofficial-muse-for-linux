@@ -167,6 +167,24 @@ textview placeholder {
     padding: 10px;
 }
 
+.muse-page-title {
+    font-size: 22pt;
+    font-weight: 800;
+}
+
+/* Feed cards: one rounded well per unit — icon, bold title, relative
+ * time, linkified body, widget graphic — the web's shape. */
+.muse-feed-card {
+    background: #1e1e1e;
+    border-radius: 18px;
+    padding: 16px 18px;
+    margin-top: 12px;
+}
+
+.muse-feed-icon {
+    font-size: 22pt;
+}
+
 .muse-link-title {
     font-weight: bold;
 }
