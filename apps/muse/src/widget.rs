@@ -11,6 +11,21 @@
 
 use std::rc::Rc;
 
+/// A measured pixel height out of a JS evaluation answer. The
+/// answer's string form varies (bare digits, quoted strings), so this
+/// keeps only the number instead of trusting one shape; `None` logs
+/// the raw answer once so a silent frame can never hide again.
+fn js_height(raw: &str) -> Option<f64> {
+    let digits: String = raw
+        .chars()
+        .filter(|mark| mark.is_ascii_digit() || *mark == '.')
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<f64>().ok()
+}
+
 /// Wrap service markup in a minimal dark document shell. The shell
 /// kills the defaults that would frame the unit in white: the
 /// WebView paints white where nothing covers it, so the ground and
@@ -208,11 +223,17 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                 None,
                 None,
                 gtk4::gio::Cancellable::NONE,
-                move |result| {
-                    if let Ok(value) = result
-                        && let Ok(height) = value.to_string().parse::<f64>()
-                    {
-                        view_for_fit.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
+                move |result| match result {
+                    Ok(value) => match js_height(&value.to_string()) {
+                        Some(height) => {
+                            view_for_fit.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
+                        }
+                        None => {
+                            eprintln!("muse: widget height unreadable: {value}");
+                        }
+                    },
+                    Err(_) => {
+                        eprintln!("muse: widget height measure failed");
                     }
                 },
             );
@@ -239,7 +260,7 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                     gtk4::gio::Cancellable::NONE,
                     move |result| {
                         if let Ok(value) = result
-                            && let Ok(height) = value.to_string().parse::<f64>()
+                            && let Some(height) = js_height(&value.to_string())
                         {
                             view_for_settle.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
                         }
@@ -276,6 +297,15 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heights_read_through_quotes_and_wrappers() {
+        assert_eq!(js_height("432"), Some(432.0));
+        assert_eq!(js_height("\"432\""), Some(432.0));
+        assert_eq!(js_height("JsValue(432)"), Some(432.0));
+        assert_eq!(js_height(""), None);
+        assert_eq!(js_height("null"), None);
+    }
 
     #[test]
     fn helpers_count_only_with_the_network_process() {
