@@ -33,22 +33,26 @@ textview placeholder {
 }
 
 /* The reader's words: solid blue pill, white text, right side. */
+.muse-connected {
+    color: #4ade80;
+}
+
 .muse-user-bubble {
     background: #0084ff;
     color: #ffffff;
     border-radius: 18px;
-    padding: 10px 16px;
+    padding: 14px 18px;
     font-size: 12pt;
-    line-height: 1.55;
+    line-height: 1.6;
 }
 
 /* The assistant's words: a card-colored bubble in the active theme. */
 .muse-assistant-text {
     background: @card_bg_color;
     border-radius: 18px;
-    padding: 12px 16px;
+    padding: 14px 18px;
     font-size: 12pt;
-    line-height: 1.55;
+    line-height: 1.6;
 }
 
 /* Option pills on the theme's card color; the reader's pick carries
