@@ -379,25 +379,28 @@ pub fn artifact_label(artifact: &ArtifactSummary) -> String {
     }
 }
 
-fn named_list(page: &gtk4::Box, name: &str) -> Option<gtk4::ListBox> {
-    // Pages wrap their content in a scrolled window, so lists can sit
-    // two or three levels deep. Walk the whole subtree.
-    fn visit(widget: &gtk4::Widget, name: &str) -> Option<gtk4::ListBox> {
-        if widget.widget_name() == name
-            && let Ok(list) = widget.clone().downcast::<gtk4::ListBox>()
-        {
-            return Some(list);
-        }
-        let mut child = widget.first_child();
-        while let Some(next) = child {
-            if let Some(found) = visit(&next, name) {
-                return Some(found);
-            }
-            child = next.next_sibling();
-        }
-        None
+/// Find a named widget anywhere under a page: pages wrap their
+/// content in a scrolled window, so targets can sit two or three
+/// levels deep. The manual first-level scans that predate the wrap
+/// would silently miss.
+fn find_widget(root: &gtk4::Widget, name: &str) -> Option<gtk4::Widget> {
+    if root.widget_name() == name {
+        return Some(root.clone());
     }
-    visit(page.upcast_ref(), name)
+    let mut child = root.first_child();
+    while let Some(next) = child {
+        if let Some(found) = find_widget(&next, name) {
+            return Some(found);
+        }
+        child = next.next_sibling();
+    }
+    None
+}
+
+fn named_list(page: &gtk4::Box, name: &str) -> Option<gtk4::ListBox> {
+    find_widget(page.upcast_ref(), name)?
+        .downcast::<gtk4::ListBox>()
+        .ok()
 }
 
 fn clear_list(list: &gtk4::ListBox) {
@@ -613,18 +616,9 @@ fn fill_history(ctx: &Ctx) {
 }
 
 fn fill_settings(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(info) = ({
-        let mut child = page.first_child();
-        let mut found = None;
-        while let Some(widget) = child {
-            if widget.widget_name() == "settings-info" {
-                found = widget.downcast::<gtk4::Label>().ok();
-                break;
-            }
-            child = widget.next_sibling();
-        }
-        found
-    }) else {
+    let Some(info) = find_widget(page.upcast_ref(), "settings-info")
+        .and_then(|widget| widget.downcast::<gtk4::Label>().ok())
+    else {
         return;
     };
     match super::session::load_saved_link() {
@@ -649,18 +643,7 @@ fn fill_settings(ctx: &Ctx, page: &gtk4::Box) {
 
 /// Paint the updates section from the shared panel state.
 fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
-    let find = |name: &str| {
-        let mut child = page.first_child();
-        let mut found = None;
-        while let Some(widget) = child {
-            if widget.widget_name() == name {
-                found = Some(widget);
-                break;
-            }
-            child = widget.next_sibling();
-        }
-        found
-    };
+    let find = |name: &str| find_widget(page.upcast_ref(), name);
     let state = ctx.updates.borrow();
     if let Some(widget) = find("updates-status")
         && let Ok(label) = widget.downcast::<gtk4::Label>()
@@ -977,18 +960,10 @@ fn fill_memory(chat: &Rc<Chat>, page: &gtk4::Box) {
         return;
     };
     let query = {
-        let mut found = String::new();
-        let mut child = page.first_child();
-        while let Some(widget) = child {
-            if widget.widget_name() == "memory-query" {
-                if let Ok(entry) = widget.downcast::<gtk4::Entry>() {
-                    found = entry.text().to_string();
-                }
-                break;
-            }
-            child = widget.next_sibling();
-        }
-        found
+        find_widget(page.upcast_ref(), "memory-query")
+            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
+            .map(|entry| entry.text().to_string())
+            .unwrap_or_default()
     };
     if query.trim().is_empty() {
         clear_list(&list);
@@ -1156,18 +1131,10 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
         return;
     };
     let query = {
-        let mut found = String::new();
-        let mut child = page.first_child();
-        while let Some(widget) = child {
-            if widget.widget_name() == "search-query" {
-                if let Ok(entry) = widget.downcast::<gtk4::Entry>() {
-                    found = entry.text().to_string();
-                }
-                break;
-            }
-            child = widget.next_sibling();
-        }
-        found
+        find_widget(page.upcast_ref(), "search-query")
+            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
+            .map(|entry| entry.text().to_string())
+            .unwrap_or_default()
     };
     if query.trim().is_empty() {
         clear_list(&list);
@@ -1376,16 +1343,11 @@ fn do_revoke(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box, permission_id: &str) 
                     "Revocation failed: {error}. The grant may still be in force; read the list again instead of pressing twice."
                 ),
             };
-            let mut child = page_strong.first_child();
-            while let Some(widget) = child {
-                if widget.widget_name() == "policy-notice" {
-                    if let Ok(notice) = widget.downcast::<gtk4::Label>() {
-                        notice.set_text(&text);
-                        notice.set_visible(true);
-                    }
-                    break;
-                }
-                child = widget.next_sibling();
+            if let Some(notice) = find_widget(page_strong.upcast_ref(), "policy-notice")
+                .and_then(|widget| widget.downcast::<gtk4::Label>().ok())
+            {
+                notice.set_text(&text);
+                notice.set_visible(true);
             }
             let _ = &ctx;
             fill_policy(&ctx, &page_strong);
