@@ -222,6 +222,15 @@ fn show_main(split: &adw::OverlaySplitView) {
     profile.append(&profile_name);
     profile.append(&gear);
     side.append(&profile);
+    // The running build, pinned to the sidebar footer: no more
+    // guessing which artifact a screenshot came from.
+    let build = gtk4::Label::new(Some(&match update::local_sha() {
+        Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
+        None => "dev build".to_owned(),
+    }));
+    build.set_halign(gtk4::Align::Start);
+    build.add_css_class("muse-build-stamp");
+    side.append(&build);
     // The web's far-left icon rail: new chat plus one icon per railed
     // page. The panel beside it keeps the full sidebar; the rail is a
     // shortcut, never a second source of truth.
