@@ -152,10 +152,21 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             inner.append(&runs);
         }
         "feed" => {
+            // The web opens on its prompt card above the units: the
+            // prompt fills on every visit beside the list.
+            let heading = gtk4::Label::new(Some("Feed"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            inner.append(&heading);
+            let prompt_head = gtk4::Label::new(Some("Your feed prompt"));
+            prompt_head.add_css_class("muse-section");
+            prompt_head.set_halign(gtk4::Align::Start);
+            inner.append(&prompt_head);
             let prompt = gtk4::Label::new(None);
             prompt.set_widget_name("feed-prompt");
             prompt.set_wrap(true);
             prompt.set_xalign(0.0);
+            prompt.add_css_class("muse-feed-card");
             inner.append(&prompt);
             let list = gtk4::ListBox::new();
             list.set_widget_name("feed-list");
@@ -868,6 +879,182 @@ pub fn feed_item_label(item: &ListingItem) -> String {
     }
 }
 
+/// A feed timestamp in the reader's words: minutes and hours ago
+/// while fresh, Yesterday across the day line, a short date after
+/// that. Pure over an explicit now so the phrasing is unit-tested.
+pub fn relative_time(stamp: Option<&str>, now: i64) -> String {
+    let epoch = stamp.and_then(|stamp| {
+        let (date, time) = stamp.split_once('T')?;
+        let (year, rest) = date.split_once('-')?;
+        let (month, day) = rest.split_once('-')?;
+        let (hour, rest) = time.split_once(':')?;
+        let minute = rest.split_at(2).0;
+        let days = super::app::days_from_civil(
+            year.parse::<i32>().ok()?,
+            month.parse::<u32>().ok()?,
+            day.parse::<u32>().ok()?,
+        ) as i64;
+        Some(days * 86_400 + hour.parse::<i64>().ok()? * 3600 + minute.parse::<i64>().ok()? * 60)
+    });
+    let Some(epoch) = epoch else {
+        return String::new();
+    };
+    let delta = (now - epoch).max(0);
+    if delta < 3600 {
+        let minutes = (delta / 60).max(1);
+        return format!("{minutes}m ago");
+    }
+    if delta < 86_400 {
+        return format!("{}h ago", delta / 3600);
+    }
+    if delta < 2 * 86_400 {
+        return "Yesterday".to_owned();
+    }
+    // Past yesterday the web names the day; the month table is the
+    // only locale-shaped piece, and it is fixed English like the
+    // service's own stamps.
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let days = epoch.div_euclid(86_400);
+    let mut year = 1970;
+    let mut remaining = days;
+    loop {
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let year_days = if leap { 366 } else { 365 };
+        if remaining < year_days {
+            break;
+        }
+        remaining -= year_days;
+        year += 1;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let lengths = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 0;
+    while remaining >= lengths[month] as i64 {
+        remaining -= lengths[month] as i64;
+        month += 1;
+    }
+    format!("{} {}", MONTHS[month], remaining + 1)
+}
+
+/// A feed body to Pango markup: escaped, bare URLs linkified, `**bold**`
+/// kept. The renderer's markdown pass is transcript-shaped; the feed
+/// needs links first, so this stays its own small shaper.
+pub fn feed_body_markup(body: &str) -> String {
+    let mut escaped = String::with_capacity(body.len());
+    for mark in body.chars() {
+        match mark {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(mark),
+        }
+    }
+    let mut out = String::with_capacity(escaped.len());
+    for token in escaped.split_inclusive(char::is_whitespace) {
+        let word = token.trim_end_matches(char::is_whitespace);
+        let trail = &token[word.len()..];
+        let bare = word
+            .trim_matches(|mark: char| ".,;:!?)]}'\"".contains(mark))
+            .trim_start_matches('(');
+        if (bare.starts_with("https://") || bare.starts_with("http://")) && bare.len() <= 2048 {
+            out.push_str(&format!("<a href=\"{bare}\">{bare}</a>"));
+            // A stripped trailing mark (`)`, `.`) is punctuation, not
+            // address: paint it outside the link.
+            out.push_str(&word[bare.len().min(word.len())..]);
+        } else {
+            out.push_str(word);
+        }
+        out.push_str(trail);
+    }
+    // Bold survives linkifying because `**` never appears inside an
+    // address the service sends; keep the pass dumb and total.
+    let mut bolded = String::with_capacity(out.len());
+    let mut parts = out.split("**");
+    bolded.push_str(parts.next().unwrap_or(""));
+    let mut strong = false;
+    for part in parts {
+        strong = !strong;
+        if strong {
+            bolded.push_str("<b>");
+        } else {
+            bolded.push_str("</b>");
+        }
+        bolded.push_str(part);
+    }
+    bolded
+}
+
+/// One feed card: the web's shape — source icon, bold title, relative
+/// time, linkified body, and the unit's widget graphic. The first two
+/// widget graphics render live; the rest show the service's extracted
+/// text, because a WebView per card would eat the session alive.
+fn feed_card(item: &ListingItem, now: i64, live: bool) -> gtk4::Widget {
+    let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+    card.add_css_class("muse-feed-card");
+    let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let icon = gtk4::Label::new(Some(item.icon.as_deref().unwrap_or("📰")));
+    icon.add_css_class("muse-feed-icon");
+    head.append(&icon);
+    let title = gtk4::Label::new(None);
+    title.set_markup(&format!(
+        "<b>{}</b>",
+        super::chat::render_markup(&item.title)
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    head.append(&title);
+    let when = gtk4::Label::new(Some(&relative_time(item.stamp.as_deref(), now)));
+    when.add_css_class("dim-label");
+    head.append(&when);
+    card.append(&head);
+    if let Some(body) = item.body.as_deref()
+        && !body.is_empty()
+    {
+        let words = gtk4::Label::new(None);
+        words.set_markup(&feed_body_markup(body));
+        words.set_wrap(true);
+        words.set_xalign(0.0);
+        card.append(&words);
+    }
+    if let Some(html) = item.widget_html.as_deref()
+        && !html.is_empty()
+    {
+        if live {
+            card.append(&super::widget::widget_frame(
+                html,
+                item.widget_text.as_deref(),
+            ));
+        } else if let Some(text) = item.widget_text.as_deref()
+            && !text.is_empty()
+        {
+            let graphic = gtk4::Label::new(Some(text));
+            graphic.set_wrap(true);
+            graphic.set_xalign(0.0);
+            graphic.add_css_class("dim-label");
+            card.append(&graphic);
+        }
+    }
+    card.upcast()
+}
+
 /// One memory hit: the passage truncated to a readable length plus its
 /// location when the service gave one.
 pub fn memory_hit_label(hit: &MemoryHit) -> String {
@@ -915,6 +1102,10 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
         chat.page_accept(&ticket);
         return;
     };
+    // The prompt card lives above the list (built with the page);
+    // resolve it before the worker round-trip, which cannot borrow it.
+    let prompt_holder: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-prompt")
+        .and_then(|widget| widget.downcast::<gtk4::Label>().ok());
     dispatch(
         &chat,
         move || client.feed(),
@@ -924,21 +1115,31 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
             }
             let Ok(listing) = answer else { return };
             clear_list(&list);
-            if let Some(prompt) = listing
-                .feed_prompt
-                .as_ref()
-                .and_then(|prompt| prompt.text.as_deref())
-                && !prompt.is_empty()
-            {
-                let card = gtk4::Label::new(Some(prompt));
-                card.set_wrap(true);
-                card.set_xalign(0.0);
-                list.append(&card);
+            if let Some(holder) = prompt_holder.as_ref() {
+                let text = listing
+                    .feed_prompt
+                    .as_ref()
+                    .and_then(|prompt| prompt.text.as_deref())
+                    .unwrap_or_default();
+                holder.set_text(text);
+                holder.set_visible(!text.is_empty());
             }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|span| span.as_secs() as i64)
+                .unwrap_or(0);
+            let mut live = 0;
             for item in &listing.items {
-                let card = gtk4::Label::new(Some(&feed_item_label(item)));
-                card.set_wrap(true);
-                card.set_xalign(0.0);
+                // The first two graphics render live; the rest read
+                // from the service's extracted text (see feed_card).
+                let frame = item
+                    .widget_html
+                    .as_deref()
+                    .is_some_and(|html| !html.is_empty());
+                if frame {
+                    live += 1;
+                }
+                let card = feed_card(item, now, frame && live <= 2);
                 list.append(&card);
             }
         },
@@ -1443,6 +1644,49 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(feed_item_label(&iconed), "📰 Morning");
+    }
+
+    #[test]
+    fn feed_times_read_minutes_hours_days() {
+        // 2026-11-17T13:54:08Z is a Monday; the web would call it
+        // "22m ago" at 14:16, "2h ago" at 16:00, Yesterday on the
+        // 18th, and "Nov 17" past that.
+        let noonish = |hour: u32, min: u32| {
+            super::super::app::days_from_civil(2026, 11, 17) as i64 * 86_400
+                + hour as i64 * 3600
+                + min as i64 * 60
+        };
+        let stamp = Some("2026-11-17T13:54:08.702000+00:00");
+        assert_eq!(relative_time(stamp, noonish(14, 16)), "22m ago");
+        assert_eq!(relative_time(stamp, noonish(16, 0)), "2h ago");
+        assert_eq!(relative_time(stamp, noonish(23, 59)), "10h ago");
+        assert_eq!(
+            relative_time(
+                stamp,
+                super::super::app::days_from_civil(2026, 11, 19) as i64 * 86_400
+            ),
+            "Yesterday"
+        );
+        assert_eq!(
+            relative_time(
+                stamp,
+                super::super::app::days_from_civil(2026, 11, 20) as i64 * 86_400
+            ),
+            "Nov 17"
+        );
+        assert_eq!(relative_time(None, noonish(14, 16)), "");
+        assert_eq!(relative_time(Some("garbage"), noonish(14, 16)), "");
+    }
+
+    #[test]
+    fn feed_bodies_escape_linkify_and_bold() {
+        let markup = feed_body_markup("See https://example.com/a. **Bold** <tag>");
+        assert!(markup.contains("<a href=\"https://example.com/a\">https://example.com/a</a>"));
+        assert!(markup.contains("<b>Bold</b>"));
+        assert!(markup.contains("&lt;tag&gt;"));
+        // Trailing punctuation stays outside the link.
+        let dotted = feed_body_markup("Go https://example.com/a, now.");
+        assert!(dotted.ends_with("</a>, now."));
     }
 
     #[test]
