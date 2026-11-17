@@ -93,6 +93,8 @@ fn stage_webkit_helpers() {
     }
     if std::os::unix::fs::symlink(&helpers, stage).is_err() {
         eprintln!("muse: cannot stage WebKit helpers at {}", stage.display());
+    } else {
+        eprintln!("muse: staged WebKit helpers from {}", helpers.display());
     }
 }
 

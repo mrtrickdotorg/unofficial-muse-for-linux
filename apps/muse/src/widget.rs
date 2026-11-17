@@ -40,6 +40,9 @@ pub(crate) fn widget_available() -> bool {
 /// error dump.
 pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     if !widget_available() {
+        // Visible in the launch log: the next crash report can tell a
+        // missing stage from a renderer failure.
+        eprintln!("muse: WebKit helpers unavailable, showing text instead of a graphic");
         let label = gtk4::Label::new(fallback);
         label.set_wrap(true);
         label.set_xalign(0.0);
