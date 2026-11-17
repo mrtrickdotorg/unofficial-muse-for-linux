@@ -56,43 +56,61 @@ fn helpers_healthy() -> bool {
 
 fn probe_helper_health() -> bool {
     use std::process::Command;
-    let binary = std::path::Path::new(crate::WEBKIT_STAGING).join("WebKitNetworkProcess");
-    // Scrubbed exactly the way WebKit spawns its helpers: the probe
-    // must resolve libraries through RUNPATH alone. Inheriting this
-    // process's LD_LIBRARY_PATH (which names the bundle's lib dir)
-    // would pass a probe the real spawn then fails.
-    let mut child = match Command::new(&binary).env_clear().arg("--help").spawn() {
-        Ok(child) => child,
-        Err(_) => return false,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if status.success() {
-                    return true;
-                }
-                // 127 is the loader giving up; a signal is a crash.
-                // Any other quick exit means the binary ran.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::ExitStatusExt as _;
-                    if status.signal().is_some() {
-                        return false;
+    // Every helper WebKit will spawn: the loader failure names the
+    // web process, and a network-only probe once passed while the web
+    // helper died. Each runs as a disposable scrubbed child; the first
+    // failure names itself in the log.
+    for helper in [
+        "WebKitWebProcess",
+        "WebKitNetworkProcess",
+        "WebKitGPUProcess",
+    ] {
+        let binary = std::path::Path::new(crate::WEBKIT_STAGING).join(helper);
+        // Scrubbed exactly the way WebKit spawns its helpers: the probe
+        // must resolve libraries through RUNPATH alone. Inheriting this
+        // process's LD_LIBRARY_PATH (which names the bundle's lib dir)
+        // would pass a probe the real spawn then fails.
+        let mut child = match Command::new(&binary).env_clear().arg("--help").spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                eprintln!("muse: WebKit helper {helper} would not start");
+                return false;
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        let healthy = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if status.success() {
+                        break true;
                     }
+                    // 127 is the loader giving up; a signal is a crash.
+                    // Any other quick exit means the binary ran.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt as _;
+                        if status.signal().is_some() {
+                            break false;
+                        }
+                    }
+                    break status.code() != Some(127);
                 }
-                return status.code() != Some(127);
-            }
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    return true;
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        break true;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(50));
+                Err(_) => break false,
             }
-            Err(_) => return false,
+        };
+        if !healthy {
+            eprintln!("muse: WebKit helper {helper} failed its load probe");
+            return false;
         }
     }
+    true
 }
 
 pub(crate) fn widget_available() -> bool {
