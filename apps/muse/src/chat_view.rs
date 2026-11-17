@@ -359,5 +359,26 @@ mod tests {
             .last_child()
             .expect("card has facts");
         assert!(facts.first_child().is_some());
+
+        // Every page builds and refills without an account, the way a
+        // sidebar click reaches it: structure first, live reads only
+        // with a chat attached. A wrong downcast or a missed nested
+        // lookup panics here instead of in the reader's session.
+        let pages = super::super::pages::Ctx {
+            chat: std::rc::Weak::new(),
+            stack: gtk4::Stack::new(),
+            sidebar: gtk4::ListBox::new(),
+            history: gtk4::ListBox::new(),
+            profile_name: gtk4::Label::new(None),
+            rail: Vec::new(),
+            show_signin: std::rc::Rc::new(|| {}) as std::rc::Rc<dyn Fn()>,
+            updates: std::rc::Rc::new(std::cell::RefCell::new(
+                super::super::update::UpdateCheck::default(),
+            )),
+        };
+        for name in super::super::pages::PAGES {
+            super::super::pages::show(&pages, name);
+            assert!(pages.stack.child_by_name(name).is_some());
+        }
     }
 }
