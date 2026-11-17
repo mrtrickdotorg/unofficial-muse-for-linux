@@ -25,6 +25,17 @@ const DEFAULT_WINDOW_WIDTH: i32 = 1100;
 const DEFAULT_WINDOW_HEIGHT: i32 = 700;
 
 fn main() {
+    // The AppImage's linuxdeploy Gtk hook exports GTK_THEME=Adwaita:
+    // <variant>, a guess at the desktop's scheme. This app follows
+    // the system theme -- on Patrick's seat that is Breeze, chosen by
+    // KDE in the Gtk settings -- and a forced theme name would
+    // replace the desktop's choice with the hook's guess, so it is
+    // cleared before Gtk can read it. The settings, the portal, and
+    // libadwaita's scheme following then decide the look, like any
+    // other app on the seat.
+    // SAFETY: main() is single-threaded here and nothing has spawned
+    // a thread or touched the environment yet.
+    unsafe { std::env::remove_var("GTK_THEME") };
     // A staged update takes over as its own instance: the old copy is
     // still holding the app name when the new one starts, and a unique
     // instance would forward its launch to the old one and exit --
@@ -43,16 +54,8 @@ fn main() {
 /// built on first visit, never up front -- eager construction of
 /// every surface is what made the old shell slow to first paint.
 fn build_ui(app: &adw::Application) {
-    // The client is a fixed dark design: its stylesheet carries the
-    // meta.ai dark surfaces as fixed values and follows nothing about
-    // the system. Left to follow the system, the toolkit still paints
-    // the unpinned surfaces from the system scheme -- near-white on a
-    // light desktop, mid-grey (#2d2d2d views, #303030 sidebars) on a
-    // dark one -- so the scheme is forced dark here. It cannot happen
-    // in main(): the style manager panics before Gtk is initialized,
-    // which is exactly what the first attempt shipped. Activate is
-    // the earliest point where the toolkit is up.
-    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+    // The look follows the system theme and color scheme; the
+    // stylesheet below carries only shape and the brand accents.
     // Permanent cold-start probe: build timestamp vs first present, so
     // a startup-cost regression shows up in logs, not as a complaint.
     let started = std::time::Instant::now();
@@ -75,15 +78,10 @@ fn build_ui(app: &adw::Application) {
     // blue send circle): fixed brand values, loaded once per display.
     let provider = gtk4::CssProvider::new();
     provider.load_from_data(include_str!("theme.css"));
-    // USER priority, not APPLICATION: a desktop theme layer (KDE's
-    // gtk.css, a user stylesheet) loads at USER priority and would
-    // otherwise repaint the grounds from its own palette no matter
-    // what this provider says. Registered after it, at the same
-    // priority, the app's fixed values win the ties.
     gtk4::style_context_add_provider_for_display(
         &gtk4::prelude::RootExt::display(&window),
         &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_USER,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
     let linked = session::load_saved_link().filter(|link| link.consent);
