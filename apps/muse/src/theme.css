@@ -2,7 +2,8 @@
  * system theme now (the forced-light experiment lost to a dark GNOME
  * box that paints dark whatever the manager claims). These are the
  * web client's own dark surfaces, taken from the meta.ai dark UI:
- * near-black app, dark grey assistant bubbles, solid blue user pills,
+ * pure black app (every pane ground is #000000; only the chat
+ * bubbles carry color), dark grey assistant bubbles, solid blue user pills,
  * dark option pills with a marked selection, dark floating composer.
  * Fixed hex values throughout; nothing here follows the system. */
 
@@ -18,7 +19,7 @@ window,
 .muse-rail,
 .muse-transcript,
 listbox {
-    background-color: #0a0a0a;
+    background-color: #000000;
 }
 
 listbox row {
@@ -32,7 +33,7 @@ window,
 }
 
 headerbar {
-    background-color: #0a0a0a;
+    background-color: #000000;
     color: #e4e6eb;
     border-color: transparent;
 }
@@ -82,7 +83,7 @@ button:disabled {
  * the bubbles stand out in the middle section. The list paints
  * nothing of its own, so the bed shows through between rows. */
 .muse-transcript {
-    background-color: #0a0a0a;
+    background-color: #000000;
 }
 
 .muse-transcript listbox {
@@ -182,7 +183,7 @@ button:disabled {
 /* The sidebar: one continuous surface with the app ground, lighter
  * pill for the selected row, dim section names, blue avatar dot. */
 .muse-side {
-    background: #0a0a0a;
+    background: #000000;
     border-radius: 0;
 }
 
@@ -259,7 +260,7 @@ button:disabled {
 
 /* The right panel: one continuous surface with the app ground. */
 .muse-panel {
-    background: #0a0a0a;
+    background: #000000;
     border-left: none;
 }
 
