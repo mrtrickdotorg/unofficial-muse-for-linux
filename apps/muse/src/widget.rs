@@ -20,10 +20,31 @@ fn document(html: &str) -> String {
     )
 }
 
+/// True when constructing a WebView is safe. Inside the AppImage the
+/// helpers must be staged (see `WEBKIT_STAGING`); a frame without
+/// helpers aborts the process, so callers show the fallback text
+/// instead. Outside the bundle the system manages its own helpers.
+fn helpers_present(dir: &std::path::Path) -> bool {
+    dir.join("WebKitNetworkProcess").is_file()
+}
+
+pub(crate) fn widget_available() -> bool {
+    if std::env::var_os("APPIMAGE").is_none() {
+        return true;
+    }
+    helpers_present(std::path::Path::new(crate::WEBKIT_STAGING))
+}
+
 /// A widget frame for `html` with `fallback` shown when the renderer
 /// cannot. The fallback is the service's own extracted text, never an
 /// error dump.
 pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
+    if !widget_available() {
+        let label = gtk4::Label::new(fallback);
+        label.set_wrap(true);
+        label.set_xalign(0.0);
+        return label.upcast();
+    }
     use webkit6::prelude::*;
     use webkit6::{LoadEvent, NavigationPolicyDecision, PolicyDecisionType, WebView};
 
@@ -119,4 +140,20 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     view.load_html(&document(html), Some("about:blank"));
     area.append(&view);
     area.upcast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helpers_count_only_with_the_network_process() {
+        let base = std::env::temp_dir().join(format!("muse-webkit-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("probe dir");
+        assert!(!helpers_present(&base));
+        std::fs::write(base.join("WebKitNetworkProcess"), b"x").expect("probe helper");
+        assert!(helpers_present(&base));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
