@@ -888,7 +888,7 @@ pub fn relative_time(stamp: Option<&str>, now: i64) -> String {
         let (year, rest) = date.split_once('-')?;
         let (month, day) = rest.split_once('-')?;
         let (hour, rest) = time.split_once(':')?;
-        let minute = rest.split_at(2).0;
+        let minute = rest.get(..2)?;
         let days = super::app::days_from_civil(
             year.parse::<i32>().ok()?,
             month.parse::<u32>().ok()?,
@@ -1000,10 +1000,11 @@ pub fn feed_body_markup(body: &str) -> String {
 }
 
 /// One feed card: the web's shape — source icon, bold title, relative
-/// time, linkified body, and the unit's widget graphic. The first two
-/// widget graphics render live; the rest show the service's extracted
-/// text, because a WebView per card would eat the session alive.
-fn feed_card(item: &ListingItem, now: i64, live: bool) -> gtk4::Widget {
+/// time, linkified body, and the unit's widget graphic. The graphic
+/// mounts on an explicit press, never on page load: the renderer runs
+/// the service's markup, and a bad unit must not take the page with
+/// it. Until pressed, the service's extracted text carries the card.
+fn feed_card(item: &ListingItem, now: i64) -> gtk4::Widget {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     card.add_css_class("muse-feed-card");
     let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
@@ -1037,12 +1038,7 @@ fn feed_card(item: &ListingItem, now: i64, live: bool) -> gtk4::Widget {
     if let Some(html) = item.widget_html.as_deref()
         && !html.is_empty()
     {
-        if live {
-            card.append(&super::widget::widget_frame(
-                html,
-                item.widget_text.as_deref(),
-            ));
-        } else if let Some(text) = item.widget_text.as_deref()
+        if let Some(text) = item.widget_text.as_deref()
             && !text.is_empty()
         {
             let graphic = gtk4::Label::new(Some(text));
@@ -1051,6 +1047,20 @@ fn feed_card(item: &ListingItem, now: i64, live: bool) -> gtk4::Widget {
             graphic.add_css_class("dim-label");
             card.append(&graphic);
         }
+        let slot = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        card.append(&slot);
+        let show = gtk4::Button::with_label("Show graphic");
+        show.set_halign(gtk4::Align::Start);
+        {
+            let html = html.to_owned();
+            let fallback = item.widget_text.clone();
+            let slot = slot.clone();
+            show.connect_clicked(move |button| {
+                slot.append(&super::widget::widget_frame(&html, fallback.as_deref()));
+                button.set_visible(false);
+            });
+        }
+        card.append(&show);
     }
     card.upcast()
 }
@@ -1128,19 +1138,8 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|span| span.as_secs() as i64)
                 .unwrap_or(0);
-            let mut live = 0;
             for item in &listing.items {
-                // The first two graphics render live; the rest read
-                // from the service's extracted text (see feed_card).
-                let frame = item
-                    .widget_html
-                    .as_deref()
-                    .is_some_and(|html| !html.is_empty());
-                if frame {
-                    live += 1;
-                }
-                let card = feed_card(item, now, frame && live <= 2);
-                list.append(&card);
+                list.append(&feed_card(item, now));
             }
         },
     );

@@ -380,5 +380,9 @@ mod tests {
             super::super::pages::show(&pages, name);
             assert!(pages.stack.child_by_name(name).is_some());
         }
+        // A widget frame builds without taking the process down: the
+        // feed mounts these for live graphics, so construction itself
+        // has to be probe-safe on a bare display.
+        let _frame = super::super::widget::widget_frame("<b>hi</b>", Some("fallback"));
     }
 }
