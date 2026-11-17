@@ -30,14 +30,6 @@ fn main() {
     // instance would forward its launch to the old one and exit --
     // the old one then exits, leaving nothing. Ordinary launches stay
     // single-instance.
-    // The client is a fixed dark design: its stylesheet carries the
-    // meta.ai dark surfaces as fixed values and follows nothing about
-    // the system. Left to follow the system, the toolkit still paints
-    // the unpinned surfaces from the system scheme -- near-white on a
-    // light desktop, mid-grey (#2d2d2d views, #303030 sidebars) on a
-    // dark one -- so the scheme is forced dark here, before any
-    // window exists, and the grounds below stay black on every seat.
-    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
     let mut builder = adw::Application::builder().application_id(APP_ID);
     if update::updating_relaunch() {
         builder = builder.flags(gtk4::gio::ApplicationFlags::NON_UNIQUE);
@@ -51,10 +43,16 @@ fn main() {
 /// built on first visit, never up front -- eager construction of
 /// every surface is what made the old shell slow to first paint.
 fn build_ui(app: &adw::Application) {
-    // The client follows the system theme: the forced-light
-    // experiment lost to a dark GNOME box that paints dark whatever
-    // the manager claims, so the stylesheet carries the meta.ai dark
-    // surfaces as fixed values instead.
+    // The client is a fixed dark design: its stylesheet carries the
+    // meta.ai dark surfaces as fixed values and follows nothing about
+    // the system. Left to follow the system, the toolkit still paints
+    // the unpinned surfaces from the system scheme -- near-white on a
+    // light desktop, mid-grey (#2d2d2d views, #303030 sidebars) on a
+    // dark one -- so the scheme is forced dark here. It cannot happen
+    // in main(): the style manager panics before Gtk is initialized,
+    // which is exactly what the first attempt shipped. Activate is
+    // the earliest point where the toolkit is up.
+    adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
     // Permanent cold-start probe: build timestamp vs first present, so
     // a startup-cost regression shows up in logs, not as a complaint.
     let started = std::time::Instant::now();
