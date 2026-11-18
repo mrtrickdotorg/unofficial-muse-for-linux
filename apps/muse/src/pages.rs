@@ -155,21 +155,69 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
         }
         "feed" => {
             // The web opens on its prompt card above the units: the
-            // prompt fills on every visit beside the list.
+            // prompt fills on every visit beside the list, with Edit
+            // and the generation state beside it.
             let heading = gtk4::Label::new(Some("Feed"));
             heading.add_css_class("muse-page-title");
             heading.set_halign(gtk4::Align::Start);
             inner.append(&heading);
-            let prompt_head = gtk4::Label::new(Some("Your feed prompt"));
+            let prompt_head = gtk4::Label::new(Some("YOUR FEED PROMPT"));
             prompt_head.add_css_class("muse-section");
             prompt_head.set_halign(gtk4::Align::Start);
             inner.append(&prompt_head);
+            let prompt_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
             let prompt = gtk4::Label::new(None);
             prompt.set_widget_name("feed-prompt");
             prompt.set_wrap(true);
             prompt.set_xalign(0.0);
+            prompt.set_hexpand(true);
             prompt.add_css_class("muse-feed-card");
-            inner.append(&prompt);
+            prompt_row.append(&prompt);
+            let edit = gtk4::Button::with_label("Edit");
+            edit.add_css_class("flat");
+            edit.set_valign(gtk4::Align::Start);
+            edit.set_tooltip_text(Some("Edit the feed prompt"));
+            prompt_row.append(&edit);
+            inner.append(&prompt_row);
+            // Editing has no backend yet: the button reads, plainly.
+            edit.connect_clicked(move |edit| {
+                let window = gtk4::Window::new();
+                window.set_modal(true);
+                window.set_default_size(480, -1);
+                window.set_title(Some("Feed prompt"));
+                if let Some(root) = edit
+                    .root()
+                    .and_then(|root| root.downcast::<gtk4::Window>().ok())
+                {
+                    window.set_transient_for(Some(&root));
+                }
+                let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+                body.set_margin_start(24);
+                body.set_margin_end(24);
+                body.set_margin_top(20);
+                body.set_margin_bottom(20);
+                let note =
+                    gtk4::Label::new(Some("Prompt editing isn't available in this client yet."));
+                note.set_wrap(true);
+                note.set_xalign(0.0);
+                body.append(&note);
+                let close = gtk4::Button::with_label("Close");
+                close.add_css_class("muse-cta");
+                body.append(&close);
+                window.set_child(Some(&body));
+                {
+                    let window = window.clone();
+                    close.connect_clicked(move |_| {
+                        window.close();
+                    });
+                }
+                window.present();
+            });
+            let status = gtk4::Label::new(None);
+            status.set_widget_name("feed-status");
+            status.set_xalign(0.0);
+            status.add_css_class("dim-label");
+            inner.append(&status);
             let list = gtk4::ListBox::new();
             list.set_widget_name("feed-list");
             inner.append(&list);
@@ -1410,6 +1458,28 @@ pub fn feed_body_markup(body: &str) -> String {
     bolded
 }
 
+/// The row's quiet meta line: the service's kicker, with the category
+/// beside it when both ride along. Nothing renders when neither does.
+pub fn feed_meta_line(item: &ListingItem) -> Option<String> {
+    match (
+        item.kicker.as_deref().filter(|text| !text.is_empty()),
+        item.category.as_deref().filter(|text| !text.is_empty()),
+    ) {
+        (Some(kicker), Some(category)) => Some(format!("{kicker} · {category}")),
+        (Some(kicker), None) => Some(kicker.to_owned()),
+        (None, Some(category)) => Some(category.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// The generation state under the prompt card: a sentence while the
+/// service builds a fresh edition, nothing the rest of the time.
+pub fn feed_status_line(status: Option<&muse_account::FeedStatus>) -> Option<String> {
+    status
+        .filter(|state| state.refresh_in_progress)
+        .map(|_| "Generating a fresh edition…".to_owned())
+}
+
 /// The hero picture for a landed file, shared by the first paint and
 /// the behind-the-paint download pass so both hang the same frame.
 fn hero_picture(path: &std::path::Path) -> gtk4::Picture {
@@ -1500,6 +1570,12 @@ fn feed_card(
     // the fill that requested them, never on a newer visit reusing
     // the same indices.
     card.set_widget_name(&format!("feed-card:{generation}:{index}"));
+    if let Some(meta) = feed_meta_line(item) {
+        let kicker = gtk4::Label::new(Some(&meta));
+        kicker.set_xalign(0.0);
+        kicker.add_css_class("dim-label");
+        card.append(&kicker);
+    }
     let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     let icon = gtk4::Label::new(Some(item.icon.as_deref().unwrap_or("📰")));
     icon.add_css_class("muse-feed-icon");
@@ -1808,9 +1884,19 @@ fn paint_feed_now(
     ctx: &Ctx,
     list: &gtk4::ListBox,
     prompt_holder: Option<&gtk4::Label>,
+    status_holder: Option<&gtk4::Label>,
     listing: &ServiceListing,
 ) -> (u64, Vec<(usize, String)>) {
     clear_list(list);
+    if let Some(holder) = status_holder {
+        match feed_status_line(listing.feed_status.as_ref()) {
+            Some(line) => {
+                holder.set_text(&line);
+                holder.set_visible(true);
+            }
+            None => holder.set_visible(false),
+        }
+    }
     if let Some(holder) = prompt_holder {
         let text = listing
             .feed_prompt
@@ -1905,6 +1991,8 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     // resolve it before the worker round-trip, which cannot borrow it.
     let prompt_holder: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-prompt")
         .and_then(|widget| widget.downcast::<gtk4::Label>().ok());
+    let status: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-status")
+        .and_then(|widget| widget.downcast::<gtk4::Label>().ok());
     // Downgraded up front: the fill below outlives this call, and a
     // borrowed page cannot enter its static completion.
     let page_weak = page.downgrade();
@@ -1913,14 +2001,14 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     // a slow service reads as its previous self, never as blank.
     let had_cache = if let Some(cached) = read_feed_cache() {
         let prompt = prompt_holder.as_ref();
-        paint_feed_now(&ctx_owned, &list, prompt, &cached);
-        let refreshing = gtk4::Label::new(Some("Refreshing the feed\u{2026}"));
+        paint_feed_now(&ctx_owned, &list, prompt, status.as_ref(), &cached);
+        let refreshing = gtk4::Label::new(Some("Refreshing the feed…"));
         refreshing.add_css_class("dim-label");
         refreshing.set_xalign(0.0);
         list.append(&refreshing);
         true
     } else {
-        let loading = gtk4::Label::new(Some("Loading the feed\u{2026}"));
+        let loading = gtk4::Label::new(Some("Loading the feed…"));
         loading.add_css_class("dim-label");
         loading.set_xalign(0.0);
         list.append(&loading);
@@ -1957,7 +2045,8 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                 return;
             };
             let prompt = prompt_holder.as_ref();
-            let (generation, missing) = paint_feed_now(&ctx_owned, &list, prompt, &listing);
+            let (generation, missing) =
+                paint_feed_now(&ctx_owned, &list, prompt, status.as_ref(), &listing);
             // The network fills the first screenful behind the paint:
             // no page ticket is held while downloads run, so pressing
             // elsewhere still fills at once.
@@ -2622,6 +2711,38 @@ mod tests {
         let back: FeedCache = serde_json::from_slice(&bytes).expect("cache parses");
         assert_eq!(back.listing.items.len(), 1);
         assert_eq!(back.listing.items[0].title, "Morning");
+    }
+
+    #[test]
+    fn feed_header_states_read_plainly() {
+        assert_eq!(
+            feed_meta_line(&ListingItem {
+                kicker: Some("Exploited in the wild".to_owned()),
+                category: Some("Development".to_owned()),
+                ..Default::default()
+            }),
+            Some("Exploited in the wild · Development".to_owned())
+        );
+        assert_eq!(
+            feed_meta_line(&ListingItem {
+                kicker: Some("Solo".to_owned()),
+                ..Default::default()
+            }),
+            Some("Solo".to_owned())
+        );
+        assert_eq!(feed_meta_line(&ListingItem::default()), None);
+        assert_eq!(
+            feed_status_line(Some(&muse_account::FeedStatus {
+                refresh_in_progress: true,
+                ..Default::default()
+            })),
+            Some("Generating a fresh edition…".to_owned())
+        );
+        assert_eq!(
+            feed_status_line(Some(&muse_account::FeedStatus::default())),
+            None
+        );
+        assert_eq!(feed_status_line(None), None);
     }
 
     #[test]

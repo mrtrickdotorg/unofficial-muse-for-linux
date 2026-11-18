@@ -451,7 +451,7 @@ pub struct ServiceListing {
 }
 
 /// The feed's generating prompt, for the display-only prompt card.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedPrompt {
     #[serde(default)]
     pub text: Option<String>,
@@ -460,7 +460,7 @@ pub struct FeedPrompt {
 }
 
 /// Whether a feed edition is being generated right now.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeedStatus {
     #[serde(default)]
     pub refresh_in_progress: bool,
