@@ -338,7 +338,41 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             let heading = gtk4::Label::new(Some(if name == "ideas" { "Ideas" } else { "Goals" }));
             heading.add_css_class("muse-page-title");
             heading.set_halign(gtk4::Align::Start);
-            inner.append(&heading);
+            if name == "goals" {
+                // The web's page opens with creation and the
+                // Tracking region above the roster.
+                let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                heading.set_hexpand(true);
+                head_row.append(&heading);
+                let create = gtk4::Button::with_label("＋ Create a goal");
+                create.add_css_class("muse-cta");
+                head_row.append(&create);
+                inner.append(&head_row);
+                {
+                    let ctx = ctx.clone();
+                    let inner_weak = inner.downgrade();
+                    create.connect_clicked(move |_| {
+                        let Some(inner) = inner_weak.upgrade() else {
+                            return;
+                        };
+                        open_goal_create_dialog(&ctx, &inner, None);
+                    });
+                }
+                let track_head = gtk4::Label::new(Some("Tracking"));
+                track_head.add_css_class("muse-section");
+                track_head.set_halign(gtk4::Align::Start);
+                inner.append(&track_head);
+                let tracking = gtk4::ListBox::new();
+                tracking.set_widget_name("goals-tracking-list");
+                tracking.set_selection_mode(gtk4::SelectionMode::Single);
+                inner.append(&tracking);
+                let goals_head = gtk4::Label::new(Some("Goals"));
+                goals_head.add_css_class("muse-section");
+                goals_head.set_halign(gtk4::Align::Start);
+                inner.append(&goals_head);
+            } else {
+                inner.append(&heading);
+            }
             // The web's roster is one scrolling list: icon, title,
             // clamped description, overflow menu. Ideas rows open the
             // detail dialog; the page itself does not drill in.
@@ -347,7 +381,8 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             list.set_selection_mode(gtk4::SelectionMode::Single);
             inner.append(&list);
             // Rows open their detail dialog; the page itself does not
-            // drill in. Ideas read the idea, goals read the goal.
+            // drill in. Ideas read the idea, goals read the goal —
+            // and the Tracking section reads from its own rows.
             if name == "ideas" || name == "goals" {
                 let ctx_owned = ctx.clone();
                 let page_name = name.to_owned();
@@ -358,6 +393,15 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                     } else {
                         open_goal_dialog(&ctx_owned, list, row);
                     }
+                });
+            }
+            if name == "goals"
+                && let Some(tracking) = named_list(&inner, "goals-tracking-list")
+            {
+                let ctx_owned = ctx.clone();
+                tracking.connect_row_selected(move |list, row| {
+                    let Some(row) = row else { return };
+                    open_goal_dialog(&ctx_owned, list, row);
                 });
             }
         }
@@ -913,6 +957,75 @@ fn open_idea_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
             );
         });
     }
+    // The dialog's lower sections read live: "What's included" and
+    // "How it works" ride the detail route, not the listing, so
+    // they fill in after the dialog presents. A failed read owns
+    // that plainly instead of leaving a hole.
+    if let (Some(chat), Some(id)) = (ctx.chat.upgrade(), item.id.clone())
+        && let Some(client) = chat.client_handle()
+    {
+        let body_for_done = body.clone();
+        super::app::dispatch(
+            &chat,
+            {
+                let client = client.clone();
+                move || client.idea_detail(&id)
+            },
+            move |chat, answer| {
+                match answer {
+                    Ok(detail) => {
+                        if !detail.items.is_empty() {
+                            let header = gtk4::Label::new(Some("What's included"));
+                            header.set_xalign(0.0);
+                            header.add_css_class("muse-section");
+                            body_for_done.append(&header);
+                            for included in &detail.items {
+                                let name = included.title.clone().unwrap_or_default();
+                                if !name.trim().is_empty() {
+                                    let line = gtk4::Label::new(None);
+                                    line.set_markup(&format!(
+                                        "<b>{}</b>",
+                                        super::chat::render_markup(&name)
+                                            .replace("<br/>", " ")
+                                            .replace("<br>", " ")
+                                    ));
+                                    line.set_wrap(true);
+                                    line.set_xalign(0.0);
+                                    body_for_done.append(&line);
+                                }
+                                if let Some(summary) = included.summary.clone()
+                                    && !summary.trim().is_empty()
+                                {
+                                    let sub = gtk4::Label::new(Some(&summary));
+                                    sub.set_wrap(true);
+                                    sub.set_xalign(0.0);
+                                    sub.add_css_class("dim-label");
+                                    body_for_done.append(&sub);
+                                }
+                            }
+                        }
+                        if let Some(how) = detail.content.build_summary.clone()
+                            && !how.trim().is_empty()
+                        {
+                            let header = gtk4::Label::new(Some("How it works"));
+                            header.set_xalign(0.0);
+                            header.add_css_class("muse-section");
+                            body_for_done.append(&header);
+                            let words = gtk4::Label::new(None);
+                            words.set_markup(&super::chat::render_markup(&how));
+                            words.set_wrap(true);
+                            words.set_xalign(0.0);
+                            body_for_done.append(&words);
+                        }
+                    }
+                    Err(_) => {
+                        body_for_done.append(&card_note("Details did not load."));
+                    }
+                }
+                let _ = chat;
+            },
+        );
+    }
     window.present();
 }
 
@@ -928,10 +1041,14 @@ fn open_goal_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
         Some(index) => index,
         None => return,
     };
+    // The store key follows the list: the Tracking section keeps
+    // its own rows beside the main listing's.
+    let page = list.widget_name().to_string();
+    let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
     let held = IDEA_STORE.with(|store| {
         store
             .borrow()
-            .get("goals")
+            .get(&page)
             .and_then(|data| data.items.get(index).cloned())
     });
     let Some(item) = held else {
@@ -1864,16 +1981,247 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
     for thread in threads {
         let row = gtk4::ListBoxRow::new();
         row.set_widget_name(&format!("thread:{}", thread.session_id));
-        let label = gtk4::Label::new(Some(if thread.title.is_empty() {
-            "(untitled)"
+        let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+        let title_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let name = if thread.title.is_empty() {
+            "(untitled)".to_owned()
         } else {
-            &thread.title
-        }));
+            thread.title.clone()
+        };
+        let name = if thread.pinned {
+            format!("📌 {name}")
+        } else {
+            name
+        };
+        let label = gtk4::Label::new(Some(name.as_str()));
         label.set_xalign(0.0);
-        if thread.pinned {
-            label.set_text(&format!("\u{1f4cc} {}", label.text()));
+        label.set_hexpand(true);
+        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        title_row.append(&label);
+        if thread.unread_count > 0 {
+            let badge = gtk4::Label::new(Some(&format!("{}", thread.unread_count)));
+            badge.set_tooltip_text(Some(&format!("{} unread", thread.unread_count)));
+            badge.add_css_class("muse-unread");
+            title_row.append(&badge);
         }
-        row.set_child(Some(&label));
+        words.append(&title_row);
+        let day = thread
+            .updated_at
+            .as_deref()
+            .map(|stamp| stamp.chars().take(10).collect::<String>())
+            .unwrap_or_default();
+        let meta = match (thread.snippet.clone().unwrap_or_default(), day) {
+            (snippet, when) if !snippet.trim().is_empty() && !when.is_empty() => {
+                format!("{} · {}", snippet.trim(), when)
+            }
+            (snippet, _) if !snippet.trim().is_empty() => snippet.trim().to_owned(),
+            (_, when) => when,
+        };
+        if !meta.is_empty() {
+            let sub = gtk4::Label::new(Some(&meta));
+            sub.set_xalign(0.0);
+            sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            sub.add_css_class("dim-label");
+            words.append(&sub);
+        }
+        line.append(&words);
+        let more = gtk4::Button::with_label("⋯");
+        more.add_css_class("flat");
+        more.add_css_class("circular");
+        more.set_valign(gtk4::Align::Start);
+        more.set_tooltip_text(Some("Thread options"));
+        line.append(&more);
+        row.set_child(Some(&line));
+        let popover = gtk4::Popover::new();
+        popover.set_parent(&more);
+        let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        menu.set_margin_start(8);
+        menu.set_margin_end(8);
+        menu.set_margin_top(8);
+        menu.set_margin_bottom(8);
+        let rename = gtk4::Button::with_label("Rename");
+        rename.add_css_class("flat");
+        menu.append(&rename);
+        let pin_label = if thread.pinned { "Unpin" } else { "Pin" };
+        let pin = gtk4::Button::with_label(pin_label);
+        pin.add_css_class("flat");
+        menu.append(&pin);
+        let archive_label = if thread.archived {
+            "Unarchive"
+        } else {
+            "Archive"
+        };
+        let archive = gtk4::Button::with_label(archive_label);
+        archive.add_css_class("flat");
+        menu.append(&archive);
+        popover.set_child(Some(&menu));
+        // A press inside the row selects it, and selecting a thread
+        // row navigates to Chat — so the menu button unselects its
+        // row on press (before the list sees it) and restores it
+        // when the menu closes. Keyboard users can't reach this
+        // button (it takes no focus) rather than navigate away.
+        more.set_focusable(false);
+        let press = gtk4::GestureClick::new();
+        {
+            let row_weak = row.downgrade();
+            let popover_held = popover.clone();
+            press.connect_pressed(move |_, _, _, _| {
+                if let Some(row) = row_weak.upgrade() {
+                    row.set_selectable(false);
+                }
+                popover_held.popup();
+            });
+        }
+        more.add_controller(press);
+        {
+            let row_weak = row.downgrade();
+            popover.connect_closed(move |_| {
+                if let Some(row) = row_weak.upgrade() {
+                    row.set_selectable(true);
+                }
+            });
+        }
+        {
+            let ctx = ctx.clone();
+            let line_inner = line.clone();
+            let popover_held = popover.clone();
+            let session_id = thread.session_id.clone();
+            let title = thread.title.clone();
+            rename.connect_clicked(move |_| {
+                popover_held.popdown();
+                // Per-click locals: the dialog below (and its Save)
+                // is built fresh on every press, so everything Save
+                // moves must die with the press, never with the row.
+                let session_id = session_id.clone();
+                let title = title.clone();
+                let Some(chat) = ctx.chat.upgrade() else {
+                    return;
+                };
+                let Some(client) = chat.client_handle() else {
+                    line_inner.append(&card_note("Link your account first."));
+                    return;
+                };
+                let window = gtk4::Window::new();
+                window.set_modal(true);
+                window.set_default_size(420, -1);
+                window.set_title(Some("Rename thread"));
+                if let Some(root) = line_inner
+                    .root()
+                    .and_then(|root| root.downcast::<gtk4::Window>().ok())
+                {
+                    window.set_transient_for(Some(&root));
+                }
+                let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+                body.set_margin_start(24);
+                body.set_margin_end(24);
+                body.set_margin_top(20);
+                body.set_margin_bottom(20);
+                let entry = gtk4::Entry::new();
+                entry.set_text(&title);
+                entry.set_hexpand(true);
+                body.append(&entry);
+                let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                let cancel = gtk4::Button::with_label("Cancel");
+                cancel.add_css_class("flat");
+                buttons.append(&cancel);
+                let save = gtk4::Button::with_label("Save");
+                save.add_css_class("muse-cta");
+                buttons.append(&save);
+                body.append(&buttons);
+                window.set_child(Some(&body));
+                {
+                    let window = window.clone();
+                    cancel.connect_clicked(move |_| {
+                        window.close();
+                    });
+                }
+                {
+                    let window = window.clone();
+                    let line_for_done = line_inner.clone();
+                    let ctx_for_done = ctx.clone();
+                    save.connect_clicked(move |_| {
+                        let name = entry.text().to_string();
+                        if name.trim().is_empty() {
+                            line_for_done.append(&card_note("A thread needs a non-blank title."));
+                            return;
+                        }
+                        window.close();
+                        let line_for_done = line_for_done.clone();
+                        let ctx_for_done = ctx_for_done.clone();
+                        super::app::dispatch(
+                            &chat,
+                            {
+                                let client = client.clone();
+                                let session_id = session_id.clone();
+                                move || client.session_op(&session_id, "rename", Some(&name))
+                            },
+                            move |chat, answer| {
+                                let accepted =
+                                    answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                                if accepted {
+                                    show(&ctx_for_done, "threads");
+                                } else {
+                                    line_for_done.append(&card_note(
+                                        "The service did not rename it. Nothing changed.",
+                                    ));
+                                }
+                                let _ = chat;
+                            },
+                        );
+                    });
+                }
+                window.present();
+            });
+        }
+        for (button, kind) in [(pin, "pin"), (archive, "archive")] {
+            let ctx = ctx.clone();
+            let line_inner = line.clone();
+            let popover_held = popover.clone();
+            let session_id = thread.session_id.clone();
+            let pinned = thread.pinned;
+            let archived = thread.archived;
+            button.connect_clicked(move |_| {
+                popover_held.popdown();
+                let Some(chat) = ctx.chat.upgrade() else {
+                    return;
+                };
+                let Some(client) = chat.client_handle() else {
+                    line_inner.append(&card_note("Link your account first."));
+                    return;
+                };
+                let flip = if kind == "pin" { !pinned } else { !archived };
+                let verb = if kind == "pin" {
+                    if flip { "pin" } else { "unpin" }
+                } else if flip {
+                    "archive"
+                } else {
+                    "unarchive"
+                };
+                let line_for_done = line_inner.clone();
+                let ctx_for_done = ctx.clone();
+                super::app::dispatch(
+                    &chat,
+                    {
+                        let client = client.clone();
+                        let session_id = session_id.clone();
+                        let verb = verb.to_owned();
+                        move || client.session_op(&session_id, &verb, None)
+                    },
+                    move |chat, answer| {
+                        let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                        if accepted {
+                            show(&ctx_for_done, "threads");
+                        } else {
+                            line_for_done.append(&card_note(
+                                "The service did not change it. Nothing changed.",
+                            ));
+                        }
+                        let _ = chat;
+                    },
+                );
+            });
+        }
         list.append(&row);
     }
 }
@@ -1914,16 +2262,24 @@ fn fill_history(ctx: &Ctx) {
     for thread in &threads {
         let row = gtk4::ListBoxRow::new();
         row.set_widget_name(&format!("thread:{}", thread.session_id));
-        let label = gtk4::Label::new(Some(if thread.title.is_empty() {
-            "(untitled)"
+        let name = if thread.title.is_empty() {
+            "(untitled)".to_owned()
         } else {
-            &thread.title
-        }));
+            thread.title.clone()
+        };
+        let name = if thread.pinned {
+            format!("📌 {name}")
+        } else {
+            name
+        };
+        let text = if thread.unread_count > 0 {
+            format!("{} ({} unread)", name, thread.unread_count)
+        } else {
+            name
+        };
+        let label = gtk4::Label::new(Some(&text));
         label.set_xalign(0.0);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        if thread.pinned {
-            label.set_text(&format!("\u{1f4cc} {}", label.text()));
-        }
         row.set_child(Some(&label));
         ctx.history.append(&row);
         if current.as_deref() == Some(thread.session_id.as_str()) {
@@ -3163,6 +3519,129 @@ pub fn roster_visible(item: &ListingItem, page: &str, filter: Option<&str>) -> b
     }
 }
 
+/// Open the goal creation dialog: title, summary, description and
+/// emoji, under the row's goal for a subgoal or top-level for
+/// None. One confirmed press is one goal; the re-read listing
+/// proves it exists.
+fn open_goal_create_dialog(ctx: &Ctx, anchor: &gtk4::Box, parent: Option<(String, String)>) {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let Some(client) = chat.client_handle() else {
+        anchor.append(&card_note("Link your account first."));
+        return;
+    };
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(480, -1);
+    window.set_title(Some(&match &parent {
+        Some((_, title)) => format!("Subgoal of “{title}”"),
+        None => "Create a goal".to_owned(),
+    }));
+    if let Some(root) = anchor
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok())
+    {
+        window.set_transient_for(Some(&root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let name = gtk4::Entry::new();
+    name.set_placeholder_text(Some("Goal title"));
+    name.set_hexpand(true);
+    body.append(&name);
+    let summary = gtk4::Entry::new();
+    summary.set_placeholder_text(Some("One-line summary"));
+    summary.set_hexpand(true);
+    body.append(&summary);
+    let description = gtk4::Entry::new();
+    description.set_placeholder_text(Some("What done looks like"));
+    description.set_hexpand(true);
+    body.append(&description);
+    let emoji = gtk4::Entry::new();
+    emoji.set_text("🎯");
+    emoji.set_hexpand(true);
+    body.append(&emoji);
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let cancel = gtk4::Button::with_label("Cancel");
+    cancel.add_css_class("flat");
+    buttons.append(&cancel);
+    let save = gtk4::Button::with_label(if parent.is_some() {
+        "Add subgoal"
+    } else {
+        "Create goal"
+    });
+    save.add_css_class("muse-cta");
+    buttons.append(&save);
+    body.append(&buttons);
+    window.set_child(Some(&body));
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| {
+            window.close();
+        });
+    }
+    {
+        let window = window.clone();
+        let anchor_for_done = anchor.clone();
+        let ctx_for_done = ctx.clone();
+        save.connect_clicked(move |_| {
+            let title = name.text().to_string();
+            let summary = summary.text().to_string();
+            let description = description.text().to_string();
+            let emoji = emoji.text().to_string();
+            if title.trim().is_empty()
+                || summary.trim().is_empty()
+                || description.trim().is_empty()
+                || emoji.trim().is_empty()
+            {
+                anchor_for_done.append(&card_note(
+                    "Every field needs words before there is anything to add.",
+                ));
+                return;
+            }
+            window.close();
+            let anchor_for_done = anchor_for_done.clone();
+            let ctx_for_done = ctx_for_done.clone();
+            super::app::dispatch(
+                &chat,
+                {
+                    let client = client.clone();
+                    let parent = parent.clone();
+                    move || match &parent {
+                        Some((parent_goal_id, _)) => client
+                            .goal_add_subgoal(
+                                parent_goal_id,
+                                &title,
+                                &summary,
+                                &description,
+                                &emoji,
+                            )
+                            .map(|answer| answer.accepted),
+                        None => client
+                            .goal_create(&title, &summary, &description, &emoji)
+                            .map(|answer| answer.accepted),
+                    }
+                },
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| *ok).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "goals");
+                    } else {
+                        anchor_for_done
+                            .append(&card_note("The service did not add it. Nothing changed."));
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    window.present();
+}
+
 /// One goal row: a completion checkbox reflecting the service's own
 /// status, title plus clamped description, and the ⋯ menu. A row
 /// press opens the detail dialog; the id travels from the listing,
@@ -3707,6 +4186,86 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
         return;
     };
     fill_service_listing(ctx, &list, |client| client.goals());
+    fill_tracking(ctx, page);
+}
+
+/// Fill the Tracking section: the assistant-tracking goals, ten at
+/// a time behind the web's own "Show more" expander.
+fn fill_tracking(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(list) = named_list(page, "goals-tracking-list") else {
+        return;
+    };
+    clear_list(&list);
+    if let Some(old) = find_widget(page.upcast_ref(), "goals-tracking-more") {
+        page.remove(&old);
+    }
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let ctx_owned = ctx.clone();
+    let list = list.clone();
+    let page_owned = page.clone();
+    dispatch(
+        &chat,
+        move || client.goals_tracking(),
+        move |chat, answer| {
+            if !chat.page_accept(&ticket) {
+                return;
+            }
+            let Ok(listing) = answer else { return };
+            IDEA_STORE.with(|store| {
+                store.borrow_mut().insert(
+                    "goals-tracking".to_owned(),
+                    IdeaStore {
+                        items: listing.items.clone(),
+                        heroes: vec![None; listing.items.len()],
+                    },
+                );
+            });
+            paint_tracking(&ctx_owned, &list, &page_owned, &listing.items, 10);
+        },
+    );
+}
+
+/// Paint the Tracking section's first `shown` rows plus the "Show
+/// more" expander while rows remain. Row taps resolve through the
+/// tracking store, so indices stay global across expansions.
+fn paint_tracking(
+    ctx: &Ctx,
+    list: &gtk4::ListBox,
+    page: &gtk4::Box,
+    items: &[ListingItem],
+    shown: usize,
+) {
+    clear_list(list);
+    if let Some(old) = find_widget(page.upcast_ref(), "goals-tracking-more") {
+        page.remove(&old);
+    }
+    for (index, item) in items.iter().enumerate().take(shown) {
+        list.append(&goal_row(ctx, item, index));
+    }
+    if items.len() > shown {
+        let more = gtk4::Button::with_label(&format!("Show {} more", items.len() - shown));
+        more.set_widget_name("goals-tracking-more");
+        more.add_css_class("flat");
+        more.set_halign(gtk4::Align::Start);
+        page.append(&more);
+        let ctx_owned = ctx.clone();
+        let list_owned = list.clone();
+        let page_owned = page.clone();
+        let items = items.to_vec();
+        more.connect_clicked(move |_| {
+            paint_tracking(&ctx_owned, &list_owned, &page_owned, &items, shown + 10);
+        });
+    }
 }
 
 /// A search visit invites a query; nothing dispatches until Search.

@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_add_subgoal", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -707,8 +707,11 @@ def validate_request(request):
                "goal_rename": {"goal_id", "title"},
                "goal_set_complete": {"goal_id", "completed"},
                "goal_get": {"goal_id"},
+               "goal_create": {"title", "summary", "description", "emoji"},
                "goal_add_subgoal": {"parent_goal_id", "title", "summary",
                                     "description", "emoji"},
+               "goals_tracking": set(),
+               "idea_detail": {"idea_id"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
                "space_export": {"slug"},
@@ -1016,19 +1019,20 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
         if not isinstance(request.get("completed"), bool):
             raise BridgeFailure("invalid_request")
-    if op == "goal_add_subgoal":
+    if op in ("goal_add_subgoal", "goal_create"):
         # The parent id is the service's own, taken from the goals
-        # listing; the words are the reader's own. The body is the
-        # live-probed shape (Nov 18, 2026): POST /goals with
-        # {title, summary, description, emoji, parent_goal_id},
-        # verified on a scratch parent and child that were both
-        # deleted after. Field caps mirror the listing projector:
-        # overlong text fails here, never at the service.
-        parent_goal_id = request.get("parent_goal_id")
-        if (not isinstance(parent_goal_id, str)
-                or not 1 <= len(parent_goal_id) <= 256
-                or "\x00" in parent_goal_id):
-            raise BridgeFailure("invalid_request")
+        # listing (subgoal only); the words are the reader's own.
+        # The body is the live-probed shape (Nov 18, 2026): POST
+        # /goals with {title, summary, description, emoji} plus
+        # {parent_goal_id} for a subgoal, verified on scratch goals
+        # that were deleted after. Field caps mirror the listing
+        # projector: overlong text fails here, never at the service.
+        if op == "goal_add_subgoal":
+            parent_goal_id = request.get("parent_goal_id")
+            if (not isinstance(parent_goal_id, str)
+                    or not 1 <= len(parent_goal_id) <= 256
+                    or "\x00" in parent_goal_id):
+                raise BridgeFailure("invalid_request")
         for key, limit in (("title", 256), ("summary", 500),
                            ("description", 4000), ("emoji", 16)):
             value = request.get(key)
@@ -1036,6 +1040,14 @@ def validate_request(request):
                     or not 1 <= len(value.strip()) <= limit
                     or "\x00" in value):
                 raise BridgeFailure("invalid_request")
+    if op == "idea_detail":
+        # The id is the service's own, taken from the ideas
+        # listing it published; anything else would be reading a
+        # guess. Read-only: the shaped detail, never raw payload.
+        idea_id = request.get("idea_id")
+        if (not isinstance(idea_id, str) or not 1 <= len(idea_id) <= 256
+                or "\x00" in idea_id):
+            raise BridgeFailure("invalid_request")
     if op == "feed_prompt_update":
         # The reader's own words, replacing the feed prompt. The
         # body is the live-probed shape (Nov 18, 2026): PATCH
@@ -3271,6 +3283,21 @@ def _unread_count(row):
     return 0
 
 
+def _snippet_text(value):
+    """A sessions.list row's snippet, for the thread rows.
+
+    The probe-confirmed row shape carries `snippet`; collapsed to
+    one line and capped so a row can never stretch the list, with
+    the same credential redaction the listing text gets. Absent or
+    blank reads as no snippet, never as an empty row.
+    """
+    text = content_text(value)
+    if text is None:
+        return None
+    text = " ".join(text.split())
+    return text[:500] if text else None
+
+
 def session_rows(client, config, config_dir=None):
     """Project the conversation list from `sessions.list` itself.
 
@@ -3289,6 +3316,7 @@ def session_rows(client, config, config_dir=None):
             "is_thread": _thread_flag(row),
             "unread_count": _unread_count(row),
             "updated_at": optional_text(row.get("updated_at")),
+            "snippet": _snippet_text(row.get("snippet")),
         } for row in object_rows(client.threads(include_archived=True))]
     with gateway_scope(config) as gateway:
         data = gateway.call_json("sessions.list")
@@ -3316,6 +3344,7 @@ def session_rows(client, config, config_dir=None):
             "is_thread": _thread_flag(session),
             "unread_count": _unread_count(session),
             "updated_at": updated_at_text(session),
+            "snippet": _snippet_text(session.get("snippet")),
         })
     return rows
 
@@ -3390,6 +3419,49 @@ def _ensure_goals_create_route():
         routes.setdefault("goals.create",
                           {"method": "goals.create",
                            "http": "POST", "path": "/goals"})
+
+
+def _idea_detail_answer(payload):
+    """Shape one api.idea-cards.detail answer into what the dialog
+    needs: the content block and the included items.
+
+    The service answers {card: {content: {title, summary,
+    buildSummary}, items: [{content: {...}}]}}; only the display
+    text travels, length-capped like the listing rows. Anything
+    else stays service-side.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    card = payload.get("card")
+    if not isinstance(card, dict):
+        raise BridgeFailure("protocol_error")
+
+    def text(value, limit):
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value[:limit] if value else None
+
+    def content_of(node):
+        if not isinstance(node, dict):
+            return {"title": None, "summary": None, "build_summary": None}
+        build = node.get("buildSummary", node.get("build_summary"))
+        return {
+            "title": text(node.get("title"), 300),
+            "summary": text(node.get("summary"), 2000),
+            "build_summary": text(build, 4000),
+        }
+    content = content_of(card.get("content"))
+    items = []
+    raw_items = card.get("items")
+    if isinstance(raw_items, list):
+        for entry in raw_items[:30]:
+            if not isinstance(entry, dict):
+                continue
+            shaped = content_of(entry.get("content"))
+            if shaped["title"] or shaped["summary"]:
+                items.append(shaped)
+    return {"content": content, "items": items}
 
 
 def _goal_detail_answer(payload):
@@ -4093,6 +4165,51 @@ class Adapter:
             return {"goal_id": goal_id,
                     "parent_goal_id": request["parent_goal_id"],
                     "accepted": True}
+        if request["op"] == "goal_create":
+            # A write on the shared gateway: one top-level goal,
+            # never retried here. Same live-probed shape as the
+            # subgoal creation (Nov 18, 2026) minus the parent link,
+            # verified on a scratch goal deleted after. Registered,
+            # not guessed, like its sibling above.
+            _ensure_goals_create_route()
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "goals.create",
+                    body={"title": request["title"],
+                          "summary": request["summary"],
+                          "description": request["description"],
+                          "emoji": request["emoji"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            goal_id = answer.get("goal_id")
+            if not isinstance(goal_id, str) or not goal_id:
+                raise BridgeFailure("protocol_error")
+            return {"goal_id": goal_id, "accepted": True}
+        if request["op"] == "goals_tracking":
+            # Read-only: the assistant-tracking goals for the web's
+            # Tracking section. The source filter is the recorded
+            # consumer's own shape (goals.list {source}), verified
+            # live (Nov 18, 2026): 45 tracking rows against 1 user
+            # goal. Projected like the main listing.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "goals.list", body={"source": "assistant_tracking"},
+                    timeout=20,
+                )
+            return listing_rows(payload, ("goals", "items", "results", "data"))
+        if request["op"] == "idea_detail":
+            # Read-only: one idea card's detail for the dialog's
+            # "What's included" and "How it works" sections. The id
+            # is the service's own, taken from the ideas listing.
+            # The answer is the shaped detail (content, items),
+            # never the raw payload.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "api.idea-cards.detail",
+                    path_params={"ideaCardId": request["idea_id"]},
+                )
+            return _idea_detail_answer(payload)
         if request["op"] == "feed_prompt_update":
             # A write on the shared gateway: one prompt replacement,
             # never retried here. The body is the live-probed shape
