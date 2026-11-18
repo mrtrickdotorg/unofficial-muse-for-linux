@@ -1079,14 +1079,14 @@ fn paint_library(
             list.append(&head);
         }
         for artifact in &files {
-            list.append(&file_row(artifact));
+            list.append(&file_row(ctx, artifact));
         }
     } else {
         for artifact in spaces.iter().chain(files.iter()) {
             if artifact.target_kind.as_deref() == Some("space") {
                 list.append(&space_row(ctx, artifact));
             } else {
-                list.append(&file_row(artifact));
+                list.append(&file_row(ctx, artifact));
             }
         }
     }
@@ -1269,10 +1269,15 @@ fn show_export_dialog(line: &gtk4::Box, name: &str, exported: &muse_account::Spa
     window.present();
 }
 
-/// One file row: title plus kind and recency. No buttons: the row's
-/// ⋯ verbs were never observed, so none are invented.
-fn file_row(artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
+/// One file row: title plus kind and recency, with the web's own ⋯
+/// verbs, observed live in the user's session: pin or unpin, and
+/// delete. Pin toggles through the live-probed artifacts.pin body;
+/// delete asks first, then dispatches the live-probed fs.delete
+/// body. Both re-read the Library on acceptance, so the row's new
+/// state is proven, not assumed.
+fn file_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
     let row = gtk4::ListBoxRow::new();
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
     let title = gtk4::Label::new(None);
     title.set_markup(&format!(
@@ -1283,6 +1288,7 @@ fn file_row(artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
     ));
     title.set_wrap(true);
     title.set_xalign(0.0);
+    title.set_hexpand(true);
     words.append(&title);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1295,7 +1301,166 @@ fn file_row(artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
         sub.add_css_class("dim-label");
         words.append(&sub);
     }
-    row.set_child(Some(&words));
+    line.append(&words);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    line.append(&spacer);
+    let more = gtk4::Button::with_label("⋯");
+    more.add_css_class("flat");
+    more.add_css_class("circular");
+    more.set_valign(gtk4::Align::Start);
+    more.set_tooltip_text(Some("File options"));
+    line.append(&more);
+    row.set_child(Some(&line));
+    let popover = gtk4::Popover::new();
+    popover.set_parent(&more);
+    let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    menu.set_margin_start(8);
+    menu.set_margin_end(8);
+    menu.set_margin_top(8);
+    menu.set_margin_bottom(8);
+    let pin_label = if artifact.pinned { "Unpin" } else { "Pin" };
+    let pin_button = gtk4::Button::with_label(pin_label);
+    pin_button.add_css_class("flat");
+    menu.append(&pin_button);
+    let delete_button = gtk4::Button::with_label("Delete");
+    delete_button.add_css_class("flat");
+    delete_button.add_css_class("muse-danger");
+    menu.append(&delete_button);
+    popover.set_child(Some(&menu));
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        let artifact_ref = artifact.artifact_ref.clone();
+        let pinned = artifact.pinned;
+        pin_button.connect_clicked(move |_| {
+            popover_held.popdown();
+            if artifact_ref.is_empty() {
+                line_inner.append(&card_note("This row carries no service reference."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let line_for_done = line_inner.clone();
+            let ctx_for_done = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                {
+                    let client = client.clone();
+                    let artifact_ref = artifact_ref.clone();
+                    move || client.artifact_pin(&artifact_ref, !pinned)
+                },
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "library");
+                    } else {
+                        line_for_done.append(&card_note(
+                            "The service did not change it. Nothing changed.",
+                        ));
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        let path = artifact.path.clone();
+        let name = artifact.title.clone();
+        delete_button.connect_clicked(move |_| {
+            popover_held.popdown();
+            let Some(path) = path.clone() else {
+                line_inner.append(&card_note("This row carries no service path."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let window = gtk4::Window::new();
+            window.set_modal(true);
+            window.set_default_size(420, -1);
+            window.set_title(Some("Delete file"));
+            if let Some(root) = line_inner
+                .root()
+                .and_then(|root| root.downcast::<gtk4::Window>().ok())
+            {
+                window.set_transient_for(Some(&root));
+            }
+            let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            body.set_margin_start(24);
+            body.set_margin_end(24);
+            body.set_margin_top(20);
+            body.set_margin_bottom(20);
+            let words = gtk4::Label::new(Some(&format!(
+                "Delete “{}” from your library? This cannot be undone.",
+                name
+            )));
+            words.set_wrap(true);
+            words.set_xalign(0.0);
+            body.append(&words);
+            let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let cancel = gtk4::Button::with_label("Cancel");
+            cancel.add_css_class("flat");
+            buttons.append(&cancel);
+            let confirm = gtk4::Button::with_label("Delete");
+            confirm.add_css_class("muse-danger");
+            buttons.append(&confirm);
+            body.append(&buttons);
+            window.set_child(Some(&body));
+            {
+                let window = window.clone();
+                cancel.connect_clicked(move |_| {
+                    window.close();
+                });
+            }
+            {
+                let window = window.clone();
+                let line_for_done = line_inner.clone();
+                let ctx_for_done = ctx.clone();
+                confirm.connect_clicked(move |_| {
+                    window.close();
+                    let line_for_done = line_for_done.clone();
+                    let ctx_for_done = ctx_for_done.clone();
+                    super::app::dispatch(
+                        &chat,
+                        {
+                            let client = client.clone();
+                            let path = path.clone();
+                            move || client.file_delete(&path)
+                        },
+                        move |chat, answer| {
+                            let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                            if accepted {
+                                show(&ctx_for_done, "library");
+                            } else {
+                                line_for_done.append(&card_note(
+                                    "The service did not delete it. Nothing changed.",
+                                ));
+                            }
+                            let _ = chat;
+                        },
+                    );
+                });
+            }
+            window.present();
+        });
+    }
+    more.connect_clicked(move |_| {
+        popover.popup();
+    });
     row
 }
 

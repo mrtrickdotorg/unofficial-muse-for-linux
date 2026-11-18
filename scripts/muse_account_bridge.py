@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "feed_react", "feed_unit_delete", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "feed_react", "feed_unit_delete", "artifact_pin", "file_delete", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -697,6 +697,8 @@ def validate_request(request):
                "idea_execute": {"idea_id"},
                "feed_react": {"unit_id", "reaction"},
                "feed_unit_delete": {"unit_id"},
+               "artifact_pin": {"artifact_ref", "pinned"},
+               "file_delete": {"path"},
                "goal_delete": {"goal_id"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
@@ -971,6 +973,27 @@ def validate_request(request):
         value = request.get(field)
         if (not isinstance(value, str) or not 1 <= len(value) <= 256
                 or "\x00" in value):
+            raise BridgeFailure("invalid_request")
+    if op == "artifact_pin":
+        # The reference is the service's own, taken from the Library
+        # listing it published; the flag is a real boolean, never a
+        # truthy string. The body is the live-probed shape (Nov 18,
+        # 2026): {artifact_ref, pinned}, verified pin and unpin with
+        # the state re-read from the listing both ways.
+        artifact_ref = request.get("artifact_ref")
+        if (not isinstance(artifact_ref, str) or not 1 <= len(artifact_ref) <= 256
+                or "\x00" in artifact_ref):
+            raise BridgeFailure("invalid_request")
+        if not isinstance(request.get("pinned"), bool):
+            raise BridgeFailure("invalid_request")
+    if op == "file_delete":
+        # The path is the service's own, taken from the Library
+        # listing it published; anything else would be deleting a
+        # guess. Absolute paths are refused service-side, so one
+        # carrying a leading slash fails here first.
+        path = request.get("path")
+        if (not isinstance(path, str) or not 1 <= len(path) <= 1024
+                or "\x00" in path or path.startswith("/")):
             raise BridgeFailure("invalid_request")
     if op == "mark_seen":
         # The id is the service's own, taken from the sessions
@@ -3757,6 +3780,38 @@ class Adapter:
             deleted = answer.get("deleted")
             return {"unit_id": request["unit_id"], "accepted": True,
                     "deleted": deleted if isinstance(deleted, bool) else None}
+        if request["op"] == "artifact_pin":
+            # A write on the shared gateway: one pin-state change,
+            # never retried here. The body is the live-probed shape
+            # (Nov 18, 2026): {artifact_ref, pinned}, verified pin
+            # and unpin with the state re-read from the listing
+            # both ways. Whether the row now shows the state is
+            # proven by re-reading the Library, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "artifacts.pin",
+                    body={"artifact_ref": request["artifact_ref"],
+                          "pinned": request["pinned"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"artifact_ref": request["artifact_ref"],
+                    "accepted": True, "pinned": request["pinned"]}
+        if request["op"] == "file_delete":
+            # A write on the shared gateway: one deletion, never
+            # retried here. The body is the live-probed shape (Nov
+            # 18, 2026): {path, recursive:false}, verified by
+            # writing a scratch file, deleting it, and reading a
+            # 404 on the stat after. Whether the row is gone is
+            # proven by re-reading the Library, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "fs.delete",
+                    body={"path": request["path"], "recursive": False},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"path": request["path"], "accepted": True}
         if request["op"] == "goal_delete":
             # A write on the shared gateway: one deletion, never
             # retried here. The route is a path-only DELETE, the
