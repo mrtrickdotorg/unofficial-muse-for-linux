@@ -3292,6 +3292,46 @@ class WriteActionTests(unittest.TestCase):
                                   {"body": {"prompt": "new words"}})])
         self.assertEqual(result, {"accepted": True})
 
+    def test_goal_get_shapes_the_detail_answer(self):
+        calls = []
+        detail = {"goal": {"goal_id": "goal_1", "title": "T",
+                           "status": "active", "summary": "S",
+                           "description": "D", "momentum": "",
+                           "momentum_status": "on_track",
+                           "emoji": "X", "parent_goal_id": None,
+                           "extra": "dropped"},
+                  "updates": [{"update_id": "u1", "title": "UT",
+                               "summary": "US", "description": "UD",
+                               "effective_at": "2026-11-18",
+                               "extra": "dropped"}],
+                  "associations": [{"association_type": "cron",
+                                    "details": {"title": "LT",
+                                                "id": "1", "path": "/x"}}]}
+        bridge, client = self._client(calls, detail)
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "goal_get", "goal_id": "goal_1"})
+        self.assertEqual(calls, [("goals.get",
+                                  {"path_params": {"id": "goal_1"}})])
+        self.assertNotIn("extra", result["goal"])
+        self.assertNotIn("extra", result["updates"][0])
+        self.assertEqual(result["associations"],
+                         [{"association_type": "cron", "title": "LT"}])
+
+    def test_goal_add_subgoal_sends_the_probed_create_once(self):
+        calls = []
+        bridge, client = self._client(calls, {"goal_id": "goal_9"})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "goal_add_subgoal", "parent_goal_id": "goal_1",
+             "title": "Sub", "summary": "S", "description": "D",
+             "emoji": "X"})
+        self.assertEqual(calls, [("goals.create",
+                                  {"body": {"title": "Sub", "summary": "S",
+                                           "description": "D", "emoji": "X",
+                                           "parent_goal_id": "goal_1"}})])
+        self.assertEqual(result, {"goal_id": "goal_9",
+                                  "parent_goal_id": "goal_1",
+                                  "accepted": True})
+
     def test_mark_seen_sends_the_recorded_call_once(self):
         # The recorded consumer's own shape: the thread id as a
         # path param and no body. One dispatch, one call.
@@ -3346,6 +3386,20 @@ class WriteActionTests(unittest.TestCase):
             {"op": "feed_prompt_update", "prompt": ""},
             {"op": "feed_prompt_update", "prompt": "   "},
             {"op": "feed_prompt_update"},
+            {"op": "goal_get", "goal_id": ""},
+            {"op": "goal_get"},
+            {"op": "goal_get", "goal_id": "goal_1", "extra": 1},
+            {"op": "goal_add_subgoal", "parent_goal_id": "",
+             "title": "Sub", "summary": "S", "description": "D",
+             "emoji": "X"},
+            {"op": "goal_add_subgoal", "parent_goal_id": "goal_1",
+             "title": "  ", "summary": "S", "description": "D",
+             "emoji": "X"},
+            {"op": "goal_add_subgoal", "parent_goal_id": "goal_1",
+             "title": "Sub", "summary": "S", "description": "D"},
+            {"op": "goal_add_subgoal", "parent_goal_id": "goal_1",
+             "title": "Sub", "summary": "S", "description": "D",
+             "emoji": "X", "extra": 1},
         ):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.validate_request(dict(request, config_dir="/tmp/x"))

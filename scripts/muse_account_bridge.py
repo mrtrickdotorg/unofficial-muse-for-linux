@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_add_subgoal", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -706,6 +706,9 @@ def validate_request(request):
                "goal_delete": {"goal_id"},
                "goal_rename": {"goal_id", "title"},
                "goal_set_complete": {"goal_id", "completed"},
+               "goal_get": {"goal_id"},
+               "goal_add_subgoal": {"parent_goal_id", "title", "summary",
+                                    "description", "emoji"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
                "space_export": {"slug"},
@@ -970,8 +973,8 @@ def validate_request(request):
         if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
                 or "\x00" in job_id):
             raise BridgeFailure("invalid_request")
-    if op in ("goal_delete", "feed_unit_delete", "idea_engagement",
-                "idea_feedback"):
+    if op in ("goal_delete", "goal_get", "feed_unit_delete",
+                "idea_engagement", "idea_feedback"):
         # The id is the service's own, taken from the listing
         # it published; anything else would be touching a guess.
         # The feed route is the same evidence class as the goal
@@ -980,7 +983,8 @@ def validate_request(request):
         # engagement carries {event_type: feedback_up} ("More like
         # this"), feedback carries {feedback: feedback_down} ("Not
         # interested", which dismisses the card).
-        field = {"goal_delete": "goal_id", "feed_unit_delete": "unit_id",
+        field = {"goal_delete": "goal_id", "goal_get": "goal_id",
+                 "feed_unit_delete": "unit_id",
                  "idea_engagement": "id", "idea_feedback": "id"}[op]
         value = request.get(field)
         if (not isinstance(value, str) or not 1 <= len(value) <= 256
@@ -1012,6 +1016,26 @@ def validate_request(request):
             raise BridgeFailure("invalid_request")
         if not isinstance(request.get("completed"), bool):
             raise BridgeFailure("invalid_request")
+    if op == "goal_add_subgoal":
+        # The parent id is the service's own, taken from the goals
+        # listing; the words are the reader's own. The body is the
+        # live-probed shape (Nov 18, 2026): POST /goals with
+        # {title, summary, description, emoji, parent_goal_id},
+        # verified on a scratch parent and child that were both
+        # deleted after. Field caps mirror the listing projector:
+        # overlong text fails here, never at the service.
+        parent_goal_id = request.get("parent_goal_id")
+        if (not isinstance(parent_goal_id, str)
+                or not 1 <= len(parent_goal_id) <= 256
+                or "\x00" in parent_goal_id):
+            raise BridgeFailure("invalid_request")
+        for key, limit in (("title", 256), ("summary", 500),
+                           ("description", 4000), ("emoji", 16)):
+            value = request.get(key)
+            if (not isinstance(value, str)
+                    or not 1 <= len(value.strip()) <= limit
+                    or "\x00" in value):
+                raise BridgeFailure("invalid_request")
     if op == "feed_prompt_update":
         # The reader's own words, replacing the feed prompt. The
         # body is the live-probed shape (Nov 18, 2026): PATCH
@@ -3345,6 +3369,95 @@ ATTACH_PROBE_MESSAGE = (
     "stores it as an attachment. Scratch chat; safe to delete.")
 
 
+def _ensure_goals_create_route():
+    """Teach this process the goal-creation route, once.
+
+    The pinned route table predates it: `goal_prompt` is the
+    table's only creation route and the service answers it with a
+    410 naming POST /goals instead. The entry below is not
+    guessed: POST /goals with {title, summary, description,
+    emoji} was verified live (Nov 18, 2026), and
+    {+ parent_goal_id} creates a subgoal, verified on a scratch
+    parent and child that were both deleted after. `setdefault`
+    keeps this a no-op the day the pin records the route itself.
+    """
+    try:
+        import muse as pinned
+    except (ImportError, OSError):
+        return
+    routes = getattr(pinned, "ROUTES", None)
+    if isinstance(routes, dict):
+        routes.setdefault("goals.create",
+                          {"method": "goals.create",
+                           "http": "POST", "path": "/goals"})
+
+
+def _goal_detail_answer(payload):
+    """Shape one goals.get answer into what the detail view needs.
+
+    The service answers {goal, updates, associations}; only the
+    display fields travel, length-capped like the listing rows.
+    An update carries its title, summary, description and date; an
+    association carries its type and the linked row's title (its
+    details' own `title`). Anything else stays service-side.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    goal = payload.get("goal")
+    if not isinstance(goal, dict):
+        raise BridgeFailure("protocol_error")
+
+    def text(value, limit):
+        if not isinstance(value, str):
+            return None
+        value = value.strip()
+        return value[:limit] if value else None
+    shaped_goal = {
+        "goal_id": goal.get("goal_id"),
+        "title": text(goal.get("title"), 300),
+        "status": goal.get("status") if isinstance(goal.get("status"), str) else None,
+        "summary": text(goal.get("summary"), 2000),
+        "description": text(goal.get("description"), 4000),
+        "momentum": goal.get("momentum") if isinstance(goal.get("momentum"), str) else None,
+        "momentum_status": (goal.get("momentum_status")
+                            if isinstance(goal.get("momentum_status"), str) else None),
+        "emoji": text(goal.get("emoji"), 16),
+        "parent_goal_id": (goal.get("parent_goal_id")
+                           if isinstance(goal.get("parent_goal_id"), str) else None),
+    }
+    updates = []
+    raw_updates = payload.get("updates")
+    if isinstance(raw_updates, list):
+        for entry in raw_updates[:50]:
+            if not isinstance(entry, dict):
+                continue
+            updates.append({
+                "update_id": entry.get("update_id"),
+                "title": text(entry.get("title"), 300),
+                "summary": text(entry.get("summary"), 2000),
+                "description": text(entry.get("description"), 4000),
+                "effective_at": (entry.get("effective_at")
+                                 if isinstance(entry.get("effective_at"), str)
+                                 else None),
+            })
+    associations = []
+    raw_links = payload.get("associations")
+    if isinstance(raw_links, list):
+        for entry in raw_links[:50]:
+            if not isinstance(entry, dict):
+                continue
+            details = entry.get("details")
+            linked = details.get("title") if isinstance(details, dict) else None
+            associations.append({
+                "association_type": (entry.get("association_type")
+                                     if isinstance(entry.get("association_type"), str)
+                                     else None),
+                "title": text(linked, 300),
+            })
+    return {"goal": shaped_goal, "updates": updates,
+            "associations": associations}
+
+
 class Adapter:
     def __init__(self, client, config, confirmation_window=8.0):
         self.client = client
@@ -3941,6 +4054,45 @@ class Adapter:
                 raise BridgeFailure("protocol_error")
             return {"goal_id": request["goal_id"], "accepted": True,
                     "completed": request["completed"]}
+        if request["op"] == "goal_get":
+            # Read-only: one goals.get for the detail view. The id
+            # is the service's own, taken from the goals listing.
+            # The answer is the shaped detail (goal, updates,
+            # associations), never the raw payload.
+            with self.client._gateway(self.config) as gateway:
+                payload = gateway.call_json(
+                    "goals.get",
+                    path_params={"id": request["goal_id"]},
+                )
+            return _goal_detail_answer(payload)
+        if request["op"] == "goal_add_subgoal":
+            # A write on the shared gateway: one subgoal creation,
+            # never retried here. The body is the live-probed shape
+            # (Nov 18, 2026): POST /goals with {title, summary,
+            # description, emoji, parent_goal_id}, verified on a
+            # scratch parent and child that were both deleted after.
+            # The creation route postdates the pinned table, so it
+            # is registered (not guessed) before the call. Whether
+            # the child exists is proven by re-reading the goals
+            # listing, not by this answer.
+            _ensure_goals_create_route()
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "goals.create",
+                    body={"title": request["title"],
+                          "summary": request["summary"],
+                          "description": request["description"],
+                          "emoji": request["emoji"],
+                          "parent_goal_id": request["parent_goal_id"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            goal_id = answer.get("goal_id")
+            if not isinstance(goal_id, str) or not goal_id:
+                raise BridgeFailure("protocol_error")
+            return {"goal_id": goal_id,
+                    "parent_goal_id": request["parent_goal_id"],
+                    "accepted": True}
         if request["op"] == "feed_prompt_update":
             # A write on the shared gateway: one prompt replacement,
             # never retried here. The body is the live-probed shape
