@@ -2505,6 +2505,22 @@ def _feed_extras(unit):
     kicker = content_text(unit.get("kicker"))
     if kicker:
         extras["kicker"] = kicker[:160]
+    # The unit's service action (the gateway's `action` object, with
+    # kind/label/state keys): actionable units render the labeled
+    # button instead of Discuss. A unit without one projects neither
+    # key, and the row reads Love + Discuss.
+    action = unit.get("action") if isinstance(unit.get("action"), dict) else {}
+    action_label = content_text(action.get("label"))
+    if action_label:
+        extras["action_label"] = action_label[:80]
+    action_kind = optional_text(action.get("kind"))
+    if action_kind:
+        extras["action_kind"] = action_kind[:40]
+    # Why the service created this unit (the gateway's
+    # `why_did_i_see_this`): shown from the row's ⋯ menu.
+    why = content_text(unit.get("why_did_i_see_this"))
+    if why:
+        extras["why"] = why[:2000]
     category = content_text(unit.get("category"))
     if category:
         extras["category"] = category[:80]
