@@ -959,6 +959,30 @@ pub struct FeedUnitDeleteAnswer {
     pub deleted: Option<bool>,
 }
 
+/// What the service said about a Library pin-state change it took.
+///
+/// The body is the live-probed shape: the artifact reference with a
+/// real boolean. Acceptance only: whether the row now shows the
+/// state is proven by re-reading the Library, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactPinAnswer {
+    pub artifact_ref: String,
+    pub accepted: bool,
+    pub pinned: bool,
+}
+
+/// What the service said about a Library file deletion it took.
+///
+/// The body is the live-probed shape: the service's own relative
+/// path with `recursive: false`. Acceptance only: whether the row
+/// is gone is proven by re-reading the Library, never by this
+/// answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileDeleteAnswer {
+    pub path: String,
+    pub accepted: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -1777,6 +1801,42 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "feed_unit_delete", "unit_id": unit_id}),
+            false,
+        )
+    }
+    /// Change one Library artifact's pin state, once.
+    ///
+    /// The reference must be one the Library listing published, and
+    /// the flag a real boolean. The bridge makes a single request in
+    /// the live-probed shape, so one press maps to one change.
+    /// Whether the row now shows the state is proven by re-reading
+    /// the Library, never by this answer alone.
+    pub fn artifact_pin(
+        &self,
+        artifact_ref: &str,
+        pinned: bool,
+    ) -> Result<ArtifactPinAnswer, AccountError> {
+        if artifact_ref.is_empty() || artifact_ref.len() > 256 || artifact_ref.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "artifact_pin", "artifact_ref": artifact_ref, "pinned": pinned}),
+            false,
+        )
+    }
+    /// Delete exactly one Library file, once.
+    ///
+    /// The path must be one the Library listing published (relative;
+    /// absolute paths are refused), and the bridge makes a single
+    /// request in the live-probed shape, so one confirmed press maps
+    /// to one deletion. Whether the row is actually gone is proven
+    /// by re-reading the Library, never by this answer alone.
+    pub fn file_delete(&self, path: &str) -> Result<FileDeleteAnswer, AccountError> {
+        if path.is_empty() || path.len() > 1024 || path.contains('\0') || path.starts_with('/') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "file_delete", "path": path}),
             false,
         )
     }

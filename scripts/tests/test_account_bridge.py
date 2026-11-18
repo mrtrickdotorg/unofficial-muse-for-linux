@@ -3218,6 +3218,27 @@ class WriteActionTests(unittest.TestCase):
         self.assertEqual(result, {"unit_id": "u1", "accepted": True,
                                   "deleted": True})
 
+    def test_artifact_pin_sends_the_probed_body_once(self):
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "artifact_pin", "artifact_ref": "space:x", "pinned": True})
+        self.assertEqual(calls, [("artifacts.pin",
+                                  {"body": {"artifact_ref": "space:x",
+                                           "pinned": True}})])
+        self.assertEqual(result, {"artifact_ref": "space:x",
+                                  "accepted": True, "pinned": True})
+
+    def test_file_delete_sends_the_probed_body_once(self):
+        calls = []
+        bridge, client = self._client(calls, {"path": "/gone.txt"})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "file_delete", "path": "gone.txt"})
+        self.assertEqual(calls, [("fs.delete",
+                                  {"body": {"path": "gone.txt",
+                                           "recursive": False}})])
+        self.assertEqual(result, {"path": "gone.txt", "accepted": True})
+
     def test_mark_seen_sends_the_recorded_call_once(self):
         # The recorded consumer's own shape: the thread id as a
         # path param and no body. One dispatch, one call.
@@ -3246,6 +3267,15 @@ class WriteActionTests(unittest.TestCase):
             {"op": "feed_unit_delete", "unit_id": ""},
             {"op": "feed_unit_delete", "unit_id": "u1", "extra": 1},
             {"op": "feed_unit_delete"},
+            {"op": "artifact_pin", "artifact_ref": "", "pinned": True},
+            {"op": "artifact_pin", "artifact_ref": "space:x"},
+            {"op": "artifact_pin", "artifact_ref": "space:x", "pinned": "yes"},
+            {"op": "artifact_pin", "artifact_ref": "space:x", "pinned": True,
+             "extra": 1},
+            {"op": "file_delete", "path": ""},
+            {"op": "file_delete", "path": "/abs.txt"},
+            {"op": "file_delete", "path": "a.txt", "extra": 1},
+            {"op": "file_delete"},
         ):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.validate_request(dict(request, config_dir="/tmp/x"))
