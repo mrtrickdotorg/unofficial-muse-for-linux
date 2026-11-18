@@ -34,18 +34,17 @@ pub struct Ctx {
 }
 
 /// The rail glyph for a page, if it has one: the bundled SVG name
-/// backing the web-shaped menu. Shapes stands for Goals and the
-/// monitor for Feed — the rail's two wordless glyphs land on their
-/// closest readers. The rest live in the sidebar list only.
+/// backing the web-shaped menu. The book stands for Feed, the check
+/// for Goals, shapes for Library — the web's glyphs land on the
+/// sections they open. The rest live in the sidebar list only.
 pub fn rail_glyph(page: &str) -> Option<&'static str> {
     match page {
         "chat" => Some("chat"),
         "search" => Some("search"),
-        "library" => Some("library"),
+        "feed" => Some("library"),
         "ideas" => Some("ideas"),
-        "tasks" => Some("tasks"),
-        "goals" => Some("shapes"),
-        "feed" => Some("monitor"),
+        "goals" => Some("tasks"),
+        "library" => Some("shapes"),
         _ => None,
     }
 }
@@ -1866,11 +1865,11 @@ mod tests {
     fn rail_glyphs_name_bundled_svgs() {
         assert_eq!(rail_glyph("chat"), Some("chat"));
         assert_eq!(rail_glyph("search"), Some("search"));
-        assert_eq!(rail_glyph("library"), Some("library"));
+        assert_eq!(rail_glyph("feed"), Some("library"));
         assert_eq!(rail_glyph("ideas"), Some("ideas"));
-        assert_eq!(rail_glyph("tasks"), Some("tasks"));
-        assert_eq!(rail_glyph("goals"), Some("shapes"));
-        assert_eq!(rail_glyph("feed"), Some("monitor"));
+        assert_eq!(rail_glyph("goals"), Some("tasks"));
+        assert_eq!(rail_glyph("library"), Some("shapes"));
+        assert_eq!(rail_glyph("tasks"), None);
         assert_eq!(rail_glyph("policy"), None);
         assert_eq!(rail_glyph("settings"), None);
     }
