@@ -70,6 +70,51 @@ pub fn delete_label(armed: bool) -> &'static str {
     }
 }
 
+/// The web's right-panel tabs, in the web's order. Mail has no client
+/// route yet; its tab owns the honest note, never a fake list.
+pub const PANEL_TABS: [&str; 4] = ["Activity", "Approvals", "Identity", "Mail"];
+
+/// A decision button's words: the service's outcome in the reader's
+/// language. Pure so the wording is unit-tested.
+pub fn decision_label(decision: muse_account::Decision) -> &'static str {
+    match decision {
+        muse_account::Decision::AllowOnce => "Allow once",
+        muse_account::Decision::AllowTask => "Allow task",
+        muse_account::Decision::AllowSite => "Allow site",
+        muse_account::Decision::AllowAlways => "Allow always",
+        muse_account::Decision::Deny => "Deny",
+    }
+}
+
+/// One approval row's headline: the title plus the service's own
+/// category words, never an invented paraphrase. Pure so the
+/// phrasing is unit-tested.
+pub fn approval_headline(approval: &muse_account::Approval) -> String {
+    let mut head = if approval.title.is_empty() {
+        "(approval)".to_owned()
+    } else {
+        approval.title.clone()
+    };
+    let mut tags: Vec<&str> = Vec::new();
+    for tag in [
+        &approval.kind,
+        &approval.decision,
+        &approval.always_scope,
+        &approval.attention_mode,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !tag.is_empty() {
+            tags.push(tag);
+        }
+    }
+    if !tags.is_empty() {
+        head.push_str(&format!(" ({})", tags.join(", ")));
+    }
+    head
+}
+
 /// Days since the civil epoch for a calendar date (Howard Hinnant's
 /// algorithm): pure date math shared with the feed's relative times.
 pub(crate) fn days_from_civil(year: i32, month: u32, day: u32) -> i32 {
@@ -179,6 +224,10 @@ pub struct Chat {
     panel_sched_head: gtk4::Label,
     panel_schedules: gtk4::ListBox,
     panel_today: gtk4::ListBox,
+    panel_approvals: gtk4::ListBox,
+    panel_approvals_empty: gtk4::Label,
+    panel_identity_name: gtk4::Label,
+    panel_identity_vm: gtk4::Label,
     panel_fetch: RefCell<bool>,
     panel_at: RefCell<Option<std::time::Instant>>,
     panel_tasks: RefCell<Option<muse_account::TasksSnapshot>>,
@@ -234,6 +283,37 @@ impl Chat {
         panel.append(&avatar);
         panel.append(&panel_name);
         panel.append(&panel_status);
+        // The web's tabs above the panel body: Activity is the
+        // profile-and-tasks list already below; Approvals, Identity
+        // and Mail swap the body under the strip.
+        let panel_stack = gtk4::Stack::new();
+        panel_stack.set_vexpand(true);
+        let tabs = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+        tabs.set_halign(gtk4::Align::Center);
+        let tab_bar: Rc<RefCell<Vec<gtk4::Button>>> = Rc::new(RefCell::new(Vec::new()));
+        for name in PANEL_TABS {
+            let tab = gtk4::Button::with_label(name);
+            tab.add_css_class("flat");
+            let stack = panel_stack.clone();
+            let bar = tab_bar.clone();
+            let active = name.to_owned();
+            tab.connect_clicked(move |_| {
+                stack.set_visible_child_name(&active.to_lowercase());
+                for other in bar.borrow().iter() {
+                    if other.label().as_deref() == Some(active.as_str()) {
+                        other.add_css_class("muse-rail-active");
+                    } else {
+                        other.remove_css_class("muse-rail-active");
+                    }
+                }
+            });
+            tab_bar.borrow_mut().push(tab.clone());
+            tabs.append(&tab);
+        }
+        if let Some(first) = tab_bar.borrow().first() {
+            first.add_css_class("muse-rail-active");
+        }
+        panel.append(&tabs);
         let panel_sched_head = gtk4::Label::new(Some("Scheduled tasks"));
         panel_sched_head.set_halign(gtk4::Align::Start);
         panel_sched_head.add_css_class("muse-section");
@@ -253,7 +333,47 @@ impl Chat {
         body_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
         body_scroll.set_vexpand(true);
         body_scroll.set_child(Some(&body));
-        panel.append(&body_scroll);
+        panel_stack.add_named(&body_scroll, Some("activity"));
+        // Approvals: the pending list with the service's own five
+        // outcomes on every row. One press maps to one decide write;
+        // the refill afterwards proves what the press did.
+        let approvals_body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        let panel_approvals_empty = gtk4::Label::new(Some("No pending approvals."));
+        panel_approvals_empty.set_halign(gtk4::Align::Start);
+        panel_approvals_empty.add_css_class("dim-label");
+        panel_approvals_empty.set_wrap(true);
+        approvals_body.append(&panel_approvals_empty);
+        let panel_approvals = gtk4::ListBox::new();
+        panel_approvals.set_selection_mode(gtk4::SelectionMode::None);
+        approvals_body.append(&panel_approvals);
+        let approvals_scroll = gtk4::ScrolledWindow::new();
+        approvals_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+        approvals_scroll.set_vexpand(true);
+        approvals_scroll.set_child(Some(&approvals_body));
+        panel_stack.add_named(&approvals_scroll, Some("approvals"));
+        // Identity: the account's own name and device id, read-only.
+        let identity_body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        identity_body.set_margin_top(8);
+        let panel_identity_name = gtk4::Label::new(None);
+        panel_identity_name.set_halign(gtk4::Align::Start);
+        panel_identity_name.add_css_class("title-4");
+        panel_identity_name.set_wrap(true);
+        identity_body.append(&panel_identity_name);
+        let panel_identity_vm = gtk4::Label::new(None);
+        panel_identity_vm.set_halign(gtk4::Align::Start);
+        panel_identity_vm.add_css_class("dim-label");
+        panel_identity_vm.set_wrap(true);
+        panel_identity_vm.set_selectable(true);
+        identity_body.append(&panel_identity_vm);
+        panel_stack.add_named(&identity_body, Some("identity"));
+        // Mail has no client route: the tab owns the note, never a
+        // fake list.
+        let mail_note = gtk4::Label::new(Some("Mail has no client route yet."));
+        mail_note.set_halign(gtk4::Align::Start);
+        mail_note.add_css_class("dim-label");
+        mail_note.set_wrap(true);
+        panel_stack.add_named(&mail_note, Some("mail"));
+        panel.append(&panel_stack);
         // Thinking lives in the composer card: the pill IS the model
         // picker, filled from the service listing like before.
         let model_combo = composer_row.thinking.clone();
@@ -288,6 +408,10 @@ impl Chat {
             panel_sched_head,
             panel_schedules,
             panel_today,
+            panel_approvals,
+            panel_approvals_empty,
+            panel_identity_name,
+            panel_identity_vm,
             panel_fetch: RefCell::new(false),
             panel_at: RefCell::new(None),
             panel_tasks: RefCell::new(None),
@@ -717,6 +841,112 @@ impl Chat {
                 chat.paint_panel(&snapshot);
             },
         );
+        // Identity and approvals read fresh on every visit beside the
+        // cached tasks: approvals are time-sensitive, identity is
+        // cheap, and both clear honestly when signed out.
+        self.refresh_identity_and_approvals();
+    }
+
+    /// Identity + approvals, fresh on every chat visit. Unlinked paints
+    /// the link-first states; a failed approvals read keeps the last
+    /// good list rather than blanking it.
+    pub fn refresh_identity_and_approvals(self: &Rc<Self>) {
+        let Some(client) = self.client.borrow().clone() else {
+            self.paint_identity(None);
+            Self::paint_approvals(
+                self,
+                &muse_account::PendingApprovals {
+                    pending: Vec::new(),
+                },
+            );
+            self.panel_approvals_empty
+                .set_text("Link your account first.");
+            return;
+        };
+        self.panel_approvals_empty.set_text("No pending approvals.");
+        dispatch(
+            self,
+            move || (client.identity(), client.approvals()),
+            move |chat, (identity, approvals)| {
+                match identity {
+                    Ok(id) => chat.paint_identity(Some(&id)),
+                    Err(_) => chat.paint_identity(None),
+                }
+                if let Ok(list) = approvals {
+                    Self::paint_approvals(chat, &list);
+                }
+            },
+        );
+    }
+
+    fn paint_identity(&self, identity: Option<&muse_account::AccountIdentity>) {
+        match identity {
+            Some(id) => {
+                self.panel_identity_name
+                    .set_text(if id.identity_name.is_empty() {
+                        "(unnamed)"
+                    } else {
+                        &id.identity_name
+                    });
+                self.panel_identity_vm
+                    .set_text(&format!("Device {}", id.vm_id));
+            }
+            None => {
+                self.panel_identity_name
+                    .set_text("Link your account first.");
+                self.panel_identity_vm.set_text("");
+            }
+        }
+    }
+
+    fn paint_approvals(chat: &Rc<Self>, list: &muse_account::PendingApprovals) {
+        while let Some(child) = chat.panel_approvals.first_child() {
+            chat.panel_approvals.remove(&child);
+        }
+        chat.panel_approvals_empty
+            .set_visible(list.pending.is_empty());
+        for approval in &list.pending {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            let head = gtk4::Label::new(Some(&approval_headline(approval)));
+            head.set_xalign(0.0);
+            head.set_wrap(true);
+            head.set_max_width_chars(28);
+            column.append(&head);
+            if !approval.summary.is_empty() {
+                let summary = gtk4::Label::new(Some(&approval.summary));
+                summary.set_xalign(0.0);
+                summary.set_wrap(true);
+                summary.set_lines(3);
+                summary.set_max_width_chars(28);
+                summary.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                summary.add_css_class("dim-label");
+                column.append(&summary);
+            }
+            for detail in &approval.details {
+                let line = gtk4::Label::new(Some(&format!("{}: {}", detail.label, detail.value)));
+                line.set_xalign(0.0);
+                line.set_wrap(true);
+                line.set_max_width_chars(28);
+                line.add_css_class("dim-label");
+                column.append(&line);
+            }
+            let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
+            for decision in muse_account::Decision::all() {
+                let press = gtk4::Button::with_label(decision_label(decision));
+                let weak = Rc::downgrade(chat);
+                let approval_id = approval.approval_id.clone();
+                press.connect_clicked(move |_| {
+                    let Some(chat) = weak.upgrade() else { return };
+                    run_decision(&chat, &approval_id, decision);
+                });
+                buttons.append(&press);
+            }
+            column.append(&buttons);
+            row.set_child(Some(&column));
+            chat.panel_approvals.append(&row);
+        }
     }
 
     /// Fill the panel lists from a held snapshot: schedules with
@@ -1491,6 +1721,32 @@ impl Chat {
     }
 }
 
+/// Decide exactly one approval: the Page ticket makes a double press
+/// wait, and the approvals refill proves what the press did instead
+/// of the answer alone.
+fn run_decision(chat: &Rc<Chat>, approval_id: &str, decision: muse_account::Decision) {
+    let ticket = match chat.page_begin() {
+        Some(ticket) => ticket,
+        None => return,
+    };
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        return;
+    };
+    let approval_id = approval_id.to_owned();
+    dispatch(
+        chat,
+        move || client.decide(&approval_id, decision),
+        move |chat, answer| {
+            chat.page_accept(&ticket);
+            if answer.is_err() {
+                return;
+            }
+            chat.refresh_identity_and_approvals();
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1520,6 +1776,55 @@ mod tests {
     fn delete_button_names_its_armed_state() {
         assert_eq!(delete_label(false), "Delete turn");
         assert_eq!(delete_label(true), "Confirm delete turn");
+    }
+
+    #[test]
+    fn panel_tabs_match_the_web() {
+        assert_eq!(PANEL_TABS, ["Activity", "Approvals", "Identity", "Mail"]);
+    }
+
+    #[test]
+    fn decision_labels_speak_the_reader_language() {
+        use muse_account::Decision;
+        assert_eq!(Decision::all().len(), 5);
+        assert_eq!(decision_label(Decision::AllowOnce), "Allow once");
+        assert_eq!(decision_label(Decision::AllowTask), "Allow task");
+        assert_eq!(decision_label(Decision::AllowSite), "Allow site");
+        assert_eq!(decision_label(Decision::AllowAlways), "Allow always");
+        assert_eq!(decision_label(Decision::Deny), "Deny");
+    }
+
+    #[test]
+    fn approval_headline_keeps_title_and_service_words() {
+        use muse_account::{Approval, ApprovalDetail};
+        let plain = Approval {
+            approval_id: "a".to_owned(),
+            kind: None,
+            decision: None,
+            always_scope: None,
+            attention_mode: None,
+            title: "Run tests".to_owned(),
+            summary: String::new(),
+            details: Vec::new(),
+        };
+        assert_eq!(approval_headline(&plain), "Run tests");
+        let tagged = Approval {
+            kind: Some("shell".to_owned()),
+            decision: Some("ask".to_owned()),
+            always_scope: None,
+            attention_mode: Some("loud".to_owned()),
+            ..plain.clone()
+        };
+        assert_eq!(approval_headline(&tagged), "Run tests (shell, ask, loud)");
+        let untitled = Approval {
+            title: String::new(),
+            ..plain.clone()
+        };
+        assert_eq!(approval_headline(&untitled), "(approval)");
+        let _ = ApprovalDetail {
+            label: String::new(),
+            value: String::new(),
+        };
     }
 
     #[test]
