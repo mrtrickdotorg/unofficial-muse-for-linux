@@ -21,8 +21,8 @@ From this repository:
 
 Default installation: `${XDG_DATA_HOME:-$HOME/.local/share}/unofficial-muse-for-linux/account-bridge`.
 
-- Source: `https://github.com/kleprevost/muse-mcp.git`
-- Reviewed source pin: `965cc2f197543a8762d3d7067038da6de962730a`
+- Source: `https://github.com/mrtrick37/muse-mcp.git` (our standby fork; route table synced with `nikships/muse-cli`)
+- Reviewed source pin: `438951c4f4c25ae186ddd35e9ba497e14d60c16d`
 - Layout: `source/` checkout, `.venv/`, `installation.json`, and `installed-dependencies.txt`.
 - Select the resulting absolute `.venv/bin/python` in the app. That interpreter imports the pinned source through a path-only `.pth` file, keeping `muse.py` beside its descriptors and route data.
 - An existing destination—including a symlink or an earlier installation—is refused. Use a new path for an update, inspect it, then explicitly select its interpreter. Failures retain the new partial installation for inspection; nothing existing is deleted.
@@ -65,7 +65,7 @@ When `muse_account_host.py` is installed beside the bridge, account reads and se
 
 ## Provenance, licensing, and drift
 
-The external [community repository at the pinned commit](https://github.com/kleprevost/muse-mcp/tree/965cc2f197543a8762d3d7067038da6de962730a) declares MIT licensing. Its README attributes `muse.py`, `cli.py`, `routes.json`, descriptors, and protocol notes to `nikships/muse-cli`; its source describes routes/framing as derived from the Muse web client. Its gateway protocol is internal and unversioned, not an official supported API. Service updates, dependency changes, session expiry, VM availability, or account differences can break the adapter without notice. The pin is a compatibility baseline, not a service guarantee.
+The external [community repository at the pinned commit](https://github.com/mrtrick37/muse-mcp/tree/438951c4f4c25ae186ddd35e9ba497e14d60c16d) declares MIT licensing. Its README attributes `muse.py`, `cli.py`, `routes.json`, descriptors, and protocol notes to `nikships/muse-cli`; its source describes routes/framing as derived from the Muse web client. Its gateway protocol is internal and unversioned, not an official supported API. Service updates, dependency changes, session expiry, VM availability, or account differences can break the adapter without notice. The pin is a compatibility baseline, not a service guarantee.
 
 Our GPL-3.0-only app bundles **only our two Python sidecars** at `usr/share/unofficial-muse-for-linux/account/`. It does not bundle the community checkout, `routes.json`, `desc*.bin`, Meta-extracted code/assets, Python environment, cookies, or account data. The setup step obtains the external source into the user's local directory, preserving its source/license there; this separation does not assert ownership of upstream protocol-derived material. Users must consider the service's terms and their own account authorization before choosing the adapter.
 
