@@ -1042,6 +1042,82 @@ pub struct FeedPromptUpdateAnswer {
     pub accepted: bool,
 }
 
+/// One goal as the detail view needs it: the display fields of a
+/// `goals.get` answer's `goal`, length-capped by the bridge like
+/// the listing rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalDetailGoal {
+    #[serde(default)]
+    pub goal_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub momentum: Option<String>,
+    #[serde(default)]
+    pub momentum_status: Option<String>,
+    #[serde(default)]
+    pub emoji: Option<String>,
+    #[serde(default)]
+    pub parent_goal_id: Option<String>,
+}
+
+/// One entry of a `goals.get` answer's `updates`: title, summary,
+/// description and date.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalDetailUpdate {
+    #[serde(default)]
+    pub update_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub effective_at: Option<String>,
+}
+
+/// One entry of a `goals.get` answer's `associations`: the link
+/// type and the linked row's own title.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalDetailAssociation {
+    #[serde(default)]
+    pub association_type: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// What a `goals.get` read answered: the shaped goal, its
+/// updates, and its associations.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalGetAnswer {
+    #[serde(default)]
+    pub goal: GoalDetailGoal,
+    #[serde(default)]
+    pub updates: Vec<GoalDetailUpdate>,
+    #[serde(default)]
+    pub associations: Vec<GoalDetailAssociation>,
+}
+
+/// What the service said about a subgoal creation it took.
+///
+/// The body is the live-probed shape: POST `/goals` with `{title,
+/// summary, description, emoji, parent_goal_id}`. Acceptance only:
+/// whether the child exists is proven by re-reading the goals
+/// listing, never by this answer alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalAddSubgoalAnswer {
+    pub goal_id: String,
+    pub parent_goal_id: String,
+    pub accepted: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -1981,6 +2057,55 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "feed_prompt_update", "prompt": prompt}),
+            false,
+        )
+    }
+    /// Read one goal's detail: the goal, its updates, its links.
+    ///
+    /// The id must be one the goals listing published. Read-only;
+    /// the answer is the bridge-shaped detail, never raw payload.
+    pub fn goal_get(&self, goal_id: &str) -> Result<GoalGetAnswer, AccountError> {
+        if goal_id.is_empty() || goal_id.len() > 256 || goal_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "goal_get", "goal_id": goal_id}),
+            false,
+        )
+    }
+    /// Create one subgoal under a goal, once.
+    ///
+    /// The parent id must be one the goals listing published and
+    /// the words the reader's own; the bridge makes a single POST
+    /// in the live-probed shape, so one confirmed press maps to
+    /// one child goal. Whether the child exists is proven by
+    /// re-reading the goals listing, never by this answer alone.
+    pub fn goal_add_subgoal(
+        &self,
+        parent_goal_id: &str,
+        title: &str,
+        summary: &str,
+        description: &str,
+        emoji: &str,
+    ) -> Result<GoalAddSubgoalAnswer, AccountError> {
+        if parent_goal_id.is_empty() || parent_goal_id.len() > 256 || parent_goal_id.contains('\0')
+        {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        for (value, limit) in [
+            (title, 256),
+            (summary, 500),
+            (description, 4000),
+            (emoji, 16),
+        ] {
+            if value.trim().is_empty() || value.len() > limit || value.contains('\0') {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+        }
+        self.request(
+            serde_json::json!({"op": "goal_add_subgoal", "parent_goal_id": parent_goal_id,
+                               "title": title, "summary": summary,
+                               "description": description, "emoji": emoji}),
             false,
         )
     }

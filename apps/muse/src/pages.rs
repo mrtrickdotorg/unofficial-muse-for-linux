@@ -346,13 +346,18 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             list.set_widget_name(&format!("{name}-list"));
             list.set_selection_mode(gtk4::SelectionMode::Single);
             inner.append(&list);
-            // Ideas rows open the detail dialog; goals stay inert
-            // until the web's goals page is read the same way.
-            if name == "ideas" {
+            // Rows open their detail dialog; the page itself does not
+            // drill in. Ideas read the idea, goals read the goal.
+            if name == "ideas" || name == "goals" {
                 let ctx_owned = ctx.clone();
+                let page_name = name.to_owned();
                 list.connect_row_selected(move |list, row| {
                     let Some(row) = row else { return };
-                    open_idea_dialog(&ctx_owned, list, row);
+                    if page_name == "ideas" {
+                        open_idea_dialog(&ctx_owned, list, row);
+                    } else {
+                        open_goal_dialog(&ctx_owned, list, row);
+                    }
                 });
             }
         }
@@ -909,6 +914,233 @@ fn open_idea_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
         });
     }
     window.present();
+}
+
+/// Open one goal's detail dialog: the row's own id travels from the
+/// listing, so a press with nothing to read never dispatches.
+fn open_goal_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
+    let index: usize = match row
+        .widget_name()
+        .as_str()
+        .strip_prefix("goal:")
+        .and_then(|id| id.parse().ok())
+    {
+        Some(index) => index,
+        None => return,
+    };
+    let held = IDEA_STORE.with(|store| {
+        store
+            .borrow()
+            .get("goals")
+            .and_then(|data| data.items.get(index).cloned())
+    });
+    let Some(item) = held else {
+        return;
+    };
+    let Some(goal_id) = item.id.clone() else {
+        return;
+    };
+    open_goal_detail(ctx, list, goal_id);
+}
+
+/// Read one goal and present its detail: status, description,
+/// updates and links. The parent button re-enters here with the
+/// parent's own id: one user press, one read.
+fn open_goal_detail(ctx: &Ctx, list: &gtk4::ListBox, goal_id: String) {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let Some(client) = chat.client_handle() else {
+        return;
+    };
+    let ctx_owned = ctx.clone();
+    let list_owned = list.clone();
+    super::app::dispatch(
+        &chat,
+        {
+            let client = client.clone();
+            move || client.goal_get(&goal_id)
+        },
+        move |chat, answer| {
+            let Ok(detail) = answer else {
+                return;
+            };
+            let goal = &detail.goal;
+            let title = goal.title.clone().unwrap_or_default();
+            let window = gtk4::Window::new();
+            window.set_modal(true);
+            window.set_default_size(560, -1);
+            window.set_title(Some(if title.is_empty() {
+                "Goal"
+            } else {
+                title.as_str()
+            }));
+            if let Some(root) = list_owned
+                .root()
+                .and_then(|root| root.downcast::<gtk4::Window>().ok())
+            {
+                window.set_transient_for(Some(&root));
+            }
+            let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            body.set_margin_start(24);
+            body.set_margin_end(24);
+            body.set_margin_top(20);
+            body.set_margin_bottom(20);
+            let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+            let heading = gtk4::Label::new(None);
+            heading.set_markup(&format!(
+                "<b>{}</b>",
+                super::chat::render_markup(&title)
+                    .replace("<br/>", " ")
+                    .replace("<br>", " ")
+            ));
+            heading.set_wrap(true);
+            heading.set_xalign(0.0);
+            heading.set_hexpand(true);
+            head.append(&heading);
+            let close = gtk4::Button::with_label("✕");
+            close.add_css_class("flat");
+            close.set_valign(gtk4::Align::Start);
+            head.append(&close);
+            body.append(&head);
+            let status = goal.status.clone().unwrap_or_else(|| "unknown".to_owned());
+            let momentum = goal.momentum_status.clone().unwrap_or_default();
+            let state = if momentum.trim().is_empty() {
+                format!("Status: {status}")
+            } else {
+                format!("Status: {status} · {momentum}")
+            };
+            let state_label = gtk4::Label::new(Some(&state));
+            state_label.set_xalign(0.0);
+            state_label.add_css_class("dim-label");
+            body.append(&state_label);
+            let words = goal
+                .description
+                .clone()
+                .or_else(|| goal.summary.clone())
+                .unwrap_or_default();
+            if !words.trim().is_empty() {
+                let description = gtk4::Label::new(None);
+                description.set_markup(&super::chat::render_markup(&words));
+                description.set_wrap(true);
+                description.set_xalign(0.0);
+                body.append(&description);
+            }
+            if let Some(parent) = goal.parent_goal_id.clone() {
+                let parent_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                let note = gtk4::Label::new(Some("Part of a larger goal."));
+                note.set_xalign(0.0);
+                note.add_css_class("dim-label");
+                note.set_hexpand(true);
+                parent_row.append(&note);
+                let open = gtk4::Button::with_label("Open parent");
+                open.add_css_class("flat");
+                parent_row.append(&open);
+                body.append(&parent_row);
+                let ctx_for_parent = ctx_owned.clone();
+                let list_for_parent = list_owned.clone();
+                {
+                    let window = window.clone();
+                    open.connect_clicked(move |_| {
+                        window.close();
+                        open_goal_detail(&ctx_for_parent, &list_for_parent, parent.clone());
+                    });
+                }
+            }
+            if !detail.updates.is_empty() {
+                let header = gtk4::Label::new(Some(&format!("Updates ({})", detail.updates.len())));
+                header.set_xalign(0.0);
+                header.add_css_class("muse-section");
+                body.append(&header);
+                for update in detail.updates.iter().take(10) {
+                    let entry = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+                    let date = update
+                        .effective_at
+                        .as_deref()
+                        .map(|stamp| stamp.chars().take(10).collect::<String>())
+                        .unwrap_or_default();
+                    let headline = match (update.title.clone().unwrap_or_default(), date) {
+                        (text, day) if !text.is_empty() && !day.is_empty() => {
+                            format!("{text} — {day}")
+                        }
+                        (text, _) if !text.is_empty() => text,
+                        (_, day) => day,
+                    };
+                    if !headline.is_empty() {
+                        let name = gtk4::Label::new(None);
+                        name.set_markup(&format!(
+                            "<b>{}</b>",
+                            super::chat::render_markup(&headline)
+                                .replace("<br/>", " ")
+                                .replace("<br>", " ")
+                        ));
+                        name.set_wrap(true);
+                        name.set_xalign(0.0);
+                        entry.append(&name);
+                    }
+                    let snippet =
+                        idea_snippet(update.summary.as_deref().or(update.description.as_deref()));
+                    if !snippet.is_empty() {
+                        let sub = gtk4::Label::new(Some(&snippet));
+                        sub.set_wrap(true);
+                        sub.set_xalign(0.0);
+                        sub.add_css_class("dim-label");
+                        entry.append(&sub);
+                    }
+                    body.append(&entry);
+                }
+                if detail.updates.len() > 10 {
+                    let more = gtk4::Label::new(Some(&format!(
+                        "…and {} more.",
+                        detail.updates.len() - 10
+                    )));
+                    more.set_xalign(0.0);
+                    more.add_css_class("dim-label");
+                    body.append(&more);
+                }
+            }
+            if !detail.associations.is_empty() {
+                let header = gtk4::Label::new(Some("Linked"));
+                header.set_xalign(0.0);
+                header.add_css_class("muse-section");
+                body.append(&header);
+                for link in &detail.associations {
+                    let line = match (
+                        link.association_type.clone().unwrap_or_default(),
+                        link.title.clone().unwrap_or_default(),
+                    ) {
+                        (kind, text) if !kind.is_empty() && !text.is_empty() => {
+                            format!("{kind} task: {text}")
+                        }
+                        (kind, _) if !kind.is_empty() => kind,
+                        (_, text) => text,
+                    };
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let row = gtk4::Label::new(Some(&line));
+                    row.set_wrap(true);
+                    row.set_xalign(0.0);
+                    body.append(&row);
+                }
+            }
+            let scrolled = gtk4::ScrolledWindow::new();
+            scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+            scrolled.set_vexpand(true);
+            scrolled.set_child(Some(&body));
+            window.set_child(Some(&scrolled));
+            {
+                let window = window.clone();
+                let list = list_owned.clone();
+                close.connect_clicked(move |_| {
+                    window.close();
+                    list.select_row(None::<&gtk4::ListBoxRow>);
+                });
+            }
+            window.present();
+            let _ = chat;
+        },
+    );
 }
 
 /// Fill the tasks page: schedules with a Run button each, plus the run
@@ -2932,11 +3164,12 @@ pub fn roster_visible(item: &ListingItem, page: &str, filter: Option<&str>) -> b
 }
 
 /// One goal row: a completion checkbox reflecting the service's own
-/// status, title plus clamped description, and the ⋯ menu. The row
-/// itself stays inert: the web's row-press destination was never
-/// observed.
-fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
+/// status, title plus clamped description, and the ⋯ menu. A row
+/// press opens the detail dialog; the id travels from the listing,
+/// so a press with nothing to read never dispatches.
+fn goal_row(ctx: &Ctx, item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
     let row = gtk4::ListBoxRow::new();
+    row.set_widget_name(&format!("goal:{index}"));
     let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     let done = gtk4::CheckButton::new();
     done.set_sensitive(false);
@@ -2974,8 +3207,8 @@ fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
     line.append(&more);
     row.set_child(Some(&line));
     // The web's five verbs: discuss proposes a draft, rename and
-    // complete/reopen dispatch, delete dispatches; only "Add
-    // subgoal" has no backend.
+    // complete/reopen dispatch, delete dispatches, and adding a
+    // subgoal creates a child through the live-probed route.
     let popover = gtk4::Popover::new();
     popover.set_parent(&more);
     let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
@@ -3155,12 +3388,126 @@ fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
             );
         });
     }
+    // "Add subgoal" opens the web's own creation: title, summary,
+    // description and emoji under the row's goal. One confirmed
+    // press is one child goal; the re-read listing proves it.
     {
+        let ctx = ctx.clone();
         let line_inner = line.clone();
         let popover_held = popover.clone();
+        let goal_id = item.id.clone();
+        let title = item.title.clone();
         subgoal.connect_clicked(move |_| {
             popover_held.popdown();
-            line_inner.append(&card_note("Add subgoal isn't available for goals yet."));
+            let Some(parent_goal_id) = goal_id.clone() else {
+                line_inner.append(&card_note("This row carries no service id."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let window = gtk4::Window::new();
+            window.set_modal(true);
+            window.set_default_size(480, -1);
+            window.set_title(Some(&format!("Subgoal of “{title}”")));
+            if let Some(root) = line_inner
+                .root()
+                .and_then(|root| root.downcast::<gtk4::Window>().ok())
+            {
+                window.set_transient_for(Some(&root));
+            }
+            let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+            body.set_margin_start(24);
+            body.set_margin_end(24);
+            body.set_margin_top(20);
+            body.set_margin_bottom(20);
+            let name = gtk4::Entry::new();
+            name.set_placeholder_text(Some("Subgoal title"));
+            name.set_hexpand(true);
+            body.append(&name);
+            let summary = gtk4::Entry::new();
+            summary.set_placeholder_text(Some("One-line summary"));
+            summary.set_hexpand(true);
+            body.append(&summary);
+            let description = gtk4::Entry::new();
+            description.set_placeholder_text(Some("What done looks like"));
+            description.set_hexpand(true);
+            body.append(&description);
+            let emoji = gtk4::Entry::new();
+            emoji.set_text("🎯");
+            emoji.set_hexpand(true);
+            body.append(&emoji);
+            let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let cancel = gtk4::Button::with_label("Cancel");
+            cancel.add_css_class("flat");
+            buttons.append(&cancel);
+            let save = gtk4::Button::with_label("Add subgoal");
+            save.add_css_class("muse-cta");
+            buttons.append(&save);
+            body.append(&buttons);
+            window.set_child(Some(&body));
+            {
+                let window = window.clone();
+                cancel.connect_clicked(move |_| {
+                    window.close();
+                });
+            }
+            {
+                let window = window.clone();
+                let line_for_done = line_inner.clone();
+                let ctx_for_done = ctx.clone();
+                save.connect_clicked(move |_| {
+                    let title = name.text().to_string();
+                    let summary = summary.text().to_string();
+                    let description = description.text().to_string();
+                    let emoji = emoji.text().to_string();
+                    if title.trim().is_empty()
+                        || summary.trim().is_empty()
+                        || description.trim().is_empty()
+                        || emoji.trim().is_empty()
+                    {
+                        line_for_done.append(&card_note(
+                            "Every field needs words before there is anything to add.",
+                        ));
+                        return;
+                    }
+                    window.close();
+                    let line_for_done = line_for_done.clone();
+                    let ctx_for_done = ctx_for_done.clone();
+                    super::app::dispatch(
+                        &chat,
+                        {
+                            let client = client.clone();
+                            let parent_goal_id = parent_goal_id.clone();
+                            move || {
+                                client.goal_add_subgoal(
+                                    &parent_goal_id,
+                                    &title,
+                                    &summary,
+                                    &description,
+                                    &emoji,
+                                )
+                            }
+                        },
+                        move |chat, answer| {
+                            let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                            if accepted {
+                                show(&ctx_for_done, "goals");
+                            } else {
+                                line_for_done.append(&card_note(
+                                    "The service did not add it. Nothing changed.",
+                                ));
+                            }
+                            let _ = chat;
+                        },
+                    );
+                });
+            }
+            window.present();
         });
     }
     {
