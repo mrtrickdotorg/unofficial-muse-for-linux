@@ -260,7 +260,6 @@ fn show_main(split: &adw::OverlaySplitView) {
     rail.add_css_class("muse-rail");
     let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
     let menu_button = rail_button("menu", "Settings");
-    rail.append(&menu_button);
     let entries: &[&str] = &["chat", "search", "feed", "ideas", "goals", "library"];
     for page in entries {
         let glyph = pages::rail_glyph(page).unwrap_or("chat");
@@ -268,10 +267,18 @@ fn show_main(split: &adw::OverlaySplitView) {
         rail.append(&button);
         rail_buttons.push(((*page).to_owned(), button));
     }
+    // The web separates creation from navigation: new space rides
+    // below a divider, downloads and settings hug the bottom.
+    let divider = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    rail.append(&divider);
     let new_button = rail_button("new", "New space");
     rail.append(&new_button);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
+    rail.append(&spacer);
     let download_button = rail_button("download", "Updates");
     rail.append(&download_button);
+    rail.append(&menu_button);
     let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     shell.append(&rail);
     shell.append(&side);
