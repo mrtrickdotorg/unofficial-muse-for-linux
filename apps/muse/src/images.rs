@@ -35,18 +35,44 @@ fn cache_dir() -> Option<PathBuf> {
     Some(base.join("muse-images"))
 }
 
+/// The cached file for a URL without touching the network: the first
+/// paint reads from here so rows appear before any download lands.
+pub fn fetch_hero_cached(url: &str) -> Option<PathBuf> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return None;
+    }
+    let target = cache_dir()?.join(cache_name(url));
+    target.is_file().then_some(target)
+}
+
+/// How many hero downloads one feed fill chases: the first screenful.
+/// The rest read text-only so a long roster never holds the paint.
+pub const HERO_LANES: usize = 8;
+
+/// Download heroes for the given (row index, URL) pairs. Order is
+/// preserved and a failed download is `None`, never an error -- the
+/// card renders text-only instead of failing the row.
+pub fn fetch_heroes(requests: Vec<(usize, String)>) -> Vec<(usize, Option<PathBuf>)> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = requests
+            .into_iter()
+            .map(|(index, url)| scope.spawn(move || (index, fetch_hero(&url))))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or((usize::MAX, None)))
+            .collect()
+    })
+}
 /// The cached file for a URL, downloading it first when missing.
 /// Only http(s) URLs; anything else is not artwork. `None` on any
 /// failure -- the card renders text-only instead of failing the row.
 pub fn fetch_hero(url: &str) -> Option<PathBuf> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return None;
+    if let Some(hit) = fetch_hero_cached(url) {
+        return Some(hit);
     }
     let dir = cache_dir()?;
     let target = dir.join(cache_name(url));
-    if target.is_file() {
-        return Some(target);
-    }
     std::fs::create_dir_all(&dir).ok()?;
     fetch_bounded(url, &target)
 }
@@ -55,7 +81,7 @@ pub fn fetch_hero(url: &str) -> Option<PathBuf> {
 fn fetch_bounded(url: &str, target: &PathBuf) -> Option<PathBuf> {
     let response = ureq::get(url)
         .set("User-Agent", "muse-linux-artwork")
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(10))
         .call()
         .ok()?;
     let mut reader = response.into_reader();
@@ -105,6 +131,15 @@ mod tests {
             cache_name("https://example.invalid/a.png"),
             cache_name("https://example.invalid/b.png")
         );
+    }
+
+    #[test]
+    fn hero_batches_skip_non_artwork_without_network() {
+        let got = fetch_heroes(vec![
+            (0, "not a url".to_owned()),
+            (2, "file:///etc/passwd".to_owned()),
+        ]);
+        assert_eq!(got, vec![(0, None), (2, None)]);
     }
 
     #[test]
