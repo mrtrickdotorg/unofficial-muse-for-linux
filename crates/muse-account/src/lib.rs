@@ -190,6 +190,11 @@ pub struct Thread {
     /// them; drives the sidebar badge. Absent reads as zero.
     #[serde(default)]
     pub unread_count: u64,
+    /// The listing's own snippet: the thread's latest activity in
+    /// the service's words, capped by the bridge. Absent reads as
+    /// no snippet, never as an empty row.
+    #[serde(default)]
+    pub snippet: Option<String>,
     pub updated_at: Option<String>,
 }
 
@@ -1105,17 +1110,54 @@ pub struct GoalGetAnswer {
     pub associations: Vec<GoalDetailAssociation>,
 }
 
-/// What the service said about a subgoal creation it took.
+/// What the service said about a goal creation it took.
 ///
 /// The body is the live-probed shape: POST `/goals` with `{title,
-/// summary, description, emoji, parent_goal_id}`. Acceptance only:
-/// whether the child exists is proven by re-reading the goals
-/// listing, never by this answer alone.
+/// summary, description, emoji}` (plus `parent_goal_id` for a
+/// subgoal). Acceptance only: whether the goal exists is proven
+/// by re-reading the goals listing, never by this answer alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalCreateAnswer {
+    pub goal_id: String,
+    pub accepted: bool,
+}
+
+/// What the service said about a subgoal creation it took.
+///
+/// Same live-probed shape as the top-level creation, plus the
+/// parent link. Acceptance only: whether the child exists is
+/// proven by re-reading the goals listing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoalAddSubgoalAnswer {
     pub goal_id: String,
     pub parent_goal_id: String,
     pub accepted: bool,
+}
+
+/// What a tracking-goals read answered: the service listing
+/// projected like the main goals listing.
+pub type GoalsTrackingAnswer = ServiceListing;
+
+/// One idea as the detail dialog needs it: the content block and
+/// the included items, length-capped by the bridge like the
+/// listing rows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeaDetailContent {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub build_summary: Option<String>,
+}
+
+/// What an idea-detail read answered.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeaDetailAnswer {
+    #[serde(default)]
+    pub content: IdeaDetailContent,
+    #[serde(default)]
+    pub items: Vec<IdeaDetailContent>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2106,6 +2148,57 @@ impl AccountClient {
             serde_json::json!({"op": "goal_add_subgoal", "parent_goal_id": parent_goal_id,
                                "title": title, "summary": summary,
                                "description": description, "emoji": emoji}),
+            false,
+        )
+    }
+    /// Create one top-level goal, once.
+    ///
+    /// The words are the reader's own; the bridge makes a single
+    /// POST in the live-probed shape, so one confirmed press maps
+    /// to one goal. Whether the goal exists is proven by
+    /// re-reading the goals listing, never by this answer alone.
+    pub fn goal_create(
+        &self,
+        title: &str,
+        summary: &str,
+        description: &str,
+        emoji: &str,
+    ) -> Result<GoalCreateAnswer, AccountError> {
+        for (value, limit) in [
+            (title, 256),
+            (summary, 500),
+            (description, 4000),
+            (emoji, 16),
+        ] {
+            if value.trim().is_empty() || value.len() > limit || value.contains('\0') {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+        }
+        self.request(
+            serde_json::json!({"op": "goal_create",
+                               "title": title, "summary": summary,
+                               "description": description, "emoji": emoji}),
+            false,
+        )
+    }
+    /// Read the assistant-tracking goals for the Tracking section.
+    ///
+    /// Read-only; the answer is the service listing projected like
+    /// the main goals listing.
+    pub fn goals_tracking(&self) -> Result<GoalsTrackingAnswer, AccountError> {
+        self.request(serde_json::json!({"op": "goals_tracking"}), false)
+    }
+    /// Read one idea card's detail: the content block and the
+    /// included items for the dialog's sections.
+    ///
+    /// The id must be one the ideas listing published. Read-only;
+    /// the answer is the bridge-shaped detail, never raw payload.
+    pub fn idea_detail(&self, idea_id: &str) -> Result<IdeaDetailAnswer, AccountError> {
+        if idea_id.is_empty() || idea_id.len() > 256 || idea_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "idea_detail", "idea_id": idea_id}),
             false,
         )
     }

@@ -49,7 +49,12 @@ acceptance, never end state; state is proven by re-reading. Shipped writes: `tas
 dismisses the card), `goal_rename` and goal complete/reopen (all
 `goals.update` PATCHes), goal detail (`goals.get`) and subgoal
 creation (POST `/goals`, the route the pin predates — registered,
-not guessed), `artifacts.pin` (Library Pin/Unpin), `fs.delete` (Library file Delete
+not guessed), top-level goal creation, the Tracking section
+(`goals.list` with `source: assistant_tracking`), thread rows
+with the listing's own snippet plus unread badges, thread
+rename/pin/archive (`session_op`), idea detail
+(`api.idea-cards.detail`) with "What's included" and "How it
+works", `artifacts.pin` (Library Pin/Unpin), `fs.delete` (Library file Delete
 behind the web's confirm), `goals.delete` (two-press arm), and `chat.mark_seen`
 with the listing's unread badges (opening a chat marks it read, as on the web; the mark owns
 a dedicated ticket slot because opening a chat is exactly when its history read holds the

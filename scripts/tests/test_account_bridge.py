@@ -1739,7 +1739,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(response, {"identity_name": "Test User", "vm_id": "vm-1",
             "threads": [{"session_id": "thread-1", "title": "Example",
                          "archived": False, "pinned": False, "is_thread": True,
-                         "unread_count": 0,
+                         "unread_count": 0, "snippet": None,
                          "updated_at": "2026-10-17T00:00:00Z"}]})
         self.assertNotIn("SECRET", str(response))
 
@@ -3332,6 +3332,47 @@ class WriteActionTests(unittest.TestCase):
                                   "parent_goal_id": "goal_1",
                                   "accepted": True})
 
+    def test_goal_create_sends_the_probed_create_once(self):
+        calls = []
+        bridge, client = self._client(calls, {"goal_id": "goal_9"})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "goal_create",
+             "title": "Top", "summary": "S", "description": "D",
+             "emoji": "X"})
+        self.assertEqual(calls, [("goals.create",
+                                  {"body": {"title": "Top", "summary": "S",
+                                           "description": "D",
+                                           "emoji": "X"}})])
+        self.assertEqual(result, {"goal_id": "goal_9", "accepted": True})
+
+    def test_goals_tracking_reads_the_tracking_source(self):
+        calls = []
+        listing = {"goals": [{"goal_id": "goal_1", "title": "T"}]}
+        bridge, client = self._client(calls, listing)
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "goals_tracking"})
+        self.assertEqual(calls[0][0], "goals.list")
+        self.assertEqual(calls[0][1]["body"], {"source": "assistant_tracking"})
+        self.assertEqual(result["items"][0]["id"], "goal_1")
+
+    def test_idea_detail_shapes_the_dialog_sections(self):
+        calls = []
+        detail = {"card": {"content": {"title": "T", "summary": "S",
+                                       "buildSummary": "H", "extra": 1},
+                           "items": [{"content": {"title": "I",
+                                                  "summary": "IS"}}],
+                           "extra": 1}}
+        bridge, client = self._client(calls, detail)
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "idea_detail", "idea_id": "idea_1"})
+        self.assertEqual(calls, [("api.idea-cards.detail",
+                                  {"path_params": {"ideaCardId": "idea_1"}})])
+        self.assertEqual(result["content"],
+                         {"title": "T", "summary": "S", "build_summary": "H"})
+        self.assertEqual(result["items"],
+                         [{"title": "I", "summary": "IS",
+                           "build_summary": None}])
+
     def test_mark_seen_sends_the_recorded_call_once(self):
         # The recorded consumer's own shape: the thread id as a
         # path param and no body. One dispatch, one call.
@@ -3400,6 +3441,15 @@ class WriteActionTests(unittest.TestCase):
             {"op": "goal_add_subgoal", "parent_goal_id": "goal_1",
              "title": "Sub", "summary": "S", "description": "D",
              "emoji": "X", "extra": 1},
+            {"op": "goal_create", "title": "", "summary": "S",
+             "description": "D", "emoji": "X"},
+            {"op": "goal_create", "title": "Top", "summary": "S",
+             "description": "D"},
+            {"op": "goal_create", "title": "Top", "summary": "S",
+             "description": "D", "emoji": "X", "extra": 1},
+            {"op": "idea_detail", "idea_id": ""},
+            {"op": "idea_detail"},
+            {"op": "idea_detail", "idea_id": "idea_1", "extra": 1},
         ):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.validate_request(dict(request, config_dir="/tmp/x"))
