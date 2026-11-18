@@ -1229,6 +1229,10 @@ impl Chat {
                 self.composer.borrow_mut().restore(images);
                 self.paint_chips();
                 self.composer_row.refresh(&self.composer.borrow());
+                // A held slot is never silent: the reader sees the
+                // message is kept and the log names the contention.
+                eprintln!("muse: send pressed while the session slot is held; message kept");
+                self.say_send_note("Still working — your message is kept; send again in a moment.");
                 return;
             }
         };
