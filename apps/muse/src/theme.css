@@ -229,11 +229,25 @@ textview placeholder {
     min-height: 36px;
     background: transparent;
     border-color: transparent;
-    font-size: 12.5pt;
+    color: #e4e6eb;
+}
+
+.muse-rail-button image {
+    color: #e4e6eb;
 }
 
 .muse-rail-button:hover {
     background: alpha(@window_fg_color, 0.08);
+    color: #ffffff;
+}
+
+.muse-rail-button:hover image {
+    color: #ffffff;
+}
+
+.muse-rail-button:active image,
+.muse-rail-active image {
+    color: #ffffff;
 }
 
 .muse-rail-active {
