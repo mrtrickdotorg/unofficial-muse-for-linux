@@ -335,16 +335,62 @@ impl Default for Session {
 /// `~/.config`) plus `unofficial-muse-for-linux/account`. The new app
 /// reads the same saved link, so signing in once links both.
 pub fn account_dir() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    config_base().map(|base| base.join("unofficial-muse-for-linux/account"))
+}
+
+fn config_base() -> Option<std::path::PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .map(|path| path.join(".config"))
-        })?;
-    Some(base.join("unofficial-muse-for-linux/account"))
+        .filter(|path| path.is_absolute());
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
+    config_base_in(config_home, home)
+}
+
+/// The config root with explicit inputs, so tests never touch the
+/// process environment.
+fn config_base_in(
+    config_home: Option<std::path::PathBuf>,
+    home: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    config_home.or_else(|| home.map(|home| home.join(".config")))
+}
+
+/// The first-run completion marker, beside the account folder: a fresh
+/// config means a fresh setup, and deleting it re-runs setup once.
+pub fn first_run_marker() -> Option<std::path::PathBuf> {
+    config_base().map(|base| base.join("unofficial-muse-for-linux/first-run-done"))
+}
+
+/// The marker path under an explicit config root, for tests.
+fn first_run_marker_in(config_base: Option<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    config_base.map(|base| base.join("unofficial-muse-for-linux/first-run-done"))
+}
+
+/// The one-time work a fresh install pays: the config folder sign-in
+/// needs, plus a warm interpreter probe so linking doesn't pay the
+/// first scan. Idempotent -- a completed setup re-runs silently.
+pub fn first_run_setup() {
+    if let Some(base) = config_base() {
+        first_run_setup_in(&base);
+    }
+    let _ = detect_python();
+}
+
+fn first_run_setup_in(config_base: &std::path::Path) {
+    let dir = config_base.join("unofficial-muse-for-linux");
+    let _ = std::fs::create_dir_all(dir);
+}
+
+/// Record a completed first run so the setup dialog shows once.
+pub fn note_first_run_done() {
+    if let Some(marker) = first_run_marker() {
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(marker, "done\n");
+    }
 }
 
 /// The saved link, when one exists and passes the permission checks.
@@ -555,6 +601,21 @@ pub fn detect_python() -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_run_setup_is_idempotent_under_a_temp_root() {
+        let root = unique_root("first-run");
+        let base = root.join("config");
+        first_run_setup_in(&base);
+        first_run_setup_in(&base);
+        assert!(base.join("unofficial-muse-for-linux").is_dir());
+        assert_eq!(
+            first_run_marker_in(Some(base)),
+            Some(root.join("config/unofficial-muse-for-linux/first-run-done"))
+        );
+        assert_eq!(config_base_in(None, None), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn bridge_venv_python_is_found_under_a_temp_data_home() {

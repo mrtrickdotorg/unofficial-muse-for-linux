@@ -169,10 +169,75 @@ fn build_ui(app: &adw::Application) {
     }
     window.set_child(Some(&split));
     window.present();
+    // A fresh install pays one-time setup (config folders, helper
+    // staging, interpreter probe): a spinner and the reader's sentence
+    // cover it, once, instead of a silent stall. Returning installs
+    // skip this entirely.
+    if session::first_run_marker().is_none_or(|marker| !marker.is_file()) {
+        show_first_run(&window);
+    }
     eprintln!(
         "muse cold-start: first present {:?} after build",
         started.elapsed()
     );
+}
+
+/// The first-run setup dialog: a spinner and the reader's sentence
+/// while the one-time work runs on a worker thread. The main loop
+/// stays free so the spinner animates; the marker lands only after
+/// setup returns, so an interrupted setup re-runs instead of
+/// pretending it finished.
+fn show_first_run(parent: &gtk4::ApplicationWindow) {
+    let dialog = gtk4::Window::builder()
+        .title("Muse")
+        .modal(true)
+        .resizable(false)
+        .default_width(360)
+        .build();
+    dialog.set_transient_for(Some(parent));
+    let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    body.set_margin_start(20);
+    body.set_margin_end(20);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let spinner = gtk4::Spinner::new();
+    spinner.set_valign(gtk4::Align::Start);
+    spinner.start();
+    body.append(&spinner);
+    let words = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    words.set_valign(gtk4::Align::Center);
+    words.set_hexpand(true);
+    let head = gtk4::Label::new(Some("Performing first-run setup"));
+    head.set_xalign(0.0);
+    head.add_css_class("title-4");
+    words.append(&head);
+    let sub = gtk4::Label::new(Some("This may take a few moments."));
+    sub.set_xalign(0.0);
+    sub.add_css_class("dim-label");
+    words.append(&sub);
+    body.append(&words);
+    dialog.set_child(Some(&body));
+    dialog.present();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        session::first_run_setup();
+        session::note_first_run_done();
+        let _ = done_tx.send(());
+    });
+    let dialog_weak = dialog.downgrade();
+    gtk4::glib::idle_add_local(move || {
+        use std::sync::mpsc::TryRecvError;
+        match done_rx.try_recv() {
+            Ok(()) => {
+                if let Some(dialog) = dialog_weak.upgrade() {
+                    dialog.close();
+                }
+                gtk4::glib::ControlFlow::Break
+            }
+            Err(TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
+            Err(TryRecvError::Disconnected) => gtk4::glib::ControlFlow::Break,
+        }
+    });
 }
 
 /// The main surface: sidebar plus a lazily-filled page stack. Only the
