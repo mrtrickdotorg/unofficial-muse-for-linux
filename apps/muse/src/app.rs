@@ -1217,6 +1217,13 @@ impl Chat {
         self.refresh_notice();
     }
 
+    /// Stage another page's text as an editable chat draft: Discuss
+    /// proposes, never sends. The reader reviews and presses send.
+    pub(crate) fn propose_draft(&self, text: &str) {
+        self.composer.borrow_mut().set_text(text);
+        self.composer_row.refresh(&self.composer.borrow());
+    }
+
     /// Dispatch one message: the composer's draft, an option button's
     /// text, staged pictures, or text with pictures. One press
     /// dispatches once; a press while the slot is held releases the

@@ -1928,6 +1928,25 @@ class FeedVisualTests(unittest.TestCase):
         self.assertNotIn("kicker", second)
         self.assertNotIn("category", second)
 
+    def test_feed_projection_carries_action_and_why(self):
+        bridge = load_bridge()
+        result = bridge.feed_rows({"items": [{
+            "unit_id": "u9",
+            "title": "Do the thing",
+            "action": {"kind": "execute", "label": "Let's do it",
+                       "state": "ready"},
+            "why_did_i_see_this": "Because you asked.",
+        }]})
+        first = result["items"][0]
+        self.assertEqual(first["action_label"], "Let's do it")
+        self.assertEqual(first["action_kind"], "execute")
+        self.assertEqual(first["why"], "Because you asked.")
+        # A unit without them projects neither key.
+        plain = bridge.feed_rows({"items": [{"title": "x"}]})["items"][0]
+        self.assertNotIn("action_label", plain)
+        self.assertNotIn("action_kind", plain)
+        self.assertNotIn("why", plain)
+
     def test_other_listings_gain_no_feed_extras(self):
         bridge = load_bridge()
         result = bridge.listing_rows(

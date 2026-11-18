@@ -1425,7 +1425,67 @@ fn hero_picture(path: &std::path::Path) -> gtk4::Picture {
 /// helpers load; anywhere else the service's extracted text carries
 /// the card, and no press can construct a crashing frame. Pictures
 /// never block or fail the card: no bytes, no picture.
+/// Which second button a feed row carries: the service's action
+/// label on actionable units, Discuss on everything else.
+pub fn feed_row_cta(item: &ListingItem) -> Option<String> {
+    item.action_label
+        .as_deref()
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+}
+
+/// A small dim note hung on a card: failures, outcomes, anything the
+/// reader must see inline because the row has no notice line.
+fn card_note(text: &str) -> gtk4::Label {
+    let label = gtk4::Label::new(Some(text));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.add_css_class("dim-label");
+    label
+}
+
+/// The reason dialog behind a feed row's ⋯ menu: the service's own
+/// `why_did_i_see_this`, read-only. Display only, never a write.
+fn show_why_dialog(card: &gtk4::Box, title: &str, why: &str) {
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(480, -1);
+    window.set_title(Some(title));
+    if let Some(root) = card
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok())
+    {
+        window.set_transient_for(Some(&root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let head = gtk4::Label::new(Some("Why this is in your feed"));
+    head.set_xalign(0.0);
+    head.add_css_class("title-4");
+    body.append(&head);
+    let words = gtk4::Label::new(None);
+    words.set_markup(&feed_body_markup(why));
+    words.set_wrap(true);
+    words.set_xalign(0.0);
+    body.append(&words);
+    let close = gtk4::Button::with_label("Close");
+    close.add_css_class("muse-cta");
+    body.append(&close);
+    window.set_child(Some(&body));
+    {
+        let window = window.clone();
+        close.connect_clicked(move |_| {
+            window.close();
+        });
+    }
+    window.present();
+}
+
 fn feed_card(
+    ctx: &Ctx,
     generation: u64,
     index: usize,
     item: &ListingItem,
@@ -1489,6 +1549,179 @@ fn feed_card(
             card.append(&graphic);
         }
     }
+    // The web's action row: Love always, the service's labeled action
+    // on actionable units, Discuss on the rest, and the ⋯ menu.
+    // Failures read inline on the card; the next visit proves the rest.
+    let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let love = gtk4::Button::with_label("Love");
+    love.add_css_class("flat");
+    actions.append(&love);
+    let cta = feed_row_cta(item);
+    let second = match cta.as_deref() {
+        Some(label) => {
+            let go = gtk4::Button::with_label(label);
+            go.add_css_class("muse-cta");
+            go
+        }
+        None => {
+            let discuss = gtk4::Button::with_label("Discuss");
+            discuss.add_css_class("flat");
+            discuss
+        }
+    };
+    actions.append(&second);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    actions.append(&spacer);
+    let more = gtk4::Button::with_label("⋯");
+    more.add_css_class("flat");
+    more.add_css_class("circular");
+    more.set_tooltip_text(Some("Feed unit options"));
+    actions.append(&more);
+    card.append(&actions);
+    // One press, one write: Love records a heart reaction, the labeled
+    // action executes the unit, Discuss stages a chat draft.
+    let card_weak = card.downgrade();
+    let unit_id = item.id.clone();
+    {
+        let ctx = ctx.clone();
+        love.clone().connect_clicked(move |_| {
+            let pressed = love.clone();
+            let Some(id) = unit_id.clone() else {
+                if let Some(card) = card_weak.upgrade() {
+                    card.append(&card_note("This unit carries no service id."));
+                }
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                if let Some(card) = card_weak.upgrade() {
+                    card.append(&card_note("Link your account first."));
+                }
+                return;
+            };
+            pressed.set_sensitive(false);
+            let pressed_inner = pressed.clone();
+            let card_inner = card_weak.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.feed_react(&id, "❤️"),
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        pressed_inner.set_tooltip_text(Some("Loved"));
+                    } else {
+                        pressed_inner.set_sensitive(true);
+                        if let Some(card) = card_inner.upgrade() {
+                            card.append(&card_note(
+                                "The service did not record it. Nothing changed.",
+                            ));
+                        }
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let card_weak = card.downgrade();
+        let unit_id = item.id.clone();
+        let title = item.title.clone();
+        let label = cta.clone().unwrap_or_else(|| "Discuss".to_owned());
+        second.clone().connect_clicked(move |_| {
+            let pressed = second.clone();
+            if cta.is_some() {
+                let Some(id) = unit_id.clone() else {
+                    if let Some(card) = card_weak.upgrade() {
+                        card.append(&card_note("This unit carries no service id."));
+                    }
+                    return;
+                };
+                let Some(chat) = ctx.chat.upgrade() else {
+                    return;
+                };
+                let Some(client) = chat.client_handle() else {
+                    if let Some(card) = card_weak.upgrade() {
+                        card.append(&card_note("Link your account first."));
+                    }
+                    return;
+                };
+                pressed.set_sensitive(false);
+                pressed.set_label("Starting…");
+                let card_inner = card_weak.clone();
+                let label_inner = label.clone();
+                let pressed_inner = pressed.clone();
+                super::app::dispatch(
+                    &chat,
+                    move || client.idea_execute(&id),
+                    move |chat, answer| {
+                        let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                        if let Some(card) = card_inner.upgrade() {
+                            card.append(&card_note(execute_notice(accepted)));
+                        }
+                        pressed_inner.set_label(&label_inner);
+                        if !accepted {
+                            pressed_inner.set_sensitive(true);
+                        }
+                        let _ = chat;
+                    },
+                );
+            } else {
+                let Some(chat) = ctx.chat.upgrade() else {
+                    return;
+                };
+                show(&ctx, "chat");
+                chat.propose_draft(&title);
+            }
+        });
+    }
+    // The row's ⋯ menu, exactly the web's two verbs: the reason first,
+    // delete last. Why opens the service's own text; delete has no
+    // backend and owns up to it instead of pretending.
+    let popover = gtk4::Popover::new();
+    popover.set_parent(&more);
+    let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    menu.set_margin_start(8);
+    menu.set_margin_end(8);
+    menu.set_margin_top(8);
+    menu.set_margin_bottom(8);
+    if let Some(why) = item.why.clone() {
+        let why_button = gtk4::Button::with_label("Why I created this");
+        why_button.add_css_class("flat");
+        menu.append(&why_button);
+        let popover_held = popover.clone();
+        let card_weak = card.downgrade();
+        let title = item.title.clone();
+        why_button.connect_clicked(move |_| {
+            popover_held.popdown();
+            if let Some(card) = card_weak.upgrade() {
+                show_why_dialog(&card, &title, &why);
+            }
+        });
+    }
+    let delete_button = gtk4::Button::with_label("Delete");
+    delete_button.add_css_class("flat");
+    delete_button.add_css_class("muse-danger");
+    menu.append(&delete_button);
+    {
+        let popover_held = popover.clone();
+        let card_weak = card.downgrade();
+        delete_button.connect_clicked(move |_| {
+            popover_held.popdown();
+            if let Some(card) = card_weak.upgrade() {
+                card.append(&card_note(
+                    "The service doesn't offer delete for feed units yet.",
+                ));
+            }
+        });
+    }
+    popover.set_child(Some(&menu));
+    more.connect_clicked(move |_| {
+        popover.popup();
+    });
     card.upcast()
 }
 
@@ -1572,6 +1805,7 @@ fn write_feed_cache(listing: &ServiceListing) {
 /// chase them behind the paint. Shared by the cached first paint and
 /// the fresh wire paint so both read identically.
 fn paint_feed_now(
+    ctx: &Ctx,
     list: &gtk4::ListBox,
     prompt_holder: Option<&gtk4::Label>,
     listing: &ServiceListing,
@@ -1625,6 +1859,7 @@ fn paint_feed_now(
             live += 1;
         }
         list.append(&feed_card(
+            ctx,
             generation,
             index,
             item,
@@ -1673,11 +1908,12 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     // Downgraded up front: the fill below outlives this call, and a
     // borrowed page cannot enter its static completion.
     let page_weak = page.downgrade();
+    let ctx_owned = ctx.clone();
     // The last good feed paints instantly while the wire answers:
     // a slow service reads as its previous self, never as blank.
     let had_cache = if let Some(cached) = read_feed_cache() {
         let prompt = prompt_holder.as_ref();
-        paint_feed_now(&list, prompt, &cached);
+        paint_feed_now(&ctx_owned, &list, prompt, &cached);
         let refreshing = gtk4::Label::new(Some("Refreshing the feed\u{2026}"));
         refreshing.add_css_class("dim-label");
         refreshing.set_xalign(0.0);
@@ -1721,7 +1957,7 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                 return;
             };
             let prompt = prompt_holder.as_ref();
-            let (generation, missing) = paint_feed_now(&list, prompt, &listing);
+            let (generation, missing) = paint_feed_now(&ctx_owned, &list, prompt, &listing);
             // The network fills the first screenful behind the paint:
             // no page ticket is held while downloads run, so pressing
             // elsewhere still fills at once.
@@ -2386,6 +2622,22 @@ mod tests {
         let back: FeedCache = serde_json::from_slice(&bytes).expect("cache parses");
         assert_eq!(back.listing.items.len(), 1);
         assert_eq!(back.listing.items[0].title, "Morning");
+    }
+
+    #[test]
+    fn feed_rows_carry_the_service_action_or_discuss() {
+        let actionable = ListingItem {
+            action_label: Some("Let's do it".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(feed_row_cta(&actionable), Some("Let's do it".to_owned()));
+        let plain = ListingItem::default();
+        assert_eq!(feed_row_cta(&plain), None);
+        let blank = ListingItem {
+            action_label: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(feed_row_cta(&blank), None);
     }
 
     #[test]

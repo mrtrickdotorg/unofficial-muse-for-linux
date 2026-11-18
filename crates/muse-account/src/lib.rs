@@ -416,6 +416,18 @@ pub struct ListingItem {
     /// rendered live in the card's navigation-locked WebView frame.
     #[serde(default)]
     pub widget_html: Option<String>,
+    /// Feed only: the unit's service action label (the gateway's
+    /// `action.label`, confirmed by the user's timing-log probe):
+    /// actionable units render this button instead of Discuss.
+    #[serde(default)]
+    pub action_label: Option<String>,
+    /// Feed only: the service action kind beside the label.
+    #[serde(default)]
+    pub action_kind: Option<String>,
+    /// Feed only: why the service created this unit (the gateway's
+    /// `why_did_i_see_this`, same probe): shown from the row's ⋯ menu.
+    #[serde(default)]
+    pub why: Option<String>,
 }
 /// One read of an Ideas / Goals / Feed listing.
 ///
