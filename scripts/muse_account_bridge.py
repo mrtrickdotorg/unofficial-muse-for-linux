@@ -465,19 +465,20 @@ def _paste_name_ok(name):
 
 
 def _binary_write_bodies(path, data):
-    """Candidate fs.write bodies for binary content, in the
-    order the attach probe tries them. fs.write's recorded use
-    is text; which of these the service decodes as base64 bytes
-    is what the probe's binary leg settles (it verifies the
-    stored attachment's byte count and dimensions). Index 0 is
-    the current best guess and the one real sends use."""
+    """The verified fs.write body for binary content (Nov 18, 2026).
+
+    Learned live, not guessed: the service's validation now requires
+    {path, data_base64, overwrite, append, create_parent} and refuses
+    the older {content, encoding} shapes with a 422 naming the
+    missing field. A 68-byte PNG written in this shape stats back
+    at exactly 68 bytes; the probe below keeps the one-candidate
+    list so the verdict machinery still names what ran.
+    """
     import base64
     encoded = base64.b64encode(data).decode("ascii")
     return [
-        {"path": path, "content": encoded, "encoding": "base64"},
-        {"path": path, "content_base64": encoded},
-        {"path": path, "content": encoded},
-        {"path": path, "data": encoded},
+        {"path": path, "data_base64": encoded, "overwrite": True,
+         "append": False, "create_parent": True},
     ]
 
 
@@ -4177,7 +4178,9 @@ class Adapter:
             fs_write = "refused"
             try:
                 write_body = {"path": ATTACH_PROBE_PATH,
-                              "content": ATTACH_PROBE_TEXT}
+                              "text": ATTACH_PROBE_TEXT,
+                              "overwrite": True, "append": False,
+                              "create_parent": True}
                 if isinstance(node_id, str) and node_id:
                     write_body["node_id"] = node_id
                 with self.client._gateway(self.config) as gateway:

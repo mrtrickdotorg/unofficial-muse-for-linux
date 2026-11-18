@@ -3729,9 +3729,11 @@ class PasteSendTests(unittest.TestCase):
         method, body = calls["writes"][0]
         self.assertEqual(method, "fs.write")
         self.assertEqual(body["path"], "pasted-images/pasted-1-1.png")
-        self.assertEqual(body["encoding"], "base64")
+        self.assertTrue(body["overwrite"])
+        self.assertFalse(body["append"])
+        self.assertTrue(body["create_parent"])
         import base64
-        self.assertEqual(base64.b64decode(body["content"]), self.PNG)
+        self.assertEqual(base64.b64decode(body["data_base64"]), self.PNG)
         method, body = calls["opened"][0]
         self.assertEqual(method, "chat.stream")
         self.assertEqual(body["session_id"], "thread-9")
@@ -3775,12 +3777,16 @@ class PasteSendTests(unittest.TestCase):
 
 
 class AttachProbeBinaryTests(unittest.TestCase):
-    def test_the_binary_leg_names_the_byte_exact_candidate(self):
+    def test_the_binary_leg_writes_the_verified_shape(self):
+        # The write shape is no longer a ladder of guesses: a live
+        # probe (Nov 18, 2026) settled {path, data_base64, overwrite,
+        # append, create_parent}, and a 68-byte PNG written in that
+        # shape stats back at exactly 68 bytes. The probe keeps one
+        # candidate so the verdict still names what ran.
         import base64
         from contextlib import contextmanager
         bridge = load_bridge()
         png_len = len(base64.b64decode(bridge.PROBE_PNG_B64))
-        b64_len = len(bridge.PROBE_PNG_B64)
         writes = []
         opened = []
 
@@ -3807,28 +3813,15 @@ class AttachProbeBinaryTests(unittest.TestCase):
                                  "mime_type": "text/plain",
                                  "bytes_len": 12}]}}}})
                         continue
-                    index = int(text.rsplit(" ", 1)[1])
-                    # Candidate 0 stores its base64 as text (wrong
-                    # size), candidate 1 stores the PNG exactly,
-                    # candidate 2 lands no attachment, candidate 3
-                    # is also exact -- the winner is the FIRST exact.
-                    if index == 2:
-                        attachments = []
-                    elif index in (1, 3):
-                        attachments = [{
-                            "filename": "attach-probe-bin-%d.png" % index,
-                            "mime_type": "image/png",
-                            "bytes_len": png_len, "width": 1, "height": 1}]
-                    else:
-                        attachments = [{
-                            "filename": "attach-probe-bin-%d.png" % index,
-                            "mime_type": "image/png",
-                            "bytes_len": b64_len, "width": 1, "height": 1}]
                     rows.append({
-                        "message_id": "probe-bin-%d" % index,
-                        "seq": 2 + index, "role": "user", "text": text,
+                        "message_id": "probe-bin-0",
+                        "seq": 2, "role": "user", "text": text,
                         "raw": {"payload": {"metadata": {
-                            "attachments": attachments}}}})
+                            "attachments": [{
+                                "filename": "attach-probe-bin-0.png",
+                                "mime_type": "image/png",
+                                "bytes_len": png_len,
+                                "width": 1, "height": 1}]}}}})
                 return rows
 
             @contextmanager
@@ -3838,16 +3831,14 @@ class AttachProbeBinaryTests(unittest.TestCase):
         answer = bridge.Adapter(Client(), {}).dispatch(
             {"op": "attach_probe", "thread": "thread-9"})
         verdicts = {v["candidate"]: v["verdict"] for v in answer["binary"]}
-        self.assertEqual(verdicts[0], "stored_other")
-        self.assertEqual(verdicts[1], "stored_exact")
-        self.assertEqual(verdicts[2], "no_attachment")
-        self.assertEqual(verdicts[3], "stored_exact")
-        bodies = {body["path"]: body for _m, body in writes
-                  if body["path"].startswith("attach-probe-bin")}
-        self.assertEqual(bodies["attach-probe-bin-1.png"]["content_base64"],
-                         bridge.PROBE_PNG_B64)
-        self.assertEqual(bodies["attach-probe-bin-0.png"]["encoding"],
-                         "base64")
+        self.assertEqual(verdicts, {0: "stored_exact"})
+        bodies = [body for _m, body in writes
+                  if body["path"].startswith("attach-probe-bin")]
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual(bodies[0]["data_base64"], bridge.PROBE_PNG_B64)
+        self.assertTrue(bodies[0]["overwrite"])
+        self.assertFalse(bodies[0]["append"])
+        self.assertTrue(bodies[0]["create_parent"])
 
     def test_dictate_posts_raw_pcm_with_a_sample_rate(self):
         # voice.dictation (Mac route table): raw audio bytes in the

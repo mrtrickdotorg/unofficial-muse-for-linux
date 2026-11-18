@@ -43,10 +43,17 @@ probing to *learn* a shape is sanctioned. The discipline is unchanged: one expli
 one write, never retried; ids come only from the service's own listings; answers claim
 acceptance, never end state; state is proven by re-reading. Shipped writes: `tasks.delete`,
 `session.start` and the session ops, `api.idea-cards.execute` (Ideas "Try it"),
-`feed.unit.reaction` (the Feed ❤), `goals.delete` (two-press arm), and `chat.mark_seen`
+`feed.unit.reaction` (the Feed ❤), `feed.unit.delete` (Feed ⋯ Delete),
+`artifacts.pin` (Library Pin/Unpin), `fs.delete` (Library file Delete
+behind the web's confirm), `goals.delete` (two-press arm), and `chat.mark_seen`
 with the listing's unread badges (opening a chat marks it read, as on the web; the mark owns
 a dedicated ticket slot because opening a chat is exactly when its history read holds the
-shared one). A connection-gate bug found the same day — the data pages' shared "verified"
+shared one). Live service change, Nov 18, 2026: `fs.write` now requires
+`{path, text|data_base64, overwrite, append, create_parent}` and answers
+the older `{content, encoding}` shapes with a 422 naming the missing field;
+the bridge's text and binary write bodies were updated to the probed shapes
+(a 22-byte text file and a 68-byte PNG each verified by stat, then deleted
+with `fs.delete` and a 404 on the stat after; nothing lingers). An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:
 the flag now follows what a reply actually proves about the account.
 
