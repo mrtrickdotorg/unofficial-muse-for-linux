@@ -448,6 +448,17 @@ fn clear_list(list: &gtk4::ListBox) {
     }
 }
 
+/// One idea row's group: the collection it belongs to, read off the
+/// service's category first, then kind, then kicker. `None` means the
+/// service named none and the row stands ungrouped.
+pub fn idea_group(item: &ListingItem) -> Option<&str> {
+    [&item.category, &item.kind, &item.kicker]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .find(|text| !text.is_empty())
+}
+
 /// One idea row's second line: the body's first line, trimmed to a
 /// glance. Pure, so the truncation is unit-tested.
 pub fn idea_snippet(body: Option<&str>) -> String {
@@ -1527,7 +1538,22 @@ where
                     },
                 );
             });
+            let mut section: Option<&str> = None;
             for (index, item) in listing.items.iter().enumerate() {
+                // The web groups its roster by collection: a section
+                // label opens each new group, ungrouped rows stand
+                // alone. Group headers carry no row name, so a press
+                // on one leaves the detail alone.
+                let group = idea_group(item);
+                if group != section {
+                    section = group;
+                    if let Some(name) = group {
+                        let head = gtk4::Label::new(Some(name));
+                        head.set_halign(gtk4::Align::Start);
+                        head.add_css_class("muse-section");
+                        list.append(&head);
+                    }
+                }
                 list.append(&idea_row(item, index));
             }
             if listing.items.is_empty() {
@@ -1944,6 +1970,27 @@ mod tests {
         let image = feed_body_markup("See ![alt](https://example.com/a.png) here.");
         assert!(!image.contains(">alt</a>"));
         assert!(image.contains("https://example.com/a.png"));
+    }
+
+    #[test]
+    fn idea_rows_group_by_collection_first() {
+        let bare = ListingItem {
+            title: "X".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(idea_group(&bare), None);
+        let categorized = ListingItem {
+            category: Some("Productivity".to_owned()),
+            kind: Some("Kind".to_owned()),
+            kicker: Some("Kicker".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(idea_group(&categorized), Some("Productivity"));
+        let fallback = ListingItem {
+            kicker: Some("Your UFP onboarding".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(idea_group(&fallback), Some("Your UFP onboarding"));
     }
 
     #[test]
