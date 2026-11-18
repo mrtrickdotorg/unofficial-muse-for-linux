@@ -1335,12 +1335,22 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
     let ctx_owned = ctx.clone();
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
-        None => return,
+        None => {
+            eprintln!("muse: library pressed while the session slot is held");
+            return;
+        }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
+        clear_list(&list);
+        list.append(&gtk4::Label::new(Some("Link your account first.")));
         return;
     };
+    clear_list(&list);
+    let loading = gtk4::Label::new(Some("Loading the library…"));
+    loading.add_css_class("dim-label");
+    loading.set_xalign(0.0);
+    list.append(&loading);
     dispatch(
         &chat,
         move || client.artifacts(),
@@ -2429,10 +2439,6 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
         Some(ticket) => ticket,
         None => return,
     };
-    let Some(client) = chat.client_handle() else {
-        chat.page_accept(&ticket);
-        return;
-    };
     // The prompt card lives above the list (built with the page);
     // resolve it before the worker round-trip, which cannot borrow it.
     let prompt_holder: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-prompt")
@@ -2459,6 +2465,20 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
         loading.set_xalign(0.0);
         list.append(&loading);
         false
+    };
+    // A missing link reads, never blanks: cached rows stay with the
+    // reason there is no fresher list.
+    let Some(client) = chat.client_handle() else {
+        chat.page_accept(&ticket);
+        if had_cache {
+            let note = gtk4::Label::new(Some("Couldn't refresh: link your account first."));
+            note.add_css_class("dim-label");
+            note.set_xalign(0.0);
+            list.append(&note);
+        } else {
+            listing_failure(&list, "Feed", &"Link your account first.");
+        }
+        return;
     };
     dispatch(
         &chat,
