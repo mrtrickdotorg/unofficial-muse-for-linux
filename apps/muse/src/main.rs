@@ -258,6 +258,12 @@ fn show_main(split: &adw::OverlaySplitView) {
     }
     let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 28);
     rail.add_css_class("muse-rail");
+    // The group's pitch is fixed and web-like; expanding spacers
+    // above and below it split the slack, so the icons sit centered
+    // in the column instead of huddling at the top.
+    let top_spacer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    top_spacer.set_vexpand(true);
+    rail.append(&top_spacer);
     let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
     let menu_button = rail_button("menu", "Settings");
     let entries: &[&str] = &["chat", "search", "feed", "ideas", "goals", "library"];
