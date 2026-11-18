@@ -213,11 +213,25 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 }
                 window.present();
             });
-            let status = gtk4::Label::new(None);
+            let status = gtk4::Button::with_label("");
             status.set_widget_name("feed-status");
-            status.set_xalign(0.0);
+            status.set_halign(gtk4::Align::Start);
+            status.add_css_class("flat");
             status.add_css_class("dim-label");
+            status.set_tooltip_text(Some("Re-read the feed now"));
             inner.append(&status);
+            // The web's Generating control re-reads: a press refills
+            // the page from the wire, same as a fresh visit.
+            {
+                let ctx_owned = ctx.clone();
+                let page_weak = inner.downgrade();
+                status.connect_clicked(move |_| {
+                    if page_weak.upgrade().is_none() {
+                        return;
+                    }
+                    show(&ctx_owned, "feed");
+                });
+            }
             let list = gtk4::ListBox::new();
             list.set_widget_name("feed-list");
             inner.append(&list);
@@ -2316,14 +2330,14 @@ fn paint_feed_now(
     ctx: &Ctx,
     list: &gtk4::ListBox,
     prompt_holder: Option<&gtk4::Label>,
-    status_holder: Option<&gtk4::Label>,
+    status_holder: Option<&gtk4::Button>,
     listing: &ServiceListing,
 ) -> (u64, Vec<(usize, String)>) {
     clear_list(list);
     if let Some(holder) = status_holder {
         match feed_status_line(listing.feed_status.as_ref()) {
             Some(line) => {
-                holder.set_text(&line);
+                holder.set_label(&line);
                 holder.set_visible(true);
             }
             None => holder.set_visible(false),
@@ -2423,8 +2437,8 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     // resolve it before the worker round-trip, which cannot borrow it.
     let prompt_holder: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-prompt")
         .and_then(|widget| widget.downcast::<gtk4::Label>().ok());
-    let status: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-status")
-        .and_then(|widget| widget.downcast::<gtk4::Label>().ok());
+    let status: Option<gtk4::Button> = find_widget(page.upcast_ref(), "feed-status")
+        .and_then(|widget| widget.downcast::<gtk4::Button>().ok());
     // Downgraded up front: the fill below outlives this call, and a
     // borrowed page cannot enter its static completion.
     let page_weak = page.downgrade();
