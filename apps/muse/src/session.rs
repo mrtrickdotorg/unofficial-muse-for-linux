@@ -149,6 +149,7 @@ pub struct Session {
     client: Option<muse_account::AccountClient>,
     config: Option<muse_account::BridgeConfig>,
     busy: Option<Ticket>,
+    busy_since: Option<std::time::Instant>,
     serial: u64,
     pub account: Option<muse_account::AccountSnapshot>,
     pub history: Vec<muse_account::HistoryMessage>,
@@ -178,6 +179,7 @@ impl Session {
             client: None,
             config: None,
             busy: None,
+            busy_since: None,
             serial: 0,
             account: None,
             history: Vec::new(),
@@ -195,12 +197,38 @@ impl Session {
         self.busy.is_some()
     }
 
+    /// A hold longer than any legitimate operation (the longest
+    /// deadlines run ~100 s) is a stuck slot, never a slow reader:
+    /// it releases with a log line instead of wedging the app.
+    pub const STALE_SLOT_AFTER: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// True when a hold has outlived every legitimate operation.
+    /// Pure over its inputs so tests never sleep.
+    pub fn slot_stale(since: std::time::Instant, now: std::time::Instant) -> bool {
+        now.duration_since(since) > Self::STALE_SLOT_AFTER
+    }
+
     /// Take the in-flight slot for one read. A second press while the
     /// slot is held gets nothing -- it waits instead of dispatching
-    /// twice.
+    /// twice. A hold older than every legitimate operation is
+    /// released as stuck, with a log line, so one wedged read cannot
+    /// silence sends and fills forever.
     pub fn try_begin(&mut self, op: Op) -> Option<Ticket> {
-        if self.busy.is_some() {
-            return None;
+        if let Some(held) = self.busy {
+            if Self::slot_stale(
+                self.busy_since.unwrap_or(std::time::Instant::now()),
+                std::time::Instant::now(),
+            ) {
+                eprintln!(
+                    "muse: releasing a stuck {:?} slot held past {:?}",
+                    held.op,
+                    Self::STALE_SLOT_AFTER
+                );
+                self.busy = None;
+                self.busy_since = None;
+            } else {
+                return None;
+            }
         }
         self.serial = self.serial.wrapping_add(1);
         let ticket = Ticket {
@@ -208,6 +236,7 @@ impl Session {
             serial: self.serial,
         };
         self.busy = Some(ticket);
+        self.busy_since = Some(std::time::Instant::now());
         Some(ticket)
     }
 
@@ -216,6 +245,7 @@ impl Session {
     pub fn accept(&mut self, ticket: &Ticket) -> bool {
         if self.busy.as_ref() == Some(ticket) {
             self.busy = None;
+            self.busy_since = None;
             true
         } else {
             false
@@ -851,6 +881,17 @@ mod tests {
             assert!(load_saved_connection_in(&root).is_none());
         }
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stale_slots_release_but_fresh_ones_hold() {
+        let past = std::time::Instant::now()
+            - (Session::STALE_SLOT_AFTER + std::time::Duration::from_secs(1));
+        assert!(Session::slot_stale(past, std::time::Instant::now()));
+        assert!(!Session::slot_stale(
+            std::time::Instant::now(),
+            std::time::Instant::now()
+        ));
     }
 
     #[test]
