@@ -13,8 +13,8 @@ import stat
 import subprocess
 import sys
 
-SOURCE_URL = "https://github.com/kleprevost/muse-mcp.git"
-SOURCE_COMMIT = "965cc2f197543a8762d3d7067038da6de962730a"
+SOURCE_URL = "https://github.com/mrtrick37/muse-mcp.git"
+SOURCE_COMMIT = "438951c4f4c25ae186ddd35e9ba497e14d60c16d"
 
 
 def fail(message):
