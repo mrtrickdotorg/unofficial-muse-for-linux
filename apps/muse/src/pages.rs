@@ -221,6 +221,10 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             });
         }
         "ideas" | "goals" => {
+            let heading = gtk4::Label::new(Some(if name == "ideas" { "Ideas" } else { "Goals" }));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            inner.append(&heading);
             let list = gtk4::ListBox::new();
             list.set_widget_name(&format!("{name}-list"));
             inner.append(&list);
@@ -1373,8 +1377,33 @@ where
                 return;
             };
             clear_list(&list);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|span| span.as_secs() as i64)
+                .unwrap_or(0);
+            // Cards, not lines: ideas and goals read like the feed
+            // (icon, title, body, hero, graphic) because they are the
+            // same units. Live graphics need the helper probe and cap
+            // at the first two, exactly like the feed.
+            let graphics = super::widget::widget_available();
+            let mut live = 0;
             for (item, hero) in listing.items.iter().zip(heroes.iter()) {
-                list.append(&listing_row(item, hero.as_deref()));
+                let frame = item
+                    .widget_html
+                    .as_deref()
+                    .is_some_and(|html| !html.is_empty());
+                if graphics && frame {
+                    live += 1;
+                }
+                list.append(&feed_card(
+                    item,
+                    now,
+                    hero.as_deref(),
+                    graphics && frame && live <= 2,
+                ));
+            }
+            if listing.items.is_empty() {
+                list.append(&gtk4::Label::new(Some("Nothing here yet.")));
             }
         },
     );
