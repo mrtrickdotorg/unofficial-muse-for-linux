@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "feed_react", "feed_unit_delete", "artifact_pin", "file_delete", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -696,11 +696,16 @@ def validate_request(request):
                "start_session": set(),
                "session_op": {"session_id", "kind", "title"},
                "idea_execute": {"idea_id"},
+               "idea_engagement": {"id"},
+               "idea_feedback": {"id"},
                "feed_react": {"unit_id", "reaction"},
                "feed_unit_delete": {"unit_id"},
+               "feed_prompt_update": {"prompt"},
                "artifact_pin": {"artifact_ref", "pinned"},
                "file_delete": {"path"},
                "goal_delete": {"goal_id"},
+               "goal_rename": {"goal_id", "title"},
+               "goal_set_complete": {"goal_id", "completed"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
                "space_export": {"slug"},
@@ -965,15 +970,56 @@ def validate_request(request):
         if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
                 or "\x00" in job_id):
             raise BridgeFailure("invalid_request")
-    if op in ("goal_delete", "feed_unit_delete"):
+    if op in ("goal_delete", "feed_unit_delete", "idea_engagement",
+                "idea_feedback"):
         # The id is the service's own, taken from the listing
-        # it published; anything else would be deleting a guess.
+        # it published; anything else would be touching a guess.
         # The feed route is the same evidence class as the goal
         # one: a path-only DELETE from the recorded route table.
-        field = "goal_id" if op == "goal_delete" else "unit_id"
+        # The idea verbs are the live-probed shapes (Nov 18, 2026):
+        # engagement carries {event_type: feedback_up} ("More like
+        # this"), feedback carries {feedback: feedback_down} ("Not
+        # interested", which dismisses the card).
+        field = {"goal_delete": "goal_id", "feed_unit_delete": "unit_id",
+                 "idea_engagement": "id", "idea_feedback": "id"}[op]
         value = request.get(field)
         if (not isinstance(value, str) or not 1 <= len(value) <= 256
                 or "\x00" in value):
+            raise BridgeFailure("invalid_request")
+    if op == "goal_rename":
+        # The id is the service's own, taken from the goals
+        # listing; the title is the reader's own words. The body
+        # is the live-probed shape (Nov 18, 2026): PATCH
+        # /goals/{id} {title}, verified rename and restore on a
+        # scratch goal that was deleted after.
+        goal_id = request.get("goal_id")
+        title = request.get("title")
+        if (not isinstance(goal_id, str) or not 1 <= len(goal_id) <= 256
+                or "\x00" in goal_id):
+            raise BridgeFailure("invalid_request")
+        if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 256
+                or "\x00" in title):
+            raise BridgeFailure("invalid_request")
+    if op == "goal_set_complete":
+        # The id is the service's own, taken from the goals
+        # listing; the flag is a real boolean, never a truthy
+        # string. The body is the live-probed shape (Nov 18,
+        # 2026): PATCH /goals/{id} {status: completed|active},
+        # verified both ways on a scratch goal deleted after.
+        goal_id = request.get("goal_id")
+        if (not isinstance(goal_id, str) or not 1 <= len(goal_id) <= 256
+                or "\x00" in goal_id):
+            raise BridgeFailure("invalid_request")
+        if not isinstance(request.get("completed"), bool):
+            raise BridgeFailure("invalid_request")
+    if op == "feed_prompt_update":
+        # The reader's own words, replacing the feed prompt. The
+        # body is the live-probed shape (Nov 18, 2026): PATCH
+        # /api/feed/prompt {prompt}, verified change and restore
+        # with the prompt re-read both ways.
+        prompt = request.get("prompt")
+        if (not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000
+                or "\x00" in prompt):
             raise BridgeFailure("invalid_request")
     if op == "artifact_pin":
         # The reference is the service's own, taken from the Library
@@ -3829,6 +3875,87 @@ class Adapter:
             deleted = answer.get("deleted")
             return {"goal_id": request["goal_id"], "accepted": True,
                     "deleted": deleted if isinstance(deleted, bool) else None}
+        if request["op"] == "idea_engagement":
+            # A write on the shared gateway: one "More like this",
+            # never retried here. The body is the live-probed shape
+            # (Nov 18, 2026): {event_type: feedback_up}, the
+            # engagement enum's own positive literal. Whether the
+            # idea now ranks higher is the service's business, never
+            # this answer's.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "api.ideas.engagement",
+                    path_params={"id": request["id"]},
+                    body={"event_type": "feedback_up"},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"id": request["id"], "accepted": True}
+        if request["op"] == "idea_feedback":
+            # A write on the shared gateway: one "Not interested",
+            # never retried here. The body is the live-probed shape
+            # (Nov 18, 2026): {feedback: feedback_down}, which
+            # dismisses the card. Whether the card is gone is proven
+            # by re-reading the ideas listing, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "api.ideas.feedback",
+                    path_params={"id": request["id"]},
+                    body={"feedback": "feedback_down"},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"id": request["id"], "accepted": True}
+        if request["op"] == "goal_rename":
+            # A write on the shared gateway: one rename, never
+            # retried here. The body is the live-probed shape (Nov
+            # 18, 2026): PATCH /goals/{id} {title}, verified rename
+            # and restore on a scratch goal deleted after. Whether
+            # the row shows the new title is proven by re-reading
+            # the goals listing, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "goals.update",
+                    path_params={"id": request["goal_id"]},
+                    body={"title": request["title"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"goal_id": request["goal_id"], "accepted": True,
+                    "title": request["title"]}
+        if request["op"] == "goal_set_complete":
+            # A write on the shared gateway: one status flip, never
+            # retried here. The body is the live-probed shape (Nov
+            # 18, 2026): PATCH /goals/{id} {status:
+            # completed|active}, verified both ways on a scratch
+            # goal deleted after. Whether the row shows the state is
+            # proven by re-reading the goals listing.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "goals.update",
+                    path_params={"id": request["goal_id"]},
+                    body={"status": ("completed" if request["completed"]
+                                     else "active")},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"goal_id": request["goal_id"], "accepted": True,
+                    "completed": request["completed"]}
+        if request["op"] == "feed_prompt_update":
+            # A write on the shared gateway: one prompt replacement,
+            # never retried here. The body is the live-probed shape
+            # (Nov 18, 2026): PATCH /api/feed/prompt {prompt},
+            # verified change and restore with the prompt re-read
+            # both ways. Whether the card shows the new words is
+            # proven by re-reading the feed, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "feed.prompt.update",
+                    body={"prompt": request["prompt"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            return {"accepted": True}
         if request["op"] == "mark_seen":
             # A write on the shared gateway: mark one conversation
             # read, once, in the recorded consumer's own shape --

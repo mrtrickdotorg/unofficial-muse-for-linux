@@ -3239,6 +3239,59 @@ class WriteActionTests(unittest.TestCase):
                                            "recursive": False}})])
         self.assertEqual(result, {"path": "gone.txt", "accepted": True})
 
+    def test_idea_engagement_sends_the_probed_body_once(self):
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "idea_engagement", "id": "idea_1"})
+        self.assertEqual(calls, [("api.ideas.engagement",
+                                  {"path_params": {"id": "idea_1"},
+                                   "body": {"event_type": "feedback_up"}})])
+        self.assertEqual(result, {"id": "idea_1", "accepted": True})
+
+    def test_idea_feedback_sends_the_probed_body_once(self):
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "idea_feedback", "id": "idea_1"})
+        self.assertEqual(calls, [("api.ideas.feedback",
+                                  {"path_params": {"id": "idea_1"},
+                                   "body": {"feedback": "feedback_down"}})])
+        self.assertEqual(result, {"id": "idea_1", "accepted": True})
+
+    def test_goal_rename_sends_the_probed_patch_once(self):
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "goal_rename", "goal_id": "goal_1", "title": "New name"})
+        self.assertEqual(calls, [("goals.update",
+                                  {"path_params": {"id": "goal_1"},
+                                   "body": {"title": "New name"}})])
+        self.assertEqual(result, {"goal_id": "goal_1", "accepted": True,
+                                  "title": "New name"})
+
+    def test_goal_set_complete_sends_the_probed_status_once(self):
+        for completed, status in ((True, "completed"), (False, "active")):
+            calls = []
+            bridge, client = self._client(calls, {})
+            result = bridge.Adapter(client, {}).dispatch(
+                {"op": "goal_set_complete", "goal_id": "goal_1",
+                 "completed": completed})
+            self.assertEqual(calls, [("goals.update",
+                                      {"path_params": {"id": "goal_1"},
+                                       "body": {"status": status}})])
+            self.assertEqual(result, {"goal_id": "goal_1", "accepted": True,
+                                      "completed": completed})
+
+    def test_feed_prompt_update_sends_the_probed_patch_once(self):
+        calls = []
+        bridge, client = self._client(calls, {})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "feed_prompt_update", "prompt": "new words"})
+        self.assertEqual(calls, [("feed.prompt.update",
+                                  {"body": {"prompt": "new words"}})])
+        self.assertEqual(result, {"accepted": True})
+
     def test_mark_seen_sends_the_recorded_call_once(self):
         # The recorded consumer's own shape: the thread id as a
         # path param and no body. One dispatch, one call.
@@ -3276,6 +3329,23 @@ class WriteActionTests(unittest.TestCase):
             {"op": "file_delete", "path": "/abs.txt"},
             {"op": "file_delete", "path": "a.txt", "extra": 1},
             {"op": "file_delete"},
+            {"op": "idea_engagement", "id": ""},
+            {"op": "idea_engagement", "id": "idea_1", "extra": 1},
+            {"op": "idea_engagement"},
+            {"op": "idea_feedback", "id": ""},
+            {"op": "idea_feedback"},
+            {"op": "goal_rename", "goal_id": "", "title": "New"},
+            {"op": "goal_rename", "goal_id": "goal_1", "title": "  "},
+            {"op": "goal_rename", "goal_id": "goal_1"},
+            {"op": "goal_rename", "goal_id": "goal_1", "title": "New",
+             "extra": 1},
+            {"op": "goal_set_complete", "goal_id": "", "completed": True},
+            {"op": "goal_set_complete", "goal_id": "goal_1",
+             "completed": "yes"},
+            {"op": "goal_set_complete", "goal_id": "goal_1"},
+            {"op": "feed_prompt_update", "prompt": ""},
+            {"op": "feed_prompt_update", "prompt": "   "},
+            {"op": "feed_prompt_update"},
         ):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.validate_request(dict(request, config_dir="/tmp/x"))

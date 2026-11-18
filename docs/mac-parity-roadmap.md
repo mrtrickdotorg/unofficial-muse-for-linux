@@ -44,7 +44,10 @@ one write, never retried; ids come only from the service's own listings; answers
 acceptance, never end state; state is proven by re-reading. Shipped writes: `tasks.delete`,
 `session.start` and the session ops, `api.idea-cards.execute` (Ideas "Try it"),
 `feed.unit.reaction` (the Feed ❤), `feed.unit.delete` (Feed ⋯ Delete),
-`artifacts.pin` (Library Pin/Unpin), `fs.delete` (Library file Delete
+`feed.prompt.update` (Feed prompt Edit), `api.ideas.engagement`
+("More like this") and `api.ideas.feedback` ("Not interested", which
+dismisses the card), `goal_rename` and goal complete/reopen (all
+`goals.update` PATCHes), `artifacts.pin` (Library Pin/Unpin), `fs.delete` (Library file Delete
 behind the web's confirm), `goals.delete` (two-press arm), and `chat.mark_seen`
 with the listing's unread badges (opening a chat marks it read, as on the web; the mark owns
 a dedicated ticket slot because opening a chat is exactly when its history read holds the

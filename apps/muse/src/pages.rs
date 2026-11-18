@@ -179,7 +179,12 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             edit.set_tooltip_text(Some("Edit the feed prompt"));
             prompt_row.append(&edit);
             inner.append(&prompt_row);
-            // Editing has no backend yet: the button reads, plainly.
+            // Editing dispatches the live-probed prompt replacement,
+            // then re-reads the feed so the card proves the new words.
+            let prompt_text = prompt.clone();
+            let chat_weak = ctx.chat.clone();
+            let ctx_owned = ctx.clone();
+            let page_weak = inner.downgrade();
             edit.connect_clicked(move |edit| {
                 let window = gtk4::Window::new();
                 window.set_modal(true);
@@ -196,19 +201,64 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 body.set_margin_end(24);
                 body.set_margin_top(20);
                 body.set_margin_bottom(20);
-                let note =
-                    gtk4::Label::new(Some("Prompt editing isn't available in this client yet."));
-                note.set_wrap(true);
-                note.set_xalign(0.0);
-                body.append(&note);
-                let close = gtk4::Button::with_label("Close");
-                close.add_css_class("muse-cta");
-                body.append(&close);
+                let entry = gtk4::Entry::new();
+                entry.set_text(&prompt_text.text());
+                entry.set_hexpand(true);
+                body.append(&entry);
+                let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                let cancel = gtk4::Button::with_label("Cancel");
+                cancel.add_css_class("flat");
+                buttons.append(&cancel);
+                let save = gtk4::Button::with_label("Save");
+                save.add_css_class("muse-cta");
+                buttons.append(&save);
+                body.append(&buttons);
                 window.set_child(Some(&body));
                 {
                     let window = window.clone();
-                    close.connect_clicked(move |_| {
+                    cancel.connect_clicked(move |_| {
                         window.close();
+                    });
+                }
+                let chat_weak = chat_weak.clone();
+                let ctx_owned = ctx_owned.clone();
+                let page_weak = page_weak.clone();
+                {
+                    let window = window.clone();
+                    save.connect_clicked(move |_| {
+                        let words = entry.text().to_string();
+                        if words.trim().is_empty() {
+                            entry.set_placeholder_text(Some("The prompt needs non-blank words."));
+                            return;
+                        }
+                        let Some(chat) = chat_weak.upgrade() else {
+                            return;
+                        };
+                        let Some(client) = chat.client_handle() else {
+                            return;
+                        };
+                        window.close();
+                        let ctx_done = ctx_owned.clone();
+                        let page_done = page_weak.clone();
+                        super::app::dispatch(
+                            &chat,
+                            {
+                                let client = client.clone();
+                                move || client.feed_prompt_update(&words)
+                            },
+                            move |chat, answer| {
+                                let accepted =
+                                    answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                                if accepted {
+                                    show(&ctx_done, "feed");
+                                } else if let Some(inner) = page_done.upgrade() {
+                                    inner.append(&card_note(
+                                        "The service did not change it. Nothing changed.",
+                                    ));
+                                }
+                                let _ = chat;
+                            },
+                        );
                     });
                 }
                 window.present();
@@ -799,19 +849,23 @@ fn open_idea_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
             );
         });
     }
-    // Reactions: the glyph is the vote. Acceptance shows inline;
-    // proof is the next visit, never the answer alone.
+    // The overflow menu: the web's own verbs. "More like this"
+    // records an engagement, "Not interested" records feedback
+    // (which dismisses the card) — each a single live-probed
+    // write. Proof is the next visit, never the answer alone.
     for (button, glyph) in [(like, "👍"), (dislike, "👎")] {
         let notice_held = notice.clone();
         let popover_held = popover.clone();
         let ctx_held = ctx.clone();
         let page_held = page.clone();
+        let window_held = window.clone();
         let unit_held = unit_id.clone();
         button.connect_clicked(move |_| {
             let notice = notice_held.clone();
             let popover = popover_held.clone();
             let ctx = ctx_held.clone();
             let page = page_held.clone();
+            let window = window_held.clone();
             let unit = unit_held.clone();
             popover.popdown();
             let Some(id) = unit.clone() else {
@@ -827,15 +881,26 @@ fn open_idea_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
                 notice.set_visible(true);
                 return;
             };
-            let reaction = glyph.to_owned();
+            let negative = glyph == "👎";
             super::app::dispatch(
                 &chat,
-                move || client.feed_react(&id, &reaction),
+                {
+                    let client = client.clone();
+                    let id = id.clone();
+                    move || {
+                        if negative {
+                            client.idea_feedback(&id).map(|answer| answer.accepted)
+                        } else {
+                            client.idea_engagement(&id).map(|answer| answer.accepted)
+                        }
+                    }
+                },
                 move |chat, answer| {
-                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    let accepted = answer.as_ref().map(|ok| *ok).unwrap_or(false);
                     notice.set_text(&react_notice(glyph, accepted));
                     notice.set_visible(true);
-                    if accepted && glyph == "👎" {
+                    if accepted && negative {
+                        window.close();
                         show(&ctx, &page);
                     }
                     let _ = chat;
@@ -2866,10 +2931,10 @@ pub fn roster_visible(item: &ListingItem, page: &str, filter: Option<&str>) -> b
     }
 }
 
-/// One goal row: an insensitive completion checkbox (the service offers
-/// no completion write, so nothing pretends to stick), title plus
-/// clamped description, and the ⋯ menu. The row itself stays inert:
-/// the web's row-press destination was never observed.
+/// One goal row: a completion checkbox reflecting the service's own
+/// status, title plus clamped description, and the ⋯ menu. The row
+/// itself stays inert: the web's row-press destination was never
+/// observed.
 fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
     let row = gtk4::ListBoxRow::new();
     let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
@@ -2908,8 +2973,9 @@ fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
     more.set_tooltip_text(Some("Goal options"));
     line.append(&more);
     row.set_child(Some(&line));
-    // The web's five verbs. Only Delete has a backend; the rest read
-    // plainly instead of pretending.
+    // The web's five verbs: discuss proposes a draft, rename and
+    // complete/reopen dispatch, delete dispatches; only "Add
+    // subgoal" has no backend.
     let popover = gtk4::Popover::new();
     popover.set_parent(&more);
     let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
@@ -2947,18 +3013,154 @@ fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
             chat.propose_draft(&title);
         });
     }
-    for (button, verb) in [
-        (rename, "Rename"),
-        (subgoal, "Add subgoal"),
-        (complete, "Complete"),
-    ] {
+    // The web's five verbs. Discuss proposes a draft; rename and
+    // complete/reopen dispatch the live-probed PATCHes and re-read;
+    // only "Add subgoal" has no backend, so only it reads plainly.
+    let completed = item.kind.as_deref() == Some("completed");
+    done.set_active(completed);
+    done.set_tooltip_text(Some(if completed {
+        "Completed — reopen it from the options."
+    } else {
+        "Not completed."
+    }));
+    complete.set_label(if completed { "Reopen" } else { "Complete" });
+    {
+        let ctx = ctx.clone();
         let line_inner = line.clone();
         let popover_held = popover.clone();
-        button.connect_clicked(move |_| {
+        let goal_id = item.id.clone();
+        let title = item.title.clone();
+        rename.connect_clicked(move |_| {
             popover_held.popdown();
-            line_inner.append(&card_note(&format!(
-                "{verb} isn't available for goals yet."
-            )));
+            let Some(goal_id) = goal_id.clone() else {
+                line_inner.append(&card_note("This row carries no service id."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let window = gtk4::Window::new();
+            window.set_modal(true);
+            window.set_default_size(420, -1);
+            window.set_title(Some("Rename goal"));
+            if let Some(root) = line_inner
+                .root()
+                .and_then(|root| root.downcast::<gtk4::Window>().ok())
+            {
+                window.set_transient_for(Some(&root));
+            }
+            let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            body.set_margin_start(24);
+            body.set_margin_end(24);
+            body.set_margin_top(20);
+            body.set_margin_bottom(20);
+            let entry = gtk4::Entry::new();
+            entry.set_text(&title);
+            entry.set_hexpand(true);
+            body.append(&entry);
+            let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let cancel = gtk4::Button::with_label("Cancel");
+            cancel.add_css_class("flat");
+            buttons.append(&cancel);
+            let save = gtk4::Button::with_label("Save");
+            save.add_css_class("muse-cta");
+            buttons.append(&save);
+            body.append(&buttons);
+            window.set_child(Some(&body));
+            {
+                let window = window.clone();
+                cancel.connect_clicked(move |_| {
+                    window.close();
+                });
+            }
+            {
+                let window = window.clone();
+                let line_for_done = line_inner.clone();
+                let ctx_for_done = ctx.clone();
+                save.connect_clicked(move |_| {
+                    let title = entry.text().to_string();
+                    if title.trim().is_empty() {
+                        line_for_done.append(&card_note("A goal needs a non-blank title."));
+                        return;
+                    }
+                    window.close();
+                    let line_for_done = line_for_done.clone();
+                    let ctx_for_done = ctx_for_done.clone();
+                    super::app::dispatch(
+                        &chat,
+                        {
+                            let client = client.clone();
+                            let goal_id = goal_id.clone();
+                            move || client.goal_rename(&goal_id, &title)
+                        },
+                        move |chat, answer| {
+                            let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                            if accepted {
+                                show(&ctx_for_done, "goals");
+                            } else {
+                                line_for_done.append(&card_note(
+                                    "The service did not rename it. Nothing changed.",
+                                ));
+                            }
+                            let _ = chat;
+                        },
+                    );
+                });
+            }
+            window.present();
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        let goal_id = item.id.clone();
+        complete.connect_clicked(move |_| {
+            popover_held.popdown();
+            let Some(goal_id) = goal_id.clone() else {
+                line_inner.append(&card_note("This row carries no service id."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let line_for_done = line_inner.clone();
+            let ctx_for_done = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                {
+                    let client = client.clone();
+                    let goal_id = goal_id.clone();
+                    move || client.goal_set_complete(&goal_id, !completed)
+                },
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "goals");
+                    } else {
+                        line_for_done.append(&card_note(
+                            "The service did not change it. Nothing changed.",
+                        ));
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    {
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        subgoal.connect_clicked(move |_| {
+            popover_held.popdown();
+            line_inner.append(&card_note("Add subgoal isn't available for goals yet."));
         });
     }
     {
