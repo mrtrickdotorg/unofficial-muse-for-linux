@@ -14,7 +14,8 @@ use adw::prelude::*;
 use super::app::{Chat, dispatch};
 use super::session::account_dir;
 use muse_account::{
-    ActiveGrant, ArtifactSummary, GrantItem, ListingItem, MemoryHit, Schedule, TaskRun,
+    ActiveGrant, ArtifactSummary, GrantItem, ListingItem, MemoryHit, Schedule, ServiceListing,
+    TaskRun,
 };
 
 /// What a page needs: the chat for reads, the stack to navigate, and
@@ -1523,6 +1524,133 @@ pub fn grant_label(grant: &GrantItem) -> String {
 }
 
 /// Fill the feed page: the generating prompt card plus the units.
+/// The last good feed, kept on disk: a slow service still reads
+/// instantly on the next visit, then refreshes behind the paint.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FeedCache {
+    listing: ServiceListing,
+}
+
+fn feed_cache_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|home| home.join(".cache"))
+        })?;
+    Some(base.join("muse-feed.json"))
+}
+
+fn read_feed_cache() -> Option<ServiceListing> {
+    let path = feed_cache_path()?;
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<FeedCache>(&bytes)
+        .ok()
+        .map(|cache| cache.listing)
+}
+
+fn write_feed_cache(listing: &ServiceListing) {
+    let Some(path) = feed_cache_path() else {
+        return;
+    };
+    let Ok(bytes) = serde_json::to_vec(&FeedCache {
+        listing: listing.clone(),
+    }) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, bytes);
+}
+
+/// Paint one listing's rows: prompt card plus cards with cache-only
+/// heroes. Returns the rows still missing heroes so the caller can
+/// chase them behind the paint. Shared by the cached first paint and
+/// the fresh wire paint so both read identically.
+fn paint_feed_now(
+    list: &gtk4::ListBox,
+    prompt_holder: Option<&gtk4::Label>,
+    listing: &ServiceListing,
+) -> (u64, Vec<(usize, String)>) {
+    clear_list(list);
+    if let Some(holder) = prompt_holder {
+        let text = listing
+            .feed_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.text.as_deref())
+            .unwrap_or_default();
+        holder.set_text(text);
+        holder.set_visible(!text.is_empty());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_secs() as i64)
+        .unwrap_or(0);
+    // Each fill takes a generation so the download pass below hangs
+    // bytes only on its own rows.
+    let generation = FEED_GEN.with(|slot| {
+        let next = slot.get().wrapping_add(1);
+        slot.set(next);
+        next
+    });
+    // The paint reads cache only: rows appear the moment the listing
+    // lands, and the network never holds them.
+    let heroes: Vec<Option<std::path::PathBuf>> = listing
+        .items
+        .iter()
+        .map(|item| {
+            item.image_url
+                .as_deref()
+                .and_then(super::images::fetch_hero_cached)
+        })
+        .collect();
+    // Widget frames need working helpers: probe once per fill
+    // (the result caches per process) so a broken bundle
+    // paints text instead of aborting on a frame.
+    let graphics = super::widget::widget_available();
+    let mut live = 0;
+    for (index, (item, hero)) in listing.items.iter().zip(heroes.iter()).enumerate() {
+        // The first two graphics render live, and only where
+        // the helper probe passed; the rest read from the
+        // service's extracted text (see feed_card).
+        let frame = item
+            .widget_html
+            .as_deref()
+            .is_some_and(|html| !html.is_empty());
+        if graphics && frame {
+            live += 1;
+        }
+        list.append(&feed_card(
+            generation,
+            index,
+            item,
+            now,
+            hero.as_deref(),
+            graphics && frame && live <= 2,
+        ));
+    }
+    if listing.items.is_empty() {
+        let label = gtk4::Label::new(Some("The feed is empty."));
+        label.set_xalign(0.0);
+        list.append(&label);
+    }
+    // The network fills the first screenful behind the paint; the
+    // generation names the rows this pass may touch.
+    let missing: Vec<(usize, String)> = listing
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| heroes[*index].is_none())
+        .filter_map(|(index, item)| item.image_url.clone().map(|url| (index, url)))
+        .take(super::images::HERO_LANES)
+        .collect();
+    (generation, missing)
+}
+
 fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     let Some(list) = named_list(page, "feed-list") else {
         return;
@@ -1545,99 +1673,58 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     // Downgraded up front: the fill below outlives this call, and a
     // borrowed page cannot enter its static completion.
     let page_weak = page.downgrade();
+    // The last good feed paints instantly while the wire answers:
+    // a slow service reads as its previous self, never as blank.
+    let had_cache = if let Some(cached) = read_feed_cache() {
+        let prompt = prompt_holder.as_ref();
+        paint_feed_now(&list, prompt, &cached);
+        let refreshing = gtk4::Label::new(Some("Refreshing the feed\u{2026}"));
+        refreshing.add_css_class("dim-label");
+        refreshing.set_xalign(0.0);
+        list.append(&refreshing);
+        true
+    } else {
+        let loading = gtk4::Label::new(Some("Loading the feed\u{2026}"));
+        loading.add_css_class("dim-label");
+        loading.set_xalign(0.0);
+        list.append(&loading);
+        false
+    };
     dispatch(
         &chat,
-        move || client.feed(),
+        move || {
+            let answer = client.feed();
+            if let Ok(listing) = &answer {
+                write_feed_cache(listing);
+            }
+            answer
+        },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
                 return;
             }
             let Ok(listing) = answer else {
-                // Errors read, never vanish: the page names the
-                // failure so the reader isn't left guessing.
+                // Errors read, never vanish. With cached rows on the
+                // page the failure appends instead of replacing: the
+                // reader keeps yesterday's feed plus the reason there
+                // is no fresher one.
                 if let Err(error) = answer {
-                    listing_failure(&list, "Feed", &error);
+                    if had_cache {
+                        let label = gtk4::Label::new(Some(&listing_failure_text("Feed", &error)));
+                        label.set_wrap(true);
+                        label.set_xalign(0.0);
+                        list.append(&label);
+                    } else {
+                        listing_failure(&list, "Feed", &error);
+                    }
                 }
                 return;
             };
-            clear_list(&list);
-            if let Some(holder) = prompt_holder.as_ref() {
-                let text = listing
-                    .feed_prompt
-                    .as_ref()
-                    .and_then(|prompt| prompt.text.as_deref())
-                    .unwrap_or_default();
-                holder.set_text(text);
-                holder.set_visible(!text.is_empty());
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|span| span.as_secs() as i64)
-                .unwrap_or(0);
-            // The first paint reads cache only: rows appear the moment
-            // the listing lands, and the network never holds them.
-            // Each fill takes a generation so the download pass below
-            // hangs bytes only on its own rows.
-            let generation = FEED_GEN.with(|slot| {
-                let next = slot.get().wrapping_add(1);
-                slot.set(next);
-                next
-            });
-            let heroes: Vec<Option<std::path::PathBuf>> = listing
-                .items
-                .iter()
-                .map(|item| {
-                    item.image_url
-                        .as_deref()
-                        .and_then(super::images::fetch_hero_cached)
-                })
-                .collect();
-            // Widget frames need working helpers: probe once per fill
-            // (the result caches per process) so a broken bundle
-            // paints text instead of aborting on a frame.
-            let graphics = super::widget::widget_available();
-            let mut live = 0;
-            for (index, (item, hero)) in listing.items.iter().zip(heroes.iter()).enumerate() {
-                // The first two graphics render live, and only where
-                // the helper probe passed; the rest read from the
-                // service's extracted text (see feed_card).
-                let frame = item
-                    .widget_html
-                    .as_deref()
-                    .is_some_and(|html| !html.is_empty());
-                if graphics && frame {
-                    live += 1;
-                }
-                list.append(&feed_card(
-                    generation,
-                    index,
-                    item,
-                    now,
-                    hero.as_deref(),
-                    graphics && frame && live <= 2,
-                ));
-            }
-            // An empty service answer reads as empty, not as broken:
-            // the sentence names the state either way.
-            if listing.items.is_empty() {
-                let label = gtk4::Label::new(Some("The feed is empty."));
-                label.set_xalign(0.0);
-                list.append(&label);
-            }
+            let prompt = prompt_holder.as_ref();
+            let (generation, missing) = paint_feed_now(&list, prompt, &listing);
             // The network fills the first screenful behind the paint:
-            // rows already read, and pictures land where they belong.
-            // No page ticket is held while downloads run, so pressing
-            // elsewhere still fills at once; the generation names the
-            // rows this pass may touch, and a newer visit reuses no
-            // name its rows would answer to.
-            let missing: Vec<(usize, String)> = listing
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| heroes[*index].is_none())
-                .filter_map(|(index, item)| item.image_url.clone().map(|url| (index, url)))
-                .take(super::images::HERO_LANES)
-                .collect();
+            // no page ticket is held while downloads run, so pressing
+            // elsewhere still fills at once.
             if !missing.is_empty() {
                 super::app::dispatch(
                     chat,
@@ -1662,7 +1749,6 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
         },
     );
 }
-
 /// A failed listing read says so on the page: a blank list with no
 /// sentence is indistinguishable from an empty one, and the reader
 /// cannot tell a broken fetch from a quiet service.
@@ -2285,6 +2371,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(idea_group(&fallback), Some("Your UFP onboarding"));
+    }
+
+    #[test]
+    fn feed_cache_round_trips_a_listing() {
+        let listing = ServiceListing {
+            items: vec![ListingItem {
+                title: "Morning".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&FeedCache { listing }).expect("cache serializes");
+        let back: FeedCache = serde_json::from_slice(&bytes).expect("cache parses");
+        assert_eq!(back.listing.items.len(), 1);
+        assert_eq!(back.listing.items[0].title, "Morning");
     }
 
     #[test]
