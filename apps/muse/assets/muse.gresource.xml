@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/kythos/MuseLinux">
+    <file>icons/menu.svg</file>
+    <file>icons/chat.svg</file>
+    <file>icons/search.svg</file>
+    <file>icons/library.svg</file>
+    <file>icons/ideas.svg</file>
+    <file>icons/tasks.svg</file>
+    <file>icons/shapes.svg</file>
+    <file>icons/monitor.svg</file>
+    <file>icons/new.svg</file>
+    <file>icons/download.svg</file>
+  </gresource>
+</gresources>

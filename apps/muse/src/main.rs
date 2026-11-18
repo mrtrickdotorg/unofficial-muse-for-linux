@@ -21,6 +21,14 @@ mod voice;
 pub(crate) mod widget;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
+/// Register the bundled icon set. Called once at startup; tests call
+/// it too, since resources register per process, not per call site.
+pub(crate) fn register_icons() {
+    let data =
+        gtk4::glib::Bytes::from_static(include_bytes!(concat!(env!("OUT_DIR"), "/muse.gresource")));
+    let resource = gtk4::gio::Resource::from_data(&data).expect("bundled icon resource loads");
+    gtk4::gio::resources_register(&resource);
+}
 /// Where the bundled libwebkit looks for its helper processes (see
 /// scripts/patch-webkit-path.py): the app points this path at the
 /// bundle's helpers on every launch. A WebView with no helpers
@@ -231,25 +239,41 @@ fn show_main(split: &adw::OverlaySplitView) {
     build.set_halign(gtk4::Align::Start);
     build.add_css_class("muse-build-stamp");
     side.append(&build);
-    // The web's far-left icon rail: new chat plus one icon per railed
-    // page. The panel beside it keeps the full sidebar; the rail is a
-    // shortcut, never a second source of truth.
+    // The icon set rides inside the binary (see build.rs): the rail
+    // paints web-shaped glyphs with no files beside the executable.
+    register_icons();
+    // The web's far-left icon rail: menu pill, one glyph per section,
+    // new chat, download. The panel beside it keeps the full sidebar;
+    // the rail is a shortcut, never a second source of truth. Shapes
+    // opens Goals and the monitor opens Feed — the rail's two wordless
+    // glyphs land on their closest readers.
+    fn rail_button(icon: &str, tooltip: &str) -> gtk4::Button {
+        let image = gtk4::Image::from_resource(&format!("/org/kythos/MuseLinux/icons/{icon}.svg"));
+        image.set_pixel_size(20);
+        let button = gtk4::Button::new();
+        button.set_child(Some(&image));
+        button.add_css_class("muse-rail-button");
+        button.set_tooltip_text(Some(tooltip));
+        button
+    }
     let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     rail.add_css_class("muse-rail");
     let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
-    let new_button = gtk4::Button::with_label("✎");
-    new_button.add_css_class("muse-rail-button");
-    new_button.set_tooltip_text(Some("New chat"));
-    rail.append(&new_button);
-    for page in pages::PAGES {
-        if let Some(icon) = pages::rail_icon(page) {
-            let button = gtk4::Button::with_label(icon);
-            button.add_css_class("muse-rail-button");
-            button.set_tooltip_text(Some(pages::title(page)));
-            rail.append(&button);
-            rail_buttons.push((page.to_string(), button));
-        }
+    let menu_button = rail_button("menu", "Chats");
+    rail.append(&menu_button);
+    let entries: &[&str] = &[
+        "chat", "search", "library", "ideas", "tasks", "goals", "feed",
+    ];
+    for page in entries {
+        let glyph = pages::rail_glyph(page).unwrap_or("chat");
+        let button = rail_button(glyph, pages::title(page));
+        rail.append(&button);
+        rail_buttons.push(((*page).to_owned(), button));
     }
+    let new_button = rail_button("new", "New chat");
+    rail.append(&new_button);
+    let download_button = rail_button("download", "Download apps");
+    rail.append(&download_button);
     let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     shell.append(&rail);
     shell.append(&side);
@@ -328,13 +352,27 @@ fn show_main(split: &adw::OverlaySplitView) {
         });
     }
     // The rail shortcuts: new chat opens a fresh thread on the chat
-    // page; an icon shows its page.
+    // page; the menu pill toggles the sidebar; download opens the
+    // app's download page in the system browser; an icon shows its
+    // page.
+    {
+        let split = split.clone();
+        menu_button.connect_clicked(move |_| {
+            split.set_show_sidebar(!split.shows_sidebar());
+        });
+    }
     {
         let ctx = ctx.clone();
         new_button.connect_clicked(move |_| {
             pages::open_thread(&ctx, None);
         });
     }
+    download_button.connect_clicked(move |_| {
+        let _ = gtk4::gio::AppInfo::launch_default_for_uri(
+            "https://ai.meta.com/meta-ai/download/",
+            None::<&gtk4::gio::AppLaunchContext>,
+        );
+    });
     for (page, button) in &ctx.rail {
         let ctx = ctx.clone();
         let page = page.clone();

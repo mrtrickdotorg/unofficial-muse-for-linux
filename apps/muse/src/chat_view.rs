@@ -380,6 +380,19 @@ mod tests {
             super::super::pages::show(&pages, name);
             assert!(pages.stack.child_by_name(name).is_some());
         }
+        // Every bundled rail glyph loads: a missing resource paints a
+        // blank button, so the suite fails instead of the reader
+        // staring at an empty rail.
+        super::super::register_icons();
+        for glyph in [
+            "menu", "chat", "search", "library", "ideas", "tasks", "shapes", "monitor", "new",
+            "download",
+        ] {
+            let image =
+                gtk4::Image::from_resource(&format!("/org/kythos/MuseLinux/icons/{glyph}.svg"));
+            image.set_pixel_size(20);
+            assert!(image.paintable().is_some(), "rail glyph loads: {glyph}");
+        }
         // A widget frame builds without taking the process down: the
         // feed mounts these for live graphics, so construction itself
         // has to be probe-safe on a bare display.
