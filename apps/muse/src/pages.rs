@@ -307,9 +307,33 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             inner.append(&list);
         }
         "library" => {
+            let heading = gtk4::Label::new(Some("Library"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            inner.append(&heading);
+            // Quick Open filters titles client-side; the tab bar
+            // filters by kind. Both repaint from held rows, never the
+            // wire, and both are wired here so fills never double-wire.
+            let search = gtk4::Entry::new();
+            search.set_widget_name("library-search");
+            search.set_placeholder_text(Some("Quick Open"));
+            search.set_hexpand(true);
+            inner.append(&search);
+            let tabs = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            tabs.set_widget_name("library-tabs");
+            inner.append(&tabs);
             let list = gtk4::ListBox::new();
             list.set_widget_name("library-list");
             inner.append(&list);
+            let ctx_owned = ctx.clone();
+            let page_weak = inner.downgrade();
+            search.connect_changed(move |entry| {
+                let Some(page) = page_weak.upgrade() else {
+                    return;
+                };
+                let query = entry.text().to_string();
+                repaint_library(&ctx_owned, &page, &query);
+            });
         }
         "settings" => {
             let info = gtk4::Label::new(None);
@@ -444,16 +468,6 @@ pub fn run_label(run: &TaskRun) -> String {
             format!("{}: {}", run.status, summary)
         }
         _ => run.status.clone(),
-    }
-}
-
-/// One-line artifact label: title plus kind when the service names one.
-pub fn artifact_label(artifact: &ArtifactSummary) -> String {
-    match artifact.kind.as_deref() {
-        Some(kind) if !kind.is_empty() => {
-            format!("{} [{}]", artifact.title, kind)
-        }
-        _ => artifact.title.clone(),
     }
 }
 
@@ -901,13 +915,410 @@ fn run_schedule(chat: &Rc<Chat>, job_id: &str) {
 }
 
 /// Fill the library page: the artifact listing, pinned first.
-fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(list) = named_list(page, "library-list") else {
+/// Tabs the library offers: All, Spaces when any space row rides
+/// along, then each file kind in visit order. Buttons exist only for
+/// data in hand, never for imagined kinds.
+pub fn library_tabs(artifacts: &[ArtifactSummary]) -> Vec<String> {
+    let mut tabs = vec!["All".to_owned()];
+    if artifacts
+        .iter()
+        .any(|artifact| artifact.target_kind.as_deref() == Some("space"))
+    {
+        tabs.push("Spaces".to_owned());
+    }
+    for artifact in artifacts {
+        if artifact.target_kind.as_deref() == Some("space") {
+            continue;
+        }
+        if let Some(kind) = artifact.kind.as_deref().filter(|kind| !kind.is_empty())
+            && !tabs.contains(&kind.to_owned())
+        {
+            tabs.push(kind.to_owned());
+        }
+    }
+    tabs
+}
+
+/// Whether a library row survives the active tab and Quick Open query.
+pub fn library_visible(artifact: &ArtifactSummary, tab: &str, query: &str) -> bool {
+    let tab_ok = match tab {
+        "All" => true,
+        "Spaces" => artifact.target_kind.as_deref() == Some("space"),
+        kind => {
+            artifact.target_kind.as_deref() != Some("space")
+                && artifact.kind.as_deref() == Some(kind)
+        }
+    };
+    tab_ok
+        && (query.is_empty()
+            || artifact
+                .title
+                .to_lowercase()
+                .contains(&query.to_lowercase()))
+}
+
+/// The quiet meta line under a file row: kind and activity, skipping
+/// whatever the service did not send.
+pub fn artifact_meta(artifact: &ArtifactSummary, now: i64) -> String {
+    let mut parts = Vec::new();
+    if let Some(kind) = artifact.kind.as_deref().filter(|kind| !kind.is_empty()) {
+        parts.push(kind.to_owned());
+    }
+    let when = relative_time_ms(artifact.updated_at_ms, now);
+    if !when.is_empty() {
+        parts.push(when);
+    }
+    parts.join(" · ")
+}
+
+/// The active library tab: the button wearing the filter class, All
+/// when none does. Read from the buttons, never from side state.
+fn active_tab(tabs: &gtk4::Box) -> String {
+    let mut child = tabs.first_child();
+    while let Some(next) = child {
+        if let Ok(button) = next.clone().downcast::<gtk4::Button>()
+            && button.has_css_class("muse-filter-active")
+        {
+            return button
+                .label()
+                .map(|label| label.to_string())
+                .unwrap_or_default();
+        }
+        child = next.next_sibling();
+    }
+    "All".to_owned()
+}
+
+// Hold the last good artifacts beside the list: tabs and Quick Open
+// repaint from here, so filtering never re-reads the wire.
+thread_local! {
+    static ART_STORE: std::cell::RefCell<Vec<ArtifactSummary>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Paint the library from held rows: tab bar, Spaces and Recent
+/// sections on All, flat rows under a filter. The tab and query ride
+/// in so every repaint is one call.
+fn paint_library(
+    ctx: &Ctx,
+    list: &gtk4::ListBox,
+    tabs: &gtk4::Box,
+    entry: &gtk4::Entry,
+    artifacts: &[ArtifactSummary],
+    tab: &str,
+    query: &str,
+) {
+    clear_list(list);
+    while let Some(child) = tabs.first_child() {
+        tabs.remove(&child);
+    }
+    for name in library_tabs(artifacts) {
+        let button = gtk4::Button::with_label(&name);
+        button.add_css_class("flat");
+        if name == tab {
+            button.add_css_class("muse-filter-active");
+        }
+        let ctx_inner = ctx.clone();
+        let list_inner = list.clone();
+        let tabs_inner = tabs.clone();
+        let entry_inner = entry.clone();
+        let artifacts_inner = artifacts.to_vec();
+        let name_inner = name.clone();
+        button.connect_clicked(move |_| {
+            let query = entry_inner.text().to_string();
+            paint_library(
+                &ctx_inner,
+                &list_inner,
+                &tabs_inner,
+                &entry_inner,
+                &artifacts_inner,
+                &name_inner,
+                &query,
+            );
+        });
+        tabs.append(&button);
+    }
+    let spaces: Vec<&ArtifactSummary> = artifacts
+        .iter()
+        .filter(|artifact| library_visible(artifact, tab, query))
+        .filter(|artifact| artifact.target_kind.as_deref() == Some("space"))
+        .collect();
+    let files: Vec<&ArtifactSummary> = artifacts
+        .iter()
+        .filter(|artifact| library_visible(artifact, tab, query))
+        .filter(|artifact| artifact.target_kind.as_deref() != Some("space"))
+        .collect();
+    if tab == "All" {
+        if !spaces.is_empty() {
+            let head = gtk4::Label::new(Some("Spaces"));
+            head.set_halign(gtk4::Align::Start);
+            head.add_css_class("muse-section");
+            list.append(&head);
+        }
+        for artifact in &spaces {
+            list.append(&space_row(ctx, artifact));
+        }
+        if !files.is_empty() {
+            let head = gtk4::Label::new(Some("Recent"));
+            head.set_halign(gtk4::Align::Start);
+            head.add_css_class("muse-section");
+            list.append(&head);
+        }
+        for artifact in &files {
+            list.append(&file_row(artifact));
+        }
+    } else {
+        for artifact in spaces.iter().chain(files.iter()) {
+            if artifact.target_kind.as_deref() == Some("space") {
+                list.append(&space_row(ctx, artifact));
+            } else {
+                list.append(&file_row(artifact));
+            }
+        }
+    }
+    if spaces.is_empty() && files.is_empty() {
+        list.append(&gtk4::Label::new(Some("Nothing here yet.")));
+    }
+}
+
+/// One space row: title plus recency, with the two writes the protocol
+/// offers. Export reports what came back; unshare reports acceptance.
+/// Open is omitted: its mechanism was never observed.
+fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let title = gtk4::Label::new(None);
+    title.set_markup(&format!(
+        "<b>{}</b>",
+        super::chat::render_markup(&artifact.title)
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    words.append(&title);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_secs() as i64)
+        .unwrap_or(0);
+    let mut meta = vec!["Space".to_owned()];
+    let when = relative_time_ms(artifact.updated_at_ms, now);
+    if !when.is_empty() {
+        meta.push(when);
+    }
+    let sub = gtk4::Label::new(Some(&meta.join(" · ")));
+    sub.set_xalign(0.0);
+    sub.add_css_class("dim-label");
+    words.append(&sub);
+    line.append(&words);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    line.append(&spacer);
+    let export = gtk4::Button::with_label("Export");
+    export.add_css_class("flat");
+    export.set_valign(gtk4::Align::Start);
+    line.append(&export);
+    let unshare = gtk4::Button::with_label("Unshare");
+    unshare.add_css_class("flat");
+    unshare.add_css_class("muse-danger");
+    unshare.set_valign(gtk4::Align::Start);
+    line.append(&unshare);
+    row.set_child(Some(&line));
+    let slug = artifact.slug.clone();
+    let name = artifact.title.clone();
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let slug_inner = slug.clone();
+        let name_inner = name.clone();
+        export.connect_clicked(move |_| {
+            let Some(slug) = slug_inner.clone() else {
+                line_inner.append(&card_note("This space carries no handle."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let line_for_done = line_inner.clone();
+            let name_for_done = name_inner.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.space_export(&slug),
+                move |chat, answer| {
+                    match answer {
+                        Ok(exported) => {
+                            show_export_dialog(&line_for_done, &name_for_done, &exported);
+                        }
+                        Err(error) => {
+                            line_for_done.append(&card_note(&format!("Export failed: {error}")));
+                        }
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        unshare.connect_clicked(move |_| {
+            let Some(slug) = slug.clone() else {
+                line_inner.append(&card_note("This space carries no handle."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let line_for_done = line_inner.clone();
+            let ctx_for_done = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.space_unshare(&slug),
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "library");
+                    } else {
+                        line_for_done.append(&card_note(
+                            "The service did not unshare it. Nothing changed.",
+                        ));
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    row
+}
+
+/// The export result, read-only: what came back and how big, with the
+/// page text capped and the cap stated.
+fn show_export_dialog(line: &gtk4::Box, name: &str, exported: &muse_account::SpaceExportAnswer) {
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(560, -1);
+    window.set_title(Some(name));
+    if let Some(root) = line
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok())
+    {
+        window.set_transient_for(Some(&root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let head = gtk4::Label::new(Some(&format!(
+        "{} · {} bytes",
+        exported.format, exported.size
+    )));
+    head.set_xalign(0.0);
+    head.add_css_class("title-4");
+    body.append(&head);
+    if let Some(html) = exported.html.as_deref() {
+        const LIMIT: usize = 4000;
+        let shown = html.chars().take(LIMIT).collect::<String>();
+        let words = gtk4::Label::new(Some(&shown));
+        words.set_wrap(true);
+        words.set_xalign(0.0);
+        words.set_selectable(true);
+        body.append(&words);
+        if html.chars().count() > LIMIT {
+            let capped =
+                gtk4::Label::new(Some(&format!("…(showing the first {LIMIT} characters)")));
+            capped.set_xalign(0.0);
+            capped.add_css_class("dim-label");
+            body.append(&capped);
+        }
+    }
+    let close = gtk4::Button::with_label("Close");
+    close.add_css_class("muse-cta");
+    body.append(&close);
+    window.set_child(Some(&body));
+    {
+        let window = window.clone();
+        close.connect_clicked(move |_| {
+            window.close();
+        });
+    }
+    window.present();
+}
+
+/// One file row: title plus kind and recency. No buttons: the row's
+/// ⋯ verbs were never observed, so none are invented.
+fn file_row(artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let title = gtk4::Label::new(None);
+    title.set_markup(&format!(
+        "<b>{}</b>",
+        super::chat::render_markup(&artifact.title)
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    words.append(&title);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_secs() as i64)
+        .unwrap_or(0);
+    let meta = artifact_meta(artifact, now);
+    if !meta.is_empty() {
+        let sub = gtk4::Label::new(Some(&meta));
+        sub.set_xalign(0.0);
+        sub.add_css_class("dim-label");
+        words.append(&sub);
+    }
+    row.set_child(Some(&words));
+    row
+}
+
+/// Repaint the library from held rows with the live tab and query:
+/// the single path tab presses and Quick Open share.
+fn repaint_library(ctx: &Ctx, page: &gtk4::Box, query: &str) {
+    let (Some(list), Some(tabs), Some(entry)) = (
+        named_list(page, "library-list"),
+        find_widget(page.upcast_ref(), "library-tabs")
+            .and_then(|widget| widget.downcast::<gtk4::Box>().ok()),
+        find_widget(page.upcast_ref(), "library-search")
+            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok()),
+    ) else {
         return;
     };
+    let tab = active_tab(&tabs);
+    let artifacts = ART_STORE.with(|store| store.borrow().clone());
+    paint_library(ctx, &list, &tabs, &entry, &artifacts, &tab, query);
+}
+
+fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
+    let (Some(list), Some(tabs), Some(entry)) = (
+        named_list(page, "library-list"),
+        find_widget(page.upcast_ref(), "library-tabs")
+            .and_then(|widget| widget.downcast::<gtk4::Box>().ok()),
+        find_widget(page.upcast_ref(), "library-search")
+            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok()),
+    ) else {
+        return;
+    };
+    // A fresh fill resets the view: stale queries against new rows
+    // read as broken, never as empty.
+    entry.set_text("");
     let Some(chat) = ctx.chat.upgrade() else {
         return;
     };
+    let ctx_owned = ctx.clone();
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
         None => return,
@@ -927,14 +1338,22 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
                 // Errors read, never vanish: the page names the
                 // failure so the reader isn't left guessing.
                 if let Err(error) = answer {
-                    listing_failure(&list, "Artifacts", &error);
+                    listing_failure(&list, "Library", &error);
                 }
                 return;
             };
-            clear_list(&list);
-            for artifact in &listing.artifacts {
-                list.append(&gtk4::Label::new(Some(&artifact_label(artifact))));
-            }
+            ART_STORE.with(|store| {
+                *store.borrow_mut() = listing.artifacts.clone();
+            });
+            paint_library(
+                &ctx_owned,
+                &list,
+                &tabs,
+                &entry,
+                &listing.artifacts,
+                "All",
+                "",
+            );
         },
     );
 }
@@ -1315,6 +1734,12 @@ pub fn relative_time(stamp: Option<&str>, now: i64) -> String {
         ) as i64;
         Some(days * 86_400 + hour.parse::<i64>().ok()? * 3600 + minute.parse::<i64>().ok()? * 60)
     });
+    relative_time_epoch(epoch, now)
+}
+
+/// The shared recency buckets over epoch seconds: minutes, hours,
+/// Yesterday, then the web's day naming.
+fn relative_time_epoch(epoch: Option<i64>, now: i64) -> String {
     let Some(epoch) = epoch else {
         return String::new();
     };
@@ -1368,6 +1793,13 @@ pub fn relative_time(stamp: Option<&str>, now: i64) -> String {
         month += 1;
     }
     format!("{} {}", MONTHS[month], remaining + 1)
+}
+
+/// Recency over millisecond epoch stamps (the library's
+/// `updated_at_ms`): same buckets as the string stamps, day granularity
+/// below.
+pub fn relative_time_ms(ms: Option<i64>, now: i64) -> String {
+    relative_time_epoch(ms.map(|ms| ms.div_euclid(1000)), now)
 }
 
 /// A feed body to Pango markup: escaped, markdown `[text](url)` links
@@ -2956,6 +3388,51 @@ mod tests {
     }
 
     #[test]
+    fn library_tabs_and_filters_come_only_from_data_in_hand() {
+        let space = ArtifactSummary {
+            title: "UFP Onboarding".to_owned(),
+            target_kind: Some("space".to_owned()),
+            ..Default::default()
+        };
+        let doc = ArtifactSummary {
+            title: "Notes".to_owned(),
+            kind: Some("Documents".to_owned()),
+            ..Default::default()
+        };
+        let items = vec![space, doc];
+        assert_eq!(
+            library_tabs(&items),
+            vec![
+                "All".to_owned(),
+                "Spaces".to_owned(),
+                "Documents".to_owned()
+            ]
+        );
+        assert!(library_visible(&items[0], "Spaces", ""));
+        assert!(!library_visible(&items[1], "Spaces", ""));
+        assert!(library_visible(&items[1], "Documents", "notes"));
+        assert!(!library_visible(&items[1], "Documents", "zzz"));
+        assert!(library_visible(&items[0], "All", ""));
+        let bare: Vec<ArtifactSummary> = vec![ArtifactSummary::default()];
+        assert_eq!(library_tabs(&bare), vec!["All".to_owned()]);
+    }
+
+    #[test]
+    fn artifact_meta_and_ms_times_read_plainly() {
+        let now = 1_000_000_000i64;
+        assert_eq!(relative_time_ms(Some(999_999_000_000), now), "16m ago");
+        assert_eq!(relative_time_ms(None, now), "");
+        let dated = ArtifactSummary {
+            kind: Some("HTML".to_owned()),
+            updated_at_ms: Some(999_913_600_000),
+            ..Default::default()
+        };
+        assert_eq!(artifact_meta(&dated, now), "HTML · Yesterday");
+        let bare = ArtifactSummary::default();
+        assert_eq!(artifact_meta(&bare, now), "");
+    }
+
+    #[test]
     fn goal_filters_come_only_from_data_in_hand() {
         let items = vec![
             ListingItem {
@@ -3105,30 +3582,5 @@ mod tests {
             ..one
         };
         assert_eq!(grant_label(&many), "connector drive (2 capabilities)");
-    }
-
-    #[test]
-    fn artifact_labels_show_kind_only_when_named() {
-        let bare = ArtifactSummary {
-            artifact_ref: "a".to_owned(),
-            title: "Notes".to_owned(),
-            kind: None,
-            format: None,
-            status: None,
-            placement: None,
-            path: None,
-            target_kind: None,
-            slug: None,
-            updated_at_ms: None,
-            pinned: false,
-            can_open: false,
-            can_share: false,
-        };
-        assert_eq!(artifact_label(&bare), "Notes");
-        let kinded = ArtifactSummary {
-            kind: Some("doc".to_owned()),
-            ..bare
-        };
-        assert_eq!(artifact_label(&kinded), "Notes [doc]");
     }
 }
