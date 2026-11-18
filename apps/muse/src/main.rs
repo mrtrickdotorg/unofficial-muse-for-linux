@@ -249,14 +249,14 @@ fn show_main(split: &adw::OverlaySplitView) {
     // Goals, shapes open Library.
     fn rail_button(icon: &str, tooltip: &str) -> gtk4::Button {
         let image = gtk4::Image::from_resource(&format!("/org/kythos/MuseLinux/icons/{icon}.svg"));
-        image.set_pixel_size(20);
+        image.set_pixel_size(26);
         let button = gtk4::Button::new();
         button.set_child(Some(&image));
         button.add_css_class("muse-rail-button");
         button.set_tooltip_text(Some(tooltip));
         button
     }
-    let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
     rail.add_css_class("muse-rail");
     let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
     let menu_button = rail_button("menu", "Settings");

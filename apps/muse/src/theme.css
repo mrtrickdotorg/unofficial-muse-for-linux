@@ -220,13 +220,13 @@ textview placeholder {
  * blue pill behind the open page's icon. */
 .muse-rail {
     background: transparent;
-    padding: 8px 4px;
+    padding: 12px 8px;
 }
 
 .muse-rail-button {
     border-radius: 9999px;
-    min-width: 36px;
-    min-height: 36px;
+    min-width: 44px;
+    min-height: 44px;
     background: transparent;
     border-color: transparent;
     color: #e4e6eb;
