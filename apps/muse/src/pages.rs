@@ -33,17 +33,19 @@ pub struct Ctx {
     pub updates: Rc<std::cell::RefCell<super::update::UpdateCheck>>,
 }
 
-/// The rail icon for a page, if it has one. The rail holds the new-chat
-/// action and the pages the web's own rail names; the rest live in
-/// the sidebar list only.
-pub fn rail_icon(page: &str) -> Option<&'static str> {
+/// The rail glyph for a page, if it has one: the bundled SVG name
+/// backing the web-shaped menu. Shapes stands for Goals and the
+/// monitor for Feed — the rail's two wordless glyphs land on their
+/// closest readers. The rest live in the sidebar list only.
+pub fn rail_glyph(page: &str) -> Option<&'static str> {
     match page {
-        "chat" => Some("💬"),
-        "search" => Some("🔍"),
-        "library" => Some("📚"),
-        "ideas" => Some("💡"),
-        "tasks" => Some("✓"),
-        "feed" => Some("📰"),
+        "chat" => Some("chat"),
+        "search" => Some("search"),
+        "library" => Some("library"),
+        "ideas" => Some("ideas"),
+        "tasks" => Some("tasks"),
+        "goals" => Some("shapes"),
+        "feed" => Some("monitor"),
         _ => None,
     }
 }
@@ -1861,15 +1863,16 @@ mod tests {
     }
 
     #[test]
-    fn rail_icons_name_real_pages_only() {
-        assert_eq!(rail_icon("chat"), Some("💬"));
-        assert_eq!(rail_icon("search"), Some("🔍"));
-        assert_eq!(rail_icon("library"), Some("📚"));
-        assert_eq!(rail_icon("ideas"), Some("💡"));
-        assert_eq!(rail_icon("tasks"), Some("✓"));
-        assert_eq!(rail_icon("feed"), Some("📰"));
-        assert_eq!(rail_icon("policy"), None);
-        assert_eq!(rail_icon("settings"), None);
+    fn rail_glyphs_name_bundled_svgs() {
+        assert_eq!(rail_glyph("chat"), Some("chat"));
+        assert_eq!(rail_glyph("search"), Some("search"));
+        assert_eq!(rail_glyph("library"), Some("library"));
+        assert_eq!(rail_glyph("ideas"), Some("ideas"));
+        assert_eq!(rail_glyph("tasks"), Some("tasks"));
+        assert_eq!(rail_glyph("goals"), Some("shapes"));
+        assert_eq!(rail_glyph("feed"), Some("monitor"));
+        assert_eq!(rail_glyph("policy"), None);
+        assert_eq!(rail_glyph("settings"), None);
     }
 
     #[test]
