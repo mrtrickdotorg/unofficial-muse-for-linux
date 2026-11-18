@@ -945,6 +945,20 @@ pub struct FeedReactAnswer {
     pub reaction: String,
 }
 
+/// What the service said about a feed-unit deletion it took.
+///
+/// Acceptance only, with the service's own `deleted` word when it
+/// supplied one; whether the unit is actually gone is proven by
+/// re-reading the feed. The route is the same evidence class as
+/// the goal deletion: a path-only DELETE from the recorded table.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedUnitDeleteAnswer {
+    pub unit_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub deleted: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -1747,6 +1761,22 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "feed_react", "unit_id": unit_id, "reaction": reaction}),
+            false,
+        )
+    }
+    /// Delete exactly one feed unit, once.
+    ///
+    /// The id must be one the feed listing published, and the
+    /// bridge makes a single request, so one confirmed press maps
+    /// to one deletion. Whether the unit is actually gone
+    /// afterwards is proven by re-reading the feed, never by this
+    /// answer alone.
+    pub fn feed_unit_delete(&self, unit_id: &str) -> Result<FeedUnitDeleteAnswer, AccountError> {
+        if unit_id.is_empty() || unit_id.len() > 256 || unit_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "feed_unit_delete", "unit_id": unit_id}),
             false,
         )
     }

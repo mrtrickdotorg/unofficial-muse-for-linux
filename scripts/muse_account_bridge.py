@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "feed_react", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "feed_react", "feed_unit_delete", "goal_delete", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -696,6 +696,7 @@ def validate_request(request):
                "session_op": {"session_id", "kind", "title"},
                "idea_execute": {"idea_id"},
                "feed_react": {"unit_id", "reaction"},
+               "feed_unit_delete": {"unit_id"},
                "goal_delete": {"goal_id"},
                "mark_seen": {"thread_id"},
                "space_unshare": {"slug"},
@@ -961,12 +962,15 @@ def validate_request(request):
         if (not isinstance(job_id, str) or not 1 <= len(job_id) <= 256
                 or "\x00" in job_id):
             raise BridgeFailure("invalid_request")
-    if op == "goal_delete":
-        # The id is the service's own, taken from the goals listing
+    if op in ("goal_delete", "feed_unit_delete"):
+        # The id is the service's own, taken from the listing
         # it published; anything else would be deleting a guess.
-        goal_id = request.get("goal_id")
-        if (not isinstance(goal_id, str) or not 1 <= len(goal_id) <= 256
-                or "\x00" in goal_id):
+        # The feed route is the same evidence class as the goal
+        # one: a path-only DELETE from the recorded route table.
+        field = "goal_id" if op == "goal_delete" else "unit_id"
+        value = request.get(field)
+        if (not isinstance(value, str) or not 1 <= len(value) <= 256
+                or "\x00" in value):
             raise BridgeFailure("invalid_request")
     if op == "mark_seen":
         # The id is the service's own, taken from the sessions
@@ -3737,6 +3741,22 @@ class Adapter:
             with self.client._gateway(self.config) as gateway:
                 payload = gateway.call_json("goals.list", timeout=20)
             return listing_rows(payload, ("goals", "items", "results", "data"))
+        if request["op"] == "feed_unit_delete":
+            # A write on the shared gateway: one deletion, never
+            # retried here. The route is a path-only DELETE, the
+            # same evidence class as the goal deletion. Whether
+            # the unit is gone afterwards is proven by re-reading
+            # the feed listing, not by this answer.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "feed.unit.delete",
+                    path_params={"unit_id": request["unit_id"]},
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            deleted = answer.get("deleted")
+            return {"unit_id": request["unit_id"], "accepted": True,
+                    "deleted": deleted if isinstance(deleted, bool) else None}
         if request["op"] == "goal_delete":
             # A write on the shared gateway: one deletion, never
             # retried here. The route is a path-only DELETE, the

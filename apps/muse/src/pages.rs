@@ -2211,8 +2211,9 @@ fn feed_card(
         });
     }
     // The row's ⋯ menu, exactly the web's two verbs: the reason first,
-    // delete last. Why opens the service's own text; delete has no
-    // backend and owns up to it instead of pretending.
+    // delete last. Why opens the service's own text; delete removes
+    // the unit through the recorded path-only route, then re-reads
+    // the feed so the row's absence is proven, not assumed.
     let popover = gtk4::Popover::new();
     popover.set_parent(&more);
     let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
@@ -2239,15 +2240,44 @@ fn feed_card(
     delete_button.add_css_class("muse-danger");
     menu.append(&delete_button);
     {
-        let popover_held = popover.clone();
+        let ctx = ctx.clone();
         let card_weak = card.downgrade();
+        let unit_id = item.id.clone();
+        let popover_held = popover.clone();
         delete_button.connect_clicked(move |_| {
             popover_held.popdown();
-            if let Some(card) = card_weak.upgrade() {
-                card.append(&card_note(
-                    "The service doesn't offer delete for feed units yet.",
-                ));
-            }
+            let Some(id) = unit_id.clone() else {
+                if let Some(card) = card_weak.upgrade() {
+                    card.append(&card_note("This unit carries no service id."));
+                }
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                if let Some(card) = card_weak.upgrade() {
+                    card.append(&card_note("Link your account first."));
+                }
+                return;
+            };
+            let card_for_done = card_weak.clone();
+            let ctx_for_done = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.feed_unit_delete(&id),
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "feed");
+                    } else if let Some(card) = card_for_done.upgrade() {
+                        card.append(&card_note(
+                            "The service did not delete it. Nothing changed.",
+                        ));
+                    }
+                    let _ = chat;
+                },
+            );
         });
     }
     popover.set_child(Some(&menu));

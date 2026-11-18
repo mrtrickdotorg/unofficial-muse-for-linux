@@ -3208,6 +3208,16 @@ class WriteActionTests(unittest.TestCase):
         self.assertEqual(result, {"goal_id": "g1", "accepted": True,
                                   "deleted": True})
 
+    def test_feed_unit_delete_sends_the_path_only_delete_once(self):
+        calls = []
+        bridge, client = self._client(calls, {"deleted": True})
+        result = bridge.Adapter(client, {}).dispatch(
+            {"op": "feed_unit_delete", "unit_id": "u1"})
+        self.assertEqual(calls, [("feed.unit.delete",
+                                  {"path_params": {"unit_id": "u1"}})])
+        self.assertEqual(result, {"unit_id": "u1", "accepted": True,
+                                  "deleted": True})
+
     def test_mark_seen_sends_the_recorded_call_once(self):
         # The recorded consumer's own shape: the thread id as a
         # path param and no body. One dispatch, one call.
@@ -3233,6 +3243,9 @@ class WriteActionTests(unittest.TestCase):
             {"op": "feed_react", "unit_id": "u1", "reaction": "x" * 17},
             {"op": "feed_react", "unit_id": "u1", "reaction": "a\x01b"},
             {"op": "feed_react", "unit_id": "u1"},
+            {"op": "feed_unit_delete", "unit_id": ""},
+            {"op": "feed_unit_delete", "unit_id": "u1", "extra": 1},
+            {"op": "feed_unit_delete"},
         ):
             with self.assertRaises(bridge.BridgeFailure) as caught:
                 bridge.validate_request(dict(request, config_dir="/tmp/x"))
