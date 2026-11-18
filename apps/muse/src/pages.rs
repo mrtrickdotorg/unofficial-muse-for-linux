@@ -481,6 +481,12 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+// Fill generation for the feed: each visit takes the next number so
+// the behind-the-paint hero pass touches only its own rows.
+thread_local! {
+    static FEED_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Paint one idea row: icon, bold title, clamped description. The
 /// row's name carries its index; a press opens the detail dialog.
 fn idea_row(item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
@@ -1403,6 +1409,15 @@ pub fn feed_body_markup(body: &str) -> String {
     bolded
 }
 
+/// The hero picture for a landed file, shared by the first paint and
+/// the behind-the-paint download pass so both hang the same frame.
+fn hero_picture(path: &std::path::Path) -> gtk4::Picture {
+    let picture = gtk4::Picture::for_filename(path);
+    picture.set_can_shrink(true);
+    picture.set_halign(gtk4::Align::Start);
+    picture
+}
+
 /// One feed card: the web's shape — source icon, bold title, relative
 /// time, linkified body, hero picture, and the unit's widget graphic.
 /// Live graphics mount only where `widget_available` proved the
@@ -1410,6 +1425,8 @@ pub fn feed_body_markup(body: &str) -> String {
 /// the card, and no press can construct a crashing frame. Pictures
 /// never block or fail the card: no bytes, no picture.
 fn feed_card(
+    generation: u64,
+    index: usize,
     item: &ListingItem,
     now: i64,
     hero: Option<&std::path::Path>,
@@ -1417,6 +1434,11 @@ fn feed_card(
 ) -> gtk4::Widget {
     let card = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     card.add_css_class("muse-feed-card");
+    // The row's name carries its fill generation and index: the
+    // behind-the-paint hero pass hangs downloads only on rows from
+    // the fill that requested them, never on a newer visit reusing
+    // the same indices.
+    card.set_widget_name(&format!("feed-card:{generation}:{index}"));
     let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     let icon = gtk4::Label::new(Some(item.icon.as_deref().unwrap_or("📰")));
     icon.add_css_class("muse-feed-icon");
@@ -1446,10 +1468,7 @@ fn feed_card(
         card.append(&words);
     }
     if let Some(hero) = hero {
-        let picture = gtk4::Picture::for_filename(hero);
-        picture.set_can_shrink(true);
-        picture.set_halign(gtk4::Align::Start);
-        card.append(&picture);
+        card.append(&hero_picture(hero));
     }
     if let Some(html) = item.widget_html.as_deref()
         && !html.is_empty()
@@ -1523,6 +1542,9 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
     // resolve it before the worker round-trip, which cannot borrow it.
     let prompt_holder: Option<gtk4::Label> = find_widget(page.upcast_ref(), "feed-prompt")
         .and_then(|widget| widget.downcast::<gtk4::Label>().ok());
+    // Downgraded up front: the fill below outlives this call, and a
+    // borrowed page cannot enter its static completion.
+    let page_weak = page.downgrade();
     dispatch(
         &chat,
         move || client.feed(),
@@ -1552,15 +1574,22 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|span| span.as_secs() as i64)
                 .unwrap_or(0);
-            // Heroes ride the worker round-trip like the library's:
-            // cached files when they land, text-only when they don't.
+            // The first paint reads cache only: rows appear the moment
+            // the listing lands, and the network never holds them.
+            // Each fill takes a generation so the download pass below
+            // hangs bytes only on its own rows.
+            let generation = FEED_GEN.with(|slot| {
+                let next = slot.get().wrapping_add(1);
+                slot.set(next);
+                next
+            });
             let heroes: Vec<Option<std::path::PathBuf>> = listing
                 .items
                 .iter()
                 .map(|item| {
                     item.image_url
                         .as_deref()
-                        .and_then(super::images::fetch_hero)
+                        .and_then(super::images::fetch_hero_cached)
                 })
                 .collect();
             // Widget frames need working helpers: probe once per fill
@@ -1568,7 +1597,7 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
             // paints text instead of aborting on a frame.
             let graphics = super::widget::widget_available();
             let mut live = 0;
-            for (item, hero) in listing.items.iter().zip(heroes.iter()) {
+            for (index, (item, hero)) in listing.items.iter().zip(heroes.iter()).enumerate() {
                 // The first two graphics render live, and only where
                 // the helper probe passed; the rest read from the
                 // service's extracted text (see feed_card).
@@ -1580,6 +1609,8 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                     live += 1;
                 }
                 list.append(&feed_card(
+                    generation,
+                    index,
                     item,
                     now,
                     hero.as_deref(),
@@ -1592,6 +1623,41 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                 let label = gtk4::Label::new(Some("The feed is empty."));
                 label.set_xalign(0.0);
                 list.append(&label);
+            }
+            // The network fills the first screenful behind the paint:
+            // rows already read, and pictures land where they belong.
+            // No page ticket is held while downloads run, so pressing
+            // elsewhere still fills at once; the generation names the
+            // rows this pass may touch, and a newer visit reuses no
+            // name its rows would answer to.
+            let missing: Vec<(usize, String)> = listing
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| heroes[*index].is_none())
+                .filter_map(|(index, item)| item.image_url.clone().map(|url| (index, url)))
+                .take(super::images::HERO_LANES)
+                .collect();
+            if !missing.is_empty() {
+                super::app::dispatch(
+                    chat,
+                    move || super::images::fetch_heroes(missing),
+                    move |chat, landed| {
+                        let Some(page) = page_weak.upgrade() else {
+                            return;
+                        };
+                        for (index, path) in landed {
+                            let Some(path) = path else { continue };
+                            let name = format!("feed-card:{generation}:{index}");
+                            if let Some(card) = find_widget(page.upcast_ref(), &name)
+                                .and_then(|widget| widget.downcast::<gtk4::Box>().ok())
+                            {
+                                card.append(&hero_picture(&path));
+                            }
+                        }
+                        let _ = chat;
+                    },
+                );
             }
         },
     );
