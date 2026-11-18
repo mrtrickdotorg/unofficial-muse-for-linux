@@ -256,23 +256,35 @@ fn show_main(split: &adw::OverlaySplitView) {
         button.set_tooltip_text(Some(tooltip));
         button
     }
-    let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
+    let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     rail.add_css_class("muse-rail");
     let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
     let menu_button = rail_button("menu", "Settings");
     let entries: &[&str] = &["chat", "search", "feed", "ideas", "goals", "library"];
+    let mut spread: Vec<gtk4::Widget> = Vec::new();
     for page in entries {
         let glyph = pages::rail_glyph(page).unwrap_or("chat");
         let button = rail_button(glyph, pages::title(page));
-        rail.append(&button);
-        rail_buttons.push(((*page).to_owned(), button));
+        rail_buttons.push(((*page).to_owned(), button.clone()));
+        spread.push(button.upcast());
     }
     // The web separates creation from navigation: new space rides
     // below a divider, downloads and settings hug the bottom.
     let divider = gtk4::Separator::new(gtk4::Orientation::Horizontal);
-    rail.append(&divider);
+    spread.push(divider.upcast());
     let new_button = rail_button("new", "New space");
-    rail.append(&new_button);
+    spread.push(new_button.clone().upcast());
+    // The web spreads its rail down the full column: an expanding
+    // gap between every icon centers the set vertically instead of
+    // huddling it at the top, on any window height.
+    for (index, widget) in spread.into_iter().enumerate() {
+        if index > 0 {
+            let gap = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            gap.set_vexpand(true);
+            rail.append(&gap);
+        }
+        rail.append(&widget);
+    }
     let spacer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     spacer.set_vexpand(true);
     rail.append(&spacer);
