@@ -137,6 +137,21 @@ fn message_widget(
     }
     column.append(&bubble);
 
+    // The web hangs actions under the answer: a Copy button that
+    // writes the response text to the clipboard. Local-only, never
+    // a write.
+    if matches!(role, Role::Assistant) {
+        let copy = gtk4::Button::with_label("Copy");
+        copy.add_css_class("flat");
+        copy.set_tooltip_text(Some("Copy response"));
+        copy.set_halign(gtk4::Align::Start);
+        let text = text.to_string();
+        copy.connect_clicked(move |button| {
+            button.clipboard().set_text(&text);
+        });
+        column.append(&copy);
+    }
+
     if !options.is_empty() {
         // The web stacks options full-width, one row each; the
         // reader's pick carries its check at the row's end.
@@ -294,17 +309,46 @@ mod tests {
     use super::*;
 
     fn history() -> Vec<muse_account::HistoryMessage> {
-        vec![muse_account::HistoryMessage {
-            message_id: "a".to_owned(),
-            seq: 0,
-            role: "user".to_owned(),
-            text: "hi".to_owned(),
-            timestamp: Some("2026-11-10T12:00:00Z".to_owned()),
-            status: None,
-            options: Vec::new(),
-            selected_option: None,
-            attachments: Vec::new(),
-        }]
+        vec![
+            muse_account::HistoryMessage {
+                message_id: "a".to_owned(),
+                seq: 0,
+                role: "user".to_owned(),
+                text: "hi".to_owned(),
+                timestamp: Some("2026-11-10T12:00:00Z".to_owned()),
+                status: None,
+                options: Vec::new(),
+                selected_option: None,
+                attachments: Vec::new(),
+            },
+            muse_account::HistoryMessage {
+                message_id: "b".to_owned(),
+                seq: 1,
+                role: "assistant".to_owned(),
+                text: "hello back".to_owned(),
+                timestamp: Some("2026-11-10T12:01:00Z".to_owned()),
+                status: None,
+                options: Vec::new(),
+                selected_option: None,
+                attachments: Vec::new(),
+            },
+        ]
+    }
+
+    /// Every button labeled `label` under a widget, however nested.
+    fn find_buttons(root: &gtk4::Widget, label: &str) -> Vec<gtk4::Button> {
+        let mut found = Vec::new();
+        let mut child = root.first_child();
+        while let Some(next) = child {
+            if let Ok(button) = next.clone().downcast::<gtk4::Button>()
+                && button.label().as_deref() == Some(label)
+            {
+                found.push(button);
+            }
+            found.extend(find_buttons(&next, label));
+            child = next.next_sibling();
+        }
+        found
     }
 
     /// Needs a display: run under `xvfb-run --test-threads=1`. The
@@ -326,6 +370,12 @@ mod tests {
             child = child.and_then(|visible| visible.next_sibling());
         }
         assert_eq!(count, rows.len());
+
+        // The assistant row carries one Copy button; the user row
+        // carries none.
+        let copies = find_buttons(list.upcast_ref(), "Copy");
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].tooltip_text().as_deref(), Some("Copy response"));
 
         let built = super::super::composer::ComposerRow::build();
         let mut composer = super::super::composer::Composer::new();
