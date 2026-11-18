@@ -8,8 +8,10 @@ route. Imports of the community library are deferred until explicit execution.
 
 import json
 import fcntl
+import hashlib
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from contextlib import contextmanager
@@ -1248,10 +1250,81 @@ def shared_gateway(client, config):
         yield
 
 
+def _source_roots_with_manifest():
+    """Installed community source roots carrying an integrity manifest:
+    an import-path directory holding both `muse_mcp` and the installer's
+    `.manifest-sha256`. Roots without a manifest are legacy installs,
+    reported nowhere and never failed."""
+    roots = []
+    for entry in sys.path:
+        if not entry:
+            continue
+        root = Path(entry)
+        try:
+            if (root / "muse_mcp").is_dir() and (root / ".manifest-sha256").is_file():
+                resolved = str(root.resolve())
+                if resolved not in roots:
+                    roots.append(resolved)
+        except OSError:
+            continue
+    return roots
+
+
+def verify_source_manifests():
+    """Recompute every installer manifest and fail closed on mismatch,
+    so a post-install modification of the fetched source cannot ride
+    into a request. Covers every recorded file plus any new executable
+    shape (`.py`, `.pth`, `.so`) the manifest does not name. Returns
+    the verified root count; zero means legacy installs only."""
+    verified = 0
+    for root in _source_roots_with_manifest():
+        base = Path(root)
+        expected = {}
+        for line in (base / ".manifest-sha256").read_text(encoding="utf-8").splitlines():
+            if line.startswith("symlink:"):
+                name, _, target = line[len("symlink:"):].partition("->")
+                expected[name] = ("link", target)
+            else:
+                digest, _, name = line.partition("  ")
+                if digest and name:
+                    expected[name] = ("file", digest)
+        if not expected:
+            raise BridgeFailure("bridge_unavailable", detail="empty integrity manifest")
+        for name, (kind, want) in expected.items():
+            target = base / name
+            if kind == "link":
+                if not target.is_symlink() or os.readlink(target) != want:
+                    raise BridgeFailure(
+                        "bridge_unavailable",
+                        detail="installed community source failed its integrity check")
+            elif not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != want:
+                raise BridgeFailure(
+                    "bridge_unavailable",
+                    detail="installed community source failed its integrity check")
+        for found in base.rglob("*"):
+            if not found.is_file() or found.name == ".manifest-sha256":
+                continue
+            if found.suffix in {".py", ".pth", ".so"}:
+                try:
+                    rel = found.relative_to(base).as_posix()
+                except ValueError:
+                    continue
+                if rel not in expected:
+                    raise BridgeFailure(
+                        "bridge_unavailable",
+                        detail="unrecorded executable file in the community source")
+        verified += 1
+    return verified
+
+
 def community_client(config):
     MuseClient, detail = import_client()
     if MuseClient is None:
         raise BridgeFailure("bridge_unavailable", detail=detail) from None
+    # Tamper-evident dependency: a post-install modification of the
+    # fetched source fails the request before any of it runs. Legacy
+    # installs without a manifest skip silently.
+    verify_source_manifests()
     class AwaitedMuseClient(MuseClient):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)

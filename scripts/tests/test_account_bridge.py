@@ -1938,6 +1938,52 @@ class IdeasProbeTests(unittest.TestCase):
         self.assertNotIn("SENTINEL", log)
 
 
+class SourceManifestTests(unittest.TestCase):
+    """The installed community source is tamper-evident: every request
+    recomputes the installer's manifest and fails closed on mismatch."""
+
+    def make_root(self, root):
+        source = pathlib.Path(root, "source")
+        (source / "muse_mcp").mkdir(parents=True)
+        (source / "muse_mcp" / "__init__.py").write_text("# fake\n")
+        (source / "routes.json").write_text("{}\n")
+        return source
+
+    def write_manifest(self, source):
+        import hashlib
+        lines = []
+        for path in sorted(source.rglob("*")):
+            if path.is_file() and path.name != ".manifest-sha256":
+                rel = path.relative_to(source).as_posix()
+                lines.append("{}  {}\n".format(
+                    hashlib.sha256(path.read_bytes()).hexdigest(), rel))
+        (source / ".manifest-sha256").write_text("".join(sorted(lines)))
+
+    def test_verify_passes_pristine_skips_legacy_fails_tampered(self):
+        import sys
+        import tempfile
+        from unittest import mock
+        bridge = load_bridge()
+        with tempfile.TemporaryDirectory() as root:
+            source = self.make_root(root)
+            # Legacy installs carry no manifest: skipped, never failed.
+            with mock.patch.object(sys, "path", [str(source)]):
+                self.assertEqual(bridge.verify_source_manifests(), 0)
+            self.write_manifest(source)
+            with mock.patch.object(sys, "path", [str(source)]):
+                self.assertEqual(bridge.verify_source_manifests(), 1)
+            (source / "routes.json").write_text("{\"tampered\": true}\n")
+            with mock.patch.object(sys, "path", [str(source)]):
+                with self.assertRaises(bridge.BridgeFailure) as caught:
+                    bridge.verify_source_manifests()
+            self.assertEqual(caught.exception.code, "bridge_unavailable")
+            (source / "routes.json").write_text("{}\n")
+            (source / "evil.py").write_text("print('x')\n")
+            with mock.patch.object(sys, "path", [str(source)]):
+                with self.assertRaises(bridge.BridgeFailure):
+                    bridge.verify_source_manifests()
+
+
 class FeedVisualTests(unittest.TestCase):
     """The web-parity Feed build: kicker/category projection and the
     shape probe that names the emoji / image / prompt fields."""
