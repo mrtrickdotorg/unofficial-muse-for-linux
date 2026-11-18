@@ -225,9 +225,33 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             heading.add_css_class("muse-page-title");
             heading.set_halign(gtk4::Align::Start);
             inner.append(&heading);
+            // Master-detail like the web: the reader's list on the
+            // left, the selected unit's full card on the right. The
+            // list holds rows; the detail repaints per selection from
+            // held data (see detail_store).
+            let columns = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+            columns.set_vexpand(true);
+            let roster = gtk4::ScrolledWindow::new();
+            roster.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+            roster.set_min_content_width(280);
             let list = gtk4::ListBox::new();
             list.set_widget_name(&format!("{name}-list"));
-            inner.append(&list);
+            roster.set_child(Some(&list));
+            columns.append(&roster);
+            let detail_wrap = gtk4::ScrolledWindow::new();
+            detail_wrap.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+            detail_wrap.set_hexpand(true);
+            let detail = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+            detail.set_widget_name(&format!("{name}-detail"));
+            detail_wrap.set_child(Some(&detail));
+            columns.append(&detail_wrap);
+            inner.append(&columns);
+            {
+                let page = name.to_owned();
+                list.connect_row_selected(move |list, row| {
+                    paint_detail(&page, list, row);
+                });
+            }
         }
         "policy" => {
             let notice = gtk4::Label::new(None);
@@ -422,6 +446,118 @@ fn clear_list(list: &gtk4::ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
+}
+
+/// One idea row's second line: the body's first line, trimmed to a
+/// glance. Pure, so the truncation is unit-tested.
+pub fn idea_snippet(body: Option<&str>) -> String {
+    const LIMIT: usize = 90;
+    let first = body.unwrap_or("").lines().next().unwrap_or("").trim();
+    if first.chars().count() <= LIMIT {
+        return first.to_owned();
+    }
+    format!("{}…", first.chars().take(LIMIT).collect::<String>())
+}
+
+/// Held units per master-detail page: rows carry only their index,
+/// so the detail painter reads the listing (plus cached heroes) from
+/// here on every selection. Refilled on each visit beside the rows.
+struct DetailData {
+    items: Vec<ListingItem>,
+    heroes: Vec<Option<std::path::PathBuf>>,
+}
+
+thread_local! {
+    static DETAIL_STORE: std::cell::RefCell<std::collections::HashMap<String, DetailData>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Paint one idea row: icon, bold title, one dim snippet line. The
+/// row's name carries its index into the held listing.
+fn idea_row(item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.set_widget_name(&format!("idea:{index}"));
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let icon = gtk4::Label::new(Some(item.icon.as_deref().unwrap_or("💡")));
+    icon.add_css_class("muse-feed-icon");
+    line.append(&icon);
+    let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let title = gtk4::Label::new(None);
+    title.set_markup(&format!(
+        "<b>{}</b>",
+        super::chat::render_markup(&item.title)
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    words.append(&title);
+    let snippet = idea_snippet(item.body.as_deref());
+    if !snippet.is_empty() {
+        let sub = gtk4::Label::new(Some(&snippet));
+        sub.set_xalign(0.0);
+        sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        sub.set_max_width_chars(48);
+        sub.add_css_class("dim-label");
+        words.append(&sub);
+    }
+    line.append(&words);
+    row.set_child(Some(&line));
+    row
+}
+
+/// Repaint the detail pane for the selected row: the unit's full card
+/// (title, body, hero, live graphic). A deselect clears the pane; an
+/// unknown row leaves it alone.
+fn paint_detail(page: &str, list: &gtk4::ListBox, selected: Option<&gtk4::ListBoxRow>) {
+    // The detail box rides beside the list: up from the list to the
+    // columns, then down by name. No page-shaped special cases.
+    let columns = list.parent().and_then(|roster| roster.parent());
+    let Some(detail) = columns
+        .as_ref()
+        .and_then(|columns| find_widget(columns, &format!("{page}-detail")))
+        .and_then(|widget| widget.downcast::<gtk4::Box>().ok())
+    else {
+        return;
+    };
+    while let Some(child) = detail.first_child() {
+        detail.remove(&child);
+    }
+    let Some(row) = selected else { return };
+    let index: usize = match row
+        .widget_name()
+        .as_str()
+        .strip_prefix("idea:")
+        .and_then(|id| id.parse().ok())
+    {
+        Some(index) => index,
+        None => return,
+    };
+    DETAIL_STORE.with(|store| {
+        let held = store.borrow();
+        let Some(data) = held.get(page) else {
+            return;
+        };
+        let (Some(item), hero) = (
+            data.items.get(index),
+            data.heroes.get(index).and_then(|hero| hero.as_deref()),
+        ) else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|span| span.as_secs() as i64)
+            .unwrap_or(0);
+        // One card, one graphic: the probe gates the live frame, and
+        // anywhere unsafe the extracted text carries the detail.
+        let frame = item
+            .widget_html
+            .as_deref()
+            .is_some_and(|html| !html.is_empty());
+        let live = frame && super::widget::widget_available();
+        detail.append(&feed_card(item, now, hero, live));
+    });
 }
 
 /// Fill the tasks page: schedules with a Run button each, plus the run
@@ -1377,33 +1513,27 @@ where
                 return;
             };
             clear_list(&list);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|span| span.as_secs() as i64)
-                .unwrap_or(0);
-            // Cards, not lines: ideas and goals read like the feed
-            // (icon, title, body, hero, graphic) because they are the
-            // same units. Live graphics need the helper probe and cap
-            // at the first two, exactly like the feed.
-            let graphics = super::widget::widget_available();
-            let mut live = 0;
-            for (item, hero) in listing.items.iter().zip(heroes.iter()) {
-                let frame = item
-                    .widget_html
-                    .as_deref()
-                    .is_some_and(|html| !html.is_empty());
-                if graphics && frame {
-                    live += 1;
-                }
-                list.append(&feed_card(
-                    item,
-                    now,
-                    hero.as_deref(),
-                    graphics && frame && live <= 2,
-                ));
+            // Rows on the left, full card on the right: hold the units
+            // for the detail painter, paint rows, open the first one.
+            // The page name rides the list's widget name.
+            let page = list.widget_name().to_string();
+            let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
+            DETAIL_STORE.with(|store| {
+                store.borrow_mut().insert(
+                    page,
+                    DetailData {
+                        items: listing.items.clone(),
+                        heroes: heroes.clone(),
+                    },
+                );
+            });
+            for (index, item) in listing.items.iter().enumerate() {
+                list.append(&idea_row(item, index));
             }
             if listing.items.is_empty() {
                 list.append(&gtk4::Label::new(Some("Nothing here yet.")));
+            } else if let Some(row) = list.row_at_index(0) {
+                list.select_row(Some(&row));
             }
         },
     );
@@ -1814,6 +1944,20 @@ mod tests {
         let image = feed_body_markup("See ![alt](https://example.com/a.png) here.");
         assert!(!image.contains(">alt</a>"));
         assert!(image.contains("https://example.com/a.png"));
+    }
+
+    #[test]
+    fn idea_rows_show_the_first_line_trimmed() {
+        assert_eq!(idea_snippet(None), "");
+        assert_eq!(idea_snippet(Some("")), "");
+        assert_eq!(
+            idea_snippet(Some("Pitch a film podcast.\nSecond line.")),
+            "Pitch a film podcast."
+        );
+        let long = format!("{}\nSecond line.", "x".repeat(200));
+        let snippet = idea_snippet(Some(&long));
+        assert!(snippet.ends_with("…"));
+        assert!(snippet.chars().count() <= 91);
     }
 
     #[test]
