@@ -3,6 +3,7 @@
 set -euo pipefail
 exec python3 -I - "$@" <<'PY'
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -101,6 +102,26 @@ def main():
     actual = run(git_command + ["rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     if actual != SOURCE_COMMIT:
         fail("source commit did not match the reviewed pin")
+    # Tamper-evident install: record every file's hash beside the tree
+    # (never inside the repo). The bridge recomputes this manifest on
+    # every client creation and fails closed on mismatch, so a later
+    # modification of the fetched source cannot ride into a request.
+    # Symlinks record their target string; the verifier checks that too.
+    manifest = []
+    for root, dirs, files in os.walk(source):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        for name in sorted(files):
+            path = Path(root) / name
+            if path.name == ".manifest-sha256" or not path.is_symlink() and not path.is_file():
+                continue
+            if path.is_symlink():
+                manifest.append("symlink:{}->{}\n".format(
+                    path.relative_to(source).as_posix(), os.readlink(path)))
+                continue
+            manifest.append("{}  {}\n".format(
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                path.relative_to(source).as_posix()))
+    (source / ".manifest-sha256").write_text("".join(sorted(manifest)), encoding="utf-8")
     run([python, "-I", "-m", "venv", str(venv)])
     interpreter = venv / "bin/python"
     run([str(interpreter), "-I", "-m", "pip", "--isolated", "--disable-pip-version-check",
