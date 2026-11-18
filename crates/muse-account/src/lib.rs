@@ -983,6 +983,65 @@ pub struct FileDeleteAnswer {
     pub accepted: bool,
 }
 
+/// What the service said about an idea engagement it took.
+///
+/// The body is the live-probed shape: `{event_type:
+/// feedback_up}`, the engagement enum's own positive literal (the
+/// web's "More like this"). Acceptance only: ranking is the
+/// service's business, never this answer's.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeaEngagementAnswer {
+    pub id: String,
+    pub accepted: bool,
+}
+
+/// What the service said about idea feedback it took.
+///
+/// The body is the live-probed shape: `{feedback: feedback_down}`,
+/// the feedback enum's own negative literal (the web's "Not
+/// interested", which dismisses the card). Acceptance only:
+/// whether the card is gone is proven by re-reading the ideas
+/// listing, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdeaFeedbackAnswer {
+    pub id: String,
+    pub accepted: bool,
+}
+
+/// What the service said about a goal rename it took.
+///
+/// The body is the live-probed shape: PATCH `/goals/{id}`
+/// `{title}`. Acceptance only: whether the row shows the new
+/// title is proven by re-reading the goals listing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalRenameAnswer {
+    pub goal_id: String,
+    pub accepted: bool,
+    pub title: String,
+}
+
+/// What the service said about a goal status flip it took.
+///
+/// The body is the live-probed shape: PATCH `/goals/{id}`
+/// `{status: completed|active}`. Acceptance only: whether the row
+/// shows the state is proven by re-reading the goals listing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalSetCompleteAnswer {
+    pub goal_id: String,
+    pub accepted: bool,
+    pub completed: bool,
+}
+
+/// What the service said about a feed prompt replacement it took.
+///
+/// The body is the live-probed shape: PATCH `/api/feed/prompt`
+/// `{prompt}`. Acceptance only: whether the card shows the new
+/// words is proven by re-reading the feed, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedPromptUpdateAnswer {
+    pub accepted: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -1837,6 +1896,91 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "file_delete", "path": path}),
+            false,
+        )
+    }
+    /// Record one "More like this" on an idea, once.
+    ///
+    /// The id must be one the ideas listing published, and the
+    /// bridge makes a single request in the live-probed shape, so
+    /// one press maps to one engagement. Ranking is the service's
+    /// business; this answer claims acceptance only.
+    pub fn idea_engagement(&self, id: &str) -> Result<IdeaEngagementAnswer, AccountError> {
+        if id.is_empty() || id.len() > 256 || id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "idea_engagement", "id": id}),
+            false,
+        )
+    }
+    /// Record one "Not interested" on an idea, once.
+    ///
+    /// The id must be one the ideas listing published, and the
+    /// bridge makes a single request in the live-probed shape, so
+    /// one press maps to one dismissal. Whether the card is gone
+    /// is proven by re-reading the ideas listing, never by this
+    /// answer alone.
+    pub fn idea_feedback(&self, id: &str) -> Result<IdeaFeedbackAnswer, AccountError> {
+        if id.is_empty() || id.len() > 256 || id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(serde_json::json!({"op": "idea_feedback", "id": id}), false)
+    }
+    /// Rename exactly one goal, once.
+    ///
+    /// The id must be one the goals listing published and the
+    /// title the reader's own non-blank words; the bridge makes a
+    /// single PATCH in the live-probed shape, so one confirmed
+    /// press maps to one rename. Whether the row shows it is
+    /// proven by re-reading the goals listing.
+    pub fn goal_rename(
+        &self,
+        goal_id: &str,
+        title: &str,
+    ) -> Result<GoalRenameAnswer, AccountError> {
+        if goal_id.is_empty() || goal_id.len() > 256 || goal_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if title.trim().is_empty() || title.len() > 256 || title.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "goal_rename", "goal_id": goal_id, "title": title}),
+            false,
+        )
+    }
+    /// Mark one goal complete, or reopen it, once.
+    ///
+    /// The id must be one the goals listing published, and the
+    /// bridge makes a single PATCH in the live-probed shape, so
+    /// one press maps to one status flip. Whether the row shows
+    /// the state is proven by re-reading the goals listing.
+    pub fn goal_set_complete(
+        &self,
+        goal_id: &str,
+        completed: bool,
+    ) -> Result<GoalSetCompleteAnswer, AccountError> {
+        if goal_id.is_empty() || goal_id.len() > 256 || goal_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "goal_set_complete", "goal_id": goal_id, "completed": completed}),
+            false,
+        )
+    }
+    /// Replace the feed prompt's words, once.
+    ///
+    /// The words are the reader's own non-blank text; the bridge
+    /// makes a single PATCH in the live-probed shape, so one
+    /// confirmed press maps to one replacement. Whether the card
+    /// shows the new words is proven by re-reading the feed.
+    pub fn feed_prompt_update(&self, prompt: &str) -> Result<FeedPromptUpdateAnswer, AccountError> {
+        if prompt.trim().is_empty() || prompt.len() > 4000 || prompt.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "feed_prompt_update", "prompt": prompt}),
             false,
         )
     }
