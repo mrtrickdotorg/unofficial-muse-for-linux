@@ -159,10 +159,17 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     let area = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     let view = WebView::new();
     view.set_hexpand(true);
-    // Width request stays at 1: a WebView's minimum follows its
-    // content, and a wide widget would set the whole window's minimum
-    // past the screen. The frame gets whatever width the card gives it.
-    view.set_size_request(1, 120);
+    // The cage: a WebView's natural width follows its content, and a
+    // wide unit (tables) would set the whole window's minimum past the
+    // screen. Inside a Never/Never scrolled window the view lays out
+    // at the card's width instead, and the frame's height rides the
+    // measured content through min/max content height. Width can never
+    // escape; height is fitted, never guessed.
+    let cage = gtk4::ScrolledWindow::new();
+    cage.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Never);
+    cage.set_min_content_height(120);
+    cage.set_max_content_height(120);
+    cage.set_child(Some(&view));
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_enable_javascript(true);
         settings.set_enable_developer_extras(false);
@@ -215,8 +222,9 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     };
     let fit = {
         let view = view.clone();
+        let cage_holder = cage.clone();
         move || {
-            let view_for_fit = view.clone();
+            let cage_for_fit = cage_holder.clone();
             view.evaluate_javascript(
                 "String(Math.max(document.body ? document.body.scrollHeight : 0, \
                  document.documentElement ? document.documentElement.scrollHeight : 0))",
@@ -226,7 +234,9 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                 move |result| match result {
                     Ok(value) => match js_height(&value.to_string()) {
                         Some(height) => {
-                            view_for_fit.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
+                            let fit_height = height.clamp(48.0, 1400.0) as i32;
+                            cage_for_fit.set_min_content_height(fit_height);
+                            cage_for_fit.set_max_content_height(fit_height);
                         }
                         None => {
                             eprintln!("muse: widget height unreadable: {value}");
@@ -245,13 +255,15 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     // clipped. Idempotent: a settled frame just re-applies its size.
     let settle = {
         let view = view.clone();
+        let cage_holder = cage.clone();
         move || {
             let owner = view.clone();
+            let cage_owner = cage_holder.clone();
             let ticks = std::rc::Rc::new(std::cell::Cell::new(0));
             gtk4::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
                 let seen = ticks.get() + 1;
                 ticks.set(seen);
-                let view_for_settle = owner.clone();
+                let cage_for_settle = cage_owner.clone();
                 owner.evaluate_javascript(
                     "String(Math.max(document.body ? document.body.scrollHeight : 0, \
                          document.documentElement ? document.documentElement.scrollHeight : 0))",
@@ -262,7 +274,9 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                         if let Ok(value) = result
                             && let Some(height) = js_height(&value.to_string())
                         {
-                            view_for_settle.set_size_request(1, height.clamp(48.0, 1400.0) as i32);
+                            let settle_height = height.clamp(48.0, 1400.0) as i32;
+                            cage_for_settle.set_min_content_height(settle_height);
+                            cage_for_settle.set_max_content_height(settle_height);
                         }
                     },
                 );
@@ -290,7 +304,7 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
         });
     }
     view.load_html(&document(html), Some("about:blank"));
-    area.append(&view);
+    area.append(&cage);
     area.upcast()
 }
 
