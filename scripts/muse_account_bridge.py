@@ -2555,6 +2555,28 @@ def _feed_extras(unit):
 _IDEAS_PROBED = False
 
 
+def _shape_of(value, depth=0):
+    """Content-free shape: types and lengths only, never values. A
+    string reports its length, a list its length plus its first
+    element's shape, anything else its type name. Lengths leak at
+    most how much text a field holds, never the text itself."""
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "num"
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "str[{}]".format(len(value))
+    if isinstance(value, list):
+        if not value or depth > 0:
+            return "list[{}]".format(len(value))
+        return "list[{}]{{{}}}".format(len(value), _shape_of(value[0], depth + 1))
+    if isinstance(value, dict):
+        return "dict"
+    return type(value).__name__
+
+
 def _probe_ideas_shapes(config_dir, payload):
     """One-shot reconnaissance for the idea-card icon (Patrick,
     Nov 13, 2026): the web draws an icon on every card; the recorded
@@ -2573,6 +2595,7 @@ def _probe_ideas_shapes(config_dir, payload):
             signatures.append("top:" + ",".join(sorted(payload.keys())))
             sections = payload.get("sections")
             cards_seen = 0
+            shapes = None
             if isinstance(sections, list):
                 for section in sections:
                     if not isinstance(section, dict):
@@ -2609,7 +2632,14 @@ def _probe_ideas_shapes(config_dir, payload):
                                     sorted(presentation.keys()))
                                 if sig not in signatures and len(signatures) < 7:
                                     signatures.append(sig)
+                            if shapes is None:
+                                shapes = "card-shapes:" + ",".join(
+                                    "{}={}".format(key, _shape_of(value))
+                                    for key, value in sorted(card.items())
+                                )
             signatures.append("cards={}".format(cards_seen))
+            if shapes is not None:
+                signatures.append(shapes)
         timing_log(config_dir, "ideas-probe " + " | ".join(signatures)[:1500])
     except Exception:
         pass

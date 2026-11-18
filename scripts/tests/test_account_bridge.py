@@ -1903,6 +1903,41 @@ class SubagentsProbeTests(unittest.TestCase):
         self.assertNotIn("SENTINEL-TITLE", log)
 
 
+class IdeasProbeTests(unittest.TestCase):
+    """The ideas probe learns card field shapes: types and lengths
+    only, never values."""
+
+    def test_probe_logs_shapes_once_and_never_values(self):
+        import tempfile
+        import time
+        bridge = load_bridge()
+        bridge._IDEAS_PROBED = False
+        payload = {"sections": [{"title": "S", "cards": [{
+            "id": "c1",
+            "title": "SENTINEL-TITLE",
+            "content": "SENTINEL-CONTENT " * 10,
+            "tags": ["a", "b"],
+            "presentation": {"icon": "x"},
+        }]}]}
+        with tempfile.TemporaryDirectory() as root:
+            bridge._probe_ideas_shapes(root, payload)
+            bridge._probe_ideas_shapes(root, payload)
+            deadline = time.monotonic() + 5
+            log = ""
+            while time.monotonic() < deadline:
+                path = pathlib.Path(root, "op-timing.log")
+                if path.exists():
+                    log = path.read_text()
+                    if "ideas-probe" in log:
+                        break
+                time.sleep(0.02)
+        self.assertIn("card-shapes:", log)
+        self.assertIn("content=str[", log)
+        self.assertIn("tags=list[2]", log)
+        self.assertEqual(log.count("ideas-probe"), 1)
+        self.assertNotIn("SENTINEL", log)
+
+
 class FeedVisualTests(unittest.TestCase):
     """The web-parity Feed build: kicker/category projection and the
     shape probe that names the emoji / image / prompt fields."""
