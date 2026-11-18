@@ -868,7 +868,14 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok(listing) = answer else { return };
+            let Ok(listing) = answer else {
+                // Errors read, never vanish: the page names the
+                // failure so the reader isn't left guessing.
+                if let Err(error) = answer {
+                    listing_failure(&list, "Artifacts", &error);
+                }
+                return;
+            };
             clear_list(&list);
             for artifact in &listing.artifacts {
                 list.append(&gtk4::Label::new(Some(&artifact_label(artifact))));
@@ -1523,7 +1530,14 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok(listing) = answer else { return };
+            let Ok(listing) = answer else {
+                // Errors read, never vanish: the page names the
+                // failure so the reader isn't left guessing.
+                if let Err(error) = answer {
+                    listing_failure(&list, "Feed", &error);
+                }
+                return;
+            };
             clear_list(&list);
             if let Some(holder) = prompt_holder.as_ref() {
                 let text = listing
@@ -1572,8 +1586,30 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
                     graphics && frame && live <= 2,
                 ));
             }
+            // An empty service answer reads as empty, not as broken:
+            // the sentence names the state either way.
+            if listing.items.is_empty() {
+                let label = gtk4::Label::new(Some("The feed is empty."));
+                label.set_xalign(0.0);
+                list.append(&label);
+            }
         },
     );
+}
+
+/// A failed listing read says so on the page: a blank list with no
+/// sentence is indistinguishable from an empty one, and the reader
+/// cannot tell a broken fetch from a quiet service.
+pub fn listing_failure_text(context: &str, error: &impl std::fmt::Display) -> String {
+    format!("{context} didn't load: {error}")
+}
+
+fn listing_failure(list: &gtk4::ListBox, context: &str, error: &impl std::fmt::Display) {
+    clear_list(list);
+    let label = gtk4::Label::new(Some(&listing_failure_text(context, error)));
+    label.set_wrap(true);
+    label.set_xalign(0.0);
+    list.append(&label);
 }
 
 /// Memory fills on demand: a visit with a query runs it, a visit
@@ -2183,6 +2219,14 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(idea_group(&fallback), Some("Your UFP onboarding"));
+    }
+
+    #[test]
+    fn failed_listings_name_the_failure() {
+        assert_eq!(
+            listing_failure_text("Feed", &"the bridge went away"),
+            "Feed didn't load: the bridge went away"
+        );
     }
 
     #[test]
