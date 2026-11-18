@@ -244,9 +244,9 @@ fn show_main(split: &adw::OverlaySplitView) {
     register_icons();
     // The web's far-left icon rail: menu pill, one glyph per section,
     // new chat, download. The panel beside it keeps the full sidebar;
-    // the rail is a shortcut, never a second source of truth. Shapes
-    // opens Goals and the monitor opens Feed — the rail's two wordless
-    // glyphs land on their closest readers.
+    // the rail is a shortcut, never a second source of truth. Glyphs
+    // land where the web sends them: book opens Feed, check opens
+    // Goals, shapes open Library.
     fn rail_button(icon: &str, tooltip: &str) -> gtk4::Button {
         let image = gtk4::Image::from_resource(&format!("/org/kythos/MuseLinux/icons/{icon}.svg"));
         image.set_pixel_size(20);
@@ -259,20 +259,18 @@ fn show_main(split: &adw::OverlaySplitView) {
     let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     rail.add_css_class("muse-rail");
     let mut rail_buttons: Vec<(String, gtk4::Button)> = Vec::new();
-    let menu_button = rail_button("menu", "Chats");
+    let menu_button = rail_button("menu", "Settings");
     rail.append(&menu_button);
-    let entries: &[&str] = &[
-        "chat", "search", "library", "ideas", "tasks", "goals", "feed",
-    ];
+    let entries: &[&str] = &["chat", "search", "feed", "ideas", "goals", "library"];
     for page in entries {
         let glyph = pages::rail_glyph(page).unwrap_or("chat");
         let button = rail_button(glyph, pages::title(page));
         rail.append(&button);
         rail_buttons.push(((*page).to_owned(), button));
     }
-    let new_button = rail_button("new", "New chat");
+    let new_button = rail_button("new", "New space");
     rail.append(&new_button);
-    let download_button = rail_button("download", "Download apps");
+    let download_button = rail_button("download", "Updates");
     rail.append(&download_button);
     let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     shell.append(&rail);
@@ -351,14 +349,13 @@ fn show_main(split: &adw::OverlaySplitView) {
             pages::show(&ctx, "settings");
         });
     }
-    // The rail shortcuts: new chat opens a fresh thread on the chat
-    // page; the menu pill toggles the sidebar; download opens the
-    // app's download page in the system browser; an icon shows its
-    // page.
+    // The rail shortcuts: plus starts a fresh thread; download opens
+    // this copy's update panel; the hamburger opens settings; an icon
+    // shows its page.
     {
-        let split = split.clone();
+        let ctx = ctx.clone();
         menu_button.connect_clicked(move |_| {
-            split.set_show_sidebar(!split.shows_sidebar());
+            pages::show(&ctx, "settings");
         });
     }
     {
@@ -367,12 +364,12 @@ fn show_main(split: &adw::OverlaySplitView) {
             pages::open_thread(&ctx, None);
         });
     }
-    download_button.connect_clicked(move |_| {
-        let _ = gtk4::gio::AppInfo::launch_default_for_uri(
-            "https://ai.meta.com/meta-ai/download/",
-            None::<&gtk4::gio::AppLaunchContext>,
-        );
-    });
+    {
+        let ctx = ctx.clone();
+        download_button.connect_clicked(move |_| {
+            pages::show(&ctx, "settings");
+        });
+    }
     for (page, button) in &ctx.rail {
         let ctx = ctx.clone();
         let page = page.clone();
