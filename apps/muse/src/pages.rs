@@ -227,12 +227,21 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             heading.set_halign(gtk4::Align::Start);
             inner.append(&heading);
             // The web's roster is one scrolling list: icon, title,
-            // clamped description, overflow menu. No detail pane, no
-            // selection — the page reads, it does not drill in.
+            // clamped description, overflow menu. Ideas rows open the
+            // detail dialog; the page itself does not drill in.
             let list = gtk4::ListBox::new();
             list.set_widget_name(&format!("{name}-list"));
-            list.set_selection_mode(gtk4::SelectionMode::None);
+            list.set_selection_mode(gtk4::SelectionMode::Single);
             inner.append(&list);
+            // Ideas rows open the detail dialog; goals stay inert
+            // until the web's goals page is read the same way.
+            if name == "ideas" {
+                let ctx_owned = ctx.clone();
+                list.connect_row_selected(move |list, row| {
+                    let Some(row) = row else { return };
+                    open_idea_dialog(&ctx_owned, list, row);
+                });
+            }
         }
         "policy" => {
             let notice = gtk4::Label::new(None);
@@ -459,9 +468,21 @@ pub fn idea_snippet(body: Option<&str>) -> String {
     format!("{}…", text.chars().take(LIMIT).collect::<String>())
 }
 
-/// Paint one idea row: icon, bold title, clamped description. Rows
-/// are display-only for now: no selection, no overflow action, until
-/// the web's press and ⋯ behaviors are confirmed off the live page.
+/// Held units per idea-laden page: rows carry only their index, so
+/// the detail dialog reads the listing (plus cached heroes) from here
+/// on selection. Refilled on each visit beside the rows.
+struct IdeaStore {
+    items: Vec<ListingItem>,
+    heroes: Vec<Option<std::path::PathBuf>>,
+}
+
+thread_local! {
+    static IDEA_STORE: std::cell::RefCell<std::collections::HashMap<String, IdeaStore>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Paint one idea row: icon, bold title, clamped description. The
+/// row's name carries its index; a press opens the detail dialog.
 fn idea_row(item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
     let row = gtk4::ListBoxRow::new();
     row.set_widget_name(&format!("idea:{index}"));
@@ -494,6 +515,252 @@ fn idea_row(item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
     line.append(&words);
     row.set_child(Some(&line));
     row
+}
+
+/// What the reader hears after an idea write: acceptance names what
+/// happens next, anything else owns that nothing changed.
+pub fn execute_notice(accepted: bool) -> &'static str {
+    if accepted {
+        "Started — find it under Tasks."
+    } else {
+        "The service did not start it. Nothing changed."
+    }
+}
+
+/// What the reader hears after a reaction write: the web answers a
+/// reaction inline, never with proof, so the words stay modest.
+pub fn react_notice(reaction: &str, accepted: bool) -> String {
+    if !accepted {
+        return "The service did not record it. Nothing changed.".to_owned();
+    }
+    if reaction == "👎" {
+        "Noted — you will not see this again.".to_owned()
+    } else {
+        "Noted — more like this.".to_owned()
+    }
+}
+
+/// Open the idea detail dialog: title, close, full description, the
+/// service's own action row — an overflow button and the blue
+/// "Let's do it". Writes dispatch on press and report acceptance;
+/// rows without a service id explain themselves instead of
+/// dispatching nothing.
+fn open_idea_dialog(ctx: &Ctx, list: &gtk4::ListBox, row: &gtk4::ListBoxRow) {
+    let page = list.widget_name().to_string();
+    let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
+    let index: usize = match row
+        .widget_name()
+        .as_str()
+        .strip_prefix("idea:")
+        .and_then(|id| id.parse().ok())
+    {
+        Some(index) => index,
+        None => return,
+    };
+    let held = IDEA_STORE.with(|store| {
+        store.borrow().get(&page).map(|data| {
+            (
+                data.items.get(index).cloned(),
+                data.heroes.get(index).and_then(|hero| hero.clone()),
+            )
+        })
+    });
+    let Some((Some(item), hero)) = held else {
+        return;
+    };
+    if ctx.chat.upgrade().is_none() {
+        return;
+    }
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(560, -1);
+    window.set_title(Some(&item.title));
+    if let Some(root) = list
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok())
+    {
+        window.set_transient_for(Some(&root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 16);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let head = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    let title = gtk4::Label::new(None);
+    title.set_markup(&format!(
+        "<b>{}</b>",
+        super::chat::render_markup(&item.title)
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    head.append(&title);
+    let close = gtk4::Button::with_label("✕");
+    close.add_css_class("flat");
+    close.set_valign(gtk4::Align::Start);
+    head.append(&close);
+    body.append(&head);
+    let words = gtk4::Label::new(None);
+    words.set_markup(&feed_body_markup(item.body.as_deref().unwrap_or("")));
+    words.set_wrap(true);
+    words.set_xalign(0.0);
+    body.append(&words);
+    if let Some(hero) = hero.as_deref() {
+        let picture = gtk4::Picture::for_filename(hero);
+        picture.set_can_shrink(true);
+        picture.set_halign(gtk4::Align::Start);
+        body.append(&picture);
+    }
+    let notice = gtk4::Label::new(None);
+    notice.set_wrap(true);
+    notice.set_xalign(0.0);
+    notice.set_visible(false);
+    body.append(&notice);
+    let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    let more = gtk4::Button::with_label("⋯");
+    more.add_css_class("circular");
+    actions.append(&more);
+    let go = gtk4::Button::with_label("✨ Let's do it");
+    go.add_css_class("muse-cta");
+    go.set_hexpand(true);
+    actions.append(&go);
+    body.append(&actions);
+    let scrolled = gtk4::ScrolledWindow::new();
+    scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    scrolled.set_vexpand(true);
+    scrolled.set_child(Some(&body));
+    window.set_child(Some(&scrolled));
+    {
+        let window = window.clone();
+        let list = list.clone();
+        close.connect_clicked(move |_| {
+            window.close();
+            list.select_row(None::<&gtk4::ListBoxRow>);
+        });
+    }
+    // The overflow menu: the web's three verbs, each a real write.
+    let popover = gtk4::Popover::new();
+    popover.set_parent(&more);
+    let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    menu.set_margin_start(8);
+    menu.set_margin_end(8);
+    menu.set_margin_top(8);
+    menu.set_margin_bottom(8);
+    let like = gtk4::Button::with_label("👍 More like this");
+    like.add_css_class("flat");
+    let dislike = gtk4::Button::with_label("👎 Not interested");
+    dislike.add_css_class("flat");
+    dislike.add_css_class("muse-danger");
+    menu.append(&like);
+    menu.append(&dislike);
+    popover.set_child(Some(&menu));
+    {
+        let popover = popover.clone();
+        more.connect_clicked(move |_| {
+            popover.popup();
+        });
+    }
+    // One press, one write: the id is the service's own, carried on
+    // the row's unit. No id, no dispatch — a press with nothing to
+    // send would be the lie this codebase avoids.
+    let item_id = item.id.clone();
+    let unit_id = item.id.clone();
+    {
+        let go_inner = go.clone();
+        let notice_inner = notice.clone();
+        let window_inner = window.clone();
+        let ctx_inner = ctx.clone();
+        let page_inner = page.clone();
+        go.connect_clicked(move |_| {
+            let go = go_inner.clone();
+            let notice = notice_inner.clone();
+            let window = window_inner.clone();
+            let ctx = ctx_inner.clone();
+            let page = page_inner.clone();
+            let Some(id) = item_id.clone() else {
+                notice.set_text("This unit carries no service id, so there is nothing to start.");
+                notice.set_visible(true);
+                return;
+            };
+            go.set_sensitive(false);
+            go.set_label("Starting…");
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                notice.set_text("Link your account first.");
+                notice.set_visible(true);
+                go.set_sensitive(true);
+                go.set_label("✨ Let's do it");
+                return;
+            };
+            super::app::dispatch(
+                &chat,
+                move || client.idea_execute(&id),
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    notice.set_text(execute_notice(accepted));
+                    notice.set_visible(true);
+                    if accepted {
+                        window.close();
+                        show(&ctx, &page);
+                    } else {
+                        go.set_sensitive(true);
+                        go.set_label("✨ Let's do it");
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    // Reactions: the glyph is the vote. Acceptance shows inline;
+    // proof is the next visit, never the answer alone.
+    for (button, glyph) in [(like, "👍"), (dislike, "👎")] {
+        let notice_held = notice.clone();
+        let popover_held = popover.clone();
+        let ctx_held = ctx.clone();
+        let page_held = page.clone();
+        let unit_held = unit_id.clone();
+        button.connect_clicked(move |_| {
+            let notice = notice_held.clone();
+            let popover = popover_held.clone();
+            let ctx = ctx_held.clone();
+            let page = page_held.clone();
+            let unit = unit_held.clone();
+            popover.popdown();
+            let Some(id) = unit.clone() else {
+                notice.set_text("This unit carries no service id, so there is nothing to record.");
+                notice.set_visible(true);
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                notice.set_text("Link your account first.");
+                notice.set_visible(true);
+                return;
+            };
+            let reaction = glyph.to_owned();
+            super::app::dispatch(
+                &chat,
+                move || client.feed_react(&id, &reaction),
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    notice.set_text(&react_notice(glyph, accepted));
+                    notice.set_visible(true);
+                    if accepted && glyph == "👎" {
+                        show(&ctx, &page);
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    window.present();
 }
 
 /// Fill the tasks page: schedules with a Run button each, plus the run
@@ -1445,10 +1712,23 @@ where
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok((listing, _heroes)) = answer else {
+            let Ok((listing, heroes)) = answer else {
                 return;
             };
             clear_list(&list);
+            // The dialog reads its unit from here: hold the listing
+            // and heroes beside the rows on every fill.
+            IDEA_STORE.with(|store| {
+                let key = list.widget_name().to_string();
+                let key = key.strip_suffix("-list").unwrap_or(&key).to_owned();
+                store.borrow_mut().insert(
+                    key,
+                    IdeaStore {
+                        items: listing.items.clone(),
+                        heroes: heroes.clone(),
+                    },
+                );
+            });
             let mut section: Option<&str> = None;
             for (index, item) in listing.items.iter().enumerate() {
                 // The web groups its roster by collection: a section
@@ -1903,6 +2183,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(idea_group(&fallback), Some("Your UFP onboarding"));
+    }
+
+    #[test]
+    fn idea_writes_report_acceptance_plainly() {
+        assert_eq!(execute_notice(true), "Started — find it under Tasks.");
+        assert_eq!(
+            execute_notice(false),
+            "The service did not start it. Nothing changed."
+        );
+        assert_eq!(react_notice("👍", true), "Noted — more like this.");
+        assert_eq!(
+            react_notice("👎", true),
+            "Noted — you will not see this again."
+        );
+        assert_eq!(
+            react_notice("👍", false),
+            "The service did not record it. Nothing changed."
+        );
     }
 
     #[test]

@@ -173,6 +173,23 @@ textview placeholder {
     padding: 2px 4px 6px;
 }
 
+/* The idea dialog's commit button and the red destructive vote. */
+.muse-cta {
+    background: #0084ff;
+    color: #ffffff;
+    border-radius: 18px;
+    padding: 10px 18px;
+    font-weight: bold;
+}
+
+.muse-cta:disabled {
+    opacity: 0.6;
+}
+
+.muse-danger {
+    color: #ff7b72;
+}
+
 .muse-page-title {
     font-size: 22pt;
     font-weight: 800;
