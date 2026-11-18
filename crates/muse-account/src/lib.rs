@@ -322,7 +322,7 @@ pub struct TaskRun {
 /// delete would quote) and `path` is the workspace path it resolves to.
 /// `can_open`/`can_share` stay the service's answers: this client never decides
 /// on its own what may be shared or removed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactSummary {
     pub artifact_ref: String,
     pub title: String,
