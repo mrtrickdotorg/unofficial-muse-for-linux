@@ -186,6 +186,11 @@ textview placeholder {
     opacity: 0.6;
 }
 
+/* The active roster filter reads selected without disabling. */
+.muse-filter-active {
+    background: alpha(@window_fg_color, 0.14);
+}
+
 .muse-danger {
     color: #ff7b72;
 }

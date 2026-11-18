@@ -2181,7 +2181,242 @@ pub fn listing_row(
     row.upcast()
 }
 
-fn fill_service_listing<F>(chat: &Rc<Chat>, list: &gtk4::ListBox, fetch: F)
+/// The category filters a goals fill offers: the distinct non-empty
+/// categories in visit order. Buttons exist only for data in hand,
+/// never for imagined kinds.
+pub fn goal_categories(items: &[ListingItem]) -> Vec<String> {
+    let mut kinds = Vec::new();
+    for item in items {
+        if let Some(category) = item.category.as_deref().filter(|text| !text.is_empty())
+            && !kinds.contains(&category.to_owned())
+        {
+            kinds.push(category.to_owned());
+        }
+    }
+    kinds
+}
+
+/// Whether a roster row survives the active filter. Only goals filter,
+/// and only by category; everything else always reads.
+pub fn roster_visible(item: &ListingItem, page: &str, filter: Option<&str>) -> bool {
+    match (page, filter) {
+        ("goals", Some(name)) => item.category.as_deref() == Some(name),
+        _ => true,
+    }
+}
+
+/// One goal row: an insensitive completion checkbox (the service offers
+/// no completion write, so nothing pretends to stick), title plus
+/// clamped description, and the ⋯ menu. The row itself stays inert:
+/// the web's row-press destination was never observed.
+fn goal_row(ctx: &Ctx, item: &ListingItem, _index: usize) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let done = gtk4::CheckButton::new();
+    done.set_sensitive(false);
+    done.set_valign(gtk4::Align::Start);
+    done.set_tooltip_text(Some(&format!("Mark {} complete", item.title)));
+    line.append(&done);
+    let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let title = gtk4::Label::new(None);
+    title.set_markup(&format!(
+        "<b>{}</b>",
+        super::chat::render_markup(&item.title)
+            .replace("<br/>", " ")
+            .replace("<br>", " ")
+    ));
+    title.set_wrap(true);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    words.append(&title);
+    let snippet = idea_snippet(item.body.as_deref());
+    if !snippet.is_empty() {
+        let sub = gtk4::Label::new(Some(&snippet));
+        sub.set_wrap(true);
+        sub.set_xalign(0.0);
+        sub.set_lines(3);
+        sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        sub.add_css_class("dim-label");
+        words.append(&sub);
+    }
+    line.append(&words);
+    let more = gtk4::Button::with_label("⋯");
+    more.add_css_class("flat");
+    more.add_css_class("circular");
+    more.set_valign(gtk4::Align::Start);
+    more.set_tooltip_text(Some("Goal options"));
+    line.append(&more);
+    row.set_child(Some(&line));
+    // The web's five verbs. Only Delete has a backend; the rest read
+    // plainly instead of pretending.
+    let popover = gtk4::Popover::new();
+    popover.set_parent(&more);
+    let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    menu.set_margin_start(8);
+    menu.set_margin_end(8);
+    menu.set_margin_top(8);
+    menu.set_margin_bottom(8);
+    let discuss = gtk4::Button::with_label("Discuss");
+    discuss.add_css_class("flat");
+    menu.append(&discuss);
+    let rename = gtk4::Button::with_label("Rename");
+    rename.add_css_class("flat");
+    menu.append(&rename);
+    let subgoal = gtk4::Button::with_label("Add subgoal");
+    subgoal.add_css_class("flat");
+    menu.append(&subgoal);
+    let complete = gtk4::Button::with_label("Complete");
+    complete.add_css_class("flat");
+    menu.append(&complete);
+    let delete = gtk4::Button::with_label("Delete");
+    delete.add_css_class("flat");
+    delete.add_css_class("muse-danger");
+    menu.append(&delete);
+    popover.set_child(Some(&menu));
+    {
+        let ctx = ctx.clone();
+        let title = item.title.clone();
+        let popover_held = popover.clone();
+        discuss.connect_clicked(move |_| {
+            popover_held.popdown();
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            show(&ctx, "chat");
+            chat.propose_draft(&title);
+        });
+    }
+    for (button, verb) in [
+        (rename, "Rename"),
+        (subgoal, "Add subgoal"),
+        (complete, "Complete"),
+    ] {
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        button.connect_clicked(move |_| {
+            popover_held.popdown();
+            line_inner.append(&card_note(&format!(
+                "{verb} isn't available for goals yet."
+            )));
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let unit_id = item.id.clone();
+        let popover_held = popover.clone();
+        let line_inner = line.clone();
+        delete.connect_clicked(move |_| {
+            popover_held.popdown();
+            let Some(id) = unit_id.clone() else {
+                line_inner.append(&card_note("This unit carries no service id."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let line_for_done = line_inner.clone();
+            let ctx_inner = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.goal_delete(&id),
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_inner, "goals");
+                    } else {
+                        line_for_done.append(&card_note(
+                            "The service did not delete it. Nothing changed.",
+                        ));
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    more.connect_clicked(move |_| {
+        popover.popup();
+    });
+    row
+}
+
+/// Paint one roster fill: the goals filter bar (only for the categories
+/// in hand), group headers, and rows. Goal rows carry the web's ⋯ menu.
+/// The filter is re-entrant: pressing one repaints from the same slices.
+fn paint_roster(
+    ctx: &Ctx,
+    list: &gtk4::ListBox,
+    page: &str,
+    items: &[ListingItem],
+    heroes: &[Option<std::path::PathBuf>],
+    filter: Option<&str>,
+) {
+    clear_list(list);
+    if page == "goals" {
+        let mut kinds = vec!["All".to_owned()];
+        kinds.extend(goal_categories(items));
+        if kinds.len() > 2 {
+            let bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            for name in kinds {
+                let button = gtk4::Button::with_label(&name);
+                button.add_css_class("flat");
+                if filter.unwrap_or("All") == name {
+                    button.add_css_class("muse-filter-active");
+                }
+                let ctx = ctx.clone();
+                let list = list.clone();
+                let items = items.to_vec();
+                let heroes = heroes.to_vec();
+                let page = page.to_owned();
+                let choice = name.clone();
+                button.connect_clicked(move |_| {
+                    let pick = if choice == "All" {
+                        None
+                    } else {
+                        Some(choice.as_str())
+                    };
+                    paint_roster(&ctx, &list, &page, &items, &heroes, pick);
+                });
+                bar.append(&button);
+            }
+            row.set_child(Some(&bar));
+            list.append(&row);
+        }
+    }
+    let mut section: Option<&str> = None;
+    for (index, item) in items.iter().enumerate() {
+        if !roster_visible(item, page, filter) {
+            continue;
+        }
+        let group = idea_group(item);
+        if group != section {
+            section = group;
+            if let Some(name) = group {
+                let head = gtk4::Label::new(Some(name));
+                head.set_halign(gtk4::Align::Start);
+                head.add_css_class("muse-section");
+                list.append(&head);
+            }
+        }
+        if page == "goals" {
+            list.append(&goal_row(ctx, item, index));
+        } else {
+            list.append(&idea_row(item, index));
+        }
+    }
+    if items.iter().all(|item| !roster_visible(item, page, filter)) {
+        list.append(&gtk4::Label::new(Some("Nothing here yet.")));
+    } else if let Some(row) = list.row_at_index(0) {
+        list.select_row(Some(&row));
+    }
+}
+
+fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, fetch: F)
 where
     F: FnOnce(
             &muse_account::AccountClient,
@@ -2189,6 +2424,10 @@ where
         + Send
         + 'static,
 {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let ctx_owned = ctx.clone();
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
         None => return,
@@ -2199,7 +2438,7 @@ where
     };
     let list = list.clone();
     dispatch(
-        chat,
+        &chat,
         move || {
             let listing = fetch(&client)?;
             // Artwork prefetches here, off the main thread: the first
@@ -2228,43 +2467,20 @@ where
             let Ok((listing, heroes)) = answer else {
                 return;
             };
-            clear_list(&list);
             // The dialog reads its unit from here: hold the listing
             // and heroes beside the rows on every fill.
+            let page = list.widget_name().to_string();
+            let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
             IDEA_STORE.with(|store| {
-                let key = list.widget_name().to_string();
-                let key = key.strip_suffix("-list").unwrap_or(&key).to_owned();
                 store.borrow_mut().insert(
-                    key,
+                    page.clone(),
                     IdeaStore {
                         items: listing.items.clone(),
                         heroes: heroes.clone(),
                     },
                 );
             });
-            let mut section: Option<&str> = None;
-            for (index, item) in listing.items.iter().enumerate() {
-                // The web groups its roster by collection: a section
-                // label opens each new group, ungrouped rows stand
-                // alone. Group headers carry no row name, so a press
-                // on one leaves the detail alone.
-                let group = idea_group(item);
-                if group != section {
-                    section = group;
-                    if let Some(name) = group {
-                        let head = gtk4::Label::new(Some(name));
-                        head.set_halign(gtk4::Align::Start);
-                        head.add_css_class("muse-section");
-                        list.append(&head);
-                    }
-                }
-                list.append(&idea_row(item, index));
-            }
-            if listing.items.is_empty() {
-                list.append(&gtk4::Label::new(Some("Nothing here yet.")));
-            } else if let Some(row) = list.row_at_index(0) {
-                list.select_row(Some(&row));
-            }
+            paint_roster(&ctx_owned, &list, &page, &listing.items, &heroes, None);
         },
     );
 }
@@ -2273,20 +2489,14 @@ fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) {
     let Some(list) = named_list(page, "ideas-list") else {
         return;
     };
-    let Some(chat) = ctx.chat.upgrade() else {
-        return;
-    };
-    fill_service_listing(&chat, &list, |client| client.ideas());
+    fill_service_listing(ctx, &list, |client| client.ideas());
 }
 
 fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
     let Some(list) = named_list(page, "goals-list") else {
         return;
     };
-    let Some(chat) = ctx.chat.upgrade() else {
-        return;
-    };
-    fill_service_listing(&chat, &list, |client| client.goals());
+    fill_service_listing(ctx, &list, |client| client.goals());
 }
 
 /// A search visit invites a query; nothing dispatches until Search.
@@ -2743,6 +2953,33 @@ mod tests {
             None
         );
         assert_eq!(feed_status_line(None), None);
+    }
+
+    #[test]
+    fn goal_filters_come_only_from_data_in_hand() {
+        let items = vec![
+            ListingItem {
+                category: Some("Health".to_owned()),
+                ..Default::default()
+            },
+            ListingItem {
+                category: Some("Finance".to_owned()),
+                ..Default::default()
+            },
+            ListingItem {
+                category: Some("Health".to_owned()),
+                ..Default::default()
+            },
+            ListingItem::default(),
+        ];
+        assert_eq!(
+            goal_categories(&items),
+            vec!["Health".to_owned(), "Finance".to_owned()]
+        );
+        assert!(roster_visible(&items[0], "goals", Some("Health")));
+        assert!(!roster_visible(&items[1], "goals", Some("Health")));
+        assert!(roster_visible(&items[1], "goals", None));
+        assert!(roster_visible(&items[0], "ideas", Some("Health")));
     }
 
     #[test]
