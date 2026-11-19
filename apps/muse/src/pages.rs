@@ -16,10 +16,7 @@ use adw::prelude::*;
 
 use super::app::{Chat, dispatch};
 use super::session::account_dir;
-use muse_account::{
-    ActiveGrant, ArtifactSummary, GrantItem, ListingItem, MemoryHit, Schedule, ServiceListing,
-    TaskRun,
-};
+use muse_account::{ArtifactSummary, ListingItem, Schedule, ServiceListing, TaskRun};
 
 /// What a page needs: the chat for reads, the stack to navigate, and
 /// a way back to the sign-in screen when the link goes away.
@@ -60,11 +57,9 @@ pub const PAGES: &[&str] = &[
     "tasks",
     "library",
     "feed",
-    "memory",
     "search",
     "ideas",
     "goals",
-    "policy",
     "settings",
     "localhost",
 ];
@@ -77,8 +72,6 @@ pub fn title(name: &str) -> &str {
         "tasks" => "Tasks",
         "library" => "Library",
         "feed" => "Feed",
-        "memory" => "Memory",
-        "policy" => "Policy",
         "localhost" => "Local host",
         "search" => "Search",
         "ideas" => "Ideas",
@@ -339,30 +332,6 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             list.set_widget_name("feed-list");
             inner.append(&list);
         }
-        "memory" => {
-            let search = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-            let entry = gtk4::Entry::new();
-            entry.set_widget_name("memory-query");
-            entry.set_hexpand(true);
-            entry.set_placeholder_text(Some("Search memory"));
-            search.append(&entry);
-            let go = gtk4::Button::with_label("Search");
-            go.set_widget_name("memory-go");
-            search.append(&go);
-            inner.append(&search);
-            let list = gtk4::ListBox::new();
-            list.set_widget_name("memory-list");
-            inner.append(&list);
-            let weak = ctx.chat.clone();
-            let page_weak = inner.downgrade();
-            go.connect_clicked(move |_| {
-                let Some(inner) = page_weak.upgrade() else {
-                    return;
-                };
-                let Some(chat) = weak.upgrade() else { return };
-                fill_memory(&chat, &inner);
-            });
-        }
         "search" => {
             let query = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
             let entry = gtk4::Entry::new();
@@ -457,20 +426,6 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                     open_goal_dialog(&ctx_owned, list, row);
                 });
             }
-        }
-        "policy" => {
-            let notice = gtk4::Label::new(None);
-            notice.set_widget_name("policy-notice");
-            notice.set_wrap(true);
-            notice.set_xalign(0.0);
-            notice.set_visible(false);
-            inner.append(&notice);
-            let active = gtk4::ListBox::new();
-            active.set_widget_name("policy-active");
-            inner.append(&active);
-            let list = gtk4::ListBox::new();
-            list.set_widget_name("policy-list");
-            inner.append(&list);
         }
         "library" => {
             let heading = gtk4::Label::new(Some("Library"));
@@ -1033,8 +988,6 @@ fn fill(ctx: &Ctx, name: &str) {
         "ideas" => fill_ideas(ctx, &page),
         "goals" => fill_goals(ctx, &page),
         "feed" => fill_feed(ctx, &page),
-        "memory" => fill_memory_opt(ctx, &page),
-        "policy" => fill_policy(ctx, &page),
         "settings" => fill_settings(ctx, &page),
         "localhost" => refresh_localhost(ctx, &page),
         _ => {}
@@ -4092,37 +4045,6 @@ fn feed_card(
     card.upcast()
 }
 
-/// One memory hit: the passage truncated to a readable length plus its
-/// location when the service gave one.
-pub fn memory_hit_label(hit: &MemoryHit) -> String {
-    const LIMIT: usize = 200;
-    let text: String = hit.text.chars().take(LIMIT + 1).collect();
-    let text = if text.chars().count() > LIMIT {
-        format!("{}…", text.chars().take(LIMIT).collect::<String>())
-    } else {
-        text
-    };
-    match hit.path.as_deref() {
-        Some(path) if !path.is_empty() => format!("{}\n{}", text, path),
-        _ => text,
-    }
-}
-
-/// One grant row: who holds what, with the capability count.
-pub fn grant_label(grant: &GrantItem) -> String {
-    format!(
-        "{} {} ({} {})",
-        grant.subject_kind,
-        grant.subject_id,
-        grant.capabilities.len(),
-        if grant.capabilities.len() == 1 {
-            "capability"
-        } else {
-            "capabilities"
-        }
-    )
-}
-
 /// Fill the feed page: the generating prompt card plus the units.
 /// The last good feed, kept on disk: a slow service still reads
 /// instantly on the next visit, then refreshes behind the paint.
@@ -4388,64 +4310,6 @@ fn listing_failure(list: &gtk4::ListBox, context: &str, error: &impl std::fmt::D
     label.set_wrap(true);
     label.set_xalign(0.0);
     list.append(&label);
-}
-
-/// Memory fills on demand: a visit with a query runs it, a visit
-/// without one only invites a query. Blank queries never dispatch --
-/// the service rejects them.
-fn fill_memory_opt(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(chat) = ctx.chat.upgrade() else {
-        return;
-    };
-    fill_memory(&chat, page);
-}
-
-fn fill_memory(chat: &Rc<Chat>, page: &gtk4::Box) {
-    let Some(list) = named_list(page, "memory-list") else {
-        return;
-    };
-    let query = {
-        find_widget(page.upcast_ref(), "memory-query")
-            .and_then(|widget| widget.downcast::<gtk4::Entry>().ok())
-            .map(|entry| entry.text().to_string())
-            .unwrap_or_default()
-    };
-    if query.trim().is_empty() {
-        clear_list(&list);
-        list.append(&gtk4::Label::new(Some(
-            "Type a query above and press Search.",
-        )));
-        return;
-    }
-    let ticket = match chat.page_begin() {
-        Some(ticket) => ticket,
-        None => return,
-    };
-    let Some(client) = chat.client_handle() else {
-        chat.page_accept(&ticket);
-        return;
-    };
-    dispatch(
-        chat,
-        move || client.memory_search(&query),
-        move |chat, answer| {
-            if !chat.page_accept(&ticket) {
-                return;
-            }
-            let Ok(found) = answer else { return };
-            clear_list(&list);
-            if found.hits.is_empty() {
-                list.append(&gtk4::Label::new(Some("No matches.")));
-                return;
-            }
-            for hit in &found.hits {
-                let card = gtk4::Label::new(Some(&memory_hit_label(hit)));
-                card.set_wrap(true);
-                card.set_xalign(0.0);
-                list.append(&card);
-            }
-        },
-    );
 }
 
 /// One service listing behind one list widget: ideas, goals, and any
@@ -5352,152 +5216,6 @@ fn go_chat(ctx: &Ctx) {
     }
 }
 
-/// One active grant: what it covers, in the service's own words.
-/// Only revocable rows grow a button; the service's mark decides.
-pub fn active_grant_label(grant: &ActiveGrant) -> String {
-    let mut meta: Vec<&str> = [
-        &grant.kind,
-        &grant.mode,
-        &grant.policy_subject,
-        &grant.lifetime,
-    ]
-    .into_iter()
-    .flatten()
-    .map(String::as_str)
-    .filter(|text| !text.is_empty())
-    .collect();
-    if !grant.revocable {
-        meta.push("service-marked irrevocable");
-    }
-    if meta.is_empty() {
-        grant.permission_id.clone()
-    } else {
-        format!("{}\n{}", grant.permission_id, meta.join(" \u{00b7} "))
-    }
-}
-
-/// The revoke outcome line: acceptance removes the row locally and the
-/// refill proves it; anything else names the failure and warns the
-/// grant may still be in force.
-pub fn revoke_notice(accepted: bool) -> &'static str {
-    if accepted {
-        "The service accepted the revocation. Reading the list again to confirm the grant is gone."
-    } else {
-        "The service did not accept the revocation. The grant is still in force."
-    }
-}
-
-/// Fill the policy page: revocable active grants with one-press
-/// Revoke buttons, plus the read-only issued inventory. A revocation
-/// holds the shared page slot, so a second press waits; the refill
-/// after an accepted revoke proves the grant is gone.
-fn fill_policy(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(active) = named_list(page, "policy-active") else {
-        return;
-    };
-    let Some(list) = named_list(page, "policy-list") else {
-        return;
-    };
-    let Some(chat) = ctx.chat.upgrade() else {
-        return;
-    };
-    let ticket = match chat.page_begin() {
-        Some(ticket) => ticket,
-        None => return,
-    };
-    let Some(client) = chat.client_handle() else {
-        chat.page_accept(&ticket);
-        return;
-    };
-    let ctx = ctx.clone();
-    let page_weak = page.downgrade();
-    dispatch(
-        &chat,
-        move || (client.permissions(), client.grants(50, None, false)),
-        move |chat, (permissions, inventory)| {
-            if !chat.page_accept(&ticket) {
-                return;
-            }
-            clear_list(&active);
-            if let Ok(grants) = permissions {
-                for grant in &grants.grants {
-                    let row = gtk4::ListBoxRow::new();
-                    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-                    let label = gtk4::Label::new(Some(&active_grant_label(grant)));
-                    label.set_hexpand(true);
-                    label.set_xalign(0.0);
-                    label.set_wrap(true);
-                    line.append(&label);
-                    if grant.revocable {
-                        let revoke = gtk4::Button::with_label("Revoke");
-                        let id = grant.permission_id.clone();
-                        let ctx = ctx.clone();
-                        let page_weak = page_weak.clone();
-                        revoke.connect_clicked(move |_| {
-                            let Some(page) = page_weak.upgrade() else {
-                                return;
-                            };
-                            let Some(chat) = ctx.chat.upgrade() else {
-                                return;
-                            };
-                            do_revoke(&ctx, &chat, &page, &id);
-                        });
-                        line.append(&revoke);
-                    }
-                    row.set_child(Some(&line));
-                    active.append(&row);
-                }
-            }
-            clear_list(&list);
-            if let Ok(inventory) = inventory {
-                for grant in &inventory.grants {
-                    list.append(&gtk4::Label::new(Some(&grant_label(grant))));
-                }
-            }
-        },
-    );
-}
-
-/// Send exactly the revocation the reader pressed, once. Acceptance
-/// removes nothing by itself: the refill re-reads the list, and a
-/// grant still in force comes back in plain sight.
-fn do_revoke(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box, permission_id: &str) {
-    let ticket = match chat.page_begin() {
-        Some(ticket) => ticket,
-        None => return,
-    };
-    let Some(client) = chat.client_handle() else {
-        chat.page_accept(&ticket);
-        return;
-    };
-    let id = permission_id.to_owned();
-    let ctx = ctx.clone();
-    let page_strong: gtk4::Box = page.clone();
-    dispatch(
-        chat,
-        move || client.revoke(&id),
-        move |chat, answer| {
-            if !chat.page_accept(&ticket) {
-                return;
-            }
-            let text = match &answer {
-                Ok(answer) => revoke_notice(answer.accepted).to_owned(),
-                Err(error) => format!(
-                    "Revocation failed: {error}. The grant may still be in force; read the list again instead of pressing twice."
-                ),
-            };
-            if let Some(notice) = find_widget(page_strong.upcast_ref(), "policy-notice")
-                .and_then(|widget| widget.downcast::<gtk4::Label>().ok())
-            {
-                notice.set_text(&text);
-                notice.set_visible(true);
-            }
-            let _ = &ctx;
-            fill_policy(&ctx, &page_strong);
-        },
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5517,6 +5235,15 @@ mod tests {
         assert!(needs_select(None, 2));
         assert!(needs_select(Some(1), 2));
         assert!(!needs_select(Some(2), 2));
+    }
+
+    #[test]
+    fn cut_pages_stay_cut() {
+        // The owner's call: Memory and Policy have no web counterpart,
+        // so they are not pages. Re-adding one must be a decision,
+        // never an accident.
+        assert!(!PAGES.contains(&"memory"));
+        assert!(!PAGES.contains(&"policy"));
     }
 
     #[test]
@@ -5670,7 +5397,6 @@ mod tests {
         assert_eq!(rail_glyph("goals"), Some("tasks"));
         assert_eq!(rail_glyph("library"), Some("shapes"));
         assert_eq!(rail_glyph("tasks"), None);
-        assert_eq!(rail_glyph("policy"), None);
         assert_eq!(rail_glyph("settings"), None);
     }
 
@@ -5968,74 +5694,5 @@ mod tests {
         let snippet = idea_snippet(Some(&long));
         assert!(snippet.ends_with("…"));
         assert!(snippet.chars().count() <= 241);
-    }
-
-    #[test]
-    fn memory_hits_truncate_long_passages_and_name_places() {
-        let long = MemoryHit {
-            memory_uri: "memory://x".to_owned(),
-            text: "y".repeat(300),
-            path: Some("/notes".to_owned()),
-            ..Default::default()
-        };
-        let label = memory_hit_label(&long);
-        assert!(label.ends_with("\n/notes"));
-        assert!(label.chars().count() < 300);
-        let short = MemoryHit {
-            memory_uri: "memory://x".to_owned(),
-            text: "hi".to_owned(),
-            ..Default::default()
-        };
-        assert_eq!(memory_hit_label(&short), "hi");
-    }
-
-    #[test]
-    fn active_grants_name_coverage_and_revocability() {
-        let grant = ActiveGrant {
-            permission_id: "p-1".to_owned(),
-            kind: Some("files".to_owned()),
-            lifetime: None,
-            mode: Some("write".to_owned()),
-            policy_subject: None,
-            expires_at_ms: None,
-            revocable: true,
-            title: String::new(),
-        };
-        let label = active_grant_label(&grant);
-        assert!(label.contains("p-1") && label.contains("files"));
-        assert!(!label.contains("irrevocable"));
-        let locked = ActiveGrant {
-            revocable: false,
-            ..grant
-        };
-        assert!(active_grant_label(&locked).contains("service-marked irrevocable"));
-    }
-
-    #[test]
-    fn revoke_outcomes_name_acceptance_or_warn_plainly() {
-        assert!(revoke_notice(true).contains("accepted"));
-        assert!(revoke_notice(false).contains("still in force"));
-    }
-
-    #[test]
-    fn grant_rows_count_capabilities_with_right_plural() {
-        let one = GrantItem {
-            grant_id: "g".to_owned(),
-            subject_kind: "connector".to_owned(),
-            subject_id: "drive".to_owned(),
-            capabilities: vec!["read".to_owned()],
-            revision: None,
-            not_before_ms: None,
-            expires_at_ms: None,
-            revoked_at_ms: None,
-            provenance: None,
-            created_at_ms: None,
-        };
-        assert_eq!(grant_label(&one), "connector drive (1 capability)");
-        let many = GrantItem {
-            capabilities: vec!["a".to_owned(), "b".to_owned()],
-            ..one
-        };
-        assert_eq!(grant_label(&many), "connector drive (2 capabilities)");
     }
 }
