@@ -315,7 +315,7 @@ fn show_main(split: &adw::OverlaySplitView) {
     // Goals, shapes open Library.
     fn rail_button(icon: &str, tooltip: &str) -> gtk4::Button {
         let image = gtk4::Image::from_resource(&format!("/org/kythos/MuseLinux/icons/{icon}.svg"));
-        image.set_pixel_size(26);
+        image.set_pixel_size(20);
         let button = gtk4::Button::new();
         button.set_child(Some(&image));
         button.add_css_class("muse-rail-button");

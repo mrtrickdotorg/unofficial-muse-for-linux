@@ -287,7 +287,7 @@ impl Chat {
         panel.add_css_class("muse-panel");
         panel.set_size_request(280, -1);
         panel.set_margin_start(8);
-        panel.set_margin_end(12);
+        panel.set_margin_end(0);
         panel.set_margin_top(12);
         panel.set_margin_bottom(12);
         let avatar = gtk4::Label::new(Some("✦"));
@@ -535,6 +535,10 @@ impl Chat {
         // on the left, the profile-and-tasks panel on the right.
         let left = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         left.set_hexpand(true);
+        // The column reads as one surface with the transcript: the
+        // theme's view color behind everything, never a darker frame
+        // around a lighter strip.
+        left.add_css_class("muse-chat-column");
         left.append(&chat.header);
         left.append(&chat.older_button);
         // The web's transcript is a centered column, never full-bleed:
@@ -545,6 +549,41 @@ impl Chat {
         left.append(&clamp);
         left.append(&chat.notice);
         left.append(chat.composer_row.widget());
+        // Scrolling anywhere over the middle column moves the
+        // transcript: the clamp's side margins sit outside the scrolled
+        // viewport, so without this a wheel over the margins does
+        // nothing. Events the transcript itself can take are left
+        // alone — applying here too would double every notch — and
+        // only the dead margins forward.
+        {
+            let scroll =
+                gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+            scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+            let left_weak = left.downgrade();
+            let scrolled_weak = chat.scrolled.downgrade();
+            scroll.connect_scroll(move |controller, _dx, dy| {
+                use gtk4::glib::Propagation;
+                let (Some(left), Some(scrolled)) = (left_weak.upgrade(), scrolled_weak.upgrade())
+                else {
+                    return Propagation::Proceed;
+                };
+                if let Some(event) = controller.current_event()
+                    && let Some((x, y)) = event.position()
+                    && let Some(target) = left.pick(x, y, gtk4::PickFlags::DEFAULT)
+                    && (target == scrolled.clone().upcast::<gtk4::Widget>()
+                        || target.is_ancestor(&scrolled))
+                {
+                    return Propagation::Proceed;
+                }
+                let adjustment = scrolled.vadjustment();
+                let max = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+                let step = adjustment.step_increment().max(1.0);
+                adjustment
+                    .set_value((adjustment.value() + dy * step).clamp(adjustment.lower(), max));
+                Propagation::Stop
+            });
+            left.add_controller(scroll);
+        }
         // The divider between transcript and panel drags: the panel
         // opens at 300px and then holds wherever the reader puts it.
         let split = gtk4::Paned::new(gtk4::Orientation::Horizontal);

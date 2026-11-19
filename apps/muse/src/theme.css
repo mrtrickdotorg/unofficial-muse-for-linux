@@ -32,6 +32,13 @@ textview placeholder {
     background-color: transparent;
 }
 
+/* The middle column reads as one surface with the transcript: the
+ * view color behind header, margins, transcript and notice alike,
+ * never a darker frame around a lighter strip. */
+.muse-chat-column {
+    background-color: @view_bg_color;
+}
+
 /* The reader's words: solid blue pill, white text, right side. */
 .muse-connected {
     color: #4ade80;
@@ -230,8 +237,8 @@ textview placeholder {
 
 .muse-rail-button {
     border-radius: 9999px;
-    min-width: 44px;
-    min-height: 44px;
+    min-width: 36px;
+    min-height: 36px;
     background: transparent;
     border-color: transparent;
     color: #e4e6eb;
