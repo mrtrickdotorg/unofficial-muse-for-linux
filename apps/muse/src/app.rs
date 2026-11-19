@@ -224,6 +224,7 @@ pub struct Chat {
     send_note: RefCell<Option<String>>,
     armed_delete: RefCell<Option<String>>,
     painted: RefCell<Option<(usize, Option<String>, u64)>>,
+    follow_after_render: RefCell<bool>,
     thread: RefCell<Option<String>>,
     model_combo: gtk4::ComboBoxText,
     recording: RefCell<Option<super::voice::Recording>>,
@@ -442,6 +443,7 @@ impl Chat {
             armed_delete: RefCell::new(None),
             send_note: RefCell::new(None),
             painted: RefCell::new(None),
+            follow_after_render: RefCell::new(false),
             thread: RefCell::new(None),
             model_combo,
             recording: RefCell::new(None),
@@ -1383,13 +1385,32 @@ impl Chat {
         adjustment.value() + adjustment.page_size() >= adjustment.upper() - 2.0
     }
 
+    /// A navigation click is an explicit request to read the newest turn,
+    /// unlike a background repaint while the reader is back-scrolling.
+    pub fn scroll_to_latest(self: &Rc<Self>) {
+        *self.follow_after_render.borrow_mut() = true;
+        self.defer_scroll_to_bottom();
+    }
+
+    fn defer_scroll_to_bottom(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        gtk4::glib::idle_add_local_once(move || {
+            if let Some(chat) = weak.upgrade() {
+                let adjustment = chat.scrolled.vadjustment();
+                adjustment.set_value(
+                    (adjustment.upper() - adjustment.page_size()).max(adjustment.lower()),
+                );
+            }
+        });
+    }
+
     /// Rebuild the transcript rows from the held history. The single
     /// place completions repaint, so option presses and attachments
     /// can never disagree with the rows. Follows to the newest row
-    /// when the reader was already there; opening a thread lands at
-    /// the bottom because a cleared transcript starts at the bottom.
+    /// when the reader was already there; explicit navigation forces
+    /// the new thread to the bottom after GTK updates the layout.
     fn render(self: &Rc<Self>) {
-        let follow = self.at_bottom();
+        let follow = self.follow_after_render.replace(false) || self.at_bottom();
         let fingerprint = self.session.borrow().history_fingerprint();
         // Unchanged history means identical rows: skip the full
         // teardown and rebuild. The labels below are cheap; the
@@ -1427,9 +1448,7 @@ impl Chat {
         self.refresh_title();
         self.refresh_delete_arm();
         if follow {
-            let adjustment = self.scrolled.vadjustment();
-            adjustment
-                .set_value((adjustment.upper() - adjustment.page_size()).max(adjustment.lower()));
+            self.defer_scroll_to_bottom();
         }
     }
 
@@ -1564,6 +1583,7 @@ impl Chat {
     /// rows in one transcript.
     pub fn switch_thread(self: &Rc<Self>, thread: Option<String>) {
         *self.thread.borrow_mut() = thread;
+        *self.follow_after_render.borrow_mut() = true;
         self.session.borrow_mut().history.clear();
         self.session.borrow_mut().latest_quota = None;
         *self.older_exhausted.borrow_mut() = false;
@@ -2129,6 +2149,92 @@ fn run_decision(chat: &Rc<Chat>, approval_id: &str, decision: muse_account::Deci
             chat.refresh_identity_and_approvals();
         },
     );
+}
+
+#[cfg(test)]
+pub(super) fn verify_chat_scroll_navigation() {
+    let transcript = gtk4::ListBox::new();
+    let chat = Chat::build(transcript, ComposerRow::build());
+    let window = gtk4::Window::new();
+    window.set_default_size(500, 320);
+    window.set_child(Some(&chat.scrolled));
+    window.present();
+
+    let history = |prefix: &str| {
+        (0..80)
+            .map(|index| muse_account::HistoryMessage {
+                message_id: format!("{prefix}-{index}"),
+                seq: index,
+                role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                text: format!(
+                    "{prefix} message {index}: {}",
+                    "long transcript line ".repeat(8)
+                ),
+                timestamp: Some("2026-11-19T12:00:00Z".to_owned()),
+                status: None,
+                options: Vec::new(),
+                selected_option: None,
+                attachments: Vec::new(),
+            })
+            .collect::<Vec<_>>()
+    };
+    chat.session.borrow_mut().history = history("old");
+    chat.render();
+    pump_gtk(150);
+    let adjustment = chat.scrolled.vadjustment();
+    assert!(adjustment.upper() > adjustment.page_size() + 100.0);
+    adjustment.set_value(adjustment.lower());
+    pump_gtk(50);
+    let ctx = crate::pages::Ctx {
+        chat: Rc::downgrade(&chat),
+        stack: gtk4::Stack::new(),
+        sidebar: gtk4::ListBox::new(),
+        history: gtk4::ListBox::new(),
+        profile_name: gtk4::Label::new(None),
+        rail: Vec::new(),
+        show_signin: Rc::new(|| {}),
+        updates: Rc::new(RefCell::new(crate::update::UpdateCheck::default())),
+    };
+    ctx.stack.add_named(
+        &gtk4::Box::new(gtk4::Orientation::Vertical, 0),
+        Some("chat"),
+    );
+    crate::pages::show(&ctx, "chat");
+    pump_gtk(50);
+    assert!(
+        adjustment.value() + adjustment.page_size() >= adjustment.upper() - 2.0,
+        "main chat navigation should show newest message",
+    );
+    adjustment.set_value(adjustment.lower());
+    pump_gtk(50);
+
+    // A fast history response can replace the cleared list before GTK
+    // updates its old scroll bounds; this matches the switch/render path.
+    chat.switch_thread(Some("next-thread".to_owned()));
+    chat.session.borrow_mut().history = history("new");
+    chat.render();
+    pump_gtk(150);
+
+    assert!(
+        adjustment.value() + adjustment.page_size() >= adjustment.upper() - 2.0,
+        "thread switch should show newest message: value={}, page={}, upper={}",
+        adjustment.value(),
+        adjustment.page_size(),
+        adjustment.upper(),
+    );
+    window.close();
+}
+
+#[cfg(test)]
+fn pump_gtk(milliseconds: u64) {
+    let context = gtk4::glib::MainContext::default();
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(milliseconds);
+    while std::time::Instant::now() < until {
+        while context.pending() {
+            context.iteration(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 #[cfg(test)]
