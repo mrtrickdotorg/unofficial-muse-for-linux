@@ -1548,6 +1548,19 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
     export.add_css_class("flat");
     export.set_valign(gtk4::Align::Start);
     line.append(&export);
+    // The listing names which spaces may be shared; the service
+    // decides anyway, so a row without the bit offers no button.
+    // "cloudflare" is the share_type the service named itself on
+    // a wrong value, sent on both presses of the round-trip.
+    let share: Option<gtk4::Button> = artifact.can_share.then(|| {
+        let share = gtk4::Button::with_label("Share");
+        share.add_css_class("flat");
+        share.set_valign(gtk4::Align::Start);
+        share
+    });
+    if let Some(share) = share.as_ref() {
+        line.append(share);
+    }
     let unshare = gtk4::Button::with_label("Unshare");
     unshare.add_css_class("flat");
     unshare.add_css_class("muse-danger");
@@ -1585,6 +1598,49 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
                         }
                         Err(error) => {
                             line_for_done.append(&card_note(&format!("Export failed: {error}")));
+                        }
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    if let Some(share) = share.clone() {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let slug_inner = slug.clone();
+        share.connect_clicked(move |_| {
+            let Some(slug) = slug_inner.clone() else {
+                line_inner.append(&card_note("This space carries no handle."));
+                return;
+            };
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let line_for_done = line_inner.clone();
+            let ctx_for_done = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.space_share(&slug, "cloudflare", None),
+                move |chat, answer| {
+                    match answer {
+                        Ok(shared) if shared.accepted && shared.url.is_some() => {
+                            line_for_done.append(&card_note(&format!(
+                                "Published: {}",
+                                shared.url.as_deref().unwrap_or("")
+                            )));
+                        }
+                        Ok(shared) if shared.accepted && shared.needs_disclosure => {
+                            show_share_confirm_dialog(&line_for_done, &ctx_for_done, &shared);
+                        }
+                        _ => {
+                            line_for_done.append(&card_note(
+                                "The service did not share it. Nothing changed.",
+                            ));
                         }
                     }
                     let _ = chat;
@@ -1678,6 +1734,107 @@ fn show_export_dialog(line: &gtk4::Box, name: &str, exported: &muse_account::Spa
         let window = window.clone();
         close.connect_clicked(move |_| {
             window.close();
+        });
+    }
+    window.present();
+}
+
+/// The Publish round-trip behind a space row's Share button: the
+/// service answered the first press with the disclosure the reader
+/// must accept instead of a link. The summary and flag names are
+/// the service's own words about what publishing exposes; Publish
+/// hands the confirmation object back verbatim and Cancel changes
+/// nothing. The token inside is never display text.
+fn show_share_confirm_dialog(line: &gtk4::Box, ctx: &Ctx, shared: &muse_account::SpaceShareAnswer) {
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(480, -1);
+    window.set_title(Some(&format!("Share {}", shared.slug)));
+    if let Some(root) = line
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok())
+    {
+        window.set_transient_for(Some(&root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let head = gtk4::Label::new(Some("Before publishing, review what becomes public:"));
+    head.set_xalign(0.0);
+    head.add_css_class("title-4");
+    body.append(&head);
+    if let Some(summary) = shared.disclosure_summary.as_deref() {
+        let words = gtk4::Label::new(Some(summary));
+        words.set_wrap(true);
+        words.set_xalign(0.0);
+        body.append(&words);
+    }
+    for flag in shared.flag_names() {
+        let item = gtk4::Label::new(Some(&format!("\u{2022} {flag}")));
+        item.set_xalign(0.0);
+        item.add_css_class("dim-label");
+        body.append(&item);
+    }
+    let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let publish = gtk4::Button::with_label("Publish");
+    publish.add_css_class("muse-cta");
+    let cancel = gtk4::Button::with_label("Cancel");
+    actions.append(&publish);
+    actions.append(&cancel);
+    body.append(&actions);
+    window.set_child(Some(&body));
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| {
+            window.close();
+        });
+    }
+    {
+        let window = window.clone();
+        let line_for_done = line.clone();
+        let ctx = ctx.clone();
+        let slug = shared.slug.clone();
+        let share_type = shared
+            .share_type
+            .clone()
+            .unwrap_or_else(|| "cloudflare".to_owned());
+        let confirmation = shared.disclosure_confirmation.clone();
+        publish.connect_clicked(move |_| {
+            let slug = slug.clone();
+            let share_type = share_type.clone();
+            let confirmation = confirmation.clone();
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_for_done.append(&card_note("Link your account first."));
+                return;
+            };
+            let window_for_done = window.clone();
+            let line_for_done = line_for_done.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.space_share(&slug, &share_type, confirmation.clone()),
+                move |chat, answer| {
+                    window_for_done.close();
+                    match answer {
+                        Ok(shared) if shared.accepted && shared.url.is_some() => {
+                            line_for_done.append(&card_note(&format!(
+                                "Published: {}",
+                                shared.url.as_deref().unwrap_or("")
+                            )));
+                        }
+                        _ => {
+                            line_for_done.append(&card_note(
+                                "The service did not share it. Nothing changed.",
+                            ));
+                        }
+                    }
+                    let _ = chat;
+                },
+            );
         });
     }
     window.present();

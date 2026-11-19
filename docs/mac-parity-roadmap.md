@@ -67,7 +67,21 @@ with `fs.delete` and a 404 on the stat after; nothing lingers).
 Chat ❤ (`reactions.toggle` with `{message_id, emoji}`, a ❤ button
 beside Copy on assistant rows, the answer's state reported as
 recorded vs removed, verified on then off through the shipped
-dispatch with net zero). An earlier connection-gate bug — the data pages' shared "verified"
+dispatch with net zero).
+Space Share (Nov 19, 2026): a Share button on Library space rows
+the listing marks `can_share`, dispatching POST
+`/spaces/share/{slug}` with `{share_type: "cloudflare",
+require_disclosure_confirmation}` — the web dialog's own call,
+mined from the 12.1 bundle, with the service naming the expected
+share_type itself on a wrong value. A link answer publishes and
+names the URL; a disclosure answer opens the Publish round-trip
+(confirmation handed back verbatim, never displayed). Only the
+validation gate and the refusal path are live-verified: none of
+the account's three spaces has a built source directory, so the
+service answers every publish with `space_unavailable`, and the
+row says so instead of claiming a link. `artifacts.share` stays
+unwired: the current web never calls it (no hits in the shipped
+bundles). An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:
 the flag now follows what a reply actually proves about the account.
 

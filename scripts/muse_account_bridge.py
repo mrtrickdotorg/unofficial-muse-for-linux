@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "message_react", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "message_react", "space_share", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -714,6 +714,7 @@ def validate_request(request):
                "goals_tracking": set(),
                "idea_detail": {"idea_id"},
                "mark_seen": {"thread_id"},
+               "space_share": {"slug", "share_type", "disclosure_confirmation"},
                "space_unshare": {"slug"},
                "space_export": {"slug"},
                "memory_search": {"query"},
@@ -1124,7 +1125,7 @@ def validate_request(request):
             if (not isinstance(uri, str) or not uri.startswith("memory://")
                     or not 1 <= len(uri) <= 2048 or "\x00" in uri):
                 raise BridgeFailure("invalid_request")
-    if op in ("space_unshare", "space_export"):
+    if op in ("space_share", "space_unshare", "space_export"):
         # The slug is the service's own, taken from the Library
         # listing's open target; it is one path segment, so a
         # slash would be aiming the route somewhere else.
@@ -1132,6 +1133,31 @@ def validate_request(request):
         if (not isinstance(slug, str) or not 1 <= len(slug) <= 256
                 or "\x00" in slug or "/" in slug):
             raise BridgeFailure("invalid_request")
+    if op == "space_share":
+        # The web's own share dialog always names a share_type
+        # ("cloudflare" at the call site); the service enforces
+        # the value itself, so shape only is checked here.
+        share_type = request.get("share_type")
+        if (not isinstance(share_type, str)
+                or not 1 <= len(share_type.strip()) <= 64
+                or "\x00" in share_type):
+            raise BridgeFailure("invalid_request")
+        confirmation = request.get("disclosure_confirmation")
+        if confirmation is not None:
+            # The round-trip object the service issued: forwarded
+            # back verbatim on Publish, never displayed. The token
+            # is the web's own 64-hex shape; anything else is
+            # refused before it can ride.
+            token = confirmation.get("token") if isinstance(
+                confirmation, dict) else None
+            try:
+                compact = json.dumps(confirmation)
+            except (TypeError, ValueError):
+                raise BridgeFailure("invalid_request")
+            if (not isinstance(token, str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", token)
+                    or len(compact) > 4096):
+                raise BridgeFailure("invalid_request")
     if op == "artifacts" and "cursor" in request:
         # A paging request hands back the opaque cursor the last
         # page issued, plus the references already shown so the
@@ -3436,6 +3462,93 @@ def _ensure_goals_create_route():
                            "http": "POST", "path": "/goals"})
 
 
+# The disclosure flags the web's share dialog reads. Fixed names
+# per the 12.1 bundle; anything else the service sends is dropped
+# rather than shown.
+SHARE_DISCLOSURE_FLAGS = ("contains_personal_information",
+                          "contains_chat_history",
+                          "contains_user_shared_media",
+                          "contains_secrets_or_credentials")
+
+
+def _space_share_answer(payload, slug):
+    """Shape one spaces.share answer into what the Share control needs.
+
+    The service answers {ok, url?, share_type?, disclosure_confirmation?}.
+    A present url is the published link; a disclosure_confirmation
+    (token plus the disclosure the reader must accept) means the
+    service wants an explicit Publish round-trip first, exactly as
+    the web's dialog does. The token rides back opaquely on the
+    confirm press and is never display text.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    url = payload.get("url")
+    url_text = (url if isinstance(url, str) and url.strip()
+                and len(url) <= 2000 else None)
+    share_type = payload.get("share_type")
+    share_type_text = (share_type if isinstance(share_type, str)
+                       and share_type.strip()
+                       and len(share_type) <= 64 else None)
+    raw_dc = payload.get("disclosure_confirmation")
+    needs_disclosure = (isinstance(raw_dc, dict)
+                        and isinstance(raw_dc.get("token"), str)
+                        and re.fullmatch(r"[a-f0-9]{64}",
+                                         raw_dc["token"]) is not None)
+    summary = None
+    flags = []
+    confirmation = None
+    if needs_disclosure:
+        text = raw_dc.get("summary")
+        summary = (text if isinstance(text, str) and text.strip()
+                   and len(text) <= 2000 else None)
+        seen = raw_dc.get("disclosure")
+        if isinstance(seen, dict):
+            flags = [name for name in SHARE_DISCLOSURE_FLAGS
+                     if seen.get(name) is True]
+        try:
+            compact = json.dumps(raw_dc)
+        except (TypeError, ValueError):
+            raise BridgeFailure("protocol_error")
+        if len(compact) > 4096:
+            raise BridgeFailure("protocol_error")
+        confirmation = raw_dc
+    accepted = (payload.get("ok") is True
+                and (url_text is not None or needs_disclosure))
+    if payload.get("ok") is True and not accepted:
+        raise BridgeFailure("protocol_error")
+    return {"slug": slug, "accepted": accepted, "url": url_text,
+            "share_type": share_type_text,
+            "needs_disclosure": needs_disclosure, "disclosure_summary": summary,
+            "disclosure_flags": flags, "disclosure_confirmation": confirmation}
+
+
+def _ensure_spaces_share_route():
+    """Teach this process the space-sharing route, once.
+
+    The pinned route table names the share family's reads
+    (review, status), its fix POST and the unshare DELETE, but
+    not the publish POST itself. The entry below is not
+    guessed: the web's own share dialog calls
+    `spaces.share` with {slug, share_type,
+    require_disclosure_confirmation, disclosure_confirmation?}
+    (shareType "cloudflare" at the call site), and the service
+    answered a wrong share_type with a 400 naming the expected
+    "cloudflare" -- the route resolves and the body keys land.
+    `setdefault` keeps this a no-op the day the pin records
+    the route itself.
+    """
+    try:
+        import muse as pinned
+    except (ImportError, OSError):
+        return
+    routes = getattr(pinned, "ROUTES", None)
+    if isinstance(routes, dict):
+        routes.setdefault("spaces.share",
+                          {"method": "spaces.share",
+                           "http": "POST", "path": "/spaces/share/{slug}"})
+
+
 def _idea_detail_answer(payload):
     """Shape one api.idea-cards.detail answer into what the dialog
     needs: the content block and the included items.
@@ -3981,6 +4094,33 @@ class Adapter:
                     path_params={"slug": request["slug"]},
                 )
             return {"slug": request["slug"], "accepted": True}
+        if request["op"] == "space_share":
+            # One press publishes or continues the disclosure
+            # round-trip, never retried here. The body is the
+            # live-probed shape: the web's dialog calls
+            # spaces.share with {slug, share_type,
+            # require_disclosure_confirmation} first and re-calls
+            # with {disclosure_confirmation} on Publish; the
+            # service named the expected "cloudflare" share_type
+            # itself on a wrong value. The answer carries the
+            # published link or the disclosure the reader must
+            # accept; a publish the service cannot serve (no
+            # built source on the space) fails here, and the row
+            # says so instead of claiming a link.
+            _ensure_spaces_share_route()
+            body = {"share_type": request["share_type"],
+                    "require_disclosure_confirmation": True}
+            if request.get("disclosure_confirmation") is not None:
+                body["disclosure_confirmation"] = request[
+                    "disclosure_confirmation"]
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "spaces.share",
+                    body=body,
+                    path_params={"slug": request["slug"]},
+                    timeout=20,
+                )
+            return _space_share_answer(answer, request["slug"])
         if request["op"] == "space_export":
             # A read: the space's own HTML export, for an in-app
             # preview. The route is recorded as a binary GET, so
