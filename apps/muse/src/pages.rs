@@ -5491,7 +5491,10 @@ mod tests {
             "Water plants · due now · pending · notified"
         );
         assert_eq!(
-            reminder_row_text(&task(now + 7200, muse_tasks::TaskStatus::Paused, false), now),
+            reminder_row_text(
+                &task(now + 7200, muse_tasks::TaskStatus::Paused, false),
+                now
+            ),
             "Water plants · in 2h · paused"
         );
     }
