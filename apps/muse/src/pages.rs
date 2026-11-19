@@ -1200,6 +1200,12 @@ thread_local! {
     static FEED_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+// Fill generation for search: each visit takes the next number so
+// the behind-the-paint hero pass touches only its own rows.
+thread_local! {
+    static SEARCH_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Paint one idea row: icon, bold title, clamped description. The
 /// row's name carries its index; a press opens the detail dialog.
 fn idea_row(item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
@@ -5000,6 +5006,63 @@ fn paint_roster(
     }
 }
 
+/// The cached file for the first screenful of roster heroes: disk
+/// only, never the network. The paint below reads this, so rows
+/// appear the moment the listing lands; missing heroes warm up
+/// behind the paint instead of holding it.
+fn roster_cached_heroes(items: &[ListingItem]) -> Vec<Option<std::path::PathBuf>> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            if index < super::images::HERO_LANES {
+                item.image_url
+                    .as_deref()
+                    .and_then(super::images::fetch_hero_cached)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Warm a painted roster's dialog store behind the paint: parallel
+/// downloads, no page ticket held, so pressing elsewhere still
+/// fills at once. The store update lands the artwork for dialogs
+/// opened after it; the rows themselves never wait.
+fn warm_dialog_heroes(
+    chat: &Rc<Chat>,
+    store_page: &str,
+    items: &[ListingItem],
+    heroes: &[Option<std::path::PathBuf>],
+) {
+    let missing: Vec<(usize, String)> = items
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index < super::images::HERO_LANES && heroes[*index].is_none())
+        .filter_map(|(index, item)| item.image_url.clone().map(|url| (index, url)))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let store_page = store_page.to_owned();
+    super::app::dispatch(
+        chat,
+        move || super::images::fetch_heroes(missing),
+        move |_chat, landed| {
+            IDEA_STORE.with(|store| {
+                if let Some(held) = store.borrow_mut().get_mut(&store_page) {
+                    for (index, path) in landed {
+                        if let Some(slot) = held.heroes.get_mut(index) {
+                            *slot = path;
+                        }
+                    }
+                }
+            });
+        },
+    );
+}
+
 fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, fetch: F)
 where
     F: FnOnce(
@@ -5025,36 +5088,28 @@ where
         &chat,
         move || {
             let listing = fetch(&client)?;
-            // Artwork prefetches here, off the main thread: the first
-            // few units with a hero URL get their cached files, and the
-            // painter below only ever reads the disk.
-            let heroes: Vec<Option<std::path::PathBuf>> = listing
-                .items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    if index < 8 {
-                        item.image_url
-                            .as_deref()
-                            .and_then(super::images::fetch_hero)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // The paint reads cache only: rows appear the moment the
+            // listing lands, and the network never holds them.
+            let heroes = roster_cached_heroes(&listing.items);
             Ok::<_, muse_account::AccountError>((listing, heroes))
         },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok((listing, heroes)) = answer else {
-                return;
+            // A failed listing read says so on the page: a blank list
+            // with no sentence is indistinguishable from an empty one.
+            let page = list.widget_name().to_string();
+            let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
+            let (listing, heroes) = match answer {
+                Ok(pair) => pair,
+                Err(error) => {
+                    listing_failure(&list, title(&page), &error);
+                    return;
+                }
             };
             // The dialog reads its unit from here: hold the listing
             // and heroes beside the rows on every fill.
-            let page = list.widget_name().to_string();
-            let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
             IDEA_STORE.with(|store| {
                 store.borrow_mut().insert(
                     page.clone(),
@@ -5065,6 +5120,7 @@ where
                 );
             });
             paint_roster(&ctx_owned, &list, &page, &listing.items, &heroes, None);
+            warm_dialog_heroes(chat, &page, &listing.items, &heroes);
         },
     );
 }
@@ -5076,27 +5132,27 @@ fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) {
     fill_service_listing(ctx, &list, |client| client.ideas());
 }
 
+/// Fill the Goals page: the roster plus the Tracking section under
+/// one page ticket. Two separate fills would race the single-flight
+/// slot — the second begin lands while the first read is still in
+/// flight, so its section never dispatches — so one worker reads
+/// both and each section paints (or reports) on its own.
 fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
     let Some(list) = named_list(page, "goals-list") else {
         return;
     };
-    fill_service_listing(ctx, &list, |client| client.goals());
-    fill_tracking(ctx, page);
-}
-
-/// Fill the Tracking section: the assistant-tracking goals, ten at
-/// a time behind the web's own "Show more" expander.
-fn fill_tracking(ctx: &Ctx, page: &gtk4::Box) {
-    let Some(list) = named_list(page, "goals-tracking-list") else {
+    let Some(tracking) = named_list(page, "goals-tracking-list") else {
+        fill_service_listing(ctx, &list, |client| client.goals());
         return;
     };
-    clear_list(&list);
+    clear_list(&tracking);
     if let Some(old) = find_widget(page.upcast_ref(), "goals-tracking-more") {
         page.remove(&old);
     }
     let Some(chat) = ctx.chat.upgrade() else {
         return;
     };
+    let ctx_owned = ctx.clone();
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
         None => return,
@@ -5105,27 +5161,59 @@ fn fill_tracking(ctx: &Ctx, page: &gtk4::Box) {
         chat.page_accept(&ticket);
         return;
     };
-    let ctx_owned = ctx.clone();
-    let list = list.clone();
     let page_owned = page.clone();
     dispatch(
         &chat,
-        move || client.goals_tracking(),
-        move |chat, answer| {
+        move || {
+            let goals = client.goals();
+            // The roster paint reads cache only: rows appear the
+            // moment the listing lands, and the network never holds
+            // them.
+            let heroes = goals
+                .as_ref()
+                .ok()
+                .map(|listing| roster_cached_heroes(&listing.items))
+                .unwrap_or_default();
+            let tracked = client.goals_tracking();
+            (goals, tracked, heroes)
+        },
+        move |chat, (goals, tracked, heroes)| {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok(listing) = answer else { return };
-            IDEA_STORE.with(|store| {
-                store.borrow_mut().insert(
-                    "goals-tracking".to_owned(),
-                    IdeaStore {
-                        items: listing.items.clone(),
-                        heroes: vec![None; listing.items.len()],
-                    },
-                );
-            });
-            paint_tracking(&ctx_owned, &list, &page_owned, &listing.items, 10);
+            match goals {
+                Err(error) => listing_failure(&list, "Goals", &error),
+                Ok(listing) => {
+                    // The dialog reads its goal from here: hold the
+                    // listing and heroes beside the rows on every fill.
+                    IDEA_STORE.with(|store| {
+                        store.borrow_mut().insert(
+                            "goals".to_owned(),
+                            IdeaStore {
+                                items: listing.items.clone(),
+                                heroes: heroes.clone(),
+                            },
+                        );
+                    });
+                    paint_roster(&ctx_owned, &list, "goals", &listing.items, &heroes, None);
+                    warm_dialog_heroes(chat, "goals", &listing.items, &heroes);
+                }
+            }
+            match tracked {
+                Err(error) => listing_failure(&tracking, "Goals tracking", &error),
+                Ok(listing) => {
+                    IDEA_STORE.with(|store| {
+                        store.borrow_mut().insert(
+                            "goals-tracking".to_owned(),
+                            IdeaStore {
+                                items: listing.items.clone(),
+                                heroes: vec![None; listing.items.len()],
+                            },
+                        );
+                    });
+                    paint_tracking(&ctx_owned, &tracking, &page_owned, &listing.items, 10);
+                }
+            }
         },
     );
 }
@@ -5205,38 +5293,41 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
         chat,
         move || {
             let found = client.search(&query)?;
-            let heroes: Vec<Option<std::path::PathBuf>> = found
-                .items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    if index < 8 {
-                        item.image_url
-                            .as_deref()
-                            .and_then(super::images::fetch_hero)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            // The paint reads cache only: rows appear the moment the
+            // results land, and the network never holds them.
+            let heroes = roster_cached_heroes(&found.items);
             Ok::<_, muse_account::AccountError>((found, heroes))
         },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok((found, heroes)) = answer else { return };
+            let (found, heroes) = match answer {
+                Ok(pair) => pair,
+                Err(error) => {
+                    listing_failure(&list, "Search", &error);
+                    return;
+                }
+            };
             clear_list(&list);
             if found.items.is_empty() {
                 list.append(&gtk4::Label::new(Some("No matches.")));
                 return;
             }
-            for (item, hero) in found.items.iter().zip(heroes.iter()) {
+            // Each visit takes a generation so the download pass below
+            // touches only its own rows.
+            let generation = SEARCH_GEN.with(|slot| {
+                let next = slot.get().wrapping_add(1);
+                slot.set(next);
+                next
+            });
+            for (index, (item, hero)) in found.items.iter().zip(heroes.iter()).enumerate() {
                 let id = item.id.clone().unwrap_or_default();
                 if id.is_empty() {
                     continue;
                 }
                 let open = gtk4::Button::new();
+                open.set_widget_name(&format!("search-row:{generation}:{index}"));
                 open.set_child(Some(&listing_row(item, hero.as_deref())));
                 open.set_has_frame(false);
                 let ctx = ctx.clone();
@@ -5247,6 +5338,50 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
                     go_chat(&ctx);
                 });
                 list.append(&open);
+            }
+            // The network fills the first screenful behind the paint:
+            // no page ticket is held while downloads run, so pressing
+            // elsewhere still fills at once.
+            let missing: Vec<(usize, String)> = found
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index < super::images::HERO_LANES && heroes[*index].is_none())
+                .filter_map(|(index, item)| item.image_url.clone().map(|url| (index, url)))
+                .collect();
+            if !missing.is_empty() {
+                let items = found.items.clone();
+                let list_weak = list.downgrade();
+                super::app::dispatch(
+                    chat,
+                    move || super::images::fetch_heroes(missing),
+                    move |_chat, landed| {
+                        let Some(list) = list_weak.upgrade() else {
+                            return;
+                        };
+                        for (index, path) in landed {
+                            let Some(path) = path else { continue };
+                            let Some(item) = items.get(index) else {
+                                continue;
+                            };
+                            // Framed rows render live markup, never a
+                            // hero picture: leave their frame alone.
+                            if item
+                                .widget_html
+                                .as_deref()
+                                .is_some_and(|html| !html.is_empty())
+                            {
+                                continue;
+                            }
+                            let name = format!("search-row:{generation}:{index}");
+                            if let Some(row) = find_widget(list.upcast_ref(), &name)
+                                .and_then(|widget| widget.downcast::<gtk4::Button>().ok())
+                            {
+                                row.set_child(Some(&listing_row(item, Some(&path))));
+                            }
+                        }
+                    },
+                );
             }
         },
     );
@@ -5288,6 +5423,34 @@ mod tests {
         // never an accident.
         assert!(!PAGES.contains(&"memory"));
         assert!(!PAGES.contains(&"policy"));
+    }
+
+    #[test]
+    fn roster_hero_resolution_never_blocks_the_paint() {
+        // A black hole: accepts connections, never answers. An
+        // uncached hero URL pointing here pays the full download
+        // timeout -- and the roster paint below must not wait for it.
+        let hole = std::net::TcpListener::bind("127.0.0.1:0").expect("hole");
+        let port = hole.local_addr().expect("port").port();
+        std::thread::spawn(move || {
+            for _ in hole.incoming().flatten() {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+        let item = |n: u8| ListingItem {
+            title: "t".to_owned(),
+            image_url: Some(format!("http://127.0.0.1:{port}/{n}.jpg")),
+            ..Default::default()
+        };
+        let items = [item(1), item(2)];
+        let start = std::time::Instant::now();
+        let heroes = roster_cached_heroes(&items);
+        let elapsed = start.elapsed();
+        assert!(heroes.iter().all(|hero| hero.is_none()));
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "roster paint waited {elapsed:?} on hero downloads",
+        );
     }
 
     #[test]
