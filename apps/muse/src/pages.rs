@@ -15,7 +15,7 @@ use super::local_host::Phase;
 use adw::prelude::*;
 
 use super::app::{Chat, dispatch};
-use super::session::account_dir;
+use super::session::{Op, account_dir};
 use muse_account::{ArtifactSummary, ListingItem, Schedule, ServiceListing, TaskRun};
 
 /// What a page needs: the chat for reads, the stack to navigate, and
@@ -1849,7 +1849,7 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(chat) = ctx.chat.upgrade() else {
         return true;
     };
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Tasks) {
         Some(ticket) => ticket,
         None => return false,
     };
@@ -2086,7 +2086,7 @@ fn show_reminder_dialog(page: &gtk4::Box) {
 /// Start exactly one run of a schedule: the ticket makes a double
 /// press wait, and the refill proves what actually started.
 fn run_schedule(chat: &Rc<Chat>, job_id: &str) {
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Panel) {
         Some(ticket) => ticket,
         None => return,
     };
@@ -2834,7 +2834,7 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
         return true;
     };
     let ctx_owned = ctx.clone();
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Library) {
         Some(ticket) => ticket,
         None => {
             fill_log("library", "skip-no-ticket", "");
@@ -4279,7 +4279,7 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(chat) = ctx.chat.upgrade() else {
         return true;
     };
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Feed) {
         Some(ticket) => ticket,
         None => {
             fill_log("feed", "skip-no-ticket", "");
@@ -5164,7 +5164,7 @@ fn warm_dialog_heroes(
     );
 }
 
-fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, fetch: F) -> bool
+fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, op: Op, fetch: F) -> bool
 where
     F: FnOnce(
             &muse_account::AccountClient,
@@ -5179,7 +5179,7 @@ where
     let page = list.widget_name().to_string();
     let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
     fill_log(&page, "visit", "");
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(op) {
         Some(ticket) => ticket,
         None => {
             fill_log(&page, "skip-no-ticket", "");
@@ -5249,7 +5249,7 @@ fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "ideas-list") else {
         return true;
     };
-    fill_service_listing(ctx, &list, |client| client.ideas())
+    fill_service_listing(ctx, &list, Op::Ideas, |client| client.ideas())
 }
 
 /// Fill the Goals page: the roster plus the Tracking section under
@@ -5262,7 +5262,7 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
         return true;
     };
     let Some(tracking) = named_list(page, "goals-tracking-list") else {
-        return fill_service_listing(ctx, &list, |client| client.goals());
+        return fill_service_listing(ctx, &list, Op::Goals, |client| client.goals());
     };
     clear_list(&tracking);
     if let Some(old) = find_widget(page.upcast_ref(), "goals-tracking-more") {
@@ -5273,7 +5273,7 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
     };
     let ctx_owned = ctx.clone();
     fill_log("goals", "visit", "sections=roster+tracking");
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Goals) {
         Some(ticket) => ticket,
         None => {
             fill_log("goals", "skip-no-ticket", "sections=roster+tracking");
@@ -5443,7 +5443,7 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) -> bool {
         return true;
     }
     fill_log("search", "visit", "");
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Search) {
         Some(ticket) => ticket,
         None => {
             fill_log("search", "skip-no-ticket", "");

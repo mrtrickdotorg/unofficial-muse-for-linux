@@ -1032,7 +1032,7 @@ impl Chat {
         network_default: Option<String>,
         protocols: Vec<(String, String)>,
     ) {
-        let ticket = match chat.page_begin() {
+        let ticket = match chat.page_begin(Op::Panel) {
             Some(ticket) => ticket,
             None => return,
         };
@@ -1065,7 +1065,7 @@ impl Chat {
     /// second press on the same row dispatches; the re-read proves
     /// the reset. A repaint disarms, which is the safe default.
     fn run_connector_reset(chat: &Rc<Self>, connector: &str) {
-        let ticket = match chat.page_begin() {
+        let ticket = match chat.page_begin(Op::Panel) {
             Some(ticket) => ticket,
             None => return,
         };
@@ -1569,14 +1569,18 @@ impl Chat {
         &self.local_host
     }
 
-    /// Take the shared page slot for one secondary read. A second
-    /// page pressing while the slot is held waits instead of stacking
-    /// a duplicate dispatch.
-    pub fn page_begin(&self) -> Option<super::session::Ticket> {
-        self.session.borrow_mut().try_begin(Op::Page)
+    /// Take one stream's slot for a secondary read or a panel write.
+    /// A second press on the same stream while its slot is held waits
+    /// instead of stacking a duplicate dispatch. Unrelated streams
+    /// proceed on their own tickets: the chat pump, every page fill
+    /// and every panel write run beside each other.
+    pub fn page_begin(&self, op: Op) -> Option<super::session::Ticket> {
+        self.session.borrow_mut().try_begin(op)
     }
 
-    /// Release the page slot for a completion carrying its own ticket.
+    /// Release a stream's slot for a completion carrying its own
+    /// ticket. Only the matching stream releases; a late answer from
+    /// a left page owns nothing.
     pub fn page_accept(&self, ticket: &super::session::Ticket) -> bool {
         self.session.borrow_mut().accept(ticket)
     }
@@ -2221,7 +2225,7 @@ impl Chat {
 /// wait, and the approvals refill proves what the press did instead
 /// of the answer alone.
 fn run_decision(chat: &Rc<Chat>, approval_id: &str, decision: muse_account::Decision) {
-    let ticket = match chat.page_begin() {
+    let ticket = match chat.page_begin(Op::Panel) {
         Some(ticket) => ticket,
         None => return,
     };
