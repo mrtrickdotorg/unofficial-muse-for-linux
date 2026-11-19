@@ -5006,6 +5006,49 @@ fn paint_roster(
     }
 }
 
+/// App-side page-fill diagnostics, beside the bridge's own
+/// op-timing.log in the account dir: one line per visit, skip,
+/// paint and failure, so a blank page is explainable after the
+/// fact without guessing. Counts, latencies and error codes only —
+/// titles, bodies, queries and URLs never land here. Best-effort:
+/// logging must never fail a fill.
+fn fill_log(page: &str, event: &str, detail: &str) {
+    let Some(dir) = super::session::account_dir() else {
+        return;
+    };
+    fill_log_to(&dir, page, event, detail);
+}
+
+/// The log writer with an explicit directory, so tests never touch
+/// the process environment.
+fn fill_log_to(dir: &std::path::Path, page: &str, event: &str, detail: &str) {
+    use std::io::Write;
+    const PATH: &str = "page-fill.log";
+    const CAP_BYTES: u64 = 200 * 1024;
+    const KEEP_LINES: usize = 400;
+    let path = dir.join(PATH);
+    if std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > CAP_BYTES
+        && let Ok(text) = std::fs::read_to_string(&path)
+    {
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() > KEEP_LINES {
+            let kept = lines[lines.len() - KEEP_LINES..].join("\n") + "\n";
+            let _ = std::fs::write(&path, kept);
+        }
+    }
+    let epoch_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_millis())
+        .unwrap_or(0);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{epoch_ms} page={page} event={event} {detail}");
+    }
+}
+
 /// The cached file for the first screenful of roster heroes: disk
 /// only, never the network. The paint below reads this, so rows
 /// appear the moment the listing lands; missing heroes warm up
@@ -5046,10 +5089,23 @@ fn warm_dialog_heroes(
         return;
     }
     let store_page = store_page.to_owned();
+    let log_page = store_page.clone();
+    let expect = missing.len();
     super::app::dispatch(
         chat,
-        move || super::images::fetch_heroes(missing),
-        move |_chat, landed| {
+        move || {
+            let start = Instant::now();
+            let landed = super::images::fetch_heroes(missing);
+            let warm_ms = start.elapsed().as_millis() as u64;
+            (landed, warm_ms)
+        },
+        move |_chat, (landed, warm_ms)| {
+            let warmed = landed.iter().filter(|(_, path)| path.is_some()).count();
+            fill_log(
+                &log_page,
+                "heroes-warmed",
+                &format!("expect={expect} warmed={warmed} warm_ms={warm_ms}"),
+            );
             IDEA_STORE.with(|store| {
                 if let Some(held) = store.borrow_mut().get_mut(&store_page) {
                     for (index, path) in landed {
@@ -5075,35 +5131,44 @@ where
         return;
     };
     let ctx_owned = ctx.clone();
+    let page = list.widget_name().to_string();
+    let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
+    fill_log(&page, "visit", "");
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
-        None => return,
+        None => {
+            fill_log(&page, "skip-no-ticket", "");
+            return;
+        }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
+        fill_log(&page, "no-client", "");
         return;
     };
     let list = list.clone();
     dispatch(
         &chat,
         move || {
+            let start = Instant::now();
             let listing = fetch(&client)?;
             // The paint reads cache only: rows appear the moment the
             // listing lands, and the network never holds them.
             let heroes = roster_cached_heroes(&listing.items);
-            Ok::<_, muse_account::AccountError>((listing, heroes))
+            let request_ms = start.elapsed().as_millis() as u64;
+            Ok::<_, muse_account::AccountError>((listing, heroes, request_ms))
         },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
+                fill_log(&page, "stale-answer-dropped", "");
                 return;
             }
             // A failed listing read says so on the page: a blank list
             // with no sentence is indistinguishable from an empty one.
-            let page = list.widget_name().to_string();
-            let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
-            let (listing, heroes) = match answer {
-                Ok(pair) => pair,
+            let (listing, heroes, request_ms) = match answer {
+                Ok(tuple) => tuple,
                 Err(error) => {
+                    fill_log(&page, "failed", &format!("error=\"{error}\""));
                     listing_failure(&list, title(&page), &error);
                     return;
                 }
@@ -5120,6 +5185,15 @@ where
                 );
             });
             paint_roster(&ctx_owned, &list, &page, &listing.items, &heroes, None);
+            let cached = heroes.iter().filter(|hero| hero.is_some()).count();
+            fill_log(
+                &page,
+                "painted",
+                &format!(
+                    "rows={} request_ms={request_ms} heroes_cached={cached}",
+                    listing.items.len(),
+                ),
+            );
             warm_dialog_heroes(chat, &page, &listing.items, &heroes);
         },
     );
@@ -5153,18 +5227,24 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
         return;
     };
     let ctx_owned = ctx.clone();
+    fill_log("goals", "visit", "sections=roster+tracking");
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
-        None => return,
+        None => {
+            fill_log("goals", "skip-no-ticket", "sections=roster+tracking");
+            return;
+        }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
+        fill_log("goals", "no-client", "");
         return;
     };
     let page_owned = page.clone();
     dispatch(
         &chat,
         move || {
+            let goals_start = Instant::now();
             let goals = client.goals();
             // The roster paint reads cache only: rows appear the
             // moment the listing lands, and the network never holds
@@ -5174,15 +5254,26 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
                 .ok()
                 .map(|listing| roster_cached_heroes(&listing.items))
                 .unwrap_or_default();
+            let goals_ms = goals_start.elapsed().as_millis() as u64;
+            let tracked_start = Instant::now();
             let tracked = client.goals_tracking();
-            (goals, tracked, heroes)
+            let tracked_ms = tracked_start.elapsed().as_millis() as u64;
+            (goals, tracked, heroes, goals_ms, tracked_ms)
         },
-        move |chat, (goals, tracked, heroes)| {
+        move |chat, (goals, tracked, heroes, goals_ms, tracked_ms)| {
             if !chat.page_accept(&ticket) {
+                fill_log("goals", "stale-answer-dropped", "sections=roster+tracking");
                 return;
             }
             match goals {
-                Err(error) => listing_failure(&list, "Goals", &error),
+                Err(error) => {
+                    fill_log(
+                        "goals",
+                        "failed",
+                        &format!("section=roster error=\"{error}\""),
+                    );
+                    listing_failure(&list, "Goals", &error);
+                }
                 Ok(listing) => {
                     // The dialog reads its goal from here: hold the
                     // listing and heroes beside the rows on every fill.
@@ -5196,11 +5287,27 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
                         );
                     });
                     paint_roster(&ctx_owned, &list, "goals", &listing.items, &heroes, None);
+                    let cached = heroes.iter().filter(|hero| hero.is_some()).count();
+                    fill_log(
+                        "goals",
+                        "painted",
+                        &format!(
+                            "section=roster rows={} request_ms={goals_ms} heroes_cached={cached}",
+                            listing.items.len(),
+                        ),
+                    );
                     warm_dialog_heroes(chat, "goals", &listing.items, &heroes);
                 }
             }
             match tracked {
-                Err(error) => listing_failure(&tracking, "Goals tracking", &error),
+                Err(error) => {
+                    fill_log(
+                        "goals",
+                        "failed",
+                        &format!("section=tracking error=\"{error}\""),
+                    );
+                    listing_failure(&tracking, "Goals tracking", &error);
+                }
                 Ok(listing) => {
                     IDEA_STORE.with(|store| {
                         store.borrow_mut().insert(
@@ -5212,6 +5319,14 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
                         );
                     });
                     paint_tracking(&ctx_owned, &tracking, &page_owned, &listing.items, 10);
+                    fill_log(
+                        "goals",
+                        "painted",
+                        &format!(
+                            "section=tracking rows={} request_ms={tracked_ms}",
+                            listing.items.len(),
+                        ),
+                    );
                 }
             }
         },
@@ -5280,31 +5395,40 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
         list.append(&gtk4::Label::new(Some("Type words to search for first.")));
         return;
     }
+    fill_log("search", "visit", "");
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
-        None => return,
+        None => {
+            fill_log("search", "skip-no-ticket", "");
+            return;
+        }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
+        fill_log("search", "no-client", "");
         return;
     };
     let ctx = ctx.clone();
     dispatch(
         chat,
         move || {
+            let start = Instant::now();
             let found = client.search(&query)?;
             // The paint reads cache only: rows appear the moment the
             // results land, and the network never holds them.
             let heroes = roster_cached_heroes(&found.items);
-            Ok::<_, muse_account::AccountError>((found, heroes))
+            let request_ms = start.elapsed().as_millis() as u64;
+            Ok::<_, muse_account::AccountError>((found, heroes, request_ms))
         },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
+                fill_log("search", "stale-answer-dropped", "");
                 return;
             }
-            let (found, heroes) = match answer {
-                Ok(pair) => pair,
+            let (found, heroes, request_ms) = match answer {
+                Ok(tuple) => tuple,
                 Err(error) => {
+                    fill_log("search", "failed", &format!("error=\"{error}\""));
                     listing_failure(&list, "Search", &error);
                     return;
                 }
@@ -5312,6 +5436,7 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
             clear_list(&list);
             if found.items.is_empty() {
                 list.append(&gtk4::Label::new(Some("No matches.")));
+                fill_log("search", "painted", "rows=0");
                 return;
             }
             // Each visit takes a generation so the download pass below
@@ -5349,13 +5474,34 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
                 .filter(|(index, _)| *index < super::images::HERO_LANES && heroes[*index].is_none())
                 .filter_map(|(index, item)| item.image_url.clone().map(|url| (index, url)))
                 .collect();
+            fill_log(
+                "search",
+                "painted",
+                &format!(
+                    "rows={} request_ms={request_ms} heroes_missing={}",
+                    found.items.len(),
+                    missing.len(),
+                ),
+            );
             if !missing.is_empty() {
                 let items = found.items.clone();
                 let list_weak = list.downgrade();
+                let expect = missing.len();
                 super::app::dispatch(
                     chat,
-                    move || super::images::fetch_heroes(missing),
-                    move |_chat, landed| {
+                    move || {
+                        let start = Instant::now();
+                        let landed = super::images::fetch_heroes(missing);
+                        let warm_ms = start.elapsed().as_millis() as u64;
+                        (landed, warm_ms)
+                    },
+                    move |_chat, (landed, warm_ms)| {
+                        let warmed = landed.iter().filter(|(_, path)| path.is_some()).count();
+                        fill_log(
+                            "search",
+                            "heroes-landed",
+                            &format!("expect={expect} warmed={warmed} warm_ms={warm_ms}"),
+                        );
                         let Some(list) = list_weak.upgrade() else {
                             return;
                         };
@@ -5451,6 +5597,46 @@ mod tests {
             elapsed < std::time::Duration::from_secs(8),
             "roster paint waited {elapsed:?} on hero downloads",
         );
+    }
+
+    #[test]
+    fn fill_log_writes_one_greppable_line() {
+        let dir = std::env::temp_dir().join(format!("muse-fill-log-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        fill_log_to(
+            &dir,
+            "goals",
+            "painted",
+            "section=roster rows=3 request_ms=42",
+        );
+        let text = std::fs::read_to_string(dir.join("page-fill.log")).expect("log");
+        let mut parts = text.lines().next().expect("one line").splitn(4, ' ');
+        let epoch: u128 = parts.next().expect("epoch").parse().expect("digits");
+        assert!(epoch > 0);
+        assert_eq!(parts.next(), Some("page=goals"));
+        assert_eq!(parts.next(), Some("event=painted"));
+        assert_eq!(parts.next(), Some("section=roster rows=3 request_ms=42"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fill_log_rotates_instead_of_growing() {
+        let dir = std::env::temp_dir().join(format!("muse-fill-log-rotate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let seed: String = (0..600)
+            .map(|n| format!("{n} page=goals event=painted pad={}\n", "x".repeat(400)))
+            .collect();
+        assert!(seed.len() as u64 > 200 * 1024);
+        let first = seed.lines().next().expect("seed").to_owned();
+        std::fs::write(dir.join("page-fill.log"), &seed).expect("seed");
+        fill_log_to(&dir, "goals", "visit", "");
+        let text = std::fs::read_to_string(dir.join("page-fill.log")).expect("log");
+        assert!(text.lines().count() <= 401);
+        assert!(text.lines().last().expect("last").contains("event=visit"));
+        assert_ne!(text.lines().next(), Some(first.as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
