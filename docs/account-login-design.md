@@ -31,6 +31,12 @@ Optional properties:
   path, or an allowed Flatpak ID prefixed with `flatpak:` (for example
   `flatpak:com.brave.Browser`). This is one executable selector, never a shell
   command or an argument list. Omit it for native-first automatic discovery.
+  Auto-scan skips PATH entries that are shell shims (e.g. a `brave` wrapper
+  that execs `flatpak run`): a shim would take the native launch path without
+  the sandbox profile flags, so the browser exits instantly with
+  `browser_closed`. Skipped shims fall through to Flatpak detection, which
+  launches with the proper `--filesystem=` profile bind. Explicit `browser`
+  choices are never second-guessed.
 - `timeout_seconds`: integer from 1 through 900; default 300. This bounds browser
   startup/CDP/sign-in polling after browser discovery. Browser discovery can add
   at most four three-second Flatpak metadata checks; bounded cleanup adds time.
