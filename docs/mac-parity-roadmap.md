@@ -582,9 +582,38 @@ sleep, owns no state of its own, and logs failures by task id only. It ships in 
 installs as a user service via `scripts/install-reminder-service.sh` (unit in
 `resources/systemd/`). The Tasks page now reflects the runner without a press: it re-reads the store every 15 seconds
 (selection preserved), so a claimed reminder shows as notified and a newly due one appears in the
-Due section on its own. Still open in this phase: proving the gate live on a real desktop (a task
-firing with the window closed, across a reboot), and location reminders (documented as time-only,
-per the work list).
+Due section on its own. The rewrite's Tasks page now carries the
+local half instead: a Local reminders section on the shared
+store (one list, one New dialog with title, optional details
+and a minutes-from-now spin, two-press Cancel, 15 s re-read
+tick that never touches the service), and the runner's
+default store dir lives in one place
+(`muse_tasks::default_store_dir`, reused by the runner).
+Headless gate (Nov 19, 2026, container): the real runner
+binary against a scratch store claimed exactly the one due
+task, logged the notify failure by id only with no text
+leaked, claimed nothing on the immediate re-run, and left
+paused/future rows untouched; the store file shows the claim
+durably. Lock exclusion is covered by the tasks suite (a
+second open blocks until the first handle drops). What no
+container can prove — delivery to a notification server, the
+window closed, a reboot — stays for the live run below.
+Location reminders are time-only by construction: tasks carry
+no place field and no UI offers one.
+Live gate runbook (owner's desktop; ~10 minutes plus a
+reboot). Preconditions: the AppImage built with the Tasks
+page, the reminder service installed
+(`scripts/install-reminder-service.sh`) and active
+(`systemctl --user is-active muse-reminder-runner`), account
+linked. 1) In the app, Tasks → New reminder, title "Gate
+ping", 2 minutes out. 2) Close the window entirely. 3) Wait
+past the due time: the desktop notification must appear with
+no window open. 4) Reopen the app: the row reads notified,
+and no second notification arrives. 5) Cancel the row (two
+presses). 6) Reboot, log back in: no notification fires for
+the cancelled task, and the runner is active again. Report
+back per step; until it reports, "window closed" and "reboot"
+stand unproven.
 
 *Cancellation from Linux is wired (Nov 9).* The route table's only schedule mutation is
 `tasks.delete` (DELETE /api/tasks/{job_id}) — there is no create, edit or enable/disable route, so
