@@ -492,6 +492,19 @@ whose account it is.
 
 ### P3 — Reach the capabilities we already have (M)
 
+*Host lifecycle port (Nov 19, 2026).* The agent cannot reach
+this machine through the rewrite today: the broker, link and
+manifest exist as tested crates, but no shipped code spawns a
+host session (the old `apps/desktop` controller is gone with
+that tree; its behavior is the reference, not the basis).
+Ported the controller into `apps/muse` as a GTK-free module —
+consent gates, one-node-id-per-installation, saved folder
+policies, start/stop pump, approval-card queue, expiry, and
+the closed-code notices — with 10 unit tests. The page (grant
+picker, Start/Stop, approval cards, activity log) is the next
+slice; only then can the live gate run.
+
+
 *Gap (2026-11-06):* the registered manifest now advertises six file commands. `files.edit`,
 `files.rename` and `files.delete` exist behind approvals with read-back verification — an edit is
 approved as the complete resulting text and refuses a file that changed since the request, a rename
