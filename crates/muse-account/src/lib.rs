@@ -1047,6 +1047,20 @@ pub struct FeedPromptUpdateAnswer {
     pub accepted: bool,
 }
 
+/// What the service said about a message reaction it took.
+///
+/// The body is the live-probed shape: `reactions.toggle` with
+/// `{message_id, emoji}`, verified on then off with the service's
+/// reactions array re-read both ways. The answer carries the
+/// resulting state, so the reader learns recorded vs removed
+/// without a re-read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReactAnswer {
+    pub message_id: String,
+    pub accepted: bool,
+    pub reacted: bool,
+}
+
 /// One goal as the detail view needs it: the display fields of a
 /// `goals.get` answer's `goal`, length-capped by the bridge like
 /// the listing rows.
@@ -2099,6 +2113,29 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "feed_prompt_update", "prompt": prompt}),
+            false,
+        )
+    }
+    /// Toggle one emoji reaction on one message, once.
+    ///
+    /// The id must be one the thread's history published; the
+    /// bridge makes a single request in the live-probed shape, so
+    /// one press flips the reaction exactly once. The answer
+    /// carries the resulting state, so the reader learns recorded
+    /// vs removed without a re-read.
+    pub fn message_react(
+        &self,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<MessageReactAnswer, AccountError> {
+        if message_id.is_empty() || message_id.len() > 256 || message_id.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if emoji.trim().is_empty() || emoji.len() > 16 || emoji.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "message_react", "message_id": message_id, "emoji": emoji}),
             false,
         )
     }

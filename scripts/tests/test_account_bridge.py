@@ -979,6 +979,37 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(bad)
 
+    def test_message_react_sends_the_probed_toggle_once(self):
+        bridge = load_bridge()
+        from contextlib import contextmanager
+        seen = {}
+        class Gateway:
+            def call_json(self, method, body=None, **kwargs):
+                seen.setdefault("calls", []).append((method, body))
+                return {"reactions": [{"emoji": "❤"}]}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "message_react", "message_id": "m1", "emoji": "❤"})
+        self.assertEqual(seen["calls"], [("reactions.toggle",
+                                          {"message_id": "m1", "emoji": "❤"})])
+        self.assertEqual(result, {"message_id": "m1", "accepted": True,
+                                  "reacted": True})
+        bridge.validate_request({"op": "message_react", "config_dir": "/unused",
+                                 "message_id": "m1", "emoji": "❤"})
+        for bad in [{"op": "message_react", "config_dir": "/unused",
+                     "message_id": "", "emoji": "❤"},
+                    {"op": "message_react", "config_dir": "/unused",
+                     "message_id": "m1", "emoji": "  "},
+                    {"op": "message_react", "config_dir": "/unused",
+                     "message_id": "m1"},
+                    {"op": "message_react", "config_dir": "/unused",
+                     "message_id": "m1", "emoji": "❤", "extra": 1}]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(bad)
+
     def test_send_verifies_the_expected_session_before_dispatching(self):
         # The preflight rides inside the dispatch request, so it must fail before
         # anything reaches the service when the account changed underneath.

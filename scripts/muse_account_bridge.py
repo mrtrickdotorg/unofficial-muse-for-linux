@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "message_react", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -683,6 +683,7 @@ def validate_request(request):
                                 "mode", "display_name"},
                "tasks_run": {"job_id"},
                "chat_delete": {"target", "message_id"},
+               "message_react": {"message_id", "emoji"},
                "watch": {"thread", "limit", "timeout", "after"},
                "activity": {"timeout"},
                "cancel": set(),
@@ -754,6 +755,20 @@ def validate_request(request):
     if op in ("history", "watch"):
         limit = request.get("limit")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+            raise BridgeFailure("invalid_request")
+    if op == "message_react":
+        # The id is the service's own, taken from the thread's
+        # history; the emoji is one glyph. The body is the
+        # live-probed shape (Nov 18, 2026): reactions.toggle with
+        # {message_id, emoji}, verified on then off with the
+        # reactions array re-read both ways.
+        message_id = request.get("message_id")
+        if (not isinstance(message_id, str) or not 1 <= len(message_id) <= 256
+                or "\x00" in message_id):
+            raise BridgeFailure("invalid_request")
+        emoji = request.get("emoji")
+        if (not isinstance(emoji, str) or not 1 <= len(emoji.strip()) <= 16
+                or "\x00" in emoji):
             raise BridgeFailure("invalid_request")
     if op == "history_window":
         # The web UI pages with an anchor plus a bounded window on each side
@@ -3794,6 +3809,29 @@ class Adapter:
                 gateway.call_json(method, body={}, timeout=20)
             return {"target": request["target"],
                     "message_id": request["message_id"], "accepted": True}
+        if request["op"] == "message_react":
+            # One press toggles one emoji on one message, never
+            # retried here. The body is the live-probed shape (Nov
+            # 18, 2026): reactions.toggle with {message_id, emoji},
+            # verified on then off with the service's reactions
+            # array re-read both ways. The answer carries the
+            # resulting state, so the reader learns recorded vs
+            # removed without a re-read.
+            with self.client._gateway(self.config) as gateway:
+                answer = gateway.call_json(
+                    "reactions.toggle",
+                    body={"message_id": request["message_id"],
+                          "emoji": request["emoji"]},
+                    timeout=20,
+                )
+            if not isinstance(answer, dict):
+                raise BridgeFailure("protocol_error")
+            reacted = any(
+                isinstance(entry, dict) and entry.get("emoji") == request["emoji"]
+                for entry in answer.get("reactions", [])
+            ) if isinstance(answer.get("reactions"), list) else False
+            return {"message_id": request["message_id"],
+                    "accepted": True, "reacted": reacted}
         if request["op"] == "tasks":
             with self.client._gateway(self.config) as gateway:
                 schedules = gateway.call_json("tasks.list")["schedules"]

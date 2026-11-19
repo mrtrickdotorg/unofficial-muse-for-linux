@@ -18,6 +18,7 @@ use super::chat::{Role, TranscriptRow};
 pub fn row_widget(
     row: &TranscriptRow,
     on_option: &std::rc::Rc<dyn Fn(String)>,
+    on_react: &std::rc::Rc<dyn Fn(String, String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
@@ -40,6 +41,7 @@ pub fn row_widget(
             selected_option,
             attachments,
             sent_at,
+            id,
             ..
         } => {
             let parts = MessageParts {
@@ -50,8 +52,9 @@ pub fn row_widget(
                 sent_at: sent_at.as_deref(),
                 show_head,
                 attachments,
+                id,
             };
-            message_widget(&parts, on_option, previews)
+            message_widget(&parts, on_option, on_react, previews)
         }
         TranscriptRow::Notice { text } => {
             let widget = gtk4::Label::new(Some(text));
@@ -76,11 +79,13 @@ struct MessageParts<'a> {
     sent_at: Option<&'a str>,
     show_head: bool,
     attachments: &'a [MessageAttachment],
+    id: &'a str,
 }
 
 fn message_widget(
     parts: &MessageParts,
     on_option: &std::rc::Rc<dyn Fn(String)>,
+    on_react: &std::rc::Rc<dyn Fn(String, String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
@@ -94,6 +99,7 @@ fn message_widget(
         sent_at,
         show_head,
         attachments,
+        id,
     } = parts;
     let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     match role {
@@ -141,15 +147,32 @@ fn message_widget(
     // writes the response text to the clipboard. Local-only, never
     // a write.
     if matches!(role, Role::Assistant) {
+        let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        actions.set_halign(gtk4::Align::Start);
         let copy = gtk4::Button::with_label("Copy");
         copy.add_css_class("flat");
         copy.set_tooltip_text(Some("Copy response"));
-        copy.set_halign(gtk4::Align::Start);
         let text = text.to_string();
         copy.connect_clicked(move |button| {
             button.clipboard().set_text(&text);
         });
-        column.append(&copy);
+        actions.append(&copy);
+        // The web hangs a React action beside Copy: one press
+        // toggles a heart on the message through the live-probed
+        // reactions.toggle shape. The answer names the new state;
+        // the row itself carries no reaction display to go stale.
+        let react = gtk4::Button::with_label("❤");
+        react.add_css_class("flat");
+        react.set_tooltip_text(Some("React to this message"));
+        {
+            let react_on = on_react.clone();
+            let id: String = (*id).into();
+            react.connect_clicked(move |_| {
+                react_on(id.clone(), "❤".to_owned());
+            });
+        }
+        actions.append(&react);
+        column.append(&actions);
     }
 
     if !options.is_empty() {
@@ -274,6 +297,7 @@ pub fn populate(
     list: &gtk4::ListBox,
     rows: &[TranscriptRow],
     on_option: &std::rc::Rc<dyn Fn(String)>,
+    on_react: &std::rc::Rc<dyn Fn(String, String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
@@ -296,6 +320,7 @@ pub fn populate(
         list.append(&row_widget(
             row,
             on_option,
+            on_react,
             previews,
             assistant && !prev_assistant,
         ));
@@ -362,7 +387,8 @@ mod tests {
         let list = gtk4::ListBox::new();
         let on_option: std::rc::Rc<dyn Fn(String)> = std::rc::Rc::new(|_| {});
         let previews = std::collections::HashMap::new();
-        populate(&list, &rows, &on_option, &previews);
+        let on_react: std::rc::Rc<dyn Fn(String, String)> = std::rc::Rc::new(|_, _| {});
+        populate(&list, &rows, &on_option, &on_react, &previews);
         let mut count = 0;
         let mut child = list.first_child();
         while child.is_some() {

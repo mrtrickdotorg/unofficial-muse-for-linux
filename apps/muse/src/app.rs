@@ -56,6 +56,8 @@ where
 
 /// An option button's press, delivered as the reader's next message.
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
+/// A message reaction toggle: the row's id plus the emoji.
+type ReactCallback = std::rc::Rc<dyn Fn(String, String)>;
 pub(crate) type RemoveCallback = std::rc::Rc<dyn Fn(String)>;
 
 /// The delete turn button names its own state: the first press arms
@@ -210,6 +212,7 @@ pub struct Chat {
     live_tx: RefCell<Option<std::sync::mpsc::Sender<()>>>,
     on_option: RefCell<Option<OptionCallback>>,
     on_remove: RefCell<Option<RemoveCallback>>,
+    on_react: RefCell<Option<ReactCallback>>,
     notice: gtk4::Label,
     send_note: RefCell<Option<String>>,
     armed_delete: RefCell<Option<String>>,
@@ -420,6 +423,7 @@ impl Chat {
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
             on_remove: RefCell::new(None),
+            on_react: RefCell::new(None),
         });
         let weak = Rc::downgrade(&chat);
         *chat.on_option.borrow_mut() = Some(std::rc::Rc::new(move |text: String| {
@@ -429,6 +433,15 @@ impl Chat {
                 chat.send_text(text, Vec::new());
             }
         }) as OptionCallback);
+        {
+            let weak = Rc::downgrade(&chat);
+            *chat.on_react.borrow_mut() =
+                Some(std::rc::Rc::new(move |message_id: String, emoji: String| {
+                    if let Some(chat) = weak.upgrade() {
+                        chat.react_message(message_id, emoji);
+                    }
+                }) as ReactCallback);
+        }
         chat.wire();
         chat
     }
@@ -1063,7 +1076,12 @@ impl Chat {
                 for text in quotas {
                     self.session.borrow_mut().note_quota(text);
                 }
-                populate(&self.transcript, &rows, &on_option, &previews);
+                let on_react = self
+                    .on_react
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
+                populate(&self.transcript, &rows, &on_option, &on_react, &previews);
             }
             *self.painted.borrow_mut() = Some(fingerprint);
         }
@@ -1644,6 +1662,32 @@ impl Chat {
                 let _ = client.cancel();
             });
         }
+    }
+
+    /// Toggle one heart on one message row: one press, one write.
+    /// The answer names the new state, so the note reports recorded
+    /// vs removed instead of guessing; the row itself carries no
+    /// reaction display to go stale.
+    fn react_message(self: &Rc<Self>, message_id: String, emoji: String) {
+        let Some(client) = self.client.borrow().clone() else {
+            self.say_send_note("Link your account first.");
+            return;
+        };
+        dispatch(
+            self,
+            move || client.message_react(&message_id, &emoji),
+            move |chat, answer| match answer {
+                Ok(ok) if ok.accepted && ok.reacted => {
+                    chat.say_send_note("❤ recorded.");
+                }
+                Ok(ok) if ok.accepted => {
+                    chat.say_send_note("❤ removed.");
+                }
+                _ => {
+                    chat.say_send_note("The service did not record it.");
+                }
+            },
+        );
     }
 
     /// Page one older window past what is loaded, anchored at the
