@@ -100,7 +100,13 @@ subscribe handshake advertises
 blocked on safety, not knowledge: scratch-session sends never
 land in history, and a real-thread reply is a non-reversible
 user-visible turn (message plus the agent run it triggers). No
-code ships until a reversible proof exists.
+wire-level reply code ships until a reversible proof exists.
+Shipped instead (Gap 1 slice): every message row carries a Reply
+button that stages the row as a capped one-line quote above the
+composer, with Cancel × to drop it. The send itself stays a
+plain send — the community gateway records no reply param and
+the web's in_reply_to shape is web-transport only — so the quote
+is reader context, never a protocol claim.
 Decision log (Nov 19, 2026): `egress.approval.history` answers
 50 decided items, and the bridge now projects them narrowly as
 `approval_history` (id, times, display name, action, decision,

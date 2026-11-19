@@ -58,6 +58,9 @@ where
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
 /// A message reaction toggle: the row's id plus the emoji.
 type ReactCallback = std::rc::Rc<dyn Fn(String, String)>;
+/// A reply press: the quoted row's id plus its text. Stages a quote
+/// above the composer; the send itself stays a plain send.
+pub(crate) type ReplyCallback = std::rc::Rc<dyn Fn(String, String)>;
 
 // One offered policy flip: the word the button writes.
 struct PolicyFlip {
@@ -218,6 +221,7 @@ pub struct Chat {
     on_option: RefCell<Option<OptionCallback>>,
     on_remove: RefCell<Option<RemoveCallback>>,
     on_react: RefCell<Option<ReactCallback>>,
+    on_reply: RefCell<Option<ReplyCallback>>,
     local_host: RefCell<super::local_host::Controller>,
     pub(crate) local_host_sync: RefCell<bool>,
     notice: gtk4::Label,
@@ -471,6 +475,7 @@ impl Chat {
             on_option: RefCell::new(None),
             on_remove: RefCell::new(None),
             on_react: RefCell::new(None),
+            on_reply: RefCell::new(None),
             local_host: RefCell::new(super::local_host::Controller::new()),
             local_host_sync: RefCell::new(false),
         });
@@ -479,7 +484,7 @@ impl Chat {
             if let Some(chat) = weak.upgrade() {
                 // An option press sends its text as the reader's next
                 // message -- the same single-press path as the composer.
-                chat.send_text(text, Vec::new());
+                chat.send_text(text, Vec::new(), None);
             }
         }) as OptionCallback);
         {
@@ -490,6 +495,15 @@ impl Chat {
                         chat.react_message(message_id, emoji);
                     }
                 }) as ReactCallback);
+        }
+        {
+            let weak = Rc::downgrade(&chat);
+            *chat.on_reply.borrow_mut() =
+                Some(std::rc::Rc::new(move |message_id: String, text: String| {
+                    if let Some(chat) = weak.upgrade() {
+                        chat.stage_reply(message_id, text);
+                    }
+                }) as ReplyCallback);
         }
         chat.wire();
         chat
@@ -768,7 +782,17 @@ impl Chat {
         });
         *self.on_remove.borrow_mut() = Some(on_remove);
         self.paint_chips();
+        self.paint_reply();
         self.composer_row.refresh(&self.composer.borrow());
+        // The quote bar's × drops the staged reply without sending.
+        let weak = Rc::downgrade(self);
+        self.composer_row.reply_cancel.connect_clicked(move |_| {
+            if let Some(chat) = weak.upgrade() {
+                chat.composer.borrow_mut().clear_reply();
+                chat.paint_reply();
+                chat.composer_row.refresh(&chat.composer.borrow());
+            }
+        });
         let weak = Rc::downgrade(self);
         self.model_combo.connect_changed(move |combo| {
             let Some(chat) = weak.upgrade() else {
@@ -1436,7 +1460,19 @@ impl Chat {
                     .borrow()
                     .clone()
                     .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
-                populate(&self.transcript, &rows, &on_option, &on_react, &previews);
+                let on_reply = self
+                    .on_reply
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
+                populate(
+                    &self.transcript,
+                    &rows,
+                    &on_option,
+                    &on_react,
+                    &on_reply,
+                    &previews,
+                );
             }
             *self.painted.borrow_mut() = Some(fingerprint);
         }
@@ -1653,17 +1689,22 @@ impl Chat {
     /// reply reloads history, and a quota-limited send lands as the
     /// service's own notice row through the transcript builders.
     fn send_pressed(self: &Rc<Self>) {
+        // Snapshot the quote before begin_send takes it: a send that
+        // never dispatches hands the quote back like the pictures.
+        let staged = self.composer.borrow().reply().cloned();
         let dispatch = match self.composer.borrow_mut().begin_send() {
             Some(dispatch) => dispatch,
             None => return,
         };
         self.composer_row.set_input_text("");
         // A fresh send clears yesterday's send note; the outcome of
-        // this one writes its own.
+        // this one writes its own. The quote clears with its send:
+        // one Reply quotes one send.
         *self.send_note.borrow_mut() = None;
         self.paint_chips();
+        self.paint_reply();
         self.composer_row.refresh(&self.composer.borrow());
-        self.send_text(dispatch.text, dispatch.images);
+        self.send_text(dispatch.text, dispatch.images, staged);
     }
 
     /// Stage the clipboard's picture as a chip. Returns whether the
@@ -1836,13 +1877,31 @@ impl Chat {
     /// text, staged pictures, or text with pictures. One press
     /// dispatches once; a press while the slot is held releases the
     /// composer instead of queueing.
-    fn send_text(self: &Rc<Self>, draft: String, images: Vec<StagedImage>) {
+    fn send_text(
+        self: &Rc<Self>,
+        draft: String,
+        images: Vec<StagedImage>,
+        reply: Option<super::composer::ReplyQuote>,
+    ) {
+        // A send that never dispatches hands the quote back, like the
+        // pictures below: the reader's context is never eaten by a
+        // held slot or a missing link.
+        let restore_reply = |chat: &Self| {
+            if let Some(quote) = reply.clone() {
+                let _ = chat
+                    .composer
+                    .borrow_mut()
+                    .stage_reply(quote.id, quote.excerpt);
+                chat.paint_reply();
+            }
+        };
         let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
             Some(ticket) => ticket,
             None => {
                 self.composer.borrow_mut().finish_send();
                 self.composer.borrow_mut().restore(images);
                 self.paint_chips();
+                restore_reply(self);
                 self.composer_row.refresh(&self.composer.borrow());
                 // A held slot is never silent: the reader sees the
                 // message is kept and the log names the contention.
@@ -1856,6 +1915,7 @@ impl Chat {
             self.composer.borrow_mut().finish_send();
             self.composer.borrow_mut().restore(images);
             self.paint_chips();
+            restore_reply(self);
             self.composer_row.refresh(&self.composer.borrow());
             return;
         };
@@ -1872,11 +1932,13 @@ impl Chat {
             self.composer.borrow_mut().finish_send();
             self.composer.borrow_mut().restore(images);
             self.paint_chips();
+            restore_reply(self);
             self.say_send_note("Sign in before sending pictures.");
             self.composer_row.refresh(&self.composer.borrow());
             return;
         }
         let scope = self.thread_scope();
+        let reply_worker = reply.clone();
         dispatch(
             self,
             move || {
@@ -1903,12 +1965,22 @@ impl Chat {
                 };
                 // The pictures ride back out with the answer: a failed
                 // send restores exactly what it took, dims and all.
-                (answer, images, with_images)
+                // The quote rides the same way.
+                (answer, images, with_images, reply_worker)
             },
-            move |chat, (answer, images, with_images)| {
+            move |chat, (answer, images, with_images, reply)| {
                 chat.session.borrow_mut().accept(&ticket);
                 chat.composer.borrow_mut().finish_send();
                 chat.composer_row.refresh(&chat.composer.borrow());
+                if let Some(quote) = reply
+                    && answer.is_err()
+                {
+                    let _ = chat
+                        .composer
+                        .borrow_mut()
+                        .stage_reply(quote.id, quote.excerpt);
+                    chat.paint_reply();
+                }
                 match answer {
                     Ok(receipt) => {
                         // The verified send checks the landed row's
@@ -2048,6 +2120,26 @@ impl Chat {
                 }
             },
         );
+    }
+
+    /// Stage a reply quote from a row press: the row's id plus one
+    /// capped line above the composer. Reversible — Cancel × drops
+    /// it, and the send below stays a plain send (the community
+    /// gateway records no reply param, so nothing new rides the wire).
+    fn stage_reply(self: &Rc<Self>, message_id: String, text: String) {
+        match self.composer.borrow_mut().stage_reply(message_id, text) {
+            Ok(()) => {
+                self.paint_reply();
+                self.composer_row.refresh(&self.composer.borrow());
+            }
+            Err(_) => self.say_send_note("That message cannot be quoted."),
+        }
+    }
+
+    /// Repaint the staged reply quote from the composer state.
+    fn paint_reply(&self) {
+        let composer = self.composer.borrow();
+        self.composer_row.paint_reply(composer.reply());
     }
 
     /// Page one older window past what is loaded, anchored at the
