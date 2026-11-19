@@ -1036,6 +1036,7 @@ dependencies = [
  "muse-account",
  "muse-local-link",
  "muse-local-tools",
+ "muse-tasks",
  "serde",
  "serde_json",
  "ureq",

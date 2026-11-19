@@ -29,6 +29,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const STORE_FILE_NAME: &str = "tasks.jsonl";
 /// File name of the advisory lock file inside the store directory.
 pub const LOCK_FILE_NAME: &str = "tasks.lock";
+
+/// The store directory the desktop app and the reminder runner share:
+/// `$HOME/.config/unofficial-muse-for-linux/tasks`. One path, one
+/// store — the runner must open the same directory the app writes,
+/// never a second store. `None` when HOME is unset or empty.
+pub fn default_store_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("unofficial-muse-for-linux")
+            .join("tasks"),
+    )
+}
 /// Maximum title length in Unicode scalar values.
 pub const TITLE_MAX_CHARS: usize = 200;
 /// Maximum body length in bytes.

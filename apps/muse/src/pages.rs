@@ -8,7 +8,7 @@
 //! grows one page at a time.
 
 use std::rc::{Rc, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::local_host::Phase;
 
@@ -166,6 +166,40 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             let runs = gtk4::ListBox::new();
             runs.set_widget_name("tasks-runs");
             inner.append(&runs);
+            // Local reminders: the durable store the runner
+            // notifies from, created and cancelled here. Server
+            // schedules above are read-only plus delete; these
+            // rows are the Linux half the P4 gate asks for.
+            let local_head = gtk4::Label::new(Some("Local reminders"));
+            local_head.set_halign(gtk4::Align::Start);
+            local_head.add_css_class("muse-section");
+            inner.append(&local_head);
+            let local_new = gtk4::Button::with_label("New reminder");
+            local_new.set_widget_name("tasks-local-new");
+            local_new.set_halign(gtk4::Align::Start);
+            inner.append(&local_new);
+            let local = gtk4::ListBox::new();
+            local.set_widget_name("tasks-local");
+            local.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&local);
+            let page_new = inner.downgrade();
+            local_new.connect_clicked(move |_| {
+                if let Some(page) = page_new.upgrade() {
+                    show_reminder_dialog(&page);
+                }
+            });
+            // The runner claims without us: re-read the store on a
+            // slow tick so a fired reminder shows as notified and
+            // a newly due one appears, all without polling the
+            // service. The tick ends with the page.
+            let page_tick = inner.downgrade();
+            gtk4::glib::timeout_add_local(Duration::from_secs(15), move || {
+                let Some(page) = page_tick.upgrade() else {
+                    return gtk4::glib::ControlFlow::Break;
+                };
+                refresh_local_tasks(&page);
+                gtk4::glib::ControlFlow::Continue
+            });
         }
         "feed" => {
             // The web opens on its prompt card above the units: the
@@ -985,7 +1019,10 @@ fn fill(ctx: &Ctx, name: &str) {
             }
         }
         "threads" => fill_threads(ctx, &page),
-        "tasks" => fill_tasks(ctx, &page),
+        "tasks" => {
+            fill_tasks(ctx, &page);
+            refresh_local_tasks(&page);
+        }
         "library" => fill_library(ctx, &page),
         "search" => fill_search_hint(&page),
         "ideas" => fill_ideas(ctx, &page),
@@ -1858,6 +1895,194 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) {
             }
         },
     );
+}
+
+/// One local reminder row: title, the due words the schedule
+/// rows use, status, and whether the runner already notified.
+/// Pure over an explicit now so the wording stays unit-tested.
+fn reminder_row_text(task: &muse_tasks::Task, now_unix_secs: u64) -> String {
+    let due = i64::try_from(task.due_unix_secs).unwrap_or(i64::MAX);
+    let now = i64::try_from(now_unix_secs).unwrap_or(i64::MAX);
+    let status = match task.status {
+        muse_tasks::TaskStatus::Pending => "pending",
+        muse_tasks::TaskStatus::Paused => "paused",
+        muse_tasks::TaskStatus::Done => "done",
+        muse_tasks::TaskStatus::Cancelled => "cancelled",
+    };
+    let mut line = format!(
+        "{} · {} · {}",
+        task.title,
+        next_run_label(Some(due), now),
+        status
+    );
+    if task.notified {
+        line.push_str(" · notified");
+    }
+    line
+}
+
+/// Re-read the local reminder store and repaint its list. Local
+/// only: the store lock serializes against the runner, so no page
+/// ticket is needed and nothing touches the service.
+fn refresh_local_tasks(page: &gtk4::Box) {
+    let Some(list) = named_list(page, "tasks-local") else {
+        return;
+    };
+    clear_list(&list);
+    let Some(dir) = muse_tasks::default_store_dir() else {
+        list.append(&dim_row("Local reminders need a home directory."));
+        return;
+    };
+    let store = match muse_tasks::TaskStore::open(&dir) {
+        Ok(store) => store,
+        Err(_) => {
+            list.append(&dim_row("Local reminders unavailable."));
+            return;
+        }
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut tasks = store.list();
+    tasks.sort_by_key(|task| task.due_unix_secs);
+    if tasks.is_empty() {
+        list.append(&dim_row("No local reminders."));
+    }
+    for task in &tasks {
+        let row = gtk4::ListBoxRow::new();
+        row.set_selectable(false);
+        let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let words = gtk4::Label::new(Some(&reminder_row_text(task, now)));
+        words.set_hexpand(true);
+        words.set_xalign(0.0);
+        words.set_wrap(true);
+        line.append(&words);
+        // Cancellation is permanent and has no undo, so the first
+        // press only arms; the second press cancels for good.
+        let cancel = gtk4::Button::with_label("Cancel");
+        cancel.add_css_class("muse-danger");
+        let armed = cancel.clone();
+        let id = task.id;
+        let page_weak = page.downgrade();
+        cancel.connect_clicked(move |_| {
+            if armed.label().as_deref() != Some("Confirm cancel") {
+                armed.set_label("Confirm cancel");
+                return;
+            }
+            armed.set_label("Cancel");
+            let Some(page) = page_weak.upgrade() else {
+                return;
+            };
+            if let Some(dir) = muse_tasks::default_store_dir()
+                && let Ok(mut store) = muse_tasks::TaskStore::open(&dir)
+            {
+                let _ = store.cancel(id);
+            }
+            refresh_local_tasks(&page);
+        });
+        line.append(&cancel);
+        row.set_child(Some(&line));
+        list.append(&row);
+    }
+}
+
+fn dim_row(text: &str) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.set_selectable(false);
+    let dim = gtk4::Label::new(Some(text));
+    dim.set_xalign(0.0);
+    dim.add_css_class("dim-label");
+    row.set_child(Some(&dim));
+    row
+}
+
+/// The new-reminder dialog: title, optional details, and minutes
+/// from now. A spin button instead of a date picker: no date
+/// parsing to get wrong, and the bounds are the widget's own.
+fn show_reminder_dialog(page: &gtk4::Box) {
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(480, -1);
+    window.set_title(Some("New reminder"));
+    if let Some(root) = page
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok())
+    {
+        window.set_transient_for(Some(&root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_start(24);
+    body.set_margin_end(24);
+    body.set_margin_top(20);
+    body.set_margin_bottom(20);
+    let title = gtk4::Entry::new();
+    title.set_placeholder_text(Some("Title (1–200 characters)"));
+    body.append(&title);
+    let details = gtk4::Entry::new();
+    details.set_placeholder_text(Some("Details, optional"));
+    body.append(&details);
+    let when_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let when_label = gtk4::Label::new(Some("In minutes:"));
+    when_row.append(&when_label);
+    let minutes = gtk4::SpinButton::with_range(1.0, 525600.0, 1.0);
+    minutes.set_value(60.0);
+    when_row.append(&minutes);
+    body.append(&when_row);
+    let note = gtk4::Label::new(None);
+    note.set_wrap(true);
+    note.set_xalign(0.0);
+    note.add_css_class("dim-label");
+    body.append(&note);
+    let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let create = gtk4::Button::with_label("Create");
+    create.add_css_class("muse-cta");
+    let cancel = gtk4::Button::with_label("Cancel");
+    actions.append(&create);
+    actions.append(&cancel);
+    body.append(&actions);
+    window.set_child(Some(&body));
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| {
+            window.close();
+        });
+    }
+    {
+        let window = window.clone();
+        let page_weak = page.downgrade();
+        create.connect_clicked(move |_| {
+            let title_text = title.text().to_string();
+            let body_text = details.text().to_string();
+            let due = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+                .saturating_add((minutes.value() as u64).saturating_mul(60));
+            let created = match muse_tasks::default_store_dir() {
+                Some(dir) => match muse_tasks::TaskStore::open(&dir) {
+                    Ok(mut store) => {
+                        let body = (!body_text.is_empty()).then_some(body_text.as_str());
+                        store.create(&title_text, body.unwrap_or(""), due)
+                    }
+                    Err(_) => Err(muse_tasks::TaskError::Io("store unavailable")),
+                },
+                None => Err(muse_tasks::TaskError::Io("no home directory")),
+            };
+            match created {
+                Ok(_) => {
+                    window.close();
+                    if let Some(page) = page_weak.upgrade() {
+                        refresh_local_tasks(&page);
+                    }
+                }
+                Err(e) => {
+                    note.set_text(&format!("{e}"));
+                }
+            }
+        });
+    }
+    window.present();
 }
 
 /// Start exactly one run of a schedule: the ticket makes a double
@@ -5240,6 +5465,35 @@ mod tests {
         assert_eq!(next_run_label(Some(now + 30 * 3600), now), "tomorrow");
         assert_eq!(next_run_label(Some(now + 3 * 86400), now), "in 3d");
         assert_eq!(next_run_label(Some(now + 14 * 86400), now), "in 2w");
+    }
+
+    #[test]
+    fn local_reminder_rows_name_title_due_and_state() {
+        let task = |due: u64, status: muse_tasks::TaskStatus, notified: bool| muse_tasks::Task {
+            id: 7,
+            title: "Water plants".to_owned(),
+            body: String::new(),
+            due_unix_secs: due,
+            status,
+            created_unix_secs: 1_000,
+            notified,
+        };
+        let now = 2_000_000_000u64;
+        assert_eq!(
+            reminder_row_text(
+                &task(now + 3600, muse_tasks::TaskStatus::Pending, false),
+                now
+            ),
+            "Water plants · in 1h · pending"
+        );
+        assert_eq!(
+            reminder_row_text(&task(now - 10, muse_tasks::TaskStatus::Pending, true), now),
+            "Water plants · due now · pending · notified"
+        );
+        assert_eq!(
+            reminder_row_text(&task(now + 7200, muse_tasks::TaskStatus::Paused, false), now),
+            "Water plants · in 2h · paused"
+        );
     }
 
     #[test]

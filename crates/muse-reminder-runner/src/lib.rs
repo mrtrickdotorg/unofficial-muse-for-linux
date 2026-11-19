@@ -80,15 +80,7 @@ pub fn run_cycle(
 /// must open the same directory the Tasks page writes, never a second
 /// store. `None` when HOME is unset or empty — the runner then refuses to
 /// start rather than inventing a location.
-pub fn default_store_dir() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok().filter(|h| !h.is_empty())?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".config")
-            .join("unofficial-muse-for-linux")
-            .join("tasks"),
-    )
-}
+pub use muse_tasks::default_store_dir;
 
 pub fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
