@@ -229,6 +229,8 @@ pub struct Chat {
     panel_today: gtk4::ListBox,
     panel_approvals: gtk4::ListBox,
     panel_approvals_empty: gtk4::Label,
+    panel_decisions: gtk4::ListBox,
+    panel_decisions_empty: gtk4::Label,
     panel_identity_name: gtk4::Label,
     panel_identity_vm: gtk4::Label,
     panel_fetch: RefCell<bool>,
@@ -349,6 +351,20 @@ impl Chat {
         let panel_approvals = gtk4::ListBox::new();
         panel_approvals.set_selection_mode(gtk4::SelectionMode::None);
         approvals_body.append(&panel_approvals);
+        // Recent decisions: the decided past, read-only. Answers
+        // "what did it do" without ever becoming a pending choice.
+        let panel_decisions_head = gtk4::Label::new(Some("Recent decisions"));
+        panel_decisions_head.set_halign(gtk4::Align::Start);
+        panel_decisions_head.add_css_class("muse-section");
+        approvals_body.append(&panel_decisions_head);
+        let panel_decisions_empty = gtk4::Label::new(Some("No recent decisions."));
+        panel_decisions_empty.set_halign(gtk4::Align::Start);
+        panel_decisions_empty.add_css_class("dim-label");
+        panel_decisions_empty.set_wrap(true);
+        approvals_body.append(&panel_decisions_empty);
+        let panel_decisions = gtk4::ListBox::new();
+        panel_decisions.set_selection_mode(gtk4::SelectionMode::None);
+        approvals_body.append(&panel_decisions);
         let approvals_scroll = gtk4::ScrolledWindow::new();
         approvals_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
         approvals_scroll.set_vexpand(true);
@@ -413,6 +429,8 @@ impl Chat {
             panel_today,
             panel_approvals,
             panel_approvals_empty,
+            panel_decisions,
+            panel_decisions_empty,
             panel_identity_name,
             panel_identity_vm,
             panel_fetch: RefCell::new(false),
@@ -872,21 +890,39 @@ impl Chat {
                     pending: Vec::new(),
                 },
             );
+            Self::paint_decisions(
+                self,
+                &muse_account::DecisionHistory {
+                    decisions: Vec::new(),
+                },
+            );
+            self.panel_decisions_empty
+                .set_text("Link your account first.");
             self.panel_approvals_empty
                 .set_text("Link your account first.");
             return;
         };
         self.panel_approvals_empty.set_text("No pending approvals.");
+        self.panel_decisions_empty.set_text("No recent decisions.");
         dispatch(
             self,
-            move || (client.identity(), client.approvals()),
-            move |chat, (identity, approvals)| {
+            move || {
+                (
+                    client.identity(),
+                    client.approvals(),
+                    client.approval_history(),
+                )
+            },
+            move |chat, (identity, approvals, history)| {
                 match identity {
                     Ok(id) => chat.paint_identity(Some(&id)),
                     Err(_) => chat.paint_identity(None),
                 }
                 if let Ok(list) = approvals {
                     Self::paint_approvals(chat, &list);
+                }
+                if let Ok(log) = history {
+                    Self::paint_decisions(chat, &log);
                 }
             },
         );
@@ -959,6 +995,66 @@ impl Chat {
             column.append(&buttons);
             row.set_child(Some(&column));
             chat.panel_approvals.append(&row);
+        }
+    }
+
+    /// The decided past, read-only rows: what it asked for, the
+    /// outcome and who decided it, plus the reason behind it. A
+    /// failed read keeps the last good log rather than blanking
+    /// it, like the pending list above.
+    fn paint_decisions(chat: &Rc<Self>, log: &muse_account::DecisionHistory) {
+        while let Some(child) = chat.panel_decisions.first_child() {
+            chat.panel_decisions.remove(&child);
+        }
+        chat.panel_decisions_empty
+            .set_visible(log.decisions.is_empty());
+        for decided in &log.decisions {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            let title = decided
+                .display_name
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .or_else(|| {
+                    decided
+                        .action_label
+                        .as_deref()
+                        .filter(|text| !text.is_empty())
+                })
+                .unwrap_or("(decision)");
+            let head = gtk4::Label::new(Some(title));
+            head.set_xalign(0.0);
+            head.set_wrap(true);
+            head.set_max_width_chars(28);
+            column.append(&head);
+            let verdict = [decided.decision.as_deref(), decided.status.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            if !verdict.is_empty() {
+                let line = gtk4::Label::new(Some(&verdict));
+                line.set_xalign(0.0);
+                line.set_wrap(true);
+                line.set_max_width_chars(28);
+                line.add_css_class("dim-label");
+                column.append(&line);
+            }
+            if let Some(reason) = decided.decision_reason.as_deref()
+                && !reason.is_empty()
+            {
+                let line = gtk4::Label::new(Some(reason));
+                line.set_xalign(0.0);
+                line.set_wrap(true);
+                line.set_lines(2);
+                line.set_max_width_chars(28);
+                line.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                line.add_css_class("dim-label");
+                column.append(&line);
+            }
+            row.set_child(Some(&column));
+            chat.panel_decisions.append(&row);
         }
     }
 

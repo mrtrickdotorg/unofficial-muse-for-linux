@@ -101,6 +101,17 @@ blocked on safety, not knowledge: scratch-session sends never
 land in history, and a real-thread reply is a non-reversible
 user-visible turn (message plus the agent run it triggers). No
 code ships until a reversible proof exists.
+Decision log (Nov 19, 2026): `egress.approval.history` answers
+50 decided items, and the bridge now projects them narrowly as
+`approval_history` (id, times, display name, action, decision,
+who, status, host, method, path, capped reason and matched
+rule — local paths, payload previews, resume tokens and rich
+explanations never cross). The chat side panel gained a "Recent
+decisions" section under the pending list, read once per visit
+alongside identity and approvals; a failed read keeps the last
+good log. Verified live: 50 rows, ~21 KB on the wire, no
+leaking keys. Paging (`next_cursor`) is untouched — the first
+page is the log the gate asks for.
 
 An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:

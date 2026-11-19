@@ -688,6 +688,7 @@ def validate_request(request):
                "activity": {"timeout"},
                "cancel": set(),
                "approvals": set(),
+               "approval_history": set(),
                "decide": {"approval_id", "decision"},
                "permissions": set(),
                "revoke": {"permission_id"},
@@ -3068,6 +3069,56 @@ def approval_rows(payload):
 DECISIONS = ("allow_once", "allow_task", "allow_site", "allow_always", "deny")
 
 
+def decision_history_rows(payload):
+    """Project the decision log, keeping only what answers "what did it do".
+
+    `egress.approval.history` answers up to 50 decided items, but each
+    item is a full evidence bundle: local binary paths and cmdlines,
+    payload previews, resume tokens, rich explanations. None of that
+    crosses here. A row carries the decision's own identity and time,
+    what it asked for, the outcome and who decided it, and the reason
+    and matched rule behind the outcome -- capped, like listing text.
+    A row with no approval_id cannot be referred to, so it is dropped
+    rather than failing the other forty-nine.
+    """
+    if not isinstance(payload, dict):
+        raise BridgeFailure("protocol_error")
+    items = payload.get("items")
+    if not isinstance(items, list):
+        raise BridgeFailure("protocol_error")
+
+    def capped(value, limit):
+        text = optional_text(value)
+        return text[:limit] if text else None
+
+    def moment(value):
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        approval_id = item.get("approval_id")
+        if not isinstance(approval_id, str) or not approval_id.strip():
+            continue
+        rows.append({
+            "approval_id": approval_id,
+            "requested_at_ms": moment(item.get("requested_at_ms")),
+            "decided_at_ms": moment(item.get("decided_at_ms")),
+            "display_name": capped(item.get("display_name"), 120),
+            "action_label": capped(item.get("action_label"), 160),
+            "decision": capped(item.get("decision"), 32),
+            "decided_by": capped(item.get("decided_by"), 64),
+            "status": capped(item.get("status"), 32),
+            "host": capped(item.get("host"), 253),
+            "method": capped(item.get("method"), 32),
+            "path": capped(item.get("path"), 400),
+            "decision_reason": capped(item.get("decision_reason"), 500),
+            "matched_policy": capped(item.get("matched_policy"), 256),
+        })
+    return {"decisions": rows}
+
+
 def decision_answer(approval_id, decision, answer):
     """What came back from a decision, without overstating it.
 
@@ -4470,6 +4521,17 @@ class Adapter:
             finally:
                 gateway.close()
             return approval_rows(payload)
+        if request["op"] == "approval_history":
+            # Read-only, on its own sentinel connection like the
+            # pending list: a decided past can never become a
+            # pending choice, but it shares the service and the
+            # narrow projection discipline.
+            gateway = sentinel_gateway(self.config)
+            try:
+                payload = gateway.call_json("egress.approval.history", timeout=20)
+            finally:
+                gateway.close()
+            return decision_history_rows(payload)
         if request["op"] == "decide":
             # A write on the sentinel service: one decision, one connection, and
             # never retried here. The caller shows the request and presses once.
