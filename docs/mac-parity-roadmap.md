@@ -63,7 +63,11 @@ shared one). Live service change, Nov 18, 2026: `fs.write` now requires
 the older `{content, encoding}` shapes with a 422 naming the missing field;
 the bridge's text and binary write bodies were updated to the probed shapes
 (a 22-byte text file and a 68-byte PNG each verified by stat, then deleted
-with `fs.delete` and a 404 on the stat after; nothing lingers). An earlier connection-gate bug — the data pages' shared "verified"
+with `fs.delete` and a 404 on the stat after; nothing lingers).
+Chat ❤ (`reactions.toggle` with `{message_id, emoji}`, a ❤ button
+beside Copy on assistant rows, the answer's state reported as
+recorded vs removed, verified on then off through the shipped
+dispatch with net zero). An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:
 the flag now follows what a reply actually proves about the account.
 
