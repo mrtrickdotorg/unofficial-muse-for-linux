@@ -107,6 +107,24 @@ composer, with Cancel × to drop it. The send itself stays a
 plain send — the community gateway records no reply param and
 the web's in_reply_to shape is web-transport only — so the quote
 is reader context, never a protocol claim.
+Message ⋯ / View details / View scheduled task (Gap 2, investigated
+Nov 19, 2026): the web puts React and Reply inline on every row and
+keeps the rest behind a separate ⋯ button (the AX tree shows
+React+Reply in one container with ⋯ as its sibling; Copy stays
+assistant-only). The ⋯ menu's own items are still unmined — the
+three localized "More options" instances in the bundle belong to
+thread/sidebar surfaces, not message rows — so no ⋯ menu ships;
+a button with unknown contents would be a mock. "View details"
+and "View scheduled task" are per-row buttons on unit and
+schedule rows; wiring either needs the widget payload shape, and
+the owner's timing log (671 widget-probe lines) shows option
+widgets only (`data.options/button_style/composer_hint/
+custom_input/html`, `state.selectedText/selectedValue/locked`) —
+no unit/idea/schedule reference keys anywhere. The widget-probe
+already auto-logs unknown shapes keys-only, so the unblock is a
+live capture, not new code: open a message ⋯ in the browser with
+a capture running, and open a thread whose history carries a unit
+or schedule row. Until then Gap 2 ships nothing.
 Decision log (Nov 19, 2026): `egress.approval.history` answers
 50 decided items, and the bridge now projects them narrowly as
 `approval_history` (id, times, display name, action, decision,
