@@ -12,6 +12,7 @@ mod chat;
 mod chat_view;
 mod composer;
 mod images;
+mod local_host;
 mod login;
 mod pages;
 mod session;

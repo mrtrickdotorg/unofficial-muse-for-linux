@@ -1034,6 +1034,8 @@ dependencies = [
  "libadwaita",
  "libc",
  "muse-account",
+ "muse-local-link",
+ "muse-local-tools",
  "serde",
  "serde_json",
  "ureq",
