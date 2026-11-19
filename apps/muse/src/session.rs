@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 /// Which service read currently owns the session's one in-flight slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Op {
     Connect,
     Identity,
@@ -143,13 +143,14 @@ pub fn save_saved_connection_in(dir: &Path, connection: &SavedConnection) -> Res
 }
 
 /// Live account state: the linked identity plus the newest transcript
-/// read. One in-flight service read at a time; a second press waits
-/// instead of stacking a duplicate dispatch.
+/// read. Each stream holds its own in-flight slot — a second press on
+/// the same stream waits instead of stacking a duplicate dispatch,
+/// while an unrelated stream (the chat pump beside a page fill)
+/// proceeds on its own ticket.
 pub struct Session {
     client: Option<muse_account::AccountClient>,
     config: Option<muse_account::BridgeConfig>,
-    busy: Option<Ticket>,
-    busy_since: Option<std::time::Instant>,
+    held: std::collections::HashMap<Op, (Ticket, std::time::Instant)>,
     serial: u64,
     pub account: Option<muse_account::AccountSnapshot>,
     pub history: Vec<muse_account::HistoryMessage>,
@@ -178,8 +179,7 @@ impl Session {
         Self {
             client: None,
             config: None,
-            busy: None,
-            busy_since: None,
+            held: std::collections::HashMap::new(),
             serial: 0,
             account: None,
             history: Vec::new(),
@@ -192,9 +192,9 @@ impl Session {
         }
     }
 
-    /// True while any read holds the slot.
+    /// True while any stream holds its slot.
     pub fn is_busy(&self) -> bool {
-        self.busy.is_some()
+        !self.held.is_empty()
     }
 
     /// A hold longer than any legitimate operation (the longest
@@ -208,47 +208,43 @@ impl Session {
         now.duration_since(since) > Self::STALE_SLOT_AFTER
     }
 
-    /// Take the in-flight slot for one read. A second press while the
-    /// slot is held gets nothing -- it waits instead of dispatching
-    /// twice. A hold older than every legitimate operation is
-    /// released as stuck, with a log line, so one wedged read cannot
-    /// silence sends and fills forever.
+    /// Take a stream's in-flight slot for one read. A second press on
+    /// the same stream while its slot is held gets nothing -- it
+    /// waits instead of dispatching twice. A hold older than every
+    /// legitimate operation is released as stuck, with a log line, so
+    /// one wedged read cannot silence its own stream forever. Other
+    /// streams are unaffected.
     pub fn try_begin(&mut self, op: Op) -> Option<Ticket> {
-        if let Some(held) = self.busy {
-            if Self::slot_stale(
-                self.busy_since.unwrap_or(std::time::Instant::now()),
-                std::time::Instant::now(),
-            ) {
-                eprintln!(
-                    "muse: releasing a stuck {:?} slot held past {:?}",
-                    held.op,
-                    Self::STALE_SLOT_AFTER
-                );
-                self.busy = None;
-                self.busy_since = None;
-            } else {
+        if let Some((held, since)) = self.held.get(&op) {
+            if !Self::slot_stale(*since, std::time::Instant::now()) {
                 return None;
             }
+            eprintln!(
+                "muse: releasing a stuck {:?} slot held past {:?}",
+                held.op,
+                Self::STALE_SLOT_AFTER
+            );
+            self.held.remove(&op);
         }
         self.serial = self.serial.wrapping_add(1);
         let ticket = Ticket {
             op,
             serial: self.serial,
         };
-        self.busy = Some(ticket);
-        self.busy_since = Some(std::time::Instant::now());
+        self.held.insert(op, (ticket, std::time::Instant::now()));
         Some(ticket)
     }
 
     /// Release the slot for a completion carrying its own ticket. A
-    /// stale or foreign ticket owns nothing and releases nothing.
+    /// stale or foreign ticket owns nothing and releases nothing --
+    /// and never touches another stream's slot.
     pub fn accept(&mut self, ticket: &Ticket) -> bool {
-        if self.busy.as_ref() == Some(ticket) {
-            self.busy = None;
-            self.busy_since = None;
-            true
-        } else {
-            false
+        match self.held.get(&ticket.op) {
+            Some((held, _)) if held == ticket => {
+                self.held.remove(&ticket.op);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -899,7 +895,9 @@ mod tests {
         let mut session = Session::new();
         let first = session.try_begin(Op::History).expect("slot");
         assert!(session.try_begin(Op::History).is_none());
-        assert!(session.try_begin(Op::Connect).is_none());
+        // A different stream is not the same press: connect proceeds
+        // while a history read is in flight, on its own ticket.
+        let connect = session.try_begin(Op::Connect).expect("other stream");
         // A foreign ticket releases nothing...
         let foreign = Ticket {
             op: Op::History,
@@ -910,6 +908,24 @@ mod tests {
         // ...while the real completion frees the slot exactly once.
         assert!(session.accept(&first));
         assert!(!session.accept(&first));
-        assert!(session.try_begin(Op::Connect).is_some());
+        assert!(session.try_begin(Op::History).is_some());
+        assert!(session.accept(&connect));
+    }
+
+    #[test]
+    fn unrelated_streams_hold_independent_slots() {
+        // The chat pump must never starve a page fill: a held History
+        // slot leaves Page dispatchable, and each completion releases
+        // only its own stream.
+        let mut session = Session::new();
+        let history = session.try_begin(Op::History).expect("history slot");
+        let page = session
+            .try_begin(Op::Page)
+            .expect("page slot beside history");
+        assert!(session.accept(&history));
+        assert!(session.try_begin(Op::History).is_some());
+        assert!(!session.accept(&history));
+        assert!(session.accept(&page));
+        assert!(session.try_begin(Op::Page).is_some());
     }
 }
