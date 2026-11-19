@@ -112,6 +112,20 @@ alongside identity and approvals; a failed read keeps the last
 good log. Verified live: 50 rows, ~21 KB on the wire, no
 leaking keys. Paging (`next_cursor`) is untouched — the first
 page is the log the gate asks for.
+Settings PATCH body (Nov 19, 2026): `permissions.settings.update`
+(PATCH `/permissions/settings`) is nowhere in the bundle chunks,
+so the service named the body itself: one of `connector_default`,
+`network_default`, `protocols` (map, at least one row), or
+`confidential_vm` (map, answered only on confidential VMs — this
+account is not one) is required; defaults take `auto_allow`
+("Ask for some actions") or `always_ask`; protocol rows take
+`deny` or `ask`. Write-backs of the current values land
+unchanged (verified live, settings identical before and after).
+A new `settings_update` op sends one PATCH and returns the same
+narrow projection as a fresh read, so the answer proves the new
+state; `confidential_vm` stays unoffered. Bridge + client only,
+no editor UI yet — the same landing state as `connector_reset`
+before it.
 
 An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:

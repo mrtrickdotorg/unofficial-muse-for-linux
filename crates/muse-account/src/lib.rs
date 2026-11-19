@@ -1856,6 +1856,51 @@ impl AccountClient {
     pub fn policy_settings(&self) -> Result<PolicySettings, AccountError> {
         self.request(serde_json::json!({"op": "policy_settings"}), false)
     }
+    /// Update the service's durable policy settings, once.
+    ///
+    /// Each argument is optional; at least one must be present, as
+    /// the service requires. Words are checked for shape only --
+    /// the service owns the policy vocabulary and names it in its
+    /// refusals. The answer is projected like a fresh read, so
+    /// what travels proves the new state.
+    pub fn settings_update(
+        &self,
+        connector_default: Option<&str>,
+        network_default: Option<&str>,
+        protocols: Option<std::collections::HashMap<String, String>>,
+    ) -> Result<PolicySettings, AccountError> {
+        for word in [connector_default, network_default].into_iter().flatten() {
+            if word.trim().is_empty() || word.len() > 32 || word.contains('\0') {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+        }
+        if let Some(modes) = &protocols {
+            if modes.is_empty() || modes.len() > 64 {
+                return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+            }
+            for (name, mode) in modes {
+                if name.trim().is_empty()
+                    || name.len() > 64
+                    || name.contains('\0')
+                    || mode.trim().is_empty()
+                    || mode.len() > 32
+                    || mode.contains('\0')
+                {
+                    return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+                }
+            }
+        }
+        if connector_default.is_none() && network_default.is_none() && protocols.is_none() {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "settings_update",
+                              "connector_default": connector_default,
+                              "network_default": network_default,
+                              "protocols": protocols}),
+            false,
+        )
+    }
     /// Reset exactly one connector's grants, once.
     ///
     /// The name must be one the policy settings' own connectors

@@ -693,6 +693,8 @@ def validate_request(request):
                "permissions": set(),
                "revoke": {"permission_id"},
                "policy_settings": set(),
+               "settings_update": {"connector_default", "network_default",
+                                   "protocols"},
                "connector_reset": {"connector"},
                "delete_task": {"job_id"},
                "start_session": set(),
@@ -985,6 +987,40 @@ def validate_request(request):
         connector = request.get("connector")
         if (not isinstance(connector, str)
                 or not _CONNECTOR_NAME.fullmatch(connector)):
+            raise BridgeFailure("invalid_request")
+    if op == "settings_update":
+        # Shape only: the service owns the policy vocabulary and
+        # names it in its refusals, so a wrong word dies there,
+        # not here. At least one of the three must ride, as the
+        # service requires; confidential_vm stays unoffered (the
+        # service answers it exists only on confidential VMs).
+        present = 0
+        for key in ("connector_default", "network_default"):
+            value = request.get(key)
+            if value is None:
+                continue
+            present += 1
+            if (not isinstance(value, str) or not 1 <= len(value.strip()) <= 32
+                    or "\x00" in value):
+                raise BridgeFailure("invalid_request")
+        protocols = request.get("protocols")
+        if protocols is not None:
+            present += 1
+            if not isinstance(protocols, dict) or not 1 <= len(protocols) <= 64:
+                raise BridgeFailure("invalid_request")
+            try:
+                compact = json.dumps(protocols)
+            except (TypeError, ValueError):
+                raise BridgeFailure("invalid_request")
+            if len(compact) > 4096:
+                raise BridgeFailure("invalid_request")
+            for name, mode in protocols.items():
+                if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 64
+                        or "\x00" in name
+                        or not isinstance(mode, str) or not 1 <= len(mode.strip()) <= 32
+                        or "\x00" in mode):
+                    raise BridgeFailure("invalid_request")
+        if present == 0:
             raise BridgeFailure("invalid_request")
     if op == "delete_task":
         # The id is the service's own, taken from the schedule listing it
@@ -4583,6 +4619,26 @@ class Adapter:
             finally:
                 gateway.close()
             _probe_settings_shapes(request.get("config_dir"), payload)
+            return settings_rows(payload)
+        if request["op"] == "settings_update":
+            # A write on the sentinel service: one PATCH, one
+            # connection, never retried here. The body is the
+            # live-probed shape (Nov 19, 2026): the service names
+            # the required keys itself, write-backs of current
+            # values land unchanged, and wrong enum words die in
+            # its 422s. The answer is projected like a fresh
+            # read, so what travels proves the new state.
+            body = {}
+            for key in ("connector_default", "network_default", "protocols"):
+                value = request.get(key)
+                if value is not None:
+                    body[key] = value
+            gateway = sentinel_gateway(self.config)
+            try:
+                payload = gateway.call_json("permissions.settings.update",
+                                            body=body, timeout=20)
+            finally:
+                gateway.close()
             return settings_rows(payload)
         if request["op"] == "connector_reset":
             # A write on the sentinel service: reset one connector's
