@@ -3427,6 +3427,18 @@ def _unread_count(row):
     return 0
 
 
+def _is_primary(row):
+    """A sessions.list row's primary flag, for the side-chats split.
+
+    The probe-confirmed row shape carries `is_primary`; only an
+    explicit false reads as a side chat. Absent, null or anything
+    else reads as primary, so a shape drift keeps the chat in the
+    main list instead of exiling it to a section the reader never
+    opens.
+    """
+    return False if row.get("is_primary") is False else True
+
+
 def _snippet_text(value):
     """A sessions.list row's snippet, for the thread rows.
 
@@ -3459,6 +3471,7 @@ def session_rows(client, config, config_dir=None):
             "pinned": bool(row.get("pinned", False)),
             "is_thread": _thread_flag(row),
             "unread_count": _unread_count(row),
+            "is_primary": _is_primary(row),
             "updated_at": optional_text(row.get("updated_at")),
             "snippet": _snippet_text(row.get("snippet")),
         } for row in object_rows(client.threads(include_archived=True))]
@@ -3487,6 +3500,7 @@ def session_rows(client, config, config_dir=None):
             "pinned": bool(session.get("pinned", False)),
             "is_thread": _thread_flag(session),
             "unread_count": _unread_count(session),
+            "is_primary": _is_primary(session),
             "updated_at": updated_at_text(session),
             "snippet": _snippet_text(session.get("snippet")),
         })

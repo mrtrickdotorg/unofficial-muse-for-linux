@@ -134,6 +134,16 @@ Yesterday / date / Earlier headers (pinned threads keep their
 pride of place above the groups), and each row's second line
 reads snippet plus clock time instead of repeating the date.
 The sidebar History stays a compact nav list by choice.
+Side chats (Gap 4, option B, shipped Nov 19, 2026): side chats are
+the listing's own non-primary threads — `sessions.list` carries
+`is_primary` on every row (timing-log sessions-shape lines), now
+projected with absent reading as primary. The Threads page files
+them under a "Side chats" header with an "Open full chat" row-menu
+item (switch thread, land on chat); the main list is unchanged.
+The primary↔side reading is an inference from the flag name, not
+a recorded route semantic — if live rows miscategorize, the rule
+changes, not the data. Split-view side-by-side (option A) stays
+deferred by design.
 Decision log (Nov 19, 2026): `egress.approval.history` answers
 50 decided items, and the bridge now projects them narrowly as
 `approval_history` (id, times, display name, action, decision,

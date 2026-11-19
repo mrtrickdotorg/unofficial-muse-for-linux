@@ -1854,7 +1854,8 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(response, {"identity_name": "Test User", "vm_id": "vm-1",
             "threads": [{"session_id": "thread-1", "title": "Example",
                          "archived": False, "pinned": False, "is_thread": True,
-                         "unread_count": 0, "snippet": None,
+                         "unread_count": 0, "is_primary": True,
+                         "snippet": None,
                          "updated_at": "2026-10-17T00:00:00Z"}]})
         self.assertNotIn("SECRET", str(response))
 
@@ -3136,6 +3137,34 @@ class SessionOpTests(unittest.TestCase):
         rows = bridge.session_rows(Client(), {})
         self.assertEqual([row["unread_count"] for row in rows],
                          [3, 0, 0, 0, 0])
+
+    def test_session_rows_project_is_primary_with_a_safe_default(self):
+        # Side chats ride the same list as the main chat; the row's
+        # own is_primary flag tells them apart. Absent or null reads
+        # as primary: no payload shape may exile a chat to a section
+        # the reader never opens.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                return {"sessions": [
+                    {"session_id": "t1", "title": "Main",
+                     "is_primary": True},
+                    {"session_id": "t2", "title": "Side",
+                     "is_primary": False},
+                    {"session_id": "t3", "title": "Unflagged"},
+                    {"session_id": "t4", "title": "Null flag",
+                     "is_primary": None}]}
+
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+
+        rows = bridge.session_rows(Client(), {})
+        self.assertEqual([row["is_primary"] for row in rows],
+                         [True, False, True, True])
 
 
 class CancelTests(unittest.TestCase):
