@@ -1341,6 +1341,12 @@ impl AccountClient {
             host: None,
         }
     }
+    /// The bridge configuration this client was built from: the local
+    /// host needs the same interpreter, script and config dir to
+    /// register the same account's device.
+    pub fn bridge_config(&self) -> BridgeConfig {
+        self.config.clone()
+    }
     /// Bound this clone's subprocesses to a session lease. False cancels locally;
     /// an already dispatched remote action cannot be recalled and is uncertain.
     pub fn cancellable(&self, active: Arc<AtomicBool>) -> Self {
