@@ -196,7 +196,9 @@ fn message_widget(
 
     if !options.is_empty() {
         // The web stacks options full-width, one row each; the
-        // reader's pick carries its check at the row's end.
+        // reader's pick carries a check at the row's end. Labels wrap
+        // so a long option can never force the transcript wider than
+        // the viewport — a button's own label never wraps.
         let choices = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         for option in options.iter() {
             // The web marks the reader's pick with a check; the class
@@ -207,17 +209,19 @@ fn message_widget(
             button.add_css_class("muse-option");
             if picked {
                 button.add_css_class("muse-option-selected");
-                let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-                let label = gtk4::Label::new(Some(option));
-                label.set_hexpand(true);
-                label.set_xalign(0.0);
-                let check = gtk4::Label::new(Some("✓"));
-                row.append(&label);
-                row.append(&check);
-                button.set_child(Some(&row));
-            } else {
-                button.set_label(option);
             }
+            let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let label = gtk4::Label::new(Some(option));
+            label.set_hexpand(true);
+            label.set_xalign(0.0);
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+            row.append(&label);
+            if picked {
+                let check = gtk4::Label::new(Some("✓"));
+                row.append(&check);
+            }
+            button.set_child(Some(&row));
             let callback = on_option.clone();
             let text = option.clone();
             button.connect_clicked(move |_| callback(text.clone()));
@@ -243,7 +247,8 @@ fn message_widget(
 
 /// One attachment card: name plus the largest useful display fields.
 /// Bytes and hashes never cross into the client, so there is nothing
-/// here that could leak a local path.
+/// here that could leak a local path. The card wraps: a long file
+/// name must never force the transcript wider than the viewport.
 pub fn attachment_card(attachment: &MessageAttachment) -> gtk4::Widget {
     let mut lines = vec![attachment.filename.clone()];
     if let (Some(width), Some(height)) = (attachment.width, attachment.height) {
@@ -264,6 +269,8 @@ pub fn attachment_card(attachment: &MessageAttachment) -> gtk4::Widget {
     }
     let card = gtk4::Label::new(Some(&lines.join("\n")));
     card.set_xalign(0.0);
+    card.set_wrap(true);
+    card.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
     card.add_css_class("card");
     card.upcast()
 }
@@ -430,6 +437,71 @@ mod tests {
             replies[0].tooltip_text().as_deref(),
             Some("Reply to this message")
         );
+
+        // Wide content must never force a row wider than the
+        // transcript column: long file names wrap, long options wrap.
+        // An over-wide row used to shove the whole transcript past the
+        // viewport with no horizontal scrollbar to reach it. Rows live
+        // inside an 800px clamp, so no row may demand more than that.
+        let wide_option = "A very long option button label that describes an entire action in one breath and keeps going past any reasonable width".to_owned();
+        let wide = vec![
+            muse_account::HistoryMessage {
+                message_id: "wide-a".to_owned(),
+                seq: 0,
+                role: "assistant".to_owned(),
+                text: "http://chaosco.app/, last crawled Nov 19. That is the plain-HTTP version."
+                    .to_owned(),
+                timestamp: Some("2026-11-19T12:00:00Z".to_owned()),
+                status: None,
+                options: vec![wide_option],
+                selected_option: None,
+                attachments: vec![muse_account::MessageAttachment {
+                    filename: "x".repeat(220),
+                    mime_type: None,
+                    kind: None,
+                    bytes_len: None,
+                    width: None,
+                    height: None,
+                    caption: None,
+                    transcription: None,
+                }],
+            },
+            muse_account::HistoryMessage {
+                message_id: "wide-b".to_owned(),
+                seq: 1,
+                role: "user".to_owned(),
+                text: "https://chaosco.app/sitemap.xml already ends with the right line."
+                    .to_owned(),
+                timestamp: Some("2026-11-19T12:01:00Z".to_owned()),
+                status: None,
+                options: Vec::new(),
+                selected_option: None,
+                attachments: Vec::new(),
+            },
+        ];
+        let wide_rows = build_rows(&wide);
+        let wide_list = gtk4::ListBox::new();
+        populate(
+            &wide_list, &wide_rows, &on_option, &on_react, &on_reply, &previews,
+        );
+        let wide_scrolled = gtk4::ScrolledWindow::new();
+        wide_scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+        wide_scrolled.set_child(Some(&wide_list));
+        let wide_window = gtk4::Window::new();
+        wide_window.set_default_size(900, 600);
+        wide_window.set_child(Some(&wide_scrolled));
+        wide_window.present();
+        super::super::app::pump_gtk(200);
+        let mut child = wide_list.first_child();
+        while let Some(next) = child {
+            let (min_w, ..) = next.measure(gtk4::Orientation::Horizontal, -1);
+            assert!(
+                min_w <= 800,
+                "row demands more than the transcript column: min={min_w}"
+            );
+            child = next.next_sibling();
+        }
+        wide_window.close();
 
         let built = super::super::composer::ComposerRow::build();
         let mut composer = super::super::composer::Composer::new();

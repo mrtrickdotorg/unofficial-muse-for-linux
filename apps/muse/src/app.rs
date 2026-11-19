@@ -2318,7 +2318,7 @@ pub(super) fn verify_chat_scroll_navigation() {
 }
 
 #[cfg(test)]
-fn pump_gtk(milliseconds: u64) {
+pub(crate) fn pump_gtk(milliseconds: u64) {
     let context = gtk4::glib::MainContext::default();
     let until = std::time::Instant::now() + std::time::Duration::from_millis(milliseconds);
     while std::time::Instant::now() < until {
