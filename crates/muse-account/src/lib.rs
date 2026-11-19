@@ -195,10 +195,20 @@ pub struct Thread {
     /// no snippet, never as an empty row.
     #[serde(default)]
     pub snippet: Option<String>,
+    /// Whether the session is the primary chat. Side chats ride the
+    /// same listing with this flag false; the Threads page files
+    /// them under their own header. Absent reads as primary, so an
+    /// older answer keeps every chat in the main list.
+    #[serde(default = "default_primary")]
+    pub is_primary: bool,
     pub updated_at: Option<String>,
 }
 
 fn default_thread() -> bool {
+    true
+}
+
+fn default_primary() -> bool {
     true
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

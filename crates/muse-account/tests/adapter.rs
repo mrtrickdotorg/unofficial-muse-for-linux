@@ -551,13 +551,17 @@ request = json.load(sys.stdin)
 assert request['op'] == 'connect'
 assert request['config_dir'].endswith('/config')
 print(json.dumps({'ok': True, 'data': {'identity_name': 'User', 'vm_id': 'vm-1',
-    'threads': [{'session_id':'thread-1', 'title':'Hello', 'archived':False, 'updated_at':None}]}}))
+    'threads': [{'session_id':'thread-1', 'title':'Hello', 'archived':False, 'updated_at':None},
+                {'session_id':'side-1', 'title':'Side', 'archived':False, 'updated_at':None, 'is_primary':False}]}}))
 "#,
     );
     let snapshot = f.client().connect().unwrap();
     assert_eq!(snapshot.identity_name, "User");
     assert_eq!(snapshot.vm_id, "vm-1");
     assert_eq!(snapshot.threads[0].session_id, "thread-1");
+    // Absent reads as primary; only an explicit false files a side chat.
+    assert!(snapshot.threads[0].is_primary);
+    assert!(!snapshot.threads[1].is_primary);
 }
 
 #[test]

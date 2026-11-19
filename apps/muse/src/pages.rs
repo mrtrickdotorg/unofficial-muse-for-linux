@@ -2898,6 +2898,272 @@ fn thread_meta(snippet: Option<&str>, updated_at: Option<&str>) -> String {
     }
 }
 
+/// Split the listing into side chats and the main list. Only an
+/// explicit non-primary flag files a side chat; order within each
+/// half follows the listing (pinned first from the caller).
+fn split_side_chats(
+    threads: Vec<muse_account::Thread>,
+) -> (Vec<muse_account::Thread>, Vec<muse_account::Thread>) {
+    let (side, main): (Vec<_>, Vec<_>) = threads.into_iter().partition(|thread| !thread.is_primary);
+    (side, main)
+}
+
+/// One thread row: title, unread badge, snippet and time, plus the
+/// row menu (rename, pin, archive — and Open full chat on side rows).
+/// Row selection navigates to Chat; the ⋯ button guards its press so
+/// the menu never navigates away.
+fn append_thread_row(
+    ctx: &Ctx,
+    list: &gtk4::ListBox,
+    thread: &muse_account::Thread,
+    open_full: bool,
+) {
+    let row = gtk4::ListBoxRow::new();
+    row.set_widget_name(&format!("thread:{}", thread.session_id));
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let title_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let name = if thread.title.is_empty() {
+        "(untitled)".to_owned()
+    } else {
+        thread.title.clone()
+    };
+    let name = if thread.pinned {
+        format!("📌 {name}")
+    } else {
+        name
+    };
+    let label = gtk4::Label::new(Some(name.as_str()));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    title_row.append(&label);
+    if thread.unread_count > 0 {
+        let badge = gtk4::Label::new(Some(&format!("{}", thread.unread_count)));
+        badge.set_tooltip_text(Some(&format!("{} unread", thread.unread_count)));
+        badge.add_css_class("muse-unread");
+        title_row.append(&badge);
+    }
+    words.append(&title_row);
+    let meta = thread_meta(thread.snippet.as_deref(), thread.updated_at.as_deref());
+    if !meta.is_empty() {
+        let sub = gtk4::Label::new(Some(&meta));
+        sub.set_xalign(0.0);
+        sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        sub.add_css_class("dim-label");
+        words.append(&sub);
+    }
+    line.append(&words);
+    let more = gtk4::Button::with_label("⋯");
+    more.add_css_class("flat");
+    more.add_css_class("circular");
+    more.set_valign(gtk4::Align::Start);
+    more.set_tooltip_text(Some("Thread options"));
+    line.append(&more);
+    row.set_child(Some(&line));
+    let popover = gtk4::Popover::new();
+    popover.set_parent(&more);
+    let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    menu.set_margin_start(8);
+    menu.set_margin_end(8);
+    menu.set_margin_top(8);
+    menu.set_margin_bottom(8);
+    if open_full {
+        let open_ctx = ctx.clone();
+        let open_popover = popover.clone();
+        let open_id = thread.session_id.clone();
+        let open = gtk4::Button::with_label("Open full chat");
+        open.add_css_class("flat");
+        menu.append(&open);
+        open.connect_clicked(move |_| {
+            open_popover.popdown();
+            open_thread(&open_ctx, Some(open_id.clone()));
+        });
+    }
+    let rename = gtk4::Button::with_label("Rename");
+    rename.add_css_class("flat");
+    menu.append(&rename);
+    let pin_label = if thread.pinned { "Unpin" } else { "Pin" };
+    let pin = gtk4::Button::with_label(pin_label);
+    pin.add_css_class("flat");
+    menu.append(&pin);
+    let archive_label = if thread.archived {
+        "Unarchive"
+    } else {
+        "Archive"
+    };
+    let archive = gtk4::Button::with_label(archive_label);
+    archive.add_css_class("flat");
+    menu.append(&archive);
+    popover.set_child(Some(&menu));
+    // A press inside the row selects it, and selecting a thread
+    // row navigates to Chat — so the menu button unselects its
+    // row on press (before the list sees it) and restores it
+    // when the menu closes. Keyboard users can't reach this
+    // button (it takes no focus) rather than navigate away.
+    more.set_focusable(false);
+    let press = gtk4::GestureClick::new();
+    {
+        let row_weak = row.downgrade();
+        let popover_held = popover.clone();
+        press.connect_pressed(move |_, _, _, _| {
+            if let Some(row) = row_weak.upgrade() {
+                row.set_selectable(false);
+            }
+            popover_held.popup();
+        });
+    }
+    more.add_controller(press);
+    {
+        let row_weak = row.downgrade();
+        popover.connect_closed(move |_| {
+            if let Some(row) = row_weak.upgrade() {
+                row.set_selectable(true);
+            }
+        });
+    }
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        let session_id = thread.session_id.clone();
+        let title = thread.title.clone();
+        rename.connect_clicked(move |_| {
+            popover_held.popdown();
+            // Per-click locals: the dialog below (and its Save)
+            // is built fresh on every press, so everything Save
+            // moves must die with the press, never with the row.
+            let session_id = session_id.clone();
+            let title = title.clone();
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let window = gtk4::Window::new();
+            window.set_modal(true);
+            window.set_default_size(420, -1);
+            window.set_title(Some("Rename thread"));
+            if let Some(root) = line_inner
+                .root()
+                .and_then(|root| root.downcast::<gtk4::Window>().ok())
+            {
+                window.set_transient_for(Some(&root));
+            }
+            let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            body.set_margin_start(24);
+            body.set_margin_end(24);
+            body.set_margin_top(20);
+            body.set_margin_bottom(20);
+            let entry = gtk4::Entry::new();
+            entry.set_text(&title);
+            entry.set_hexpand(true);
+            body.append(&entry);
+            let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let cancel = gtk4::Button::with_label("Cancel");
+            cancel.add_css_class("flat");
+            buttons.append(&cancel);
+            let save = gtk4::Button::with_label("Save");
+            save.add_css_class("muse-cta");
+            buttons.append(&save);
+            body.append(&buttons);
+            window.set_child(Some(&body));
+            {
+                let window = window.clone();
+                cancel.connect_clicked(move |_| {
+                    window.close();
+                });
+            }
+            {
+                let window = window.clone();
+                let line_for_done = line_inner.clone();
+                let ctx_for_done = ctx.clone();
+                save.connect_clicked(move |_| {
+                    let name = entry.text().to_string();
+                    if name.trim().is_empty() {
+                        line_for_done.append(&card_note("A thread needs a non-blank title."));
+                        return;
+                    }
+                    window.close();
+                    let line_for_done = line_for_done.clone();
+                    let ctx_for_done = ctx_for_done.clone();
+                    super::app::dispatch(
+                        &chat,
+                        {
+                            let client = client.clone();
+                            let session_id = session_id.clone();
+                            move || client.session_op(&session_id, "rename", Some(&name))
+                        },
+                        move |chat, answer| {
+                            let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                            if accepted {
+                                show(&ctx_for_done, "threads");
+                            } else {
+                                line_for_done.append(&card_note(
+                                    "The service did not rename it. Nothing changed.",
+                                ));
+                            }
+                            let _ = chat;
+                        },
+                    );
+                });
+            }
+            window.present();
+        });
+    }
+    for (button, kind) in [(pin, "pin"), (archive, "archive")] {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        let session_id = thread.session_id.clone();
+        let pinned = thread.pinned;
+        let archived = thread.archived;
+        button.connect_clicked(move |_| {
+            popover_held.popdown();
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let flip = if kind == "pin" { !pinned } else { !archived };
+            let verb = if kind == "pin" {
+                if flip { "pin" } else { "unpin" }
+            } else if flip {
+                "archive"
+            } else {
+                "unarchive"
+            };
+            let line_for_done = line_inner.clone();
+            let ctx_for_done = ctx.clone();
+            super::app::dispatch(
+                &chat,
+                {
+                    let client = client.clone();
+                    let session_id = session_id.clone();
+                    let verb = verb.to_owned();
+                    move || client.session_op(&session_id, &verb, None)
+                },
+                move |chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "threads");
+                    } else {
+                        line_for_done.append(&card_note(
+                            "The service did not change it. Nothing changed.",
+                        ));
+                    }
+                    let _ = chat;
+                },
+            );
+        });
+    }
+    list.append(&row);
+}
+
 fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
     let Some(list) = named_list(page, "threads-list") else {
         return;
@@ -2915,11 +3181,12 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
         return;
     }
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
+    let (side, main) = split_side_chats(threads);
     // Pinned threads keep their pride of place above the day groups;
     // the rest file under Today / Yesterday / date / Earlier headers.
     let today = super::app::local_today();
     let mut group: Option<String> = None;
-    for thread in threads {
+    for thread in main {
         if !thread.pinned {
             let label = thread_group_label(thread.updated_at.as_deref(), &today);
             if group.as_deref() != Some(label.as_str()) {
@@ -2930,239 +3197,16 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
                 group = Some(label);
             }
         }
-        let row = gtk4::ListBoxRow::new();
-        row.set_widget_name(&format!("thread:{}", thread.session_id));
-        let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-        let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
-        let title_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-        let name = if thread.title.is_empty() {
-            "(untitled)".to_owned()
-        } else {
-            thread.title.clone()
-        };
-        let name = if thread.pinned {
-            format!("📌 {name}")
-        } else {
-            name
-        };
-        let label = gtk4::Label::new(Some(name.as_str()));
-        label.set_xalign(0.0);
-        label.set_hexpand(true);
-        label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        title_row.append(&label);
-        if thread.unread_count > 0 {
-            let badge = gtk4::Label::new(Some(&format!("{}", thread.unread_count)));
-            badge.set_tooltip_text(Some(&format!("{} unread", thread.unread_count)));
-            badge.add_css_class("muse-unread");
-            title_row.append(&badge);
+        append_thread_row(ctx, &list, &thread, false);
+    }
+    if !side.is_empty() {
+        let head = gtk4::Label::new(Some("Side chats"));
+        head.set_halign(gtk4::Align::Start);
+        head.add_css_class("muse-section");
+        list.append(&head);
+        for thread in &side {
+            append_thread_row(ctx, &list, thread, true);
         }
-        words.append(&title_row);
-        let meta = thread_meta(thread.snippet.as_deref(), thread.updated_at.as_deref());
-        if !meta.is_empty() {
-            let sub = gtk4::Label::new(Some(&meta));
-            sub.set_xalign(0.0);
-            sub.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-            sub.add_css_class("dim-label");
-            words.append(&sub);
-        }
-        line.append(&words);
-        let more = gtk4::Button::with_label("⋯");
-        more.add_css_class("flat");
-        more.add_css_class("circular");
-        more.set_valign(gtk4::Align::Start);
-        more.set_tooltip_text(Some("Thread options"));
-        line.append(&more);
-        row.set_child(Some(&line));
-        let popover = gtk4::Popover::new();
-        popover.set_parent(&more);
-        let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-        menu.set_margin_start(8);
-        menu.set_margin_end(8);
-        menu.set_margin_top(8);
-        menu.set_margin_bottom(8);
-        let rename = gtk4::Button::with_label("Rename");
-        rename.add_css_class("flat");
-        menu.append(&rename);
-        let pin_label = if thread.pinned { "Unpin" } else { "Pin" };
-        let pin = gtk4::Button::with_label(pin_label);
-        pin.add_css_class("flat");
-        menu.append(&pin);
-        let archive_label = if thread.archived {
-            "Unarchive"
-        } else {
-            "Archive"
-        };
-        let archive = gtk4::Button::with_label(archive_label);
-        archive.add_css_class("flat");
-        menu.append(&archive);
-        popover.set_child(Some(&menu));
-        // A press inside the row selects it, and selecting a thread
-        // row navigates to Chat — so the menu button unselects its
-        // row on press (before the list sees it) and restores it
-        // when the menu closes. Keyboard users can't reach this
-        // button (it takes no focus) rather than navigate away.
-        more.set_focusable(false);
-        let press = gtk4::GestureClick::new();
-        {
-            let row_weak = row.downgrade();
-            let popover_held = popover.clone();
-            press.connect_pressed(move |_, _, _, _| {
-                if let Some(row) = row_weak.upgrade() {
-                    row.set_selectable(false);
-                }
-                popover_held.popup();
-            });
-        }
-        more.add_controller(press);
-        {
-            let row_weak = row.downgrade();
-            popover.connect_closed(move |_| {
-                if let Some(row) = row_weak.upgrade() {
-                    row.set_selectable(true);
-                }
-            });
-        }
-        {
-            let ctx = ctx.clone();
-            let line_inner = line.clone();
-            let popover_held = popover.clone();
-            let session_id = thread.session_id.clone();
-            let title = thread.title.clone();
-            rename.connect_clicked(move |_| {
-                popover_held.popdown();
-                // Per-click locals: the dialog below (and its Save)
-                // is built fresh on every press, so everything Save
-                // moves must die with the press, never with the row.
-                let session_id = session_id.clone();
-                let title = title.clone();
-                let Some(chat) = ctx.chat.upgrade() else {
-                    return;
-                };
-                let Some(client) = chat.client_handle() else {
-                    line_inner.append(&card_note("Link your account first."));
-                    return;
-                };
-                let window = gtk4::Window::new();
-                window.set_modal(true);
-                window.set_default_size(420, -1);
-                window.set_title(Some("Rename thread"));
-                if let Some(root) = line_inner
-                    .root()
-                    .and_then(|root| root.downcast::<gtk4::Window>().ok())
-                {
-                    window.set_transient_for(Some(&root));
-                }
-                let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-                body.set_margin_start(24);
-                body.set_margin_end(24);
-                body.set_margin_top(20);
-                body.set_margin_bottom(20);
-                let entry = gtk4::Entry::new();
-                entry.set_text(&title);
-                entry.set_hexpand(true);
-                body.append(&entry);
-                let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-                let cancel = gtk4::Button::with_label("Cancel");
-                cancel.add_css_class("flat");
-                buttons.append(&cancel);
-                let save = gtk4::Button::with_label("Save");
-                save.add_css_class("muse-cta");
-                buttons.append(&save);
-                body.append(&buttons);
-                window.set_child(Some(&body));
-                {
-                    let window = window.clone();
-                    cancel.connect_clicked(move |_| {
-                        window.close();
-                    });
-                }
-                {
-                    let window = window.clone();
-                    let line_for_done = line_inner.clone();
-                    let ctx_for_done = ctx.clone();
-                    save.connect_clicked(move |_| {
-                        let name = entry.text().to_string();
-                        if name.trim().is_empty() {
-                            line_for_done.append(&card_note("A thread needs a non-blank title."));
-                            return;
-                        }
-                        window.close();
-                        let line_for_done = line_for_done.clone();
-                        let ctx_for_done = ctx_for_done.clone();
-                        super::app::dispatch(
-                            &chat,
-                            {
-                                let client = client.clone();
-                                let session_id = session_id.clone();
-                                move || client.session_op(&session_id, "rename", Some(&name))
-                            },
-                            move |chat, answer| {
-                                let accepted =
-                                    answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
-                                if accepted {
-                                    show(&ctx_for_done, "threads");
-                                } else {
-                                    line_for_done.append(&card_note(
-                                        "The service did not rename it. Nothing changed.",
-                                    ));
-                                }
-                                let _ = chat;
-                            },
-                        );
-                    });
-                }
-                window.present();
-            });
-        }
-        for (button, kind) in [(pin, "pin"), (archive, "archive")] {
-            let ctx = ctx.clone();
-            let line_inner = line.clone();
-            let popover_held = popover.clone();
-            let session_id = thread.session_id.clone();
-            let pinned = thread.pinned;
-            let archived = thread.archived;
-            button.connect_clicked(move |_| {
-                popover_held.popdown();
-                let Some(chat) = ctx.chat.upgrade() else {
-                    return;
-                };
-                let Some(client) = chat.client_handle() else {
-                    line_inner.append(&card_note("Link your account first."));
-                    return;
-                };
-                let flip = if kind == "pin" { !pinned } else { !archived };
-                let verb = if kind == "pin" {
-                    if flip { "pin" } else { "unpin" }
-                } else if flip {
-                    "archive"
-                } else {
-                    "unarchive"
-                };
-                let line_for_done = line_inner.clone();
-                let ctx_for_done = ctx.clone();
-                super::app::dispatch(
-                    &chat,
-                    {
-                        let client = client.clone();
-                        let session_id = session_id.clone();
-                        let verb = verb.to_owned();
-                        move || client.session_op(&session_id, &verb, None)
-                    },
-                    move |chat, answer| {
-                        let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
-                        if accepted {
-                            show(&ctx_for_done, "threads");
-                        } else {
-                            line_for_done.append(&card_note(
-                                "The service did not change it. Nothing changed.",
-                            ));
-                        }
-                        let _ = chat;
-                    },
-                );
-            });
-        }
-        list.append(&row);
     }
 }
 
@@ -5244,6 +5288,38 @@ mod tests {
         // never an accident.
         assert!(!PAGES.contains(&"memory"));
         assert!(!PAGES.contains(&"policy"));
+    }
+
+    #[test]
+    fn side_chats_are_the_non_primary_threads_in_order() {
+        let thread = |id: &str, primary: bool| muse_account::Thread {
+            session_id: id.to_owned(),
+            title: id.to_owned(),
+            archived: false,
+            pinned: false,
+            is_thread: true,
+            unread_count: 0,
+            snippet: None,
+            is_primary: primary,
+            updated_at: None,
+        };
+        let (side, main) = split_side_chats(vec![
+            thread("a", true),
+            thread("b", false),
+            thread("c", true),
+        ]);
+        assert_eq!(
+            main.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert_eq!(
+            side.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
     }
 
     #[test]
