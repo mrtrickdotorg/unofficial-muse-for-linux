@@ -90,14 +90,17 @@ pub fn needs_select(selected: Option<i32>, target: usize) -> bool {
 }
 
 /// Show a page: build its structure on first visit, refill on every
-/// visit, then navigate the stack and the sidebar together.
+/// visit, then navigate the stack and the sidebar together. A visit
+/// the ticket slot refuses does not leave a blank page behind:
+/// while the page stays visible the fill retries a few times, so a
+/// skipped visit still lands once the in-flight read clears.
 pub fn show(ctx: &Ctx, name: &str) {
     let existing = ctx.stack.child_by_name(name);
     if existing.is_none() {
         let page = build(ctx, name);
         ctx.stack.add_named(&page, Some(name));
     }
-    fill(ctx, name);
+    let dispatched = fill(ctx, name);
     ctx.stack.set_visible_child_name(name);
     fill_history(ctx);
     // The rail echoes the page beside the sidebar row.
@@ -125,6 +128,32 @@ pub fn show(ctx: &Ctx, name: &str) {
     {
         chat.scroll_to_latest();
     }
+    if !dispatched {
+        retry_fill_while_visible(ctx, name, 0);
+    }
+}
+
+/// A skipped visit never leaves a blank page behind: while the page
+/// stays visible the fill retries a few times, so a visit that lost
+/// the ticket race still lands once the in-flight read clears the
+/// slot. Moving to another page stops the retries.
+fn retry_fill_while_visible(ctx: &Ctx, name: &str, attempt: u32) {
+    const ATTEMPTS: u32 = 5;
+    if attempt >= ATTEMPTS {
+        return;
+    }
+    let ctx = ctx.clone();
+    let name = name.to_owned();
+    gtk4::glib::timeout_add_local(Duration::from_secs(3), move || {
+        if ctx.stack.visible_child_name().as_deref() != Some(name.as_str()) {
+            return gtk4::glib::ControlFlow::Break;
+        }
+        if fill(&ctx, &name) {
+            return gtk4::glib::ControlFlow::Break;
+        }
+        retry_fill_while_visible(&ctx, &name, attempt + 1);
+        gtk4::glib::ControlFlow::Break
+    });
 }
 
 fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
@@ -648,12 +677,13 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
 /// Re-poll the host and repaint the page: the pump tick and
 /// every press land here, so cards, replies and the notice never
 /// go stale while the page shows.
-fn refresh_localhost(ctx: &Ctx, page: &gtk4::Box) {
+fn refresh_localhost(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(chat) = ctx.chat.upgrade() else {
-        return;
+        return true;
     };
     chat.host().borrow_mut().poll();
     paint_localhost(ctx, page);
+    true
 }
 
 /// Set the page's notice line. Controller failures that carry no
@@ -967,9 +997,9 @@ fn decide_localhost(
     refresh_localhost(ctx, &page);
 }
 
-fn fill(ctx: &Ctx, name: &str) {
+fn fill(ctx: &Ctx, name: &str) -> bool {
     let Some(page) = ctx.stack.child_by_name(name) else {
-        return;
+        return true;
     };
     let page: gtk4::Box = page.downcast().expect("page box");
     match name {
@@ -977,11 +1007,13 @@ fn fill(ctx: &Ctx, name: &str) {
             if let Some(chat) = ctx.chat.upgrade() {
                 chat.refresh_panel();
             }
+            true
         }
         "threads" => fill_threads(ctx, &page),
         "tasks" => {
-            fill_tasks(ctx, &page);
+            let dispatched = fill_tasks(ctx, &page);
             refresh_local_tasks(&page);
+            dispatched
         }
         "library" => fill_library(ctx, &page),
         "search" => fill_search_hint(&page),
@@ -990,7 +1022,7 @@ fn fill(ctx: &Ctx, name: &str) {
         "feed" => fill_feed(ctx, &page),
         "settings" => fill_settings(ctx, &page),
         "localhost" => refresh_localhost(ctx, &page),
-        _ => {}
+        _ => true,
     }
 }
 
@@ -1807,23 +1839,23 @@ fn open_goal_detail(ctx: &Ctx, list: &gtk4::ListBox, goal_id: String) {
 /// history. "Run now" is single-press like send: the run holds the
 /// shared page slot, so a double press waits instead of starting two
 /// runs of the same job.
-fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(schedules) = named_list(page, "tasks-schedules") else {
-        return;
+        return true;
     };
     let Some(runs) = named_list(page, "tasks-runs") else {
-        return;
+        return true;
     };
     let Some(chat) = ctx.chat.upgrade() else {
-        return;
+        return true;
     };
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
-        None => return,
+        None => return false,
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
-        return;
+        return false;
     };
     let chat_strong = chat.clone();
     dispatch(
@@ -1859,6 +1891,7 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) {
             }
         },
     );
+    true
 }
 
 /// One local reminder row: title, the due words the schedule
@@ -1888,20 +1921,20 @@ fn reminder_row_text(task: &muse_tasks::Task, now_unix_secs: u64) -> String {
 /// Re-read the local reminder store and repaint its list. Local
 /// only: the store lock serializes against the runner, so no page
 /// ticket is needed and nothing touches the service.
-fn refresh_local_tasks(page: &gtk4::Box) {
+fn refresh_local_tasks(page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "tasks-local") else {
-        return;
+        return true;
     };
     clear_list(&list);
     let Some(dir) = muse_tasks::default_store_dir() else {
         list.append(&dim_row("Local reminders need a home directory."));
-        return;
+        return true;
     };
     let store = match muse_tasks::TaskStore::open(&dir) {
         Ok(store) => store,
         Err(_) => {
             list.append(&dim_row("Local reminders unavailable."));
-            return;
+            return true;
         }
     };
     let now = SystemTime::now()
@@ -1949,6 +1982,7 @@ fn refresh_local_tasks(page: &gtk4::Box) {
         row.set_child(Some(&line));
         list.append(&row);
     }
+    true
 }
 
 fn dim_row(text: &str) -> gtk4::ListBoxRow {
@@ -2783,7 +2817,7 @@ fn repaint_library(ctx: &Ctx, page: &gtk4::Box, query: &str) {
     paint_library(ctx, &list, &tabs, &entry, &artifacts, &tab, query);
 }
 
-fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let (Some(list), Some(tabs), Some(entry)) = (
         named_list(page, "library-list"),
         find_widget(page.upcast_ref(), "library-tabs")
@@ -2791,27 +2825,27 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
         find_widget(page.upcast_ref(), "library-search")
             .and_then(|widget| widget.downcast::<gtk4::Entry>().ok()),
     ) else {
-        return;
+        return true;
     };
     // A fresh fill resets the view: stale queries against new rows
     // read as broken, never as empty.
     entry.set_text("");
     let Some(chat) = ctx.chat.upgrade() else {
-        return;
+        return true;
     };
     let ctx_owned = ctx.clone();
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
         None => {
-            eprintln!("muse: library pressed while the session slot is held");
-            return;
+            fill_log("library", "skip-no-ticket", "");
+            return false;
         }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
         clear_list(&list);
         list.append(&gtk4::Label::new(Some("Link your account first.")));
-        return;
+        return true;
     };
     clear_list(&list);
     let loading = gtk4::Label::new(Some("Loading the library…"));
@@ -2847,6 +2881,7 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
             );
         },
     );
+    true
 }
 
 /// A thread row's day (`YYYY-MM-DD`) from its update stamp, when the
@@ -3170,21 +3205,21 @@ fn append_thread_row(
     list.append(&row);
 }
 
-fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_threads(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "threads-list") else {
-        return;
+        return true;
     };
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
     let Some(chat) = ctx.chat.upgrade() else {
         list.append(&gtk4::Label::new(Some("Link your account first.")));
-        return;
+        return true;
     };
     let mut threads = chat.threads();
     if threads.is_empty() {
         list.append(&gtk4::Label::new(Some("No threads yet.")));
-        return;
+        return true;
     }
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
     let (side, main) = split_side_chats(threads);
@@ -3214,6 +3249,7 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
             append_thread_row(ctx, &list, thread, true);
         }
     }
+    true
 }
 
 /// Open a thread from the sidebar history (or a fresh one for a `None`
@@ -3282,11 +3318,11 @@ fn fill_history(ctx: &Ctx) {
     ctx.profile_name.set_text(&name);
 }
 
-fn fill_settings(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_settings(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(info) = find_widget(page.upcast_ref(), "settings-info")
         .and_then(|widget| widget.downcast::<gtk4::Label>().ok())
     else {
-        return;
+        return true;
     };
     match super::session::load_saved_link() {
         Some(link) => info.set_text(&format!(
@@ -3306,6 +3342,7 @@ fn fill_settings(ctx: &Ctx, page: &gtk4::Box) {
     {
         do_check(ctx, page);
     }
+    true
 }
 
 /// Paint the updates section from the shared panel state.
@@ -4235,16 +4272,19 @@ fn paint_feed_now(
     (generation, missing)
 }
 
-fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_feed(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "feed-list") else {
-        return;
+        return true;
     };
     let Some(chat) = ctx.chat.upgrade() else {
-        return;
+        return true;
     };
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
-        None => return,
+        None => {
+            fill_log("feed", "skip-no-ticket", "");
+            return false;
+        }
     };
     // The prompt card lives above the list (built with the page);
     // resolve it before the worker round-trip, which cannot borrow it.
@@ -4285,7 +4325,7 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
         } else {
             listing_failure(&list, "Feed", &"Link your account first.");
         }
-        return;
+        return false;
     };
     dispatch(
         &chat,
@@ -4346,6 +4386,7 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) {
             }
         },
     );
+    true
 }
 /// A failed listing read says so on the page: a blank list with no
 /// sentence is indistinguishable from an empty one, and the reader
@@ -5045,7 +5086,11 @@ fn fill_log_to(dir: &std::path::Path, page: &str, event: &str, detail: &str) {
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(file, "{epoch_ms} page={page} event={event} {detail}");
+        let pid = std::process::id();
+        let _ = writeln!(
+            file,
+            "{epoch_ms} pid={pid} page={page} event={event} {detail}"
+        );
     }
 }
 
@@ -5119,7 +5164,7 @@ fn warm_dialog_heroes(
     );
 }
 
-fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, fetch: F)
+fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, fetch: F) -> bool
 where
     F: FnOnce(
             &muse_account::AccountClient,
@@ -5128,7 +5173,7 @@ where
         + 'static,
 {
     let Some(chat) = ctx.chat.upgrade() else {
-        return;
+        return true;
     };
     let ctx_owned = ctx.clone();
     let page = list.widget_name().to_string();
@@ -5138,13 +5183,13 @@ where
         Some(ticket) => ticket,
         None => {
             fill_log(&page, "skip-no-ticket", "");
-            return;
+            return false;
         }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
         fill_log(&page, "no-client", "");
-        return;
+        return false;
     };
     let list = list.clone();
     dispatch(
@@ -5197,13 +5242,14 @@ where
             warm_dialog_heroes(chat, &page, &listing.items, &heroes);
         },
     );
+    true
 }
 
-fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "ideas-list") else {
-        return;
+        return true;
     };
-    fill_service_listing(ctx, &list, |client| client.ideas());
+    fill_service_listing(ctx, &list, |client| client.ideas())
 }
 
 /// Fill the Goals page: the roster plus the Tracking section under
@@ -5211,20 +5257,19 @@ fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) {
 /// slot — the second begin lands while the first read is still in
 /// flight, so its section never dispatches — so one worker reads
 /// both and each section paints (or reports) on its own.
-fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
+fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "goals-list") else {
-        return;
+        return true;
     };
     let Some(tracking) = named_list(page, "goals-tracking-list") else {
-        fill_service_listing(ctx, &list, |client| client.goals());
-        return;
+        return fill_service_listing(ctx, &list, |client| client.goals());
     };
     clear_list(&tracking);
     if let Some(old) = find_widget(page.upcast_ref(), "goals-tracking-more") {
         page.remove(&old);
     }
     let Some(chat) = ctx.chat.upgrade() else {
-        return;
+        return true;
     };
     let ctx_owned = ctx.clone();
     fill_log("goals", "visit", "sections=roster+tracking");
@@ -5232,13 +5277,13 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
         Some(ticket) => ticket,
         None => {
             fill_log("goals", "skip-no-ticket", "sections=roster+tracking");
-            return;
+            return false;
         }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
         fill_log("goals", "no-client", "");
-        return;
+        return false;
     };
     let page_owned = page.clone();
     dispatch(
@@ -5331,6 +5376,7 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) {
             }
         },
     );
+    true
 }
 
 /// Paint the Tracking section's first `shown` rows plus the "Show
@@ -5367,22 +5413,23 @@ fn paint_tracking(
 }
 
 /// A search visit invites a query; nothing dispatches until Search.
-fn fill_search_hint(page: &gtk4::Box) {
+fn fill_search_hint(page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "search-list") else {
-        return;
+        return true;
     };
     clear_list(&list);
     list.append(&gtk4::Label::new(Some(
         "Search every conversation in the account. A result opens its conversation in Chat.",
     )));
+    true
 }
 
 /// Run one account-wide conversation search. A result button opens
 /// its conversation: the id becomes the chat's thread scope, and the
 /// reader lands in Chat.
-fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
+fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "search-list") else {
-        return;
+        return true;
     };
     let query = {
         find_widget(page.upcast_ref(), "search-query")
@@ -5393,20 +5440,20 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
     if query.trim().is_empty() {
         clear_list(&list);
         list.append(&gtk4::Label::new(Some("Type words to search for first.")));
-        return;
+        return true;
     }
     fill_log("search", "visit", "");
     let ticket = match chat.page_begin() {
         Some(ticket) => ticket,
         None => {
             fill_log("search", "skip-no-ticket", "");
-            return;
+            return false;
         }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
         fill_log("search", "no-client", "");
-        return;
+        return false;
     };
     let ctx = ctx.clone();
     dispatch(
@@ -5531,6 +5578,7 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) {
             }
         },
     );
+    true
 }
 
 /// Land in Chat: show the page, select it in the sidebar.
@@ -5611,9 +5659,17 @@ mod tests {
             "section=roster rows=3 request_ms=42",
         );
         let text = std::fs::read_to_string(dir.join("page-fill.log")).expect("log");
-        let mut parts = text.lines().next().expect("one line").splitn(4, ' ');
+        let mut parts = text.lines().next().expect("one line").splitn(5, ' ');
         let epoch: u128 = parts.next().expect("epoch").parse().expect("digits");
         assert!(epoch > 0);
+        let pid: u32 = parts
+            .next()
+            .expect("pid")
+            .strip_prefix("pid=")
+            .expect("pid=")
+            .parse()
+            .expect("digits");
+        assert!(pid > 0);
         assert_eq!(parts.next(), Some("page=goals"));
         assert_eq!(parts.next(), Some("event=painted"));
         assert_eq!(parts.next(), Some("section=roster rows=3 request_ms=42"));
