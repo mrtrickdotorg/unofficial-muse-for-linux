@@ -503,6 +503,18 @@ policies, start/stop pump, approval-card queue, expiry, and
 the closed-code notices — with 10 unit tests. The page (grant
 picker, Start/Stop, approval cards, activity log) is the next
 slice; only then can the live gate run.
+Page landed (Nov 19, 2026): sidebar Local host page with the
+consent and read-only toggles, folder picker, Start/Stop,
+grant list with per-folder promise and saved-permission mark,
+Allow-writes switch synced from disk, per-card Allow once /
+Deny with live countdowns and capped content previews, and
+the redacted activity log. A page-owned 250 ms pump polls and
+repaints while the page lives and stops a host whose account
+went away; navigating away pauses the pump, which is safe by
+design (expired approvals refuse instead of hanging). The
+snapshot carries no capability tokens, and the page names the
+registered device id. Gate green: clippy clean, 88 app tests
+including 5 page and 10 controller tests, bridge suite 239.
 
 
 *Gap (2026-11-06):* the registered manifest now advertises six file commands. `files.edit`,
