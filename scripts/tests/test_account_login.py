@@ -301,6 +301,31 @@ class LoginTests(unittest.TestCase):
                 helper.find_browser(None)
         self.assertEqual(error.exception.code, "missing_browser")
 
+    def test_browser_scan_skips_shell_shims_for_flatpak_wrapped_browsers(self):
+        # A `brave` on PATH that is a shell shim for `flatpak run` must
+        # not take the native launch path: sandboxed without the
+        # profile/filesystem flags, the browser cannot write its
+        # isolated profile and exits instantly (browser_closed).
+        # Explicit executable choices are untouched — only auto-scan.
+        helper = load_helper()
+        with tempfile.TemporaryDirectory() as root:
+            shim = Path(root) / "brave"
+            shim.write_text("#!/usr/bin/env bash\nexec flatpak run com.brave.Browser \"$@\"\n")
+            shim.chmod(0o700)
+
+            def which(name):
+                if name == "brave":
+                    return str(shim)
+                if name == "flatpak":
+                    return "/usr/bin/flatpak"
+                return None
+
+            with patch.object(helper.shutil, "which", side_effect=which):
+                with patch.object(helper.subprocess, "run") as run:
+                    run.return_value = type("Result", (), {"returncode": 0})()
+                    found = helper.find_browser(None)
+        self.assertEqual(found, ["/usr/bin/flatpak", "com.brave.Browser"])
+
     def run_fake(self, mode="success"):
         with tempfile.TemporaryDirectory() as root:
             base = Path(root)

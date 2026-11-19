@@ -270,6 +270,23 @@ NATIVE_BROWSERS = ("google-chrome", "google-chrome-stable", "chromium", "chromiu
 FLATPAK_BROWSERS = ("com.brave.Browser", "com.microsoft.Edge", "com.vivaldi.Vivaldi", "org.chromium.Chromium")
 
 
+def _is_native_executable(path):
+    """True when a PATH candidate is a real native browser binary.
+
+    A shell shim (e.g. a `brave` wrapper that execs `flatpak run`)
+    must not take the native launch path: inside the sandbox without
+    the profile/filesystem flags the flatpak path adds, the browser
+    cannot write its isolated profile and exits instantly, which
+    surfaces as browser_closed. Only auto-scan consults this;
+    explicit executable choices are the reader's own.
+    """
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(2) != b"#!"
+    except OSError:
+        return False
+
+
 def find_browser(requested):
     """Only explicit executable paths/names, never shell strings or extra flags."""
     if requested and not requested.startswith("flatpak:"):
@@ -280,7 +297,7 @@ def find_browser(requested):
     if requested is None:
         for name in NATIVE_BROWSERS:
             candidate = shutil.which(name)
-            if candidate:
+            if candidate and _is_native_executable(candidate):
                 return [candidate]
     flatpak = shutil.which("flatpak")
     ids = FLATPAK_BROWSERS if requested is None else (requested.removeprefix("flatpak:"),)
