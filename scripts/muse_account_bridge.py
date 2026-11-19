@@ -3198,9 +3198,10 @@ def settings_rows(payload):
     """Project the service's durable policy settings for display.
 
     Only scalar leaves travel, flattened one level (a section's
-    values as "section.key"); anything deeper, a list, or a null
-    is counted as withheld rather than summarized into words the
-    service never said. Connector names are the keys of the
+    values as "section.key"); the protocols list rides as one
+    "protocol.<key>" entry per row. Anything deeper, any other
+    list, or a null is counted as withheld rather than summarized
+    into words the service never said. Connector names are the keys of the
     settings' own "connectors" section when it carries one --
     the only names a reset may address, because they are the
     names the service itself published.
@@ -3227,6 +3228,21 @@ def settings_rows(payload):
         if key == "connectors" and isinstance(value, dict):
             # The connectors section is represented by its names
             # (below) and their reset rows, not flattened pairs.
+            continue
+        if key == "protocols" and isinstance(value, list):
+            # One entry per protocol row: the key the service
+            # updates by, and the mode word the editor flips.
+            # Anything but a {key, mode} row stays withheld.
+            for row in value:
+                if not isinstance(row, dict):
+                    withheld += 1
+                    continue
+                name = row.get("key")
+                mode = row.get("mode")
+                if isinstance(name, str) and name.strip() and isinstance(mode, str):
+                    add(f"protocol.{name.strip()}", mode)
+                else:
+                    withheld += 1
             continue
         if isinstance(value, dict):
             for sub_key, sub_value in value.items():

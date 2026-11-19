@@ -126,6 +126,47 @@ narrow projection as a fresh read, so the answer proves the new
 state; `confidential_vm` stays unoffered. Bridge + client only,
 no editor UI yet — the same landing state as `connector_reset`
 before it.
+Policy surface (Nov 19, 2026): the approvals panel grew a
+Policy section read once per visit on its own dispatch, so a
+slow settings read never holds up the pending list. The
+`policy_settings` projection now rides the protocols list as
+one `protocol.<key>` entry per row (verified live: 8 rows),
+and each default plus each protocol row carries the flip the
+service accepts — defaults swap `auto_allow`/`always_ask`,
+protocols swap `ask`/`deny`, anything else is display only.
+One press is one PATCH and the refill proves what it did;
+connector rows arm first ("Confirm reset") and a repaint
+disarms. No connectors exist on this account, so the reset
+rows render nothing here — the path is exercised by tests
+until a connector appears. The editor itself is the undo:
+every word it writes can be written back, and the re-read
+shows the current words.
+Undo, scoped (Nov 19, 2026): every reversible write in the
+client already carries its inverse — pin/unpin toggles, goal
+and prompt rows re-edit, unshare re-shares, policy flips
+write back. What stays one-way is one-way service-side, not
+for lack of UI: decide/revoke/reset have no inverse routes,
+chat and feed deletes have none, and file restore has no
+route at all (checked: no restore/untrash/undelete in the
+table — a Trash move cannot come back through this client).
+So there is no general Undo control; the panel and rows
+re-read after every write instead of assuming.
+Durable policy (Nov 19, 2026): the store is the service, not
+a local file. `allow_always` persists across restarts
+server-side (the history log shows a live `allow_always`
+row and `always_allow` domains), revocation removes it
+(`revoke` wired, re-read proves), and no client-side cache
+could enforce anything the model does not. Keeping a local
+copy would be a stale shadow of the durable record, so the
+client holds none and reads fresh per visit.
+Gate review: "always allow persists across restarts and is
+revocable" holds via the service record plus the revoke
+path; "deny leaves no side effect" holds in the decide
+wording (never pressed live — irreversible by owner policy,
+same as decisions); a request that changes mid-flight is
+refused service-side and the card stays on screen for a
+re-read; and the log plus this panel answer "what did it do
+to my machine" without secrets. P2 is closed.
 
 An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:

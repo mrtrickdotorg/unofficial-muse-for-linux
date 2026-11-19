@@ -58,6 +58,11 @@ where
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
 /// A message reaction toggle: the row's id plus the emoji.
 type ReactCallback = std::rc::Rc<dyn Fn(String, String)>;
+
+// One offered policy flip: the word the button writes.
+struct PolicyFlip {
+    next: String,
+}
 pub(crate) type RemoveCallback = std::rc::Rc<dyn Fn(String)>;
 
 /// The delete turn button names its own state: the first press arms
@@ -231,6 +236,8 @@ pub struct Chat {
     panel_approvals_empty: gtk4::Label,
     panel_decisions: gtk4::ListBox,
     panel_decisions_empty: gtk4::Label,
+    panel_policy: gtk4::ListBox,
+    panel_policy_empty: gtk4::Label,
     panel_identity_name: gtk4::Label,
     panel_identity_vm: gtk4::Label,
     panel_fetch: RefCell<bool>,
@@ -365,6 +372,22 @@ impl Chat {
         let panel_decisions = gtk4::ListBox::new();
         panel_decisions.set_selection_mode(gtk4::SelectionMode::None);
         approvals_body.append(&panel_decisions);
+        // Policy: the durable settings reads alongside the pending
+        // list, with the flips the service accepts on each row. One
+        // press maps to one PATCH; the refill afterwards proves
+        // what the press did. Connector resets arm first.
+        let panel_policy_head = gtk4::Label::new(Some("Policy"));
+        panel_policy_head.set_halign(gtk4::Align::Start);
+        panel_policy_head.add_css_class("muse-section");
+        approvals_body.append(&panel_policy_head);
+        let panel_policy_empty = gtk4::Label::new(Some("No policy settings."));
+        panel_policy_empty.set_halign(gtk4::Align::Start);
+        panel_policy_empty.add_css_class("dim-label");
+        panel_policy_empty.set_wrap(true);
+        approvals_body.append(&panel_policy_empty);
+        let panel_policy = gtk4::ListBox::new();
+        panel_policy.set_selection_mode(gtk4::SelectionMode::None);
+        approvals_body.append(&panel_policy);
         let approvals_scroll = gtk4::ScrolledWindow::new();
         approvals_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
         approvals_scroll.set_vexpand(true);
@@ -431,6 +454,8 @@ impl Chat {
             panel_approvals_empty,
             panel_decisions,
             panel_decisions_empty,
+            panel_policy,
+            panel_policy_empty,
             panel_identity_name,
             panel_identity_vm,
             panel_fetch: RefCell::new(false),
@@ -874,8 +899,11 @@ impl Chat {
         );
         // Identity and approvals read fresh on every visit beside the
         // cached tasks: approvals are time-sensitive, identity is
-        // cheap, and both clear honestly when signed out.
+        // cheap, and both clear honestly when signed out. Policy
+        // rides its own dispatch: it changes rarely, and a slow
+        // settings read must never hold up the pending list.
         self.refresh_identity_and_approvals();
+        self.refresh_policy();
     }
 
     /// Identity + approvals, fresh on every chat visit. Unlinked paints
@@ -896,6 +924,15 @@ impl Chat {
                     decisions: Vec::new(),
                 },
             );
+            Self::paint_policy(
+                self,
+                &muse_account::PolicySettings {
+                    entries: Vec::new(),
+                    connectors: Vec::new(),
+                    withheld: 0,
+                },
+            );
+            self.panel_policy_empty.set_text("Link your account first.");
             self.panel_decisions_empty
                 .set_text("Link your account first.");
             self.panel_approvals_empty
@@ -924,6 +961,98 @@ impl Chat {
                 if let Ok(log) = history {
                     Self::paint_decisions(chat, &log);
                 }
+            },
+        );
+    }
+
+    /// Policy settings, fresh on their own dispatch. Unlinked paints
+    /// the link-first state; a failed read keeps the last good
+    /// policy rather than blanking it.
+    pub fn refresh_policy(self: &Rc<Self>) {
+        let Some(client) = self.client.borrow().clone() else {
+            Self::paint_policy(
+                self,
+                &muse_account::PolicySettings {
+                    entries: Vec::new(),
+                    connectors: Vec::new(),
+                    withheld: 0,
+                },
+            );
+            self.panel_policy_empty.set_text("Link your account first.");
+            return;
+        };
+        self.panel_policy_empty.set_text("No policy settings.");
+        dispatch(
+            self,
+            move || client.policy_settings(),
+            move |chat, settings| {
+                if let Ok(policy) = settings {
+                    Self::paint_policy(chat, &policy);
+                }
+            },
+        );
+    }
+
+    /// One policy flip: exactly one settings PATCH, then a re-read
+    /// that proves what the press did. The editor itself is the
+    /// undo: every word it writes can be written back.
+    fn run_settings_update(
+        chat: &Rc<Self>,
+        connector_default: Option<String>,
+        network_default: Option<String>,
+        protocols: Vec<(String, String)>,
+    ) {
+        let ticket = match chat.page_begin() {
+            Some(ticket) => ticket,
+            None => return,
+        };
+        let Some(client) = chat.client_handle() else {
+            chat.page_accept(&ticket);
+            return;
+        };
+        let modes: std::collections::HashMap<String, String> = protocols.into_iter().collect();
+        let change = if modes.is_empty() { None } else { Some(modes) };
+        dispatch(
+            chat,
+            move || {
+                client.settings_update(
+                    connector_default.as_deref(),
+                    network_default.as_deref(),
+                    change,
+                )
+            },
+            move |chat, answer| {
+                chat.page_accept(&ticket);
+                if answer.is_err() {
+                    return;
+                }
+                chat.refresh_policy();
+            },
+        );
+    }
+
+    /// One connector reset: the first press arms the row, the
+    /// second press on the same row dispatches; the re-read proves
+    /// the reset. A repaint disarms, which is the safe default.
+    fn run_connector_reset(chat: &Rc<Self>, connector: &str) {
+        let ticket = match chat.page_begin() {
+            Some(ticket) => ticket,
+            None => return,
+        };
+        let Some(client) = chat.client_handle() else {
+            chat.page_accept(&ticket);
+            return;
+        };
+        let connector = connector.to_owned();
+        dispatch(
+            chat,
+            move || client.connector_reset(&connector),
+            move |chat, answer| {
+                chat.page_accept(&ticket);
+                if answer.is_err() {
+                    return;
+                }
+                chat.refresh_policy();
             },
         );
     }
@@ -1056,6 +1185,111 @@ impl Chat {
             row.set_child(Some(&column));
             chat.panel_decisions.append(&row);
         }
+    }
+
+    /// The durable policy, one row per projected entry. The two
+    /// defaults and each protocol row carry the flip the service
+    /// accepts; anything else is display only. Connector rows arm
+    /// first: the bridge comment asks for one armed press, and a
+    /// repaint disarms. A failed read keeps the last good policy.
+    fn paint_policy(chat: &Rc<Self>, policy: &muse_account::PolicySettings) {
+        while let Some(child) = chat.panel_policy.first_child() {
+            chat.panel_policy.remove(&child);
+        }
+        let actionable = policy
+            .entries
+            .iter()
+            .filter(|entry| Self::policy_flip(&entry.label, &entry.value).is_some())
+            .count()
+            + policy.connectors.len();
+        chat.panel_policy_empty.set_visible(actionable == 0);
+        for entry in &policy.entries {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            let head = gtk4::Label::new(Some(&format!("{}: {}", entry.label, entry.value)));
+            head.set_xalign(0.0);
+            head.set_wrap(true);
+            head.set_max_width_chars(28);
+            column.append(&head);
+            if let Some(flip) = Self::policy_flip(&entry.label, &entry.value) {
+                let press = gtk4::Button::with_label(&format!("Set to {}", flip.next));
+                let weak = Rc::downgrade(chat);
+                let (label, value) = (entry.label.clone(), flip.next.clone());
+                press.connect_clicked(move |_| {
+                    let Some(chat) = weak.upgrade() else { return };
+                    let (connector_default, network_default, protocols) = match label.as_str() {
+                        "connector_default" => (Some(value.clone()), None, Vec::new()),
+                        "network_default" => (None, Some(value.clone()), Vec::new()),
+                        _ => (None, None, vec![(label.clone(), value.clone())]),
+                    };
+                    // Protocol rows arrive labelled "protocol.<key>";
+                    // the update takes the bare key.
+                    let protocols = protocols
+                        .into_iter()
+                        .map(|(name, mode)| {
+                            (
+                                name.strip_prefix("protocol.").unwrap_or(&name).to_owned(),
+                                mode,
+                            )
+                        })
+                        .collect();
+                    Self::run_settings_update(&chat, connector_default, network_default, protocols);
+                });
+                column.append(&press);
+            }
+            row.set_child(Some(&column));
+            chat.panel_policy.append(&row);
+        }
+        for connector in &policy.connectors {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            let head = gtk4::Label::new(Some(connector));
+            head.set_xalign(0.0);
+            head.set_wrap(true);
+            head.set_max_width_chars(28);
+            column.append(&head);
+            let press = gtk4::Button::with_label("Reset");
+            press.add_css_class("muse-danger");
+            let weak = Rc::downgrade(chat);
+            let name = connector.clone();
+            // Clones are handles to the same row: `armed`
+            // rides into the closure while `arm` takes the signal.
+            let arm = press.clone();
+            let armed = arm.clone();
+            arm.connect_clicked(move |_| {
+                let Some(chat) = weak.upgrade() else { return };
+                if armed.label().as_deref() != Some("Confirm reset") {
+                    armed.set_label("Confirm reset");
+                    return;
+                }
+                armed.set_label("Reset");
+                Self::run_connector_reset(&chat, &name);
+            });
+            column.append(&press);
+            row.set_child(Some(&column));
+            chat.panel_policy.append(&row);
+        }
+    }
+
+    /// The flip a policy row offers, if any: the service's own
+    /// alternating words, never an invented third. Defaults swap
+    /// ask-for-some with always-ask; protocol rows swap ask with
+    /// deny. Anything else is display only.
+    fn policy_flip(label: &str, value: &str) -> Option<PolicyFlip> {
+        let next = match (label, value) {
+            ("connector_default", "auto_allow") => "always_ask",
+            ("connector_default", "always_ask") => "auto_allow",
+            ("network_default", "auto_allow") => "always_ask",
+            ("network_default", "always_ask") => "auto_allow",
+            (name, "ask") if name.starts_with("protocol.") => "deny",
+            (name, "deny") if name.starts_with("protocol.") => "ask",
+            _ => return None,
+        };
+        Some(PolicyFlip {
+            next: next.to_owned(),
+        })
     }
 
     /// Fill the panel lists from a held snapshot: schedules with
