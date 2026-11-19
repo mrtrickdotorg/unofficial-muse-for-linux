@@ -748,6 +748,21 @@ is upstream's newest commit (2026-09-17, no tags), and the table's only memory p
 four `POST`s — no delete, forget, write, update or edit exists under any other name. Until then
 P6 is met for reading and search only.
 
+*Cut (Nov 19, 2026, owner's call).* The Memory and Policy pages are
+gone: neither has a web counterpart (the web menu is Chat, Search,
+Library, Ideas, Goals, Create, Feed plus Settings — memory is a
+settings-level surface there, policy lives server-side), so they
+were app-only surfaces with no parity target. The bridge and client
+keep their `memory_search`, `memory_get`, `policy_settings` and
+connector-reset ops — tested and untouched — and the chat panel
+keeps its Policy section beside the pending list; only the
+standalone pages were removed, with a guard test (`cut_pages_stay_cut`)
+so re-adding one is a decision, never an accident. Note: per-grant
+revoke currently has no surface — the `permissions`/`revoke` ops are
+retained and tested, but only the settings flips remain pressable
+(in the chat panel). If the live-revoke proof needs a button, that
+is a follow-up slice.
+
 ### P7 — Connector framework (L)
 
 *Gap:* Mac connectors are authorized in-app, are read-only or read-write per connector, can push events,
