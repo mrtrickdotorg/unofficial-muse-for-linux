@@ -2834,6 +2834,7 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
         return true;
     };
     let ctx_owned = ctx.clone();
+    fill_log("library", "visit", "");
     let ticket = match chat.page_begin(Op::Library) {
         Some(ticket) => ticket,
         None => {
@@ -2854,15 +2855,22 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
     list.append(&loading);
     dispatch(
         &chat,
-        move || client.artifacts(),
+        move || {
+            let start = Instant::now();
+            let listing = client.artifacts();
+            let request_ms = start.elapsed().as_millis() as u64;
+            listing.map(|listing| (listing, request_ms))
+        },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
+                fill_log("library", "stale-answer-dropped", "");
                 return;
             }
-            let Ok(listing) = answer else {
+            let Ok((listing, request_ms)) = answer else {
                 // Errors read, never vanish: the page names the
                 // failure so the reader isn't left guessing.
                 if let Err(error) = answer {
+                    fill_log("library", "failed", &format!("error=\"{error}\""));
                     listing_failure(&list, "Library", &error);
                 }
                 return;
@@ -2878,6 +2886,11 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
                 &listing.artifacts,
                 "All",
                 "",
+            );
+            fill_log(
+                "library",
+                "painted",
+                &format!("rows={} request_ms={request_ms}", listing.artifacts.len(),),
             );
         },
     );
