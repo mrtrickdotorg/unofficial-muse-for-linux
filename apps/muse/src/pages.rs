@@ -8,6 +8,9 @@
 //! grows one page at a time.
 
 use std::rc::{Rc, Weak};
+use std::time::{Duration, Instant};
+
+use super::local_host::Phase;
 
 use adw::prelude::*;
 
@@ -52,8 +55,18 @@ pub fn rail_glyph(page: &str) -> Option<&'static str> {
 
 /// Page names in sidebar order.
 pub const PAGES: &[&str] = &[
-    "chat", "threads", "tasks", "library", "feed", "memory", "search", "ideas", "goals", "policy",
+    "chat",
+    "threads",
+    "tasks",
+    "library",
+    "feed",
+    "memory",
+    "search",
+    "ideas",
+    "goals",
+    "policy",
     "settings",
+    "localhost",
 ];
 
 /// Human titles for the sidebar rows.
@@ -66,6 +79,7 @@ pub fn title(name: &str) -> &str {
         "feed" => "Feed",
         "memory" => "Memory",
         "policy" => "Policy",
+        "localhost" => "Local host",
         "search" => "Search",
         "ideas" => "Ideas",
         "goals" => "Goals",
@@ -495,6 +509,123 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 show_signin();
             });
         }
+        "localhost" => {
+            let heading = gtk4::Label::new(Some("Local host"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            inner.append(&heading);
+            // The consent copy is the boundary: filenames and
+            // content reach Muse only in granted folders, writes
+            // only with a local Allow. Nothing here runs until the
+            // person checks the box, grants a folder, and starts.
+            let intro = gtk4::Label::new(Some(
+                "Separate from account connection and the read-only Library. When enabled, Muse may search filenames and read text inside the folders you grant. Filenames and content reach Muse. In a read-only folder every write is refused outright; in a read-write folder, every write requires your local Allow once approval of the exact path and, where text changes, the complete resulting content. Nothing is overwritten, permanently deleted, or run as a shell command.",
+            ));
+            intro.set_wrap(true);
+            intro.set_xalign(0.0);
+            inner.append(&intro);
+            let identity = gtk4::Label::new(Some(super::local_host::identity_copy()));
+            identity.set_widget_name("localhost-identity");
+            identity.set_wrap(true);
+            identity.set_xalign(0.0);
+            identity.add_css_class("dim-label");
+            inner.append(&identity);
+            let consent = gtk4::CheckButton::with_label(
+                "I explicitly enable this local host and allow granted filenames and text to reach Muse.",
+            );
+            consent.set_widget_name("localhost-consent");
+            wrap_check(&consent);
+            inner.append(&consent);
+            let read_only = gtk4::CheckButton::with_label(
+                "Grant read-only: folders granted while this is on can be read and searched, but Muse can never propose a write in them.",
+            );
+            read_only.set_widget_name("localhost-readonly");
+            wrap_check(&read_only);
+            inner.append(&read_only);
+            let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let choose = gtk4::Button::with_label("Grant a folder to Muse…");
+            choose.set_widget_name("localhost-choose");
+            toolbar.append(&choose);
+            let start = gtk4::Button::with_label("Start local host");
+            start.set_widget_name("localhost-start");
+            start.add_css_class("muse-cta");
+            toolbar.append(&start);
+            let stop = gtk4::Button::with_label("Stop & revoke all");
+            stop.set_widget_name("localhost-stop");
+            stop.add_css_class("muse-danger");
+            toolbar.append(&stop);
+            inner.append(&toolbar);
+            let notice = gtk4::Label::new(None);
+            notice.set_widget_name("localhost-notice");
+            notice.set_wrap(true);
+            notice.set_xalign(0.0);
+            inner.append(&notice);
+            let grants_head = gtk4::Label::new(Some("Granted folders"));
+            grants_head.set_halign(gtk4::Align::Start);
+            grants_head.add_css_class("muse-section");
+            inner.append(&grants_head);
+            let grants = gtk4::ListBox::new();
+            grants.set_widget_name("localhost-grants");
+            grants.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&grants);
+            let allow_writes = gtk4::CheckButton::with_label(
+                "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.",
+            );
+            allow_writes.set_widget_name("localhost-allow-writes");
+            wrap_check(&allow_writes);
+            inner.append(&allow_writes);
+            let cards_head = gtk4::Label::new(Some(
+                "Pending file approvals · review the exact path and content before allowing",
+            ));
+            cards_head.set_halign(gtk4::Align::Start);
+            cards_head.add_css_class("muse-section");
+            inner.append(&cards_head);
+            let cards = gtk4::ListBox::new();
+            cards.set_widget_name("localhost-cards");
+            cards.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&cards);
+            let activity_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let activity_head =
+                gtk4::Label::new(Some("Session activity · commands and outcomes only"));
+            activity_head.set_hexpand(true);
+            activity_head.set_halign(gtk4::Align::Start);
+            activity_head.add_css_class("muse-section");
+            activity_row.append(&activity_head);
+            let clear = gtk4::Button::with_label("Clear log");
+            clear.set_widget_name("localhost-clear");
+            activity_row.append(&clear);
+            inner.append(&activity_row);
+            let log = gtk4::ListBox::new();
+            log.set_widget_name("localhost-log");
+            log.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&log);
+            wire_localhost(ctx, &inner);
+            // The pump lives with the page: poll, repaint, and stop
+            // the host when the account goes away. It ends with the
+            // page, so a host never outlives its console silently --
+            // closing the page leaves cards to expire, never to hang.
+            let ctx_pump = ctx.clone();
+            let page_weak = inner.downgrade();
+            gtk4::glib::timeout_add_local(Duration::from_millis(250), move || {
+                let Some(page) = page_weak.upgrade() else {
+                    return gtk4::glib::ControlFlow::Break;
+                };
+                let Some(chat) = ctx_pump.chat.upgrade() else {
+                    return gtk4::glib::ControlFlow::Continue;
+                };
+                {
+                    let mut host = chat.host().borrow_mut();
+                    if chat.client_handle().is_none()
+                        && host.snapshot().phase != Phase::Disconnected
+                    {
+                        host.stop();
+                    }
+                    host.poll();
+                }
+                paint_localhost(&ctx_pump, &page);
+                gtk4::glib::ControlFlow::Continue
+            });
+        }
         _ => {
             let label = gtk4::Label::new(Some("Coming in this milestone"));
             label.set_halign(gtk4::Align::Center);
@@ -513,6 +644,319 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
     let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     page.append(&scroll);
     page
+}
+
+/// Re-poll the host and repaint the page: the pump tick and
+/// every press land here, so cards, replies and the notice never
+/// go stale while the page shows.
+fn refresh_localhost(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    chat.host().borrow_mut().poll();
+    paint_localhost(ctx, page);
+}
+
+/// Set the page's notice line. Controller failures that carry no
+/// state change (a refused grant, a failed press) surface here
+/// instead of silently doing nothing.
+fn localhost_note(page: &gtk4::Box, text: &str) {
+    if let Some(notice) = named_label(page, "localhost-notice") {
+        notice.set_text(text);
+    }
+}
+
+/// Wire the Local host page's buttons once; repainting only swaps
+/// rows, never handlers. Every press repaints afterwards so the
+/// notice, grants and cards always show the controller's answer.
+fn wire_localhost(ctx: &Ctx, page: &gtk4::Box) {
+    let ctx_consent = ctx.clone();
+    let page_consent = page.downgrade();
+    if let Some(consent) = named_check(page, "localhost-consent") {
+        consent.connect_toggled(move |_| {
+            let Some(page) = page_consent.upgrade() else {
+                return;
+            };
+            paint_localhost(&ctx_consent, &page);
+        });
+    }
+    let ctx_choose = ctx.clone();
+    let page_choose = page.downgrade();
+    if let Some(choose) = named_button(page, "localhost-choose") {
+        choose.connect_clicked(move |_| {
+            let Some(page) = page_choose.upgrade() else {
+                return;
+            };
+            let consent = named_check(&page, "localhost-consent")
+                .map(|check| check.is_active())
+                .unwrap_or(false);
+            let read_only = named_check(&page, "localhost-readonly")
+                .map(|check| check.is_active())
+                .unwrap_or(true);
+            let parent = page
+                .root()
+                .and_then(|root| root.downcast::<gtk4::Window>().ok());
+            let dialog = gtk4::FileChooserNative::new(
+                Some("Grant a folder to Muse"),
+                parent.as_ref(),
+                gtk4::FileChooserAction::SelectFolder,
+                Some("Grant"),
+                Some("Cancel"),
+            );
+            dialog.set_select_multiple(false);
+            dialog.set_modal(true);
+            let ctx_done = ctx_choose.clone();
+            let page_done = page_choose.clone();
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk4::ResponseType::Accept
+                    && let Some(path) = dialog
+                        .files()
+                        .item(0)
+                        .and_then(|file| file.downcast::<gtk4::gio::File>().ok())
+                        .and_then(|file| file.path())
+                    && let Some(chat) = ctx_done.chat.upgrade()
+                {
+                    if let Err(e) = chat.host().borrow().grant(path, consent, !read_only)
+                        && let Some(page) = page_done.upgrade()
+                    {
+                        localhost_note(&page, e);
+                    }
+                    if let Some(page) = page_done.upgrade() {
+                        refresh_localhost(&ctx_done, &page);
+                    }
+                }
+                dialog.destroy();
+            });
+            dialog.show();
+        });
+    }
+    let ctx_start = ctx.clone();
+    let page_start = page.downgrade();
+    if let Some(start) = named_button(page, "localhost-start") {
+        start.connect_clicked(move |_| {
+            let Some(page) = page_start.upgrade() else {
+                return;
+            };
+            let Some(chat) = ctx_start.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                localhost_note(&page, "Link your account first.");
+                return;
+            };
+            let consent = named_check(&page, "localhost-consent")
+                .map(|check| check.is_active())
+                .unwrap_or(false);
+            let config = client.bridge_config();
+            if let Err(e) = chat.host().borrow_mut().start(Some(config), consent) {
+                localhost_note(&page, e);
+            }
+            // The saved permission belongs to the folders: reflect
+            // it in the switch now that a session exists to hold it.
+            let policies = chat.host().borrow().snapshot().policies;
+            if let Some(allow) = named_check(&page, "localhost-allow-writes") {
+                *chat.local_host_sync.borrow_mut() = true;
+                allow.set_active(!policies.is_empty());
+                *chat.local_host_sync.borrow_mut() = false;
+            }
+            refresh_localhost(&ctx_start, &page);
+        });
+    }
+    let ctx_stop = ctx.clone();
+    let page_stop = page.downgrade();
+    if let Some(stop) = named_button(page, "localhost-stop") {
+        stop.connect_clicked(move |_| {
+            let Some(page) = page_stop.upgrade() else {
+                return;
+            };
+            let Some(chat) = ctx_stop.chat.upgrade() else {
+                return;
+            };
+            chat.host().borrow_mut().stop();
+            if let Some(consent) = named_check(&page, "localhost-consent") {
+                consent.set_active(false);
+            }
+            refresh_localhost(&ctx_stop, &page);
+        });
+    }
+    let ctx_writes = ctx.clone();
+    let page_writes = page.downgrade();
+    if let Some(allow) = named_check(page, "localhost-allow-writes") {
+        allow.connect_toggled(move |button| {
+            let Some(page) = page_writes.upgrade() else {
+                return;
+            };
+            let Some(chat) = ctx_writes.chat.upgrade() else {
+                return;
+            };
+            if *chat.local_host_sync.borrow() {
+                return;
+            }
+            let active = button.is_active();
+            if let Err(e) = chat.host().borrow_mut().set_write_policy(active) {
+                localhost_note(&page, e);
+                // Revert the switch to the saved state: with no
+                // session the press cannot take effect, and a stuck
+                // switch would claim a permission nobody holds.
+                let saved = !chat.host().borrow().snapshot().policies.is_empty();
+                *chat.local_host_sync.borrow_mut() = true;
+                button.set_active(saved);
+                *chat.local_host_sync.borrow_mut() = false;
+            }
+            refresh_localhost(&ctx_writes, &page);
+        });
+    }
+    let ctx_clear = ctx.clone();
+    let page_clear = page.downgrade();
+    if let Some(clear) = named_button(page, "localhost-clear") {
+        clear.connect_clicked(move |_| {
+            let Some(page) = page_clear.upgrade() else {
+                return;
+            };
+            let Some(chat) = ctx_clear.chat.upgrade() else {
+                return;
+            };
+            chat.host().borrow_mut().clear_log();
+            refresh_localhost(&ctx_clear, &page);
+        });
+    }
+}
+
+/// Render the host snapshot: notice, grants, approval cards and
+/// the activity log. Rows are rebuilt, so card buttons below are
+/// wired fresh on every repaint and never dangle at old cards.
+fn paint_localhost(ctx: &Ctx, page: &gtk4::Box) {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let snap = chat.host().borrow().snapshot();
+    if let Some(notice) = named_label(page, "localhost-notice") {
+        notice.set_text(&snap.notice);
+    }
+    if let Some(grants) = named_list(page, "localhost-grants") {
+        clear_list(&grants);
+        if snap.grants.is_empty() {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let dim = gtk4::Label::new(Some("No folders granted."));
+            dim.set_xalign(0.0);
+            dim.add_css_class("dim-label");
+            row.set_child(Some(&dim));
+            grants.append(&row);
+        }
+        for grant in &snap.grants {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let line = gtk4::Label::new(Some(&grant_row_text(
+                &grant.label,
+                &grant.root,
+                grant.writable,
+                snap.policies.iter().any(|root| root == &grant.root),
+            )));
+            line.set_xalign(0.0);
+            line.set_wrap(true);
+            row.set_child(Some(&line));
+            grants.append(&row);
+        }
+    }
+    if let Some(cards) = named_list(page, "localhost-cards") {
+        clear_list(&cards);
+        if snap.cards.is_empty() {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let dim = gtk4::Label::new(Some("No pending approvals."));
+            dim.set_xalign(0.0);
+            dim.add_css_class("dim-label");
+            row.set_child(Some(&dim));
+            cards.append(&row);
+        }
+        for card in &snap.cards {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+            let head = gtk4::Label::new(Some(&format!(
+                "{} · {}",
+                card.request.operation, card.request.path
+            )));
+            head.set_xalign(0.0);
+            head.set_wrap(true);
+            column.append(&head);
+            if let Some(target) = card.request.target_path.as_deref() {
+                let dest = gtk4::Label::new(Some(&format!("→ {target}")));
+                dest.set_xalign(0.0);
+                dest.add_css_class("dim-label");
+                column.append(&dest);
+            }
+            if !card.request.content.is_empty() {
+                let view = gtk4::TextView::new();
+                view.set_editable(false);
+                view.set_wrap_mode(gtk4::WrapMode::WordChar);
+                view.buffer()
+                    .set_text(&preview_content(&card.request.content));
+                column.append(&view);
+            }
+            let expiry = gtk4::Label::new(Some(&approval_countdown(card.deadline)));
+            expiry.set_xalign(0.0);
+            expiry.add_css_class("dim-label");
+            column.append(&expiry);
+            let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let allow = gtk4::Button::with_label("Allow once");
+            allow.add_css_class("muse-cta");
+            let deny = gtk4::Button::with_label("Deny");
+            if card.deciding {
+                allow.set_sensitive(false);
+                deny.set_sensitive(false);
+            }
+            let approval_id = card.request.approval_id.clone();
+            let ctx_allow = ctx.clone();
+            let page_allow = page.downgrade();
+            allow.connect_clicked(move |_| {
+                decide_localhost(&ctx_allow, &page_allow, &approval_id, true);
+            });
+            let approval_id = card.request.approval_id.clone();
+            let ctx_deny = ctx.clone();
+            let page_deny = page.downgrade();
+            deny.connect_clicked(move |_| {
+                decide_localhost(&ctx_deny, &page_deny, &approval_id, false);
+            });
+            actions.append(&allow);
+            actions.append(&deny);
+            column.append(&actions);
+            row.set_child(Some(&column));
+            cards.append(&row);
+        }
+    }
+    if let Some(log) = named_list(page, "localhost-log") {
+        clear_list(&log);
+        for entry in snap.log.iter().rev().take(20) {
+            let line = gtk4::Label::new(Some(entry));
+            line.set_xalign(0.0);
+            line.set_wrap(true);
+            line.set_selectable(true);
+            line.add_css_class("dim-label");
+            log.append(&line);
+        }
+    }
+}
+
+/// One approval press: exactly one decide, then a re-poll and a
+/// repaint so the card's fate shows instead of being assumed.
+fn decide_localhost(
+    ctx: &Ctx,
+    page: &gtk4::glib::WeakRef<gtk4::Box>,
+    approval_id: &str,
+    allow: bool,
+) {
+    let Some(page) = page.upgrade() else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    if let Err(e) = chat.host().borrow_mut().decide(approval_id, allow) {
+        localhost_note(&page, e);
+    }
+    refresh_localhost(ctx, &page);
 }
 
 fn fill(ctx: &Ctx, name: &str) {
@@ -536,6 +980,7 @@ fn fill(ctx: &Ctx, name: &str) {
         "memory" => fill_memory_opt(ctx, &page),
         "policy" => fill_policy(ctx, &page),
         "settings" => fill_settings(ctx, &page),
+        "localhost" => refresh_localhost(ctx, &page),
         _ => {}
     }
 }
@@ -612,6 +1057,89 @@ fn clear_list(list: &gtk4::ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
+}
+
+fn named_label(page: &gtk4::Box, name: &str) -> Option<gtk4::Label> {
+    find_widget(page.upcast_ref(), name)?
+        .downcast::<gtk4::Label>()
+        .ok()
+}
+
+fn named_button(page: &gtk4::Box, name: &str) -> Option<gtk4::Button> {
+    find_widget(page.upcast_ref(), name)?
+        .downcast::<gtk4::Button>()
+        .ok()
+}
+
+/// A check button's label never wraps on its own, and these
+/// are sentences: left alone, a single line sets the page's
+/// minimum width and pushes the panel off the screen. Walk the
+/// subtree and wrap the label like the old client did.
+fn wrap_check(check: &gtk4::CheckButton) {
+    let mut pending = vec![check.clone().upcast::<gtk4::Widget>()];
+    while let Some(widget) = pending.pop() {
+        if let Some(text) = widget.downcast_ref::<gtk4::Label>() {
+            text.set_wrap(true);
+            text.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+            text.set_max_width_chars(80);
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            pending.push(current.clone());
+            child = current.next_sibling();
+        }
+    }
+}
+
+fn named_check(page: &gtk4::Box, name: &str) -> Option<gtk4::CheckButton> {
+    find_widget(page.upcast_ref(), name)?
+        .downcast::<gtk4::CheckButton>()
+        .ok()
+}
+
+/// One grant row's line: the broker's label, the folder, and the
+/// promise the person set at grant time, plus whether writes ride
+/// without a card. Capability tokens never render.
+fn grant_row_text(label: &str, root: &std::path::Path, writable: bool, policy: bool) -> String {
+    let mut line = format!(
+        "{} · {} · {}",
+        label,
+        root.display(),
+        if writable { "read-write" } else { "read-only" }
+    );
+    if policy {
+        line.push_str(" · writes without a card");
+    }
+    line
+}
+
+/// An approval card's countdown, recomputed at every repaint so the
+/// reader sees a live deadline, never a stale one.
+fn approval_countdown(deadline: Instant) -> String {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return "Expired".to_owned();
+    }
+    let secs = left.as_secs();
+    if secs < 90 {
+        format!("Expires in {secs}s")
+    } else {
+        format!("Expires in {}m", secs / 60)
+    }
+}
+
+/// Approval content for the card: the exact proposal text the
+/// person reviews, capped for the card with the cap named.
+/// Wrapping the whole result in one scrollable view would let a
+/// megabyte proposal set the row height; the cap keeps the card
+/// a card.
+fn preview_content(content: &str) -> String {
+    const LIMIT: usize = 2000;
+    if content.chars().count() <= LIMIT {
+        return content.to_owned();
+    }
+    let shown: String = content.chars().take(LIMIT).collect();
+    format!("{shown}\n…(showing the first {LIMIT} characters)")
 }
 
 /// One idea row's group: the collection it belongs to, read off the
@@ -4698,6 +5226,50 @@ mod tests {
         assert_eq!(next_run_label(Some(now + 30 * 3600), now), "tomorrow");
         assert_eq!(next_run_label(Some(now + 3 * 86400), now), "in 3d");
         assert_eq!(next_run_label(Some(now + 14 * 86400), now), "in 2w");
+    }
+
+    #[test]
+    fn localhost_page_names_itself_and_stays_in_the_sidebar() {
+        assert_eq!(title("localhost"), "Local host");
+        assert!(PAGES.contains(&"localhost"));
+        assert_eq!(rail_glyph("localhost"), None);
+    }
+
+    #[test]
+    fn localhost_grant_rows_name_label_path_and_promise() {
+        let root = std::path::Path::new("/home/u/work");
+        assert_eq!(
+            grant_row_text("Folder 1", root, true, false),
+            "Folder 1 · /home/u/work · read-write"
+        );
+        assert_eq!(
+            grant_row_text("Folder 1", root, false, false),
+            "Folder 1 · /home/u/work · read-only"
+        );
+        assert_eq!(
+            grant_row_text("Folder 1", root, true, true),
+            "Folder 1 · /home/u/work · read-write · writes without a card"
+        );
+    }
+
+    #[test]
+    fn localhost_countdowns_name_a_live_deadline_never_a_stale_one() {
+        let soon = Instant::now() + Duration::from_secs(45);
+        assert!(approval_countdown(soon).starts_with("Expires in 4"));
+        let later = Instant::now() + Duration::from_secs(200);
+        assert_eq!(approval_countdown(later), "Expires in 3m");
+        let past = Instant::now() - Duration::from_secs(1);
+        assert_eq!(approval_countdown(past), "Expired");
+    }
+
+    #[test]
+    fn localhost_content_previews_cap_but_say_so() {
+        assert_eq!(preview_content("abc"), "abc");
+        let big = "x".repeat(2500);
+        let shown = preview_content(&big);
+        assert!(shown.starts_with(&"x".repeat(2000)));
+        assert!(shown.contains("2000 characters"));
+        assert!(!shown.contains(&"x".repeat(2001)));
     }
 
     #[test]
