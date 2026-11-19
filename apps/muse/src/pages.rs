@@ -2890,6 +2890,61 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) {
     );
 }
 
+/// A thread row's day (`YYYY-MM-DD`) from its update stamp, when the
+/// stamp carries one. Pure, so malformed stamps group as undated.
+fn thread_day(updated_at: Option<&str>) -> Option<String> {
+    let stamp = updated_at?;
+    if stamp.len() >= 10 && stamp.as_bytes()[4] == b'-' && stamp.as_bytes()[7] == b'-' {
+        Some(stamp.chars().take(10).collect())
+    } else {
+        None
+    }
+}
+
+/// A thread row's clock time (`HH:MM`) from an ISO update stamp, when
+/// the stamp carries one. The day itself lives in the group header.
+fn thread_time(updated_at: Option<&str>) -> Option<String> {
+    let stamp = updated_at?;
+    let bytes = stamp.as_bytes();
+    if stamp.len() >= 16
+        && bytes[10] == b'T'
+        && bytes[11..13].iter().all(u8::is_ascii_digit)
+        && bytes[13] == b':'
+        && bytes[14..16].iter().all(u8::is_ascii_digit)
+    {
+        Some(stamp.chars().skip(11).take(5).collect())
+    } else {
+        None
+    }
+}
+
+/// A thread row's group header against the local today: Today,
+/// Yesterday, the date itself for older days, Earlier when undated.
+/// Reuses the panel's calendar buckets, so the two lists agree.
+fn thread_group_label(updated_at: Option<&str>, today: &str) -> String {
+    match thread_day(updated_at) {
+        None => "Earlier".to_owned(),
+        Some(day) => match super::app::activity_bucket(Some(&day), today) {
+            "Today" => "Today".to_owned(),
+            "Yesterday" => "Yesterday".to_owned(),
+            _ => day,
+        },
+    }
+}
+
+/// A thread row's second line: the service's snippet plus the clock
+/// time when the stamp carries one. The day lives in the header, so
+/// it never repeats per row.
+fn thread_meta(snippet: Option<&str>, updated_at: Option<&str>) -> String {
+    let snippet = snippet.map(str::trim).filter(|text| !text.is_empty());
+    match (snippet, thread_time(updated_at)) {
+        (Some(text), Some(time)) => format!("{text} · {time}"),
+        (Some(text), None) => text.to_owned(),
+        (None, Some(time)) => time,
+        (None, None) => String::new(),
+    }
+}
+
 fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
     let Some(list) = named_list(page, "threads-list") else {
         return;
@@ -2907,7 +2962,21 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
         return;
     }
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
+    // Pinned threads keep their pride of place above the day groups;
+    // the rest file under Today / Yesterday / date / Earlier headers.
+    let today = super::app::local_today();
+    let mut group: Option<String> = None;
     for thread in threads {
+        if !thread.pinned {
+            let label = thread_group_label(thread.updated_at.as_deref(), &today);
+            if group.as_deref() != Some(label.as_str()) {
+                let head = gtk4::Label::new(Some(&label));
+                head.set_halign(gtk4::Align::Start);
+                head.add_css_class("muse-section");
+                list.append(&head);
+                group = Some(label);
+            }
+        }
         let row = gtk4::ListBoxRow::new();
         row.set_widget_name(&format!("thread:{}", thread.session_id));
         let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
@@ -2935,18 +3004,7 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) {
             title_row.append(&badge);
         }
         words.append(&title_row);
-        let day = thread
-            .updated_at
-            .as_deref()
-            .map(|stamp| stamp.chars().take(10).collect::<String>())
-            .unwrap_or_default();
-        let meta = match (thread.snippet.clone().unwrap_or_default(), day) {
-            (snippet, when) if !snippet.trim().is_empty() && !when.is_empty() => {
-                format!("{} · {}", snippet.trim(), when)
-            }
-            (snippet, _) if !snippet.trim().is_empty() => snippet.trim().to_owned(),
-            (_, when) => when,
-        };
+        let meta = thread_meta(thread.snippet.as_deref(), thread.updated_at.as_deref());
         if !meta.is_empty() {
             let sub = gtk4::Label::new(Some(&meta));
             sub.set_xalign(0.0);
@@ -5459,6 +5517,53 @@ mod tests {
         assert!(needs_select(None, 2));
         assert!(needs_select(Some(1), 2));
         assert!(!needs_select(Some(2), 2));
+    }
+
+    #[test]
+    fn thread_rows_group_by_day_with_times() {
+        let today = "2026-11-19";
+        assert_eq!(
+            thread_day(Some("2026-11-19T12:00:00Z")),
+            Some("2026-11-19".to_owned())
+        );
+        assert_eq!(
+            thread_day(Some("2026-11-18T23:59:59Z")),
+            Some("2026-11-18".to_owned())
+        );
+        assert_eq!(thread_day(None), None);
+        assert_eq!(thread_day(Some("not a stamp")), None);
+        assert_eq!(thread_day(Some("2026-1-1")), None);
+        assert_eq!(
+            thread_group_label(Some("2026-11-19T12:00:00Z"), today),
+            "Today"
+        );
+        assert_eq!(
+            thread_group_label(Some("2026-11-18T23:59:59Z"), today),
+            "Yesterday"
+        );
+        assert_eq!(
+            thread_group_label(Some("2026-11-10T08:00:00Z"), today),
+            "2026-11-10"
+        );
+        assert_eq!(
+            thread_group_label(Some("2026-11-20T08:00:00Z"), today),
+            "Today"
+        );
+        assert_eq!(thread_group_label(None, today), "Earlier");
+        assert_eq!(thread_group_label(Some("garbage"), today), "Earlier");
+        assert_eq!(
+            thread_time(Some("2026-11-19T12:34:56Z")),
+            Some("12:34".to_owned())
+        );
+        assert_eq!(thread_time(Some("2026-11-19")), None);
+        assert_eq!(thread_time(None), None);
+        assert_eq!(
+            thread_meta(Some("hello"), Some("2026-11-19T12:34:56Z")),
+            "hello · 12:34"
+        );
+        assert_eq!(thread_meta(Some("  hi  "), None), "hi");
+        assert_eq!(thread_meta(None, Some("2026-11-19T12:34:56Z")), "12:34");
+        assert_eq!(thread_meta(None, None), "");
     }
 
     #[test]

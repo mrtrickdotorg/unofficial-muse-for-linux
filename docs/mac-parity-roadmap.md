@@ -125,6 +125,15 @@ already auto-logs unknown shapes keys-only, so the unblock is a
 live capture, not new code: open a message ⋯ in the browser with
 a capture running, and open a thread whose history carries a unit
 or schedule row. Until then Gap 2 ships nothing.
+Thread summary / time / groups (Gap 3, shipped Nov 19, 2026): no
+new route was needed — `sessions.list` already carries `snippet`,
+`updated_at_ms` and `unread_count` (confirmed in the timing log's
+sessions-shape lines), and the bridge already projects all three.
+The Threads page now files unpinned threads under Today /
+Yesterday / date / Earlier headers (pinned threads keep their
+pride of place above the groups), and each row's second line
+reads snippet plus clock time instead of repeating the date.
+The sidebar History stays a compact nav list by choice.
 Decision log (Nov 19, 2026): `egress.approval.history` answers
 50 decided items, and the bridge now projects them narrowly as
 `approval_history` (id, times, display name, action, decision,

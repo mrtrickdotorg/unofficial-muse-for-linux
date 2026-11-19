@@ -140,7 +140,7 @@ pub(crate) fn days_from_civil(year: i32, month: u32, day: u32) -> i32 {
 /// Which panel section an activity belongs in against the local
 /// today (`YYYY-MM-DD`): today, yesterday, or anything older. Future
 /// stamps read as today; undated ones land in Earlier, never dropped.
-fn activity_bucket(day: Option<&str>, today: &str) -> &'static str {
+pub(crate) fn activity_bucket(day: Option<&str>, today: &str) -> &'static str {
     let Some(day) = day else {
         return "Earlier";
     };
@@ -166,7 +166,7 @@ fn activity_bucket(day: Option<&str>, today: &str) -> &'static str {
 }
 
 /// The reader's local today as `YYYY-MM-DD` for the panel groups.
-fn local_today() -> String {
+pub(crate) fn local_today() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|span| span.as_secs() as libc::time_t)
