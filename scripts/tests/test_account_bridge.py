@@ -2829,6 +2829,62 @@ class PolicySettingsTests(unittest.TestCase):
                 bridge.validate_request(dict(bad, op="connector_reset",
                                                config_dir="/tmp/x"))
 
+    def test_settings_update_sends_one_patch_and_projects_the_new_state(self):
+        bridge = load_bridge()
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["method"] = method
+                seen.update(kwargs)
+                return {"connector_default": "ask",
+                        "network_default": "ask",
+                        "protocols": {"ssh": {"mode": "deny"}}}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(FakeClient(), {}).dispatch(
+                {"op": "settings_update", "connector_default": "ask",
+                 "network_default": None, "protocols": None})
+        self.assertEqual(seen["method"], "permissions.settings.update")
+        self.assertEqual(seen["body"], {"connector_default": "ask"})
+        self.assertTrue(seen["closed"])
+        self.assertIn("entries", result)
+        self.assertIn({"label": "connector_default", "value": "ask"},
+                      result["entries"])
+
+    def test_settings_update_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "settings_update",
+                                 "connector_default": "auto_allow",
+                                 "network_default": None, "protocols": None,
+                                 "config_dir": "/tmp/x"})
+        bridge.validate_request({"op": "settings_update",
+                                 "connector_default": None,
+                                 "network_default": None,
+                                 "protocols": {"ssh": "ask"},
+                                 "config_dir": "/tmp/x"})
+        for bad in ({"connector_default": None, "network_default": None,
+                     "protocols": None},
+                    {"connector_default": "", "network_default": None,
+                     "protocols": None},
+                    {"connector_default": None, "network_default": None,
+                     "protocols": {}},
+                    {"connector_default": None, "network_default": None,
+                     "protocols": {"x" * 65: "ask"}},
+                    {"connector_default": None, "network_default": None,
+                     "protocols": {"ssh": ""}},
+                    {"connector_default": None, "network_default": "ok",
+                     "protocols": None, "extra": 1}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(bridge.BridgeFailure):
+                    bridge.validate_request(dict(bad, op="settings_update",
+                                                 config_dir="/tmp/x"))
+
+
 
 class DeleteTaskTests(unittest.TestCase):
     def test_a_deletion_asks_the_tasks_route_once_and_claims_acceptance_only(self):
