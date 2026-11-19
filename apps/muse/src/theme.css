@@ -32,6 +32,14 @@ textview placeholder {
     background-color: transparent;
 }
 
+/* The transcript never draws its scrollbar: it floats over the
+ * content (no gutter reserved) and the slider stays transparent.
+ * Scrolling still works everywhere — the wheel forwards from the
+ * whole middle column and follow-to-latest drives the adjustment. */
+.muse-transcript scrollbar.vertical slider {
+    opacity: 0;
+}
+
 /* The middle column reads as one surface with the transcript: the
  * view color behind header, margins, transcript and notice alike,
  * never a darker frame around a lighter strip. */

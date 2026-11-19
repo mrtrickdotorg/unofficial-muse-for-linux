@@ -258,9 +258,13 @@ impl Chat {
         let scrolled = gtk4::ScrolledWindow::new();
         scrolled.set_child(Some(&transcript));
         scrolled.add_css_class("muse-transcript");
-        // The transcript never scrolls sideways: anything wide wraps
-        // to the viewport instead of pushing the column off-screen.
+        // No bars are ever drawn: the scrollbar floats over the
+        // content instead of reserving a gutter, and the slider
+        // itself stays transparent (see the theme). The wheel and
+        // follow-to-latest drive the vertical adjustment, which stays
+        // fully functional: hiding the bar must never collapse it.
         scrolled.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+        scrolled.set_overlay_scrolling(true);
         // The Mac panel names its thread up top, centered, with the
         // turn menu behind a "…" button at the row's end.
         let heading = gtk4::Label::new(Some("New chat"));
