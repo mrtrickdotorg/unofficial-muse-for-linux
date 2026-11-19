@@ -560,6 +560,11 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             notice.set_wrap(true);
             notice.set_xalign(0.0);
             inner.append(&notice);
+            let device = gtk4::Label::new(None);
+            device.set_widget_name("localhost-device");
+            device.set_xalign(0.0);
+            device.add_css_class("dim-label");
+            inner.append(&device);
             let grants_head = gtk4::Label::new(Some("Granted folders"));
             grants_head.set_halign(gtk4::Align::Start);
             grants_head.add_css_class("muse-section");
@@ -832,6 +837,15 @@ fn paint_localhost(ctx: &Ctx, page: &gtk4::Box) {
     let snap = chat.host().borrow().snapshot();
     if let Some(notice) = named_label(page, "localhost-notice") {
         notice.set_text(&snap.notice);
+    }
+    if let Some(device) = named_label(page, "localhost-device") {
+        match snap.node_id.as_deref() {
+            Some(id) => {
+                device.set_text(&format!("Device {id}"));
+                device.set_visible(true);
+            }
+            None => device.set_visible(false),
+        }
     }
     if let Some(grants) = named_list(page, "localhost-grants") {
         clear_list(&grants);
@@ -5226,6 +5240,14 @@ mod tests {
         assert_eq!(next_run_label(Some(now + 30 * 3600), now), "tomorrow");
         assert_eq!(next_run_label(Some(now + 3 * 86400), now), "in 3d");
         assert_eq!(next_run_label(Some(now + 14 * 86400), now), "in 2w");
+    }
+
+    #[test]
+    fn localhost_phases_compare_by_variant() {
+        assert_ne!(
+            crate::local_host::Phase::Disconnected,
+            crate::local_host::Phase::Registered
+        );
     }
 
     #[test]
