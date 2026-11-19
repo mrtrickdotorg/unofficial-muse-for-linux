@@ -1289,6 +1289,90 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(calls, [("spaces.unshare", {"path_params": {"slug": "my-space"}})])
         self.assertEqual(result, {"slug": "my-space", "accepted": True})
 
+    def test_space_share_sends_the_probed_publish_once(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append((method, kwargs))
+                return {"ok": True, "url": "https://example.invalid/s/1/abc",
+                        "share_type": "cloudflare"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "space_share", "slug": "my-space",
+             "share_type": "cloudflare", "disclosure_confirmation": None})
+        self.assertEqual(
+            calls,
+            [("spaces.share",
+              {"body": {"share_type": "cloudflare",
+                        "require_disclosure_confirmation": True},
+               "path_params": {"slug": "my-space"}, "timeout": 20})])
+        self.assertEqual(result["slug"], "my-space")
+        self.assertTrue(result["accepted"])
+        self.assertTrue(result["url"].startswith("https://"))
+        self.assertFalse(result["needs_disclosure"])
+
+    def test_space_share_shapes_the_disclosure_round_trip(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        token = "a" * 64
+        seen = {}
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["body"] = kwargs.get("body")
+                return {"ok": True,
+                        "disclosure_confirmation": {
+                            "token": token, "summary": "What becomes public",
+                            "disclosure": {"contains_chat_history": True,
+                                           "something_new": True}}}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "space_share", "slug": "my-space",
+             "share_type": "cloudflare", "disclosure_confirmation": None})
+        self.assertFalse(result["accepted"] and result["url"])
+        self.assertTrue(result["needs_disclosure"])
+        self.assertEqual(result["disclosure_flags"], ["contains_chat_history"])
+        self.assertEqual(result["disclosure_confirmation"]["token"], token)
+        confirmed = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "space_share", "slug": "my-space",
+             "share_type": "cloudflare",
+             "disclosure_confirmation": result["disclosure_confirmation"]})
+        self.assertEqual(seen["body"]["disclosure_confirmation"]["token"], token)
+        self.assertTrue(confirmed["needs_disclosure"])
+
+    def test_space_share_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "space_share", "slug": "ok-slug",
+                                 "share_type": "cloudflare",
+                                 "disclosure_confirmation": None,
+                                 "config_dir": "/tmp/x"})
+        token = "b" * 64
+        bridge.validate_request({"op": "space_share", "slug": "ok-slug",
+                                 "share_type": "cloudflare",
+                                 "disclosure_confirmation": {"token": token},
+                                 "config_dir": "/tmp/x"})
+        for bad in ({"slug": "", "share_type": "cloudflare",
+                     "disclosure_confirmation": None},
+                    {"slug": "a/b", "share_type": "cloudflare",
+                     "disclosure_confirmation": None},
+                    {"slug": "ok", "share_type": "  ",
+                     "disclosure_confirmation": None},
+                    {"slug": "ok", "share_type": "cloudflare",
+                     "disclosure_confirmation": {"token": "short"}},
+                    {"slug": "ok", "share_type": "cloudflare",
+                     "disclosure_confirmation": {"token": "z" * 64}}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(bridge.BridgeFailure):
+                    request = dict(bad, op="space_share", config_dir="/tmp/x")
+                    bridge.validate_request(request)
+
     def test_space_unshare_and_paging_requests_are_validated(self):
         bridge = load_bridge()
         bridge.validate_request({"op": "space_unshare", "slug": "ok-slug",

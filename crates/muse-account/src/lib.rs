@@ -861,6 +861,50 @@ pub struct SpaceUnshareAnswer {
     pub accepted: bool,
 }
 
+// The disclosure flags the web's share dialog reads. Fixed names
+// per the 12.1 bundle; the bridge drops anything else.
+const SHARE_DISCLOSURE_FLAG_NAMES: [&str; 4] = [
+    "contains_personal_information",
+    "contains_chat_history",
+    "contains_user_shared_media",
+    "contains_secrets_or_credentials",
+];
+
+/// What the service said about a space sharing it took.
+///
+/// Either the published link or the disclosure the reader must
+/// accept first, exactly as the web's dialog does: a present
+/// `url` is the share; `needs_disclosure` with a summary and
+/// flag names means the service wants an explicit Publish
+/// round-trip. The confirmation object rides back opaquely on
+/// that press and is never display text. A publish the service
+/// cannot serve (no built source on the space) fails the call,
+/// and the row says so instead of claiming a link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceShareAnswer {
+    pub slug: String,
+    pub accepted: bool,
+    pub url: Option<String>,
+    pub share_type: Option<String>,
+    pub needs_disclosure: bool,
+    pub disclosure_summary: Option<String>,
+    pub disclosure_flags: Vec<String>,
+    pub disclosure_confirmation: Option<serde_json::Value>,
+}
+
+impl SpaceShareAnswer {
+    /// The disclosure flags the UI may name, in the web's own
+    /// fixed order. Anything the service sent outside this list
+    /// never reaches a reader.
+    pub fn flag_names(&self) -> Vec<&str> {
+        self.disclosure_flags
+            .iter()
+            .filter(|flag| SHARE_DISCLOSURE_FLAG_NAMES.contains(&flag.as_str()))
+            .map(String::as_str)
+            .collect()
+    }
+}
+
 /// What the service's HTML export of one space came back as.
 ///
 /// `html` is present only when the export decoded as a page and
@@ -1529,6 +1573,33 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "space_unshare", "slug": slug}),
+            false,
+        )
+    }
+    /// Share one space, or continue its disclosure round-trip.
+    ///
+    /// The slug must be one the Library listing's open target
+    /// published; the bridge makes a single POST on the
+    /// live-probed route, so one press maps to one write. The
+    /// confirmation is the service's own round-trip object from
+    /// a `needs_disclosure` answer, handed back verbatim on the
+    /// Publish press; pass None on the first press.
+    pub fn space_share(
+        &self,
+        slug: &str,
+        share_type: &str,
+        disclosure_confirmation: Option<serde_json::Value>,
+    ) -> Result<SpaceShareAnswer, AccountError> {
+        if slug.is_empty() || slug.len() > 256 || slug.contains('\0') || slug.contains('/') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        if share_type.trim().is_empty() || share_type.len() > 64 || share_type.contains('\0') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "space_share", "slug": slug,
+                              "share_type": share_type,
+                              "disclosure_confirmation": disclosure_confirmation}),
             false,
         )
     }
