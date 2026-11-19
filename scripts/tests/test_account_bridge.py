@@ -2766,6 +2766,20 @@ class PolicySettingsTests(unittest.TestCase):
         self.assertEqual(result["connectors"], ["github", "gmail"])
         self.assertNotIn("bad/name", str(result))
 
+    def test_protocols_project_as_one_entry_per_row(self):
+        bridge = load_bridge()
+        payload = {"protocols": [
+            {"key": "ssh", "mode": "ask"},
+            {"key": "ftp", "mode": "deny"},
+            {"key": "", "mode": "ask"},
+            {"mode": "ask"},
+            "nope",
+        ]}
+        result = bridge.settings_rows(payload)
+        by_label = {e["label"]: e["value"] for e in result["entries"]}
+        self.assertEqual(by_label, {"protocol.ssh": "ask", "protocol.ftp": "deny"})
+        self.assertEqual(result["withheld"], 3)
+
     def test_settings_projection_fails_closed_on_a_non_object(self):
         bridge = load_bridge()
         with self.assertRaises(bridge.BridgeFailure):
