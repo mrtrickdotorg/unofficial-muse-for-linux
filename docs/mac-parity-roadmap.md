@@ -81,7 +81,28 @@ the account's three spaces has a built source directory, so the
 service answers every publish with `space_unavailable`, and the
 row says so instead of claiming a link. `artifacts.share` stays
 unwired: the current web never calls it (no hits in the shipped
-bundles). An earlier connection-gate bug — the data pages' shared "verified"
+bundles).
+Chat stop (Nov 19, 2026): the Stop button's server leg was
+verified live with all threads `completed` — `chat.cancel`
+with `{}` answers `{cancelled: false, message_id: null}`,
+an honest idle no-op with nothing running to kill. Already
+wired end-to-end (button outside the ticket slot,
+fire-and-forget, the answer's `cancelled` travels as data), so
+no change; the probe just closed the "never verified" line.
+Message reply (Nov 19, 2026): the send shape is mined from the
+12.1 bundle but NOT wired and NOT live-verified. A quoted chat
+message rides as `{in_reply_to: <messageId>}` in the stream
+params (plus an image `reply_to_target` when the quote carries
+one); other targets ride as `reply_to_target` (`goal`,
+`feed_unit`, `presentation`, `mail_message` kinds), and the
+subscribe handshake advertises
+`supported_reply_to_target_types` per session. Verification is
+blocked on safety, not knowledge: scratch-session sends never
+land in history, and a real-thread reply is a non-reversible
+user-visible turn (message plus the agent run it triggers). No
+code ships until a reversible proof exists.
+
+An earlier connection-gate bug — the data pages' shared "verified"
 flag latched off on any single error and never recovered while chats self-healed — is fixed:
 the flag now follows what a reply actually proves about the account.
 
