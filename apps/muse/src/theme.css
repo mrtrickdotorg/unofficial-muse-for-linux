@@ -251,8 +251,8 @@ textview placeholder {
 
 .muse-rail-button {
     border-radius: 9999px;
-    min-width: 36px;
-    min-height: 36px;
+    min-width: 32px;
+    min-height: 32px;
     background: transparent;
     border-color: transparent;
     color: #e4e6eb;
