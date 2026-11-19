@@ -19,6 +19,7 @@ pub fn row_widget(
     row: &TranscriptRow,
     on_option: &std::rc::Rc<dyn Fn(String)>,
     on_react: &std::rc::Rc<dyn Fn(String, String)>,
+    on_reply: &std::rc::Rc<dyn Fn(String, String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
@@ -54,7 +55,7 @@ pub fn row_widget(
                 attachments,
                 id,
             };
-            message_widget(&parts, on_option, on_react, previews)
+            message_widget(&parts, on_option, on_react, on_reply, previews)
         }
         TranscriptRow::Notice { text } => {
             let widget = gtk4::Label::new(Some(text));
@@ -86,6 +87,7 @@ fn message_widget(
     parts: &MessageParts,
     on_option: &std::rc::Rc<dyn Fn(String)>,
     on_react: &std::rc::Rc<dyn Fn(String, String)>,
+    on_reply: &std::rc::Rc<dyn Fn(String, String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
@@ -145,33 +147,50 @@ fn message_widget(
 
     // The web hangs actions under the answer: a Copy button that
     // writes the response text to the clipboard. Local-only, never
-    // a write.
-    if matches!(role, Role::Assistant) {
+    // a write. Reply stages the row as a quote above the composer;
+    // the send itself stays a plain send (the community gateway
+    // records no reply param), so the quote is context, not protocol.
+    let is_assistant = matches!(role, Role::Assistant);
+    if is_assistant || matches!(role, Role::User) {
         let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         actions.set_halign(gtk4::Align::Start);
-        let copy = gtk4::Button::with_label("Copy");
-        copy.add_css_class("flat");
-        copy.set_tooltip_text(Some("Copy response"));
-        let text = text.to_string();
-        copy.connect_clicked(move |button| {
-            button.clipboard().set_text(&text);
-        });
-        actions.append(&copy);
-        // The web hangs a React action beside Copy: one press
-        // toggles a heart on the message through the live-probed
-        // reactions.toggle shape. The answer names the new state;
-        // the row itself carries no reaction display to go stale.
-        let react = gtk4::Button::with_label("❤");
-        react.add_css_class("flat");
-        react.set_tooltip_text(Some("React to this message"));
+        if is_assistant {
+            let copy = gtk4::Button::with_label("Copy");
+            copy.add_css_class("flat");
+            copy.set_tooltip_text(Some("Copy response"));
+            let text = text.to_string();
+            copy.connect_clicked(move |button| {
+                button.clipboard().set_text(&text);
+            });
+            actions.append(&copy);
+            // The web hangs a React action beside Copy: one press
+            // toggles a heart on the message through the live-probed
+            // reactions.toggle shape. The answer names the new state;
+            // the row itself carries no reaction display to go stale.
+            let react = gtk4::Button::with_label("❤");
+            react.add_css_class("flat");
+            react.set_tooltip_text(Some("React to this message"));
+            {
+                let react_on = on_react.clone();
+                let id: String = (*id).into();
+                react.connect_clicked(move |_| {
+                    react_on(id.clone(), "❤".to_owned());
+                });
+            }
+            actions.append(&react);
+        }
+        let reply = gtk4::Button::with_label("Reply");
+        reply.add_css_class("flat");
+        reply.set_tooltip_text(Some("Reply to this message"));
         {
-            let react_on = on_react.clone();
+            let reply_on = on_reply.clone();
             let id: String = (*id).into();
-            react.connect_clicked(move |_| {
-                react_on(id.clone(), "❤".to_owned());
+            let text: String = (*text).into();
+            reply.connect_clicked(move |_| {
+                reply_on(id.clone(), text.clone());
             });
         }
-        actions.append(&react);
+        actions.append(&reply);
         column.append(&actions);
     }
 
@@ -298,6 +317,7 @@ pub fn populate(
     rows: &[TranscriptRow],
     on_option: &std::rc::Rc<dyn Fn(String)>,
     on_react: &std::rc::Rc<dyn Fn(String, String)>,
+    on_reply: &std::rc::Rc<dyn Fn(String, String)>,
     previews: &std::collections::HashMap<
         String,
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
@@ -321,6 +341,7 @@ pub fn populate(
             row,
             on_option,
             on_react,
+            on_reply,
             previews,
             assistant && !prev_assistant,
         ));
@@ -388,7 +409,8 @@ mod tests {
         let on_option: std::rc::Rc<dyn Fn(String)> = std::rc::Rc::new(|_| {});
         let previews = std::collections::HashMap::new();
         let on_react: std::rc::Rc<dyn Fn(String, String)> = std::rc::Rc::new(|_, _| {});
-        populate(&list, &rows, &on_option, &on_react, &previews);
+        let on_reply: std::rc::Rc<dyn Fn(String, String)> = std::rc::Rc::new(|_, _| {});
+        populate(&list, &rows, &on_option, &on_react, &on_reply, &previews);
         let mut count = 0;
         let mut child = list.first_child();
         while child.is_some() {
@@ -398,10 +420,16 @@ mod tests {
         assert_eq!(count, rows.len());
 
         // The assistant row carries one Copy button; the user row
-        // carries none.
+        // carries none. Both rows carry Reply (quote staging only).
         let copies = find_buttons(list.upcast_ref(), "Copy");
         assert_eq!(copies.len(), 1);
         assert_eq!(copies[0].tooltip_text().as_deref(), Some("Copy response"));
+        let replies = find_buttons(list.upcast_ref(), "Reply");
+        assert_eq!(replies.len(), 2);
+        assert_eq!(
+            replies[0].tooltip_text().as_deref(),
+            Some("Reply to this message")
+        );
 
         let built = super::super::composer::ComposerRow::build();
         let mut composer = super::super::composer::Composer::new();

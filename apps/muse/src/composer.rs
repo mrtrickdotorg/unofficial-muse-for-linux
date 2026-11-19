@@ -73,6 +73,27 @@ pub fn remove_image(images: &mut Vec<StagedImage>, name: &str) {
 pub struct Dispatch {
     pub text: String,
     pub images: Vec<StagedImage>,
+    /// The quoted row's id, staged by Reply and cleared on dispatch.
+    /// The wire still sends plain text (the community gateway records
+    /// no reply param; the web's in_reply_to shape is web-transport
+    /// only), so this is reader-side context, never a protocol claim.
+    pub reply_to: Option<String>,
+}
+
+/// A staged reply quote: the quoted row's id plus one capped line.
+/// Reader-side context only — the dispatch below stays a plain send.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReplyQuote {
+    pub id: String,
+    pub excerpt: String,
+}
+
+/// One capped line for the reply quote bar: first line, trimmed,
+/// 200 chars max on a char boundary. Pure, so the cap is unit-tested.
+pub fn quote_excerpt(text: &str) -> String {
+    let first = text.lines().next().unwrap_or("").trim();
+    let capped: String = first.chars().take(200).collect();
+    capped.trim().to_owned()
 }
 
 /// Draft plus in-flight send flag. One press dispatches once; a second
@@ -82,6 +103,7 @@ pub struct Composer {
     text: String,
     sending: bool,
     images: Vec<StagedImage>,
+    reply: Option<ReplyQuote>,
 }
 
 impl Composer {
@@ -110,7 +132,8 @@ impl Composer {
 
     /// Take the draft (and any staged pictures) for dispatch, marking
     /// the send in flight. Returns `None` when there is nothing
-    /// sendable -- the press is dropped, never queued.
+    /// sendable -- the press is dropped, never queued. A staged quote
+    /// rides along for context and clears, so one reply quotes one send.
     pub fn begin_send(&mut self) -> Option<Dispatch> {
         if !self.can_send() {
             return None;
@@ -119,9 +142,36 @@ impl Composer {
         let dispatch = Dispatch {
             text: self.text.trim().to_owned(),
             images: std::mem::take(&mut self.images),
+            reply_to: self.reply.take().map(|quote| quote.id),
         };
         self.text.clear();
         Some(dispatch)
+    }
+
+    /// Stage a reply quote from a row press: the row's id plus its
+    /// excerpt. Guards mirror the reaction path (id 1–256, no NUL;
+    /// excerpt derived through the capped one-line helper, never raw).
+    /// Re-staging replaces the quote; a quote alone never arms send.
+    pub fn stage_reply(&mut self, id: String, excerpt: String) -> Result<(), &'static str> {
+        if id.is_empty() || id.len() > 256 || id.contains('\0') {
+            return Err("bad id");
+        }
+        let excerpt = quote_excerpt(&excerpt);
+        if excerpt.is_empty() {
+            return Err("empty quote");
+        }
+        self.reply = Some(ReplyQuote { id, excerpt });
+        Ok(())
+    }
+
+    /// The staged quote, if Reply was pressed since the last send.
+    pub fn reply(&self) -> Option<&ReplyQuote> {
+        self.reply.as_ref()
+    }
+
+    /// Drop the staged quote without sending. The Cancel × beside it.
+    pub fn clear_reply(&mut self) {
+        self.reply = None;
     }
 
     /// Stage one pasted picture for the next send.
@@ -178,6 +228,9 @@ pub struct ComposerRow {
     pub stop: gtk4::Button,
     pub thinking: gtk4::ComboBoxText,
     pub mic: gtk4::Button,
+    reply_bar: gtk4::Box,
+    reply_label: gtk4::Label,
+    pub reply_cancel: gtk4::Button,
     outer: gtk4::Box,
     chips: gtk4::FlowBox,
 }
@@ -305,6 +358,23 @@ impl ComposerRow {
         card.append(&mic);
         card.append(&stop);
         card.append(&send);
+        // The staged reply quote: one capped line naming what the next
+        // send answers, with a Cancel × that drops it without sending.
+        // Hidden until Reply stages a row.
+        let reply_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        reply_bar.add_css_class("muse-reply-bar");
+        let reply_label = gtk4::Label::new(None);
+        reply_label.set_hexpand(true);
+        reply_label.set_halign(gtk4::Align::Start);
+        reply_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        reply_label.add_css_class("dim-label");
+        let reply_cancel = gtk4::Button::with_label("×");
+        reply_cancel.add_css_class("flat");
+        reply_cancel.set_tooltip_text(Some("Cancel reply"));
+        reply_bar.append(&reply_label);
+        reply_bar.append(&reply_cancel);
+        reply_bar.set_visible(false);
+        outer.append(&reply_bar);
         outer.append(&chips);
         outer.append(&card);
         let row = Self {
@@ -315,6 +385,9 @@ impl ComposerRow {
             stop,
             thinking,
             mic,
+            reply_bar,
+            reply_label,
+            reply_cancel,
             outer,
             chips,
         };
@@ -363,6 +436,21 @@ impl ComposerRow {
         self.send.set_visible(!composer.sending());
         self.stop.set_sensitive(composer.sending());
         self.stop.set_visible(composer.sending());
+    }
+
+    /// Repaint the staged reply quote; hidden when Reply staged none.
+    pub fn paint_reply(&self, reply: Option<&ReplyQuote>) {
+        match reply {
+            Some(quote) => {
+                self.reply_label
+                    .set_text(&format!("Replying to: {}", quote.excerpt));
+                self.reply_bar.set_visible(true);
+            }
+            None => {
+                self.reply_label.set_text("");
+                self.reply_bar.set_visible(false);
+            }
+        }
     }
 }
 
@@ -450,5 +538,79 @@ mod tests {
         composer.restore(dispatch.images);
         assert_eq!(composer.staged().len(), 1);
         assert!(composer.can_send());
+    }
+
+    #[test]
+    fn reply_stages_a_quote_without_arming_send() {
+        let mut composer = Composer::new();
+        assert!(composer.reply().is_none());
+        composer
+            .stage_reply("m1".to_owned(), "hello there".to_owned())
+            .expect("stage");
+        assert_eq!(
+            composer.reply(),
+            Some(&ReplyQuote {
+                id: "m1".to_owned(),
+                excerpt: "hello there".to_owned(),
+            })
+        );
+        // A quote alone sends nothing: words or pictures still required.
+        assert!(!composer.can_send());
+        assert!(composer.begin_send().is_none());
+        assert!(composer.reply().is_some());
+        composer.clear_reply();
+        assert!(composer.reply().is_none());
+    }
+
+    #[test]
+    fn reply_ids_and_excerpts_are_bounded() {
+        let mut composer = Composer::new();
+        assert!(
+            composer
+                .stage_reply("".to_owned(), "hi".to_owned())
+                .is_err()
+        );
+        assert!(
+            composer
+                .stage_reply(format!("m{}x", '\0'), "hi".to_owned())
+                .is_err()
+        );
+        assert!(
+            composer
+                .stage_reply("m1".to_owned(), "   ".to_owned())
+                .is_err()
+        );
+        assert!(composer.reply().is_none());
+        composer
+            .stage_reply("m1".to_owned(), "hi".to_owned())
+            .expect("stage");
+        assert!(
+            composer
+                .stage_reply("m2".to_owned(), "re-quote".to_owned())
+                .is_ok()
+        );
+        assert_eq!(composer.reply().map(|quote| quote.id.as_str()), Some("m2"));
+    }
+
+    #[test]
+    fn reply_excerpt_is_one_capped_line() {
+        assert_eq!(quote_excerpt("hello"), "hello");
+        assert_eq!(quote_excerpt("  first line\nsecond line  "), "first line");
+        assert_eq!(quote_excerpt("   "), "");
+        let long = "x".repeat(500);
+        assert_eq!(quote_excerpt(&long).chars().count(), 200);
+    }
+
+    #[test]
+    fn begin_send_carries_and_clears_the_quote() {
+        let mut composer = Composer::new();
+        composer.set_text("answer");
+        composer
+            .stage_reply("m9".to_owned(), "quoted".to_owned())
+            .expect("stage");
+        let dispatch = composer.begin_send().expect("sendable");
+        assert_eq!(dispatch.text, "answer");
+        assert_eq!(dispatch.reply_to.as_deref(), Some("m9"));
+        assert!(composer.reply().is_none());
     }
 }
