@@ -32,6 +32,12 @@ textview placeholder {
     background-color: transparent;
 }
 
+/* No hover wash on transcript rows: mousing across the transcript
+ * never highlights the row under the pointer. */
+.muse-transcript row:hover {
+    background-color: transparent;
+}
+
 /* The transcript never draws its scrollbar: it floats over the
  * content (no gutter reserved) and the slider stays transparent.
  * Scrolling still works everywhere — the wheel forwards from the
