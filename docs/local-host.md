@@ -55,6 +55,44 @@ Required release checks:
 5. Fresh account authentication and a real registration/read/create workflow are verified separately, or the precise blocking response is recorded without a success claim.
 6. The final AppImage contains the verified sidecars, no saved credentials, and no bundled community/Meta protocol assets. Native Wayland and XWayland evidence remain distinct.
 
+## Live gate runbook (owner's hand required)
+
+Grants and approval presses are the owner's consent boundary, so this runs with them, not by them. Still unproven: an approval-gated create against the live service, and revocation during an in-flight invocation. Reads already round-tripped; expiry is covered by broker unit tests, not by this run.
+
+Preconditions: the app is built with the Local host page; the account is linked (chat loads); no host session is running (page shows the disconnected notice).
+
+Setup (their shell, exact commands):
+
+```sh
+mkdir -p ~/muse-gate
+printf 'gate liveness\n' > ~/muse-gate/ping.txt
+ls -la ~/muse-gate
+```
+
+Grant and start (their hand, Local host page):
+
+1. Tick "I explicitly enable this local host…". Leave "Grant read-only" OFF (this gate exercises writes).
+2. "Grant a folder to Muse…" → pick `~/muse-gate` only. Never home, Documents, or the repo.
+3. "Start local host". Wait for the notice to read "This device keeps one identity across restarts…" — connecting is not registered. The device row names the registered node id; it must match `local-host-node-id` in the account config dir.
+
+Step 0 — liveness (their chat with the agent): "Using my Linux host's granted folder, read `ping.txt` and quote it back." Expect the exact `gate liveness` line in the reply. If the agent cannot see the host tools, stop here and report that: registration did not advertise.
+
+Step 1 — deny leaves nothing behind: "Using my Linux host's granted folder, create `refused.txt` containing exactly `should-not-exist`." When the card appears, check it names `files.create_text` and `refused.txt` and shows the content, then press **Deny**. Verify: `test ! -e ~/muse-gate/refused.txt && echo DENY-OK`. The activity log should show the approval requested and the denial.
+
+Step 2 — allow creates the exact bytes: "Using my Linux host's granted folder, create `allowed.txt` containing exactly `gate-allowed-1`." Press **Allow once** within the countdown. Verify byte-exact:
+```sh
+printf 'gate-allowed-1' | cmp - ~/muse-gate/allowed.txt && echo ALLOW-OK
+```
+(note: no trailing newline both sides). The log should show auto-reply ok and the reply sent.
+
+Step 3 — revocation mid-flight (deterministic, no racing): "Using my Linux host's granted folder, create `revoked.txt` containing exactly `should-not-exist`." When the card appears, do NOT press it — press **Stop & revoke all** instead. Verify: `test ! -e ~/muse-gate/revoked.txt && echo REVOKE-OK`, the cards list is empty, and the notice reads disconnected. The agent's request should fail, not hang silently — note whatever the agent reports.
+
+Step 4 — extended (roadmap gate names edit and move; same card machinery): with the host re-granted and restarted, "replace the contents of `allowed.txt` with exactly `gate-allowed-2`" (Allow once; `cmp` again), then "rename `allowed.txt` to `moved.txt`" (Allow once; `ls`).
+
+Cleanup: **Stop & revoke all**, then `rm -rf ~/muse-gate`. Confirm the notice reads "Disconnected. Grants revoked; new consent, folders and Start are required."
+
+Report back per step: PASS/FAIL plus any deviation (card text, log lines, agent behavior). Do not edit this doc's evidence section until the run reports.
+
 ## Developer gates
 
 The canonical `scripts/test-account.sh` now includes wire-contract tests using the selected external runtime's real protobuf classes with **fake network IO**. It rejects skipped tests. Install the pinned test runtime with `scripts/setup-account-bridge.sh`, then select its absolute interpreter through `MUSE_ACCOUNT_TEST_PYTHON`. This does not sign in or read credentials.
