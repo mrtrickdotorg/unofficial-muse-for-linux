@@ -502,7 +502,7 @@ consent gates, one-node-id-per-installation, saved folder
 policies, start/stop pump, approval-card queue, expiry, and
 the closed-code notices — with 10 unit tests. The page (grant
 picker, Start/Stop, approval cards, activity log) is the next
-slice; only then can the live gate run.
+slice; only then can the live gate run. The runbook is now written (`docs/local-host.md`, "Live gate runbook") and waits on the owner: grants and approval presses are theirs to make. Until it reports, the unproven list stands exactly where the local-host doc left it: approval-gated create, revocation mid-flight.
 Page landed (Nov 19, 2026): sidebar Local host page with the
 consent and read-only toggles, folder picker, Start/Stop,
 grant list with per-folder promise and saved-permission mark,
