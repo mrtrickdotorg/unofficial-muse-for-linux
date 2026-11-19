@@ -16,9 +16,18 @@ pub enum Op {
     Identity,
     History,
     Send,
-    /// Shared by every secondary page: only the visible page reads,
-    /// so one slot covers them all.
-    Page,
+    /// Panel writes beside the chat (approvals, policy, schedules):
+    /// one shared slot so presses serialize instead of stacking.
+    Panel,
+    /// One slot per data page: fills run beside each other, so a slow
+    /// goals read never starves ideas and switching pages never
+    /// cancels anything. Only a second fill of the SAME page waits.
+    Tasks,
+    Library,
+    Ideas,
+    Goals,
+    Feed,
+    Search,
     /// The model picker read and write. One slot: a set never races
     /// a listing.
     Model,
@@ -920,12 +929,33 @@ mod tests {
         let mut session = Session::new();
         let history = session.try_begin(Op::History).expect("history slot");
         let page = session
-            .try_begin(Op::Page)
+            .try_begin(Op::Goals)
             .expect("page slot beside history");
         assert!(session.accept(&history));
         assert!(session.try_begin(Op::History).is_some());
         assert!(!session.accept(&history));
         assert!(session.accept(&page));
-        assert!(session.try_begin(Op::Page).is_some());
+        assert!(session.try_begin(Op::Goals).is_some());
+    }
+
+    #[test]
+    fn page_fills_run_beside_each_other_but_not_over_themselves() {
+        // Switching pages never stalls: a goals fill in flight leaves
+        // ideas dispatchable (each paints on its own ticket, so the
+        // late answer owns only its own page). A second fill of the
+        // same page still waits instead of stacking.
+        let mut session = Session::new();
+        let history = session.try_begin(Op::History).expect("history slot");
+        let goals = session
+            .try_begin(Op::Goals)
+            .expect("goals fill beside the pump");
+        let ideas = session
+            .try_begin(Op::Ideas)
+            .expect("ideas fill beside goals");
+        assert!(session.try_begin(Op::Goals).is_none());
+        assert!(session.accept(&history));
+        assert!(session.accept(&goals));
+        assert!(session.accept(&ideas));
+        assert!(session.try_begin(Op::Goals).is_some());
     }
 }
