@@ -127,6 +127,11 @@ pub fn show(ctx: &Ctx, name: &str) {
             ctx.sidebar.select_row(Some(&row));
         }
     }
+    if name == "chat"
+        && let Some(chat) = ctx.chat.upgrade()
+    {
+        chat.scroll_to_latest();
+    }
 }
 
 fn build(ctx: &Ctx, name: &str) -> gtk4::Box {

@@ -472,6 +472,7 @@ mod tests {
         // A widget frame builds without taking the process down: the
         // feed mounts these for live graphics, so construction itself
         // has to be probe-safe on a bare display.
+        super::super::app::verify_chat_scroll_navigation();
         let _frame = super::super::widget::widget_frame("<b>hi</b>", Some("fallback"));
     }
 }
