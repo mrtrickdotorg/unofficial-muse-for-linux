@@ -12,10 +12,6 @@
 //! and every reply rides back over the same link. Stop revokes
 //! everything: transport first, then file capabilities.
 
-// The page (next slice) owns a Controller and renders snapshots;
-// until it lands, the public surface below is intentionally quiet.
-#![allow(dead_code)]
-
 use muse_account::BridgeConfig;
 use muse_local_link::{HostConfig, HostEvent, HostSession};
 use muse_local_tools::{ApprovalRequest, Decision, Invocation, ToolBroker, ToolReply};
@@ -36,9 +32,6 @@ use std::{
 #[derive(Clone)]
 pub(crate) struct Card {
     pub request: ApprovalRequest,
-    pub root: PathBuf,
-    pub target_root: Option<PathBuf>,
-    pub grant_id: String,
     pub deadline: Instant,
     pub deciding: bool,
 }
@@ -47,14 +40,7 @@ enum Completed {
     Grant(Result<(), &'static str>),
     // Boxed: an approval card carries a full proposal, and the grant variant must
     // not carry that weight through every channel send.
-    Operation(
-        Box<Decision>,
-        PathBuf,
-        String,
-        Instant,
-        String,
-        Option<PathBuf>,
-    ),
+    Operation(Box<Decision>, Instant, String),
 }
 
 /// Session activity log capacity: oldest entries are dropped first.
@@ -256,21 +242,11 @@ pub(crate) enum Phase {
     Connecting,
     Registered,
 }
-impl Phase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Phase::Disconnected => "disconnected",
-            Phase::Connecting => "connecting",
-            Phase::Registered => "registered",
-        }
-    }
-}
 
 /// One granted folder, for the page's grant list. The broker mints the
 /// id per session; the label is display text, never logged raw.
 #[derive(Clone)]
 pub(crate) struct GrantedFolder {
-    pub id: String,
     pub label: String,
     pub root: PathBuf,
     pub writable: bool,
@@ -342,7 +318,6 @@ impl Controller {
                 .grants()
                 .into_iter()
                 .map(|g| GrantedFolder {
-                    id: g.id,
                     label: g.label,
                     root: g.root,
                     writable: g.writable,
@@ -353,19 +328,6 @@ impl Controller {
             policies: self.policies.clone(),
             node_id: self.identity.as_ref().map(|lease| lease.node_id.clone()),
         }
-    }
-    fn device(&self) -> Option<DeviceLease> {
-        self.identity
-            .as_ref()
-            .filter(|_| self.phase == Phase::Registered)
-            .cloned()
-    }
-    /// A live lease for workers that must stop touching the broker and
-    /// the link the moment the page goes away or the host stops. The
-    /// page holds one while it pumps; dropping the last lease ends
-    /// background work without touching session state.
-    pub(crate) fn lease(&self) -> Option<DeviceLease> {
-        self.device()
     }
     fn push_log(&mut self, entry: String) {
         if self.log.len() >= MAX_LOG {
@@ -488,30 +450,18 @@ impl Controller {
             self.stop();
             return;
         }
-        let grant_id = invocation
-            .params
-            .get("grant_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        let grants = self.broker.grants();
-        let root = grants
-            .iter()
-            .find(|g| g.id == grant_id)
-            .map(|g| g.root.clone())
-            .unwrap_or_default();
-        // A cross-folder move's card must name the destination folder too;
-        // resolve it from the same grant list the broker checks against.
-        let target_root = invocation
-            .params
-            .get("target_grant_id")
-            .and_then(|v| v.as_str())
-            .and_then(|tid| grants.iter().find(|g| g.id == tid))
-            .map(|g| g.root.clone());
+        // The folder label is log-only: the raw grant id (a
+        // capability token) never travels past this line.
+        let label = self.grant_label(
+            invocation
+                .params
+                .get("grant_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
         let deadline = Instant::now() + Duration::from_millis(invocation.timeout_ms.min(120000));
         let broker = self.broker.clone();
         let command = invocation.command.clone();
-        let label = self.grant_label(&grant_id);
         self.push_log(format!(
             "{} received {} · {}",
             now_hms(),
@@ -521,14 +471,7 @@ impl Controller {
         if self
             .work(move || {
                 let decision = run_invocation(&broker, invocation, deadline);
-                Completed::Operation(
-                    Box::new(decision),
-                    root,
-                    grant_id,
-                    deadline,
-                    command,
-                    target_root,
-                )
+                Completed::Operation(Box::new(decision), deadline, command)
             })
             .is_err()
         {
@@ -597,11 +540,8 @@ impl Controller {
                 } else {
                     broker.deny(&id)
                 })),
-                PathBuf::new(),
-                String::new(),
                 Instant::now(),
                 String::new(),
-                None,
             )
         })?;
         self.cards[index].deciding = true;
@@ -680,7 +620,7 @@ impl Controller {
                         Err(e) => e.into(),
                     }
                 }
-                Completed::Operation(decision, root, grant_id, deadline, command, target_root)
+                Completed::Operation(decision, deadline, command)
                     if self.phase == Phase::Registered =>
                 {
                     match *decision {
@@ -715,9 +655,6 @@ impl Controller {
                                 ));
                                 self.cards.push(Card {
                                     request,
-                                    root,
-                                    target_root,
-                                    grant_id,
                                     deadline,
                                     deciding: false,
                                 });
@@ -1011,12 +948,5 @@ mod tests {
         assert_eq!(safe_code("!!!"), "err");
         assert_eq!(safe_path("/a/b"), "a/b");
         assert_eq!(safe_path(""), "(invalid-path)");
-    }
-
-    #[test]
-    fn phase_labels_stay_stable() {
-        assert_eq!(Phase::Disconnected.label(), "disconnected");
-        assert_eq!(Phase::Connecting.label(), "connecting");
-        assert_eq!(Phase::Registered.label(), "registered");
     }
 }
