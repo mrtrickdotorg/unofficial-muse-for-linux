@@ -2221,6 +2221,62 @@ class ApprovalTests(unittest.TestCase):
                         {"label": "Path", "value": "/x"}]}]})
         self.assertNotIn("SECRET", str(bridge.approval_rows(payload)))
 
+    def test_decision_history_projects_narrowly_and_drops_idless_rows(self):
+        bridge = load_bridge()
+        payload = {"items": [{
+            "approval_id": "d-1", "requested_at_ms": 1, "decided_at_ms": 2,
+            "display_name": "GitHub", "action_label": "Change content",
+            "decision": "allow_once", "decided_by": "user-1", "status": "approved",
+            "host": "github.com", "method": "CONNECT", "path": "/",
+            "decision_reason": "owner approved", "matched_policy": "rule-9",
+            "binary_path": "/home/u/SECRET", "cmdline_paths": ["/SECRET"],
+            "payload_preview": "SECRET", "resume_token": {"checkpoint_blob": {}},
+            "rich_explanation": "SECRET", "request_preview_document": {}}]}
+        rows = bridge.decision_history_rows(payload)["decisions"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["approval_id"], "d-1")
+        self.assertEqual(row["decision"], "allow_once")
+        self.assertEqual(row["decided_by"], "user-1")
+        self.assertEqual(row["matched_policy"], "rule-9")
+        self.assertNotIn("SECRET", str(rows))
+        for key in ("binary_path", "cmdline_paths", "payload_preview",
+                    "resume_token", "rich_explanation",
+                    "request_preview_document"):
+            self.assertNotIn(key, row)
+        dropped = bridge.decision_history_rows({"items": [
+            {"decision": "allow_once"}, "nope",
+            {"approval_id": "  ", "decision": "deny"},
+            {"approval_id": "d-2", "decision": "deny"}]})["decisions"]
+        self.assertEqual([r["approval_id"] for r in dropped], ["d-2"])
+        for bad in ({}, {"items": "nope"}, {"items": None}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.decision_history_rows(bad)
+
+    def test_approval_history_reads_the_sentinel_service_and_closes_it(self):
+        bridge = load_bridge()
+        seen = {}
+
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                seen["method"] = method
+                seen["timeout"] = kwargs.get("timeout")
+                return {"items": []}
+
+            def close(self):
+                seen["closed"] = True
+
+        from unittest.mock import patch
+        with patch.object(bridge, "sentinel_gateway", return_value=Gateway()):
+            result = bridge.Adapter(object(), {}).dispatch({"op": "approval_history"})
+        self.assertEqual(result, {"decisions": []})
+        self.assertEqual(seen["method"], "egress.approval.history")
+        self.assertTrue(seen["closed"])
+        bridge.validate_request({"op": "approval_history", "config_dir": "/tmp/x"})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({"op": "approval_history", "config_dir": "/tmp/x",
+                                     "cursor": "c1"})
+
     def test_an_approval_without_an_id_fails_closed(self):
         bridge = load_bridge()
         for payload in ({}, {"pending_approvals": [{"decision": "allow_once"}]},

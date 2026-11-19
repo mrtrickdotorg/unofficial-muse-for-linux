@@ -569,6 +569,43 @@ pub struct PendingApprovals {
     #[serde(default)]
     pub pending: Vec<Approval>,
 }
+/// One decided request: what the agent asked for, the outcome, and
+/// who decided it. Display only -- the bridge keeps the service's
+/// own words and drops the evidence bundle (local paths, payload
+/// previews, resume tokens) before it can travel.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecidedApproval {
+    pub approval_id: String,
+    #[serde(default)]
+    pub requested_at_ms: Option<i64>,
+    #[serde(default)]
+    pub decided_at_ms: Option<i64>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub action_label: Option<String>,
+    #[serde(default)]
+    pub decision: Option<String>,
+    #[serde(default)]
+    pub decided_by: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub decision_reason: Option<String>,
+    #[serde(default)]
+    pub matched_policy: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionHistory {
+    #[serde(default)]
+    pub decisions: Vec<DecidedApproval>,
+}
 /// The five outcomes the service publishes. Nothing else is ever sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -1709,6 +1746,12 @@ impl AccountClient {
     /// List what the agent is asking to do. Read-only: listing never decides.
     pub fn approvals(&self) -> Result<PendingApprovals, AccountError> {
         self.request(serde_json::json!({"op": "approvals"}), false)
+    }
+    /// List what the agent already did. Read-only: the decided past
+    /// can never become a pending choice. Rows the bridge could not
+    /// refer to (no approval_id) are dropped, never failed.
+    pub fn approval_history(&self) -> Result<DecisionHistory, AccountError> {
+        self.request(serde_json::json!({"op": "approval_history"}), false)
     }
     /// Decide exactly one approval, once.
     ///
