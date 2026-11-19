@@ -218,6 +218,8 @@ pub struct Chat {
     on_option: RefCell<Option<OptionCallback>>,
     on_remove: RefCell<Option<RemoveCallback>>,
     on_react: RefCell<Option<ReactCallback>>,
+    local_host: RefCell<super::local_host::Controller>,
+    pub(crate) local_host_sync: RefCell<bool>,
     notice: gtk4::Label,
     send_note: RefCell<Option<String>>,
     armed_delete: RefCell<Option<String>>,
@@ -467,6 +469,8 @@ impl Chat {
             on_option: RefCell::new(None),
             on_remove: RefCell::new(None),
             on_react: RefCell::new(None),
+            local_host: RefCell::new(super::local_host::Controller::new()),
+            local_host_sync: RefCell::new(false),
         });
         let weak = Rc::downgrade(&chat);
         *chat.on_option.borrow_mut() = Some(std::rc::Rc::new(move |text: String| {
@@ -1502,6 +1506,12 @@ impl Chat {
     /// The linked client, for pages that read on the shared page slot.
     pub fn client_handle(&self) -> Option<AccountClient> {
         self.client.borrow().clone()
+    }
+    /// The local host controller: folder grants, host session and
+    /// approval cards. The Local host page renders its snapshot;
+    /// presses go through it so every mutation keeps the invariants.
+    pub(crate) fn host(&self) -> &RefCell<super::local_host::Controller> {
+        &self.local_host
     }
 
     /// Take the shared page slot for one secondary read. A second
