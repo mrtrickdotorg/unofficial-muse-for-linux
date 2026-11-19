@@ -572,6 +572,16 @@ mod tests {
         // A widget frame builds without taking the process down: the
         // feed mounts these for live graphics, so construction itself
         // has to be probe-safe on a bare display.
+        // Reply stages its quote without taking the process down: the
+        // quote bar paints from the same composer the button just
+        // borrowed, so a borrow held across the repaint panics here
+        // instead of in the reader's session.
+        let reply_chat = super::super::app::Chat::build(
+            gtk4::ListBox::new(),
+            super::super::composer::ComposerRow::build(),
+        );
+        reply_chat.stage_reply("m1".to_owned(), "the quoted words".to_owned());
+        reply_chat.stage_reply("".to_owned(), "no id, no quote".to_owned());
         super::super::app::verify_chat_scroll_navigation();
         let _frame = super::super::widget::widget_frame("<b>hi</b>", Some("fallback"));
     }

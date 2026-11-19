@@ -2173,8 +2173,14 @@ impl Chat {
     /// capped line above the composer. Reversible — Cancel × drops
     /// it, and the send below stays a plain send (the community
     /// gateway records no reply param, so nothing new rides the wire).
-    fn stage_reply(self: &Rc<Self>, message_id: String, text: String) {
-        match self.composer.borrow_mut().stage_reply(message_id, text) {
+    /// Visible crate-wide for the GUI regression test: the Reply
+    /// button reaches it through the row callback.
+    pub(crate) fn stage_reply(self: &Rc<Self>, message_id: String, text: String) {
+        // The staging borrow ends with this statement: paint_reply
+        // and refresh borrow the same composer, so holding the
+        // borrow across the match below panics every press.
+        let staged = self.composer.borrow_mut().stage_reply(message_id, text);
+        match staged {
             Ok(()) => {
                 self.paint_reply();
                 self.composer_row.refresh(&self.composer.borrow());
