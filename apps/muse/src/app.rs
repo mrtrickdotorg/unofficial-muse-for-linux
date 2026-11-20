@@ -329,6 +329,23 @@ pub struct Chat {
     panel_press: std::cell::Cell<bool>,
 }
 
+/// Move the keyboard to the first control under `widget` that will take
+/// it. `can_focus` alone is not a promise: a container can announce it
+/// and still refuse the grab, so the grab itself is the test.
+fn focus_first(widget: &gtk4::Widget) -> bool {
+    if widget.is_visible() && widget.is_sensitive() && widget.can_focus() && widget.grab_focus() {
+        return true;
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if focus_first(&current) {
+            return true;
+        }
+        child = current.next_sibling();
+    }
+    false
+}
+
 impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
         let scrolled = gtk4::ScrolledWindow::new();
@@ -685,6 +702,29 @@ impl Chat {
         self.panel_toggle
             .set_child(Some(&gtk4::Image::from_icon_name(icon)));
         describe(&self.panel_toggle, tip);
+    }
+
+    /// The panel widget itself, for the shell's pane walk: identity
+    /// only, so the walk can tell where the keyboard is.
+    pub fn panel_widget(&self) -> gtk4::Widget {
+        self.panel.clone().upcast()
+    }
+
+    /// Land the keyboard on the conversation: the transcript takes it so
+    /// the page keys scroll the messages, and the composer is the
+    /// fallback for when the list has nothing to focus yet.
+    pub fn focus_chat(&self) -> bool {
+        self.transcript.grab_focus() || self.composer_row.input.grab_focus()
+    }
+
+    /// Land the keyboard on the details panel, showing it first if it
+    /// was folded: a hidden pane cannot take the keyboard, and the walk
+    /// asking for it is the reader asking to see it.
+    pub fn focus_panel(&self) -> bool {
+        if !self.panel.is_visible() {
+            self.set_panel_shown(true);
+        }
+        focus_first(self.panel.upcast_ref()) || self.panel_toggle.grab_focus()
     }
 
     /// Whether the keyboard is somewhere inside the panel: the panel is
