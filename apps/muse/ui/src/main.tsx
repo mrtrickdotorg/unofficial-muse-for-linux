@@ -11,6 +11,7 @@ window.addEventListener("error", (event) => {
   window.__MUSE_ERR__ = String(event.message || "");
 });
 import { Goals } from "./Goals";
+import { Feed } from "./Feed";
 import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
@@ -30,7 +31,9 @@ const page =
         ? "ideas"
         : boot && "threads" in boot
           ? "threads"
-          : "library");
+          : boot && "cards" in boot
+            ? "feed"
+            : "library");
 
 const mount = document.getElementById("root");
 if (mount) {
@@ -43,6 +46,8 @@ if (mount) {
       <Ideas />
     ) : page === "threads" ? (
       <Threads />
+    ) : page === "feed" ? (
+      <Feed />
     ) : (
       <Library />
     ),

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::{HeldGoals, HeldIdeas, HeldTasks, HeldThreads};
+use crate::pages::{HeldFeed, HeldGoals, HeldIdeas, HeldTasks, HeldThreads};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -135,6 +135,84 @@ fn threads_reply(held: &HeldThreads) -> serde_json::Value {
     reply
 }
 
+/// The Feed cards, shaped once for both the boot payload and the reply.
+fn feed_payload(held: &HeldFeed) -> serde_json::Value {
+    serde_json::json!({
+        "cards": held.cards,
+        "prompt": held.prompt,
+        "status": held.status,
+        "total": held.total,
+        "loaded": held.loaded,
+        "error": held.error,
+    })
+}
+
+fn feed_document(held: &HeldFeed) -> String {
+    let mut boot = feed_payload(held);
+    boot["page"] = serde_json::json!("feed");
+    document(&boot)
+}
+
+fn feed_reply(held: &HeldFeed) -> serde_json::Value {
+    let mut reply = feed_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
+/// Standard base64, so a cached hero can travel to the page as a data URI:
+/// a document loaded from `about:blank` cannot read `file://` images, and
+/// inlining every hero in the boot payload would carry megabytes.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let triple = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(triple >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(triple >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(triple >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[triple as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// A hero's bytes as a data URI, or None when nothing is cached for that
+/// address. Cache-only: the native fill owns the download, so a page open
+/// never waits on the network.
+fn feed_hero(url: &str) -> Option<String> {
+    if url.is_empty() {
+        return None;
+    }
+    let path = crate::images::fetch_hero_cached(url)?;
+    let bytes = std::fs::read(&path).ok()?;
+    let mime = match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        _ => "image/jpeg",
+    };
+    Some(format!("data:{mime};base64,{}", base64(&bytes)))
+}
+
 /// What a fresh wire read produced off the main loop.
 enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
@@ -142,6 +220,7 @@ enum Fetched {
     Tasks(HeldTasks),
     Ideas(HeldIdeas),
     Threads(HeldThreads),
+    Feed(HeldFeed),
     Failed(String),
 }
 
@@ -201,6 +280,34 @@ fn fresh_ideas(client: Option<AccountClient>) -> Receiver<Fetched> {
                     loaded: true,
                     error: None,
                 }),
+                Err(error) => Fetched::Failed(error.to_string()),
+            },
+        };
+        let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// Read the Feed listing from the service on a worker thread. The rows keep
+/// the native page's wording, and the graphic rule is the native one: the
+/// first two graphical cards render live, the rest read as their text.
+fn fresh_feed(client: Option<AccountClient>) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = match client {
+            None => Fetched::Failed("no account link in this app".into()),
+            Some(client) => match client.feed() {
+                Ok(listing) => {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|span| span.as_secs() as i64)
+                        .unwrap_or(0);
+                    Fetched::Feed(crate::pages::held_feed_from(
+                        &listing,
+                        now,
+                        crate::widget::widget_available(),
+                    ))
+                }
                 Err(error) => Fetched::Failed(error.to_string()),
             },
         };
@@ -313,6 +420,15 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
         "ideas.refresh" => Answer::Later(fresh_ideas(client)),
         "threads.snapshot" => Answer::Now(threads_reply(&crate::pages::threads_snapshot())),
         "threads.refresh" => Answer::Later(fresh_threads(client)),
+        "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
+        "feed.refresh" => Answer::Later(fresh_feed(client)),
+        "feed.hero" => {
+            let url = request
+                .get("url")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            Answer::Now(serde_json::json!({ "ok": true, "data": feed_hero(url) }))
+        }
         other => Answer::Now(
             serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
         ),
@@ -397,6 +513,16 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
                 started.elapsed().as_millis()
             );
             threads_reply(&held)
+        }
+        Fetched::Feed(held) => {
+            crate::pages::feed_cache(held.clone());
+            eprintln!(
+                "muse webui: {command} read the service: cards={} total={} ms={}",
+                held.cards.len(),
+                held.total,
+                started.elapsed().as_millis()
+            );
+            feed_reply(&held)
         }
         Fetched::Failed(error) => {
             eprintln!("muse webui: {command} failed: {error}");
@@ -639,6 +765,18 @@ pub(crate) fn open_threads_window(held: HeldThreads, client: Option<AccountClien
     )
 }
 
+const FEED_PROBE: &str = "JSON.stringify({cards: document.querySelectorAll('.feed-card').length, \
+     graphics: document.querySelectorAll('.feed-graphic').length, \
+     boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.cards || []).length, \
+     err: window.__MUSE_ERR__ || '', \
+     text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
+/// Open the Feed page in its own window, on the cards the native page last
+/// painted.
+pub(crate) fn open_feed_window(held: HeldFeed, client: Option<AccountClient>) -> bool {
+    open_window("Feed · web view", feed_document(&held), client, FEED_PROBE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -845,6 +983,7 @@ mod tests {
             Fetched::Tasks(..) => panic!("a library read must not answer with tasks"),
             Fetched::Ideas(..) => panic!("a library read must not answer with ideas"),
             Fetched::Threads(..) => panic!("a library read must not answer with threads"),
+            Fetched::Feed(..) => panic!("a library read must not answer with a feed"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -869,6 +1008,7 @@ mod tests {
             Fetched::Tasks(..) => panic!("no client, no tasks"),
             Fetched::Ideas(..) => panic!("no client, no ideas"),
             Fetched::Threads(..) => panic!("no client, no threads"),
+            Fetched::Feed(..) => panic!("no client, no feed"),
         }
     }
 
@@ -1539,5 +1679,214 @@ mod tests {
         assert_eq!(rows.threads[4].group, "Earlier");
         assert_eq!(rows.total, 5);
         assert!(rows.loaded);
+    }
+
+    /// Feed boot: one page-tagged payload carrying the prompt card, the
+    /// generation line and the cards in the native wording.
+    #[test]
+    fn the_feed_document_names_its_page_and_carries_prompt_and_cards() {
+        use muse_account::{FeedPrompt, FeedStatus, ListingItem, ServiceListing};
+
+        let listing = ServiceListing {
+            total: 2,
+            recognized: 2,
+            skipped: 0,
+            items: vec![
+                ListingItem {
+                    id: Some("u-1".into()),
+                    title: "A unit title".into(),
+                    icon: Some("🧭".into()),
+                    body: Some("Read [the advisory](https://example.test/a) now.".into()),
+                    kicker: Some("Research".into()),
+                    image_url: Some("https://example.test/hero.jpg".into()),
+                    widget_html: Some("<b>graphic</b>".into()),
+                    widget_text: Some("graphic text".into()),
+                    action_label: Some("Open".into()),
+                    why: Some("Because you asked".into()),
+                    stamp: Some("2026-11-20T09:00:00Z".into()),
+                    ..ListingItem::default()
+                },
+                ListingItem {
+                    id: Some("u-2".into()),
+                    title: "Second unit".into(),
+                    ..ListingItem::default()
+                },
+            ],
+            feed_prompt: Some(FeedPrompt {
+                text: Some("Verdant architecture".into()),
+                enabled: true,
+            }),
+            feed_status: Some(FeedStatus {
+                refresh_in_progress: true,
+                next_edition_kind: None,
+            }),
+        };
+        let held = crate::pages::held_feed_from(&listing, 1_795_000_000, true);
+        // The first graphical card renders live, the second has no markup.
+        assert!(held.cards[0].live);
+        assert_eq!(held.cards[0].meta, "Research");
+        // The body travels as the native markup, links and all.
+        assert_eq!(
+            held.cards[0].body,
+            "Read <a href=\"https://example.test/a\">the advisory</a> now."
+        );
+        assert_eq!(held.cards[0].action, "Open");
+        assert_eq!(held.cards[0].why, "Because you asked");
+        assert_eq!(held.cards[0].icon, "🧭");
+        assert_eq!(held.cards[0].widget_text, "graphic text");
+        assert_eq!(held.cards[1].icon, "📰", "the native default icon");
+        assert!(!held.cards[1].live);
+
+        let doc = feed_document(&held);
+        assert!(doc.contains("\"page\":\"feed\""), "page named in boot");
+        assert!(doc.contains("Verdant architecture"));
+        assert!(doc.contains("Generating a fresh edition"));
+        assert!(doc.contains("A unit title"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    #[test]
+    fn feed_snapshot_answers_from_the_held_cards() {
+        crate::pages::feed_cache(HeldFeed {
+            cards: vec![crate::pages::FeedCard {
+                id: "u-9".into(),
+                title: "Held card".into(),
+                ..crate::pages::FeedCard::default()
+            }],
+            prompt: "Held prompt".into(),
+            total: 1,
+            loaded: true,
+            ..HeldFeed::default()
+        });
+        let (id, answer, command) = handle_command(r#"{"id":51,"cmd":"feed.snapshot"}"#, None);
+        assert_eq!(id, serde_json::json!(51));
+        assert_eq!(command, "feed.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["cards"][0]["title"], "Held card");
+        assert_eq!(reply["prompt"], "Held prompt");
+        assert_eq!(reply["loaded"], true);
+    }
+
+    /// Feed refresh reads the service on a thread and updates the cache.
+    #[test]
+    fn feed_refresh_reads_the_service() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-feed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let service = serde_json::json!({
+            "ok": true,
+            "data": {
+                "total": 3, "recognized": 1, "skipped": 0,
+                "items": [{ "id": "u-1", "title": "Read from the service" }],
+                "feed_prompt": { "text": "Fresh prompt", "enabled": true },
+                "feed_status": { "refresh_in_progress": false }
+            }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(service.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        crate::pages::feed_cache(HeldFeed {
+            cards: vec![crate::pages::FeedCard {
+                id: "held".into(),
+                title: "Held, not re-read".into(),
+                ..crate::pages::FeedCard::default()
+            }],
+            total: 1,
+            loaded: true,
+            ..HeldFeed::default()
+        });
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+
+        let (_, answer, command) =
+            handle_command(r#"{"id":52,"cmd":"feed.refresh"}"#, Some(client));
+        assert_eq!(command, "feed.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        let Fetched::Feed(rows) = fetched else {
+            panic!("the host answered with something else");
+        };
+        assert_eq!(rows.cards[0].title, "Read from the service");
+        assert_eq!(rows.prompt, "Fresh prompt");
+        assert_eq!(rows.total, 3);
+
+        let reply = reply_for(Fetched::Feed(rows), &command, Instant::now());
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["cards"][0]["title"], "Read from the service");
+        let cached = crate::pages::feed_snapshot();
+        assert_eq!(cached.cards[0].title, "Read from the service");
+        assert_eq!(cached.prompt, "Fresh prompt");
+
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"feed""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn feed_refresh_without_a_client_reports_the_missing_link() {
+        let (_, answer, command) = handle_command(r#"{"id":53,"cmd":"feed.refresh"}"#, None);
+        assert_eq!(command, "feed.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no rows"),
+        }
+    }
+
+    /// The hero command answers a data URI from the cache, and says so
+    /// plainly when nothing is cached -- never a `file://` path the page
+    /// could not read anyway.
+    #[test]
+    fn the_hero_command_answers_a_data_uri_or_null() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+
+        let (id, answer, command) = handle_command(
+            r#"{"id":54,"cmd":"feed.hero","url":"https://example.test/never-cached.jpg"}"#,
+            None,
+        );
+        assert_eq!(id, serde_json::json!(54));
+        assert_eq!(command, "feed.hero");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert!(reply["data"].is_null(), "nothing cached, no data URI");
     }
 }

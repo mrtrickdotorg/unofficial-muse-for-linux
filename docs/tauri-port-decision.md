@@ -172,7 +172,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the not-loaded state, the wire refresh, a refused refresh, tab+search filtering, and an empty
   filter result. The `Web UI` CI job runs them and fails if the committed `built/app.html`
   differs from a fresh build.
-- **S2 — Page migration (2–3 weeks). IN PROGRESS: Goals is the second page (Nov 20, 2026).**
+- **S2 — Page migration (2–3 weeks). IN PROGRESS: Feed is the sixth page (Nov 20, 2026).**
   Remaining read-only and settings pages, one at a time, behind the same GTK shell. Goals copies
   S1's contract: `open_goals_window` renders a boot payload of the roster and the Tracking section
   the native fill last held; `goals.snapshot` answers from those held rows, `goals.refresh` reads
@@ -212,6 +212,29 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   own header, and `loaded` again separating "no conversations" from "not read yet". Seven DOM
   tests (`Threads.test.tsx`) cover the groups, the unread and meta line, both empty states, a wire
   refresh, a refused refresh and a failed read beside held rows.
+  Feed is the sixth page, and the first with service-supplied graphics. The native card's
+  attachment renders in a locked-down WebKit view (scripts on, navigation ignored, links handed to
+  the system browser). The web slice first tried the same shape as an `<iframe srcdoc>` with
+  `sandbox="allow-scripts"`; on this build's WebKitGTK the frame never painted — the probe found
+  the attribute set and the frame's document empty — and a sandboxed `data:` URL frame came back
+  empty too, so the page fell back to plain DOM: each graphic is inserted into its own **shadow
+  root**, which keeps the service's `<style>` inside the widget, never executes its `<script>`
+  (`innerHTML` does not run scripts), and lets a card-sized element grow to the graphic's natural
+  height. A click guard cancels presses on links, so a graphic cannot navigate the window away;
+  links inside a graphic are therefore inert here, where the native frame hands them to the
+  desktop, because the page has no channel to launch one. A graphic renders live only on the first
+  two graphical cards (`widget_available` on this host), the rest keep the service's extracted
+  text, exactly as the native paint decides. Heroes are the
+  other new shape: a document loaded from `about:blank` cannot read the cache's `file://` images,
+  and inlining 34 heroes in the boot payload would carry megabytes, so `feed.hero` answers a
+  cached image as a base64 data URI, fetched per card only when the card asks, and cache-only —
+  the native fill owns the download. Card wording is projected natively again: `held_feed_from`
+  reuses `feed_meta_line`, `relative_time`, `feed_row_cta` and `feed_body_markup` (so the body's
+  links arrive resolved, as the GTK label's markup has them), and `fill_feed` fills the cache on
+  both the cached and the fresh path, enabling the page's button only once a listing exists. Ten
+  DOM tests (`Feed.test.tsx`) cover the prompt and status, the card order and native wording, the
+  shadow-root graphic and its fallback text, the body's link markup, the hero data URI, both empty
+  states, a wire refresh, a refused refresh and a failed read beside held cards.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote

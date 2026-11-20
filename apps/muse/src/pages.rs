@@ -297,10 +297,39 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             // The web opens on its prompt card above the units: the
             // prompt fills on every visit beside the list, with Edit
             // and the generation state beside it.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
             let heading = gtk4::Label::new(Some("Feed"));
             heading.add_css_class("muse-page-title");
             heading.set_halign(gtk4::Align::Start);
-            inner.append(&heading);
+            heading.set_hexpand(true);
+            head_row.append(&heading);
+            // The sixth page of the web UI port, beside the native one.
+            // Insensitive until a feed lands, so a window cannot open
+            // claiming the feed is empty.
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("feed-web");
+            web_view.set_valign(gtk4::Align::Center);
+            web_view.set_sensitive(false);
+            web_view.set_tooltip_text(Some(
+                "Open this Feed in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            {
+                // Resolved per press: the snapshot is the cards the
+                // native paint last held.
+                let chat = ctx.chat.clone();
+                web_view.connect_clicked(move |_| {
+                    let held = feed_snapshot();
+                    let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                    if !crate::webui::open_feed_window(held, client) {
+                        eprintln!("muse: web view unavailable in this build");
+                    }
+                });
+            }
+            inner.append(&head_row);
             let prompt_head = gtk4::Label::new(Some("YOUR FEED PROMPT"));
             prompt_head.add_css_class("muse-section");
             prompt_head.set_halign(gtk4::Align::Start);
@@ -2544,6 +2573,133 @@ pub(crate) fn held_threads_from(threads: &[muse_account::Thread], today: &str) -
     }
 }
 
+/// One Feed card as the web view shows it. The meta line, the relative
+/// time, the action label and the first-screenful rule for live graphics
+/// are the native page's own, so the two renderers cannot drift.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct FeedCard {
+    pub id: String,
+    pub icon: String,
+    pub meta: String,
+    pub title: String,
+    pub when: String,
+    pub body: String,
+    /// The service's own action label on actionable units.
+    pub action: String,
+    /// Why the service showed this unit, for the card's own line.
+    pub why: String,
+    /// The hero's address; the page asks `feed.hero` for its bytes rather
+    /// than carrying megabytes in the boot payload.
+    pub image_url: String,
+    /// Service markup for the card's graphic, and the extracted text the
+    /// native page falls back to when the markup cannot render.
+    pub widget_html: String,
+    pub widget_text: String,
+    /// True for the first two graphical cards, which the native paint
+    /// renders live; the rest read as their extracted text.
+    pub live: bool,
+}
+
+/// The Feed page as the web view opens it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldFeed {
+    pub cards: Vec<FeedCard>,
+    pub prompt: String,
+    pub status: String,
+    pub total: u64,
+    pub loaded: bool,
+    /// The last read's failure, kept beside whatever cards are held.
+    pub error: Option<String>,
+}
+
+thread_local! {
+    static FEED_STORE: std::cell::RefCell<HeldFeed> =
+        std::cell::RefCell::new(HeldFeed::default());
+}
+
+/// The held Feed cards, for the web UI slice: never a second trip to the
+/// wire, and never a second download of a hero.
+pub(crate) fn feed_snapshot() -> HeldFeed {
+    FEED_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held Feed cards with a listing the native paint produced.
+/// The prompt and the generation line travel with the cards, as they do on
+/// the native page.
+pub(crate) fn feed_cache(held: HeldFeed) {
+    FEED_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// Project a feed listing into the page's cards, with the native wording.
+/// `now` is the caller's clock, so the relative times are testable.
+pub(crate) fn held_feed_from(
+    listing: &muse_account::ServiceListing,
+    now: i64,
+    graphics: bool,
+) -> HeldFeed {
+    let mut live = 0;
+    let cards = listing
+        .items
+        .iter()
+        .map(|item| {
+            let frame = item
+                .widget_html
+                .as_deref()
+                .is_some_and(|html| !html.is_empty());
+            if graphics && frame {
+                live += 1;
+            }
+            FeedCard {
+                id: item.id.clone().unwrap_or_default(),
+                icon: item
+                    .icon
+                    .as_deref()
+                    .filter(|icon| !icon.is_empty())
+                    .unwrap_or("📰")
+                    .to_owned(),
+                meta: feed_meta_line(item).unwrap_or_default(),
+                title: item.title.clone(),
+                when: relative_time(item.stamp.as_deref(), now),
+                // The native body markup: escaped text with its links
+                // (and bold) already resolved, so both renderers show
+                // the same words and the page needs no Markdown parser.
+                body: feed_body_markup(item.body.as_deref().unwrap_or_default()),
+                action: feed_row_cta(item).unwrap_or_default(),
+                why: item.why.clone().unwrap_or_default(),
+                image_url: item.image_url.clone().unwrap_or_default(),
+                widget_html: item.widget_html.clone().unwrap_or_default(),
+                widget_text: item.widget_text.clone().unwrap_or_default(),
+                live: graphics && frame && live <= 2,
+            }
+        })
+        .collect();
+    HeldFeed {
+        cards,
+        prompt: listing
+            .feed_prompt
+            .as_ref()
+            .and_then(|prompt| prompt.text.clone())
+            .unwrap_or_default(),
+        status: feed_status_line(listing.feed_status.as_ref()).unwrap_or_default(),
+        total: listing.total,
+        loaded: true,
+        error: None,
+    }
+}
+
+/// Fill the web cache from a listing the native page just painted.
+fn cache_feed_for_web(listing: &muse_account::ServiceListing) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_secs() as i64)
+        .unwrap_or(0);
+    feed_cache(held_feed_from(
+        listing,
+        now,
+        super::widget::widget_available(),
+    ));
+}
+
 /// One Tasks row as the web view shows it: the native page's own words, so
 /// the two renderers cannot drift on state, status or due wording.
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -4785,6 +4941,10 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let had_cache = if let Some(cached) = read_feed_cache() {
         let prompt = prompt_holder.as_ref();
         paint_feed_now(&ctx_owned, &list, prompt, status.as_ref(), &cached);
+        cache_feed_for_web(&cached);
+        if let Some(button) = named_button(page, "feed-web") {
+            button.set_sensitive(!cached.items.is_empty() && crate::webui::available());
+        }
         let refreshing = gtk4::Label::new(Some("Refreshing the feed…"));
         refreshing.add_css_class("dim-label");
         refreshing.set_xalign(0.0);
@@ -4844,6 +5004,12 @@ fn fill_feed(ctx: &Ctx, page: &gtk4::Box) -> bool {
             let prompt = prompt_holder.as_ref();
             let (generation, missing) =
                 paint_feed_now(&ctx_owned, &list, prompt, status.as_ref(), &listing);
+            cache_feed_for_web(&listing);
+            if let Some(page) = page_weak.upgrade()
+                && let Some(button) = named_button(&page, "feed-web")
+            {
+                button.set_sensitive(!listing.items.is_empty() && crate::webui::available());
+            }
             // The network fills the first screenful behind the paint:
             // no page ticket is held while downloads run, so pressing
             // elsewhere still fills at once.

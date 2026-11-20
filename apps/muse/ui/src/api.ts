@@ -28,7 +28,11 @@ export function channelAvailable(): boolean {
   return Boolean(window.webkit?.messageHandlers?.muse);
 }
 
-export function call<T>(cmd: string, timeoutMs = 15_000): Promise<T> {
+export function call<T>(
+  cmd: string,
+  timeoutMs = 15_000,
+  extra?: Record<string, unknown>,
+): Promise<T> {
   const handler = window.webkit?.messageHandlers?.muse;
   if (!handler) return Promise.reject(new Error("no channel"));
   const id = nextId++;
@@ -45,6 +49,6 @@ export function call<T>(cmd: string, timeoutMs = 15_000): Promise<T> {
         resolve(reply as T);
       }
     });
-    handler.postMessage(JSON.stringify({ id, cmd }));
+    handler.postMessage(JSON.stringify({ id, cmd, ...extra }));
   });
 }
