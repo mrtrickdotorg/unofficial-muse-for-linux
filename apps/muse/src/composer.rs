@@ -7,7 +7,7 @@
 //! until then the live app does not reference them yet.
 #![allow(dead_code)]
 
-use super::widget::describe;
+use super::widget::{describe, glyph_button};
 use adw::prelude::*;
 
 /// One pasted picture waiting to send. The bytes ride the
@@ -305,10 +305,9 @@ impl ComposerRow {
         // picture chips hover above the card.
         let card = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         card.add_css_class("muse-composer-card");
-        let attach = gtk4::Button::with_label("+");
+        let attach = glyph_button("+", "Paste a picture from the clipboard");
         attach.set_valign(gtk4::Align::Start);
         attach.add_css_class("muse-circle");
-        describe(&attach, "Paste a picture from the clipboard");
         // A growing multi-line input under an "Ask Meta AI…" overlay,
         // one line tall at rest, scrolling past six.
         let input = gtk4::TextView::new();
@@ -331,10 +330,9 @@ impl ComposerRow {
         placeholder.set_margin_start(4);
         placeholder.add_css_class("dim-label");
         overlay.add_overlay(&placeholder);
-        let send = gtk4::Button::with_label("↑");
+        let send = glyph_button("↑", "Send");
         send.set_valign(gtk4::Align::End);
         send.add_css_class("muse-send");
-        describe(&send, "Send");
         let stop = gtk4::Button::with_label("■");
         stop.set_valign(gtk4::Align::End);
         stop.add_css_class("muse-circle");
@@ -349,10 +347,9 @@ impl ComposerRow {
         describe(&thinking, "Thinking mode");
         // Voice dictation: records the microphone, then asks the
         // service what it heard. The pill is real on both legs.
-        let mic = gtk4::Button::with_label("🎤");
+        let mic = glyph_button("🎤", "Dictate");
         mic.set_valign(gtk4::Align::End);
         mic.add_css_class("muse-circle");
-        describe(&mic, "Dictate");
         card.append(&attach);
         card.append(&overlay);
         card.append(&thinking);
