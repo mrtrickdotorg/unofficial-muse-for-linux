@@ -188,9 +188,10 @@ fn base64(bytes: &[u8]) -> String {
     out
 }
 
-/// A hero's bytes as a data URI, or None when nothing is cached for that
-/// address. Cache-only: the native fill owns the download, so a page open
-/// never waits on the network.
+/// Read a hero's cached bytes on a worker thread, as a data URI. Cache-only
+/// on the wire -- the native fill owns the download -- and off the main loop
+/// too: even a local read of a capped thumbnail is file I/O the UI thread
+/// should not wait on while a card asks for it.
 fn feed_hero(url: &str) -> Option<String> {
     if url.is_empty() {
         return None;
@@ -221,6 +222,8 @@ enum Fetched {
     Ideas(HeldIdeas),
     Threads(HeldThreads),
     Feed(HeldFeed),
+    /// A cached hero's data URI, or None when nothing is cached.
+    Hero(Option<String>),
     Failed(String),
 }
 
@@ -284,6 +287,16 @@ fn fresh_ideas(client: Option<AccountClient>) -> Receiver<Fetched> {
             },
         };
         let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// Read one cached hero off the main loop. The cache lookup and the file
+/// read both happen on the worker; the answer is a data URI or None.
+fn read_hero(url: String) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(Fetched::Hero(feed_hero(&url)));
     });
     receiver
 }
@@ -427,7 +440,7 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
                 .get("url")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            Answer::Now(serde_json::json!({ "ok": true, "data": feed_hero(url) }))
+            Answer::Later(read_hero(url.to_owned()))
         }
         other => Answer::Now(
             serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
@@ -523,6 +536,14 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
                 started.elapsed().as_millis()
             );
             feed_reply(&held)
+        }
+        Fetched::Hero(data) => {
+            eprintln!(
+                "muse webui: {command} read the hero cache: cached={} ms={}",
+                data.is_some(),
+                started.elapsed().as_millis()
+            );
+            serde_json::json!({ "ok": true, "data": data })
         }
         Fetched::Failed(error) => {
             eprintln!("muse webui: {command} failed: {error}");
@@ -984,6 +1005,7 @@ mod tests {
             Fetched::Ideas(..) => panic!("a library read must not answer with ideas"),
             Fetched::Threads(..) => panic!("a library read must not answer with threads"),
             Fetched::Feed(..) => panic!("a library read must not answer with a feed"),
+            Fetched::Hero(..) => panic!("a library read must not answer with a hero"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -1009,6 +1031,7 @@ mod tests {
             Fetched::Ideas(..) => panic!("no client, no ideas"),
             Fetched::Threads(..) => panic!("no client, no threads"),
             Fetched::Feed(..) => panic!("no client, no feed"),
+            Fetched::Hero(..) => panic!("no client, no hero"),
         }
     }
 
@@ -1883,11 +1906,21 @@ mod tests {
         );
         assert_eq!(id, serde_json::json!(54));
         assert_eq!(command, "feed.hero");
-        let Answer::Now(reply) = answer else {
-            panic!("a cache read must answer without a thread");
+        // The cache lookup and the file read leave the main loop: even a
+        // local thumbnail read must not run on the UI thread.
+        let Answer::Later(receiver) = answer else {
+            panic!("the hero read must leave the main loop");
         };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers");
+        let Fetched::Hero(data) = fetched else {
+            panic!("the hero read must answer a hero");
+        };
+        assert!(data.is_none(), "nothing cached, no data URI");
+        let reply = reply_for(Fetched::Hero(data), &command, Instant::now());
         assert_eq!(reply["ok"], true);
-        assert!(reply["data"].is_null(), "nothing cached, no data URI");
+        assert!(reply["data"].is_null());
 
         // Only http(s) artwork is ever offered: `feed_hero` goes through
         // `fetch_hero_cached`, which refuses other schemes before it looks
@@ -1902,10 +1935,16 @@ mod tests {
                 &serde_json::json!({ "id": 55, "cmd": "feed.hero", "url": url }).to_string(),
                 None,
             );
-            let Answer::Now(reply) = answer else {
-                panic!("a cache read must answer without a thread");
+            let Answer::Later(receiver) = answer else {
+                panic!("the hero read must leave the main loop");
             };
-            assert!(reply["data"].is_null(), "{url} must never be served");
+            let Fetched::Hero(data) = receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the worker answers")
+            else {
+                panic!("the hero read must answer a hero");
+            };
+            assert!(data.is_none(), "{url} must never be served");
         }
     }
 }

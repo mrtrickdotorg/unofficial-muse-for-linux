@@ -239,7 +239,16 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   control that does nothing. `feed.hero` is cache-only by construction — it goes through
   `fetch_hero_cached`, which refuses every non-http(s) address (a `file:` path can never be read)
   and only calls `is_file()`, so a page open issues no download; the download stays with the
-  native fill (`fetch_hero`).
+  native fill (`fetch_hero`) — and the lookup and the read now run on a worker thread
+  (`Answer::Later`), so a card asking for its hero never puts file I/O on the UI thread.
+  The native frame got the same correction the web slice needed: `widget::document` paints a light
+  shell (`#ffffff` ground, `#14161a` text, `color-scheme: light`), because the service authors its
+  widgets for a white page and their near-black text disappeared into the old `#1e1e1e` shell. Two
+  more native faults came out of that check: the frame's measured height was applied with
+  `set_min/max_content_height`, which a `Never`-policy scroller ignores for its own allocation (the
+  frame laid out at zero and painted nothing), so the fit now sets an explicit `set_size_request`
+  and the cage carries a white ground; and a load failure now names its URI and error in the log
+  instead of collapsing to a silent blank.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote
