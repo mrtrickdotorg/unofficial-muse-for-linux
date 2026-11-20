@@ -19,6 +19,7 @@ mod session;
 mod signin;
 mod update;
 mod voice;
+mod webui;
 pub(crate) mod widget;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
