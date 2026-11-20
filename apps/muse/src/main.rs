@@ -259,7 +259,7 @@ fn show_main(split: &adw::OverlaySplitView) {
     // recursion guard keeps working untouched.
     let side = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     side.add_css_class("muse-side");
-    side.set_size_request(232, -1);
+    side.set_size_request(DRAWER_WIDTH, -1);
     side.set_margin_start(6);
     side.set_margin_end(10);
     side.set_margin_top(12);
@@ -375,41 +375,28 @@ fn show_main(split: &adw::OverlaySplitView) {
     let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     shell.add_css_class("muse-shell");
     // The split view hands the sidebar a width of its own choosing; the
-    // shell asks for exactly the rail (and the drawer, while it shows),
-    // so the chat column starts right after the icons when the drawer
-    // is folded away.
+    // shell asks for exactly the rail, so the chat column starts right
+    // after the icons whether the drawer is open or folded away.
     shell.set_size_request(RAIL_WIDTH, -1);
     shell.append(&rail);
     // The page list is a drawer, not a column: as on muse.ai the rail is
     // the only permanent navigation, and an icon press slides the list
     // and its History out beside it. A second press on the open page's
     // own icon folds it away again.
-    // Without this the split view hands its sidebar a quarter of the
-    // window (sidebar-width-fraction's default), which parks a strip
-    // of empty sidebar between the icons and the chat column. The
-    // shell's own request is the width instead: the rail alone when
-    // the drawer is folded, rail plus drawer while it shows.
+    // It slides over the page instead of beside it, so opening it never
+    // takes width from the chat column -- which at the default window
+    // width has no room to spare -- and never asks the window to grow.
     split.set_sidebar_width_fraction(0.0);
     split.set_min_sidebar_width(0.0);
-    split.set_max_sidebar_width(f64::from(RAIL_WIDTH + DRAWER_WIDTH));
+    split.set_max_sidebar_width(f64::from(RAIL_WIDTH));
     let drawer = gtk4::Revealer::new();
     drawer.set_transition_type(gtk4::RevealerTransitionType::SlideRight);
     drawer.set_transition_duration(180);
     drawer.set_reveal_child(false);
+    drawer.set_halign(gtk4::Align::Start);
+    drawer.set_valign(gtk4::Align::Fill);
     drawer.set_child(Some(&side));
-    shell.append(&drawer);
     split.set_sidebar(Some(&shell));
-    {
-        // The drawer's width request falls back to the rail once the
-        // fold animation has actually finished, so the slide is never
-        // squeezed and the chat column still gets the room.
-        let shell = shell.clone();
-        drawer.connect_notify_local(Some("child-revealed"), move |drawer, _| {
-            if !drawer.is_child_revealed() {
-                shell.set_size_request(RAIL_WIDTH, -1);
-            }
-        });
-    }
     let stack = gtk4::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
@@ -421,7 +408,36 @@ fn show_main(split: &adw::OverlaySplitView) {
     // leaked for the life of the process.
     let weak_chat = Rc::downgrade(&chat);
     std::mem::forget(chat);
-    split.set_content(Some(&stack));
+    // The drawer is an overlay child of the page, so it paints above the
+    // chat column and leaves its width alone.
+    let page_overlay = gtk4::Overlay::new();
+    page_overlay.set_child(Some(&stack));
+    // A scrim under the drawer dims the page it covers, so the list reads
+    // as a layer above the chat column rather than a column that clips
+    // it; a press anywhere on the scrim folds the drawer away again.
+    let scrim = gtk4::Revealer::new();
+    scrim.set_transition_type(gtk4::RevealerTransitionType::Crossfade);
+    scrim.set_transition_duration(180);
+    scrim.set_reveal_child(false);
+    scrim.set_can_target(false);
+    let scrim_fill = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    scrim_fill.add_css_class("muse-scrim");
+    scrim_fill.set_hexpand(true);
+    scrim_fill.set_vexpand(true);
+    scrim.set_child(Some(&scrim_fill));
+    {
+        let drawer = drawer.clone();
+        let scrim = scrim.clone();
+        let dismiss = gtk4::GestureClick::new();
+        dismiss.connect_released(move |_, _, _, _| {
+            drawer.set_reveal_child(false);
+            scrim.set_can_target(false);
+        });
+        scrim_fill.add_controller(dismiss);
+    }
+    page_overlay.add_overlay(&scrim);
+    page_overlay.add_overlay(&drawer);
+    split.set_content(Some(&page_overlay));
     let ctx = pages::Ctx {
         chat: weak_chat,
         stack: stack.clone(),
@@ -508,16 +524,19 @@ fn show_main(split: &adw::OverlaySplitView) {
         let ctx = ctx.clone();
         let page = page.clone();
         let drawer = drawer.clone();
-        let shell = shell.clone();
+        let scrim = scrim.clone();
         let stack = stack.clone();
         button.connect_clicked(move |_| {
             let current = stack.visible_child_name();
             if pages::rail_closes(current.as_deref(), &page, drawer.reveals_child()) {
                 drawer.set_reveal_child(false);
+                scrim.set_reveal_child(false);
+                scrim.set_can_target(false);
                 return;
             }
-            shell.set_size_request(RAIL_WIDTH + DRAWER_WIDTH, -1);
             drawer.set_reveal_child(true);
+            scrim.set_can_target(true);
+            scrim.set_reveal_child(true);
             pages::show(&ctx, &page);
         });
     }
