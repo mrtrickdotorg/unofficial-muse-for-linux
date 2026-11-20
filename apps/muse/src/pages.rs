@@ -3002,7 +3002,7 @@ fn paint_library(
         }
     }
     if spaces.is_empty() && files.is_empty() {
-        list.append(&gtk4::Label::new(Some("Nothing here yet.")));
+        empty_note(list, "Nothing here yet.");
     }
 }
 
@@ -3577,7 +3577,7 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
         clear_list(&list);
-        list.append(&gtk4::Label::new(Some("Link your account first.")));
+        empty_note(&list, "Link your account first.");
         return true;
     };
     // Held by value so the answer closure can enable the web view's entry
@@ -3700,6 +3700,19 @@ fn split_side_chats(
 ) -> (Vec<muse_account::Thread>, Vec<muse_account::Thread>) {
     let (side, main): (Vec<_>, Vec<_>) = threads.into_iter().partition(|thread| !thread.is_primary);
     (side, main)
+}
+
+/// A note inside a list: "No threads yet." and its friends. The label
+/// is not a row, but the list wraps it in one, and that wrapper would
+/// take the keyboard and draw the focus ring around the empty box --
+/// which reads as a broken panel rather than an answer. Keeping it out
+/// of the Tab order is right: nothing opens from it.
+fn empty_note(list: &gtk4::ListBox, text: &str) {
+    let note = gtk4::Label::new(Some(text));
+    list.append(&note);
+    if let Some(row) = note.parent().and_downcast::<gtk4::ListBoxRow>() {
+        row.set_focusable(false);
+    }
 }
 
 /// One thread row: title, unread badge, snippet and time, plus the
@@ -3984,7 +3997,7 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) -> bool {
         list.remove(&child);
     }
     let Some(chat) = ctx.chat.upgrade() else {
-        list.append(&gtk4::Label::new(Some("Link your account first.")));
+        empty_note(&list, "Link your account first.");
         return true;
     };
     let mut threads = chat.threads();
@@ -3997,7 +4010,7 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) -> bool {
         button.set_sensitive(!threads.is_empty() && crate::webui::available());
     }
     if threads.is_empty() {
-        list.append(&gtk4::Label::new(Some("No threads yet.")));
+        empty_note(&list, "No threads yet.");
         return true;
     }
     let (side, main) = split_side_chats(threads);
@@ -5825,7 +5838,7 @@ fn paint_roster(
         }
     }
     if items.iter().all(|item| !roster_visible(item, page, filter)) {
-        list.append(&gtk4::Label::new(Some("Nothing here yet.")));
+        empty_note(list, "Nothing here yet.");
     } else if let Some(row) = list.row_at_index(0) {
         list.select_row(Some(&row));
     }
@@ -6265,9 +6278,10 @@ fn fill_search_hint(page: &gtk4::Box) -> bool {
         return true;
     };
     clear_list(&list);
-    list.append(&gtk4::Label::new(Some(
+    empty_note(
+        &list,
         "Search every conversation in the account. A result opens its conversation in Chat.",
-    )));
+    );
     true
 }
 
@@ -6286,7 +6300,7 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) -> bool {
     };
     if query.trim().is_empty() {
         clear_list(&list);
-        list.append(&gtk4::Label::new(Some("Type words to search for first.")));
+        empty_note(&list, "Type words to search for first.");
         return true;
     }
     fill_log("search", "visit", "");
@@ -6354,7 +6368,7 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) -> bool {
             }
             clear_list(&list);
             if found.items.is_empty() {
-                list.append(&gtk4::Label::new(Some("No matches.")));
+                empty_note(&list, "No matches.");
                 fill_log("search", "painted", "rows=0");
                 return;
             }
