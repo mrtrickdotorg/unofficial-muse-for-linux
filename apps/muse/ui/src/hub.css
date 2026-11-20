@@ -492,3 +492,61 @@ html, body {
 }
 
 .feed-body a { color: var(--accent); }
+
+/* Search: the reader's own query above the rows the service answered with.
+ * Rows are read-only text; the native row opens its conversation in Chat. */
+.search-box {
+  display: flex;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  background: var(--surface-solid);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+}
+
+.search-input::placeholder { color: var(--text-faint); }
+
+.search-for {
+  color: var(--text-faint);
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
+.search-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 12px 16px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--card-gradient);
+}
+
+.search-icon { flex: none; font-size: 14px; }
+
+.search-words { min-width: 0; }
+
+.search-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.search-meta {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

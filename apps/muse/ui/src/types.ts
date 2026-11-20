@@ -48,6 +48,26 @@ export type IdeasSnapshot = {
   error?: string | null;
 };
 
+// One Search result: the conversation it belongs to, and the native label's
+// parts (icon, title, and the kicker/kind/stamp line).
+export type SearchRow = {
+  id: string;
+  icon: string;
+  title: string;
+  meta: string;
+  image_url: string;
+};
+
+// The search as the web view opens it: the query this page ran, and the rows
+// the native search painted for it.
+export type SearchSnapshot = {
+  query: string;
+  rows: SearchRow[];
+  total: number;
+  loaded: boolean;
+  error?: string | null;
+};
+
 // One Feed card: the native page's own meta line, relative time, action
 // label and graphic rule. `widget_html` is service markup for the card's
 // frame; `widget_text` is the extracted text the native page falls back to.
@@ -119,4 +139,5 @@ export type Boot =
   | (TasksSnapshot & { page?: "tasks" })
   | (IdeasSnapshot & { page?: "ideas" })
   | (ThreadsSnapshot & { page?: "threads" })
-  | (FeedSnapshot & { page?: "feed" });
+  | (FeedSnapshot & { page?: "feed" })
+  | (SearchSnapshot & { page?: "search" });

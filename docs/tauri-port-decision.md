@@ -172,7 +172,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the not-loaded state, the wire refresh, a refused refresh, tab+search filtering, and an empty
   filter result. The `Web UI` CI job runs them and fails if the committed `built/app.html`
   differs from a fresh build.
-- **S2 — Page migration (2–3 weeks). IN PROGRESS: Feed is the sixth page (Nov 20, 2026).**
+- **S2 — Page migration (2–3 weeks). IN PROGRESS: Search is the seventh page (Nov 20, 2026).**
   Remaining read-only and settings pages, one at a time, behind the same GTK shell. Goals copies
   S1's contract: `open_goals_window` renders a boot payload of the roster and the Tracking section
   the native fill last held; `goals.snapshot` answers from those held rows, `goals.refresh` reads
@@ -249,6 +249,24 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   frame laid out at zero and painted nothing), so the fit now sets an explicit `set_size_request`
   and the cage carries a white ground; and a load failure now names its URI and error in the log
   instead of collapsing to a silent blank.
+  Search is the seventh page, and the first whose native side is a query rather than a listing. It
+  keeps the contract and adds the read that page needs: `search.snapshot` answers the query and rows
+  the native search last painted (a boot payload carries both, so the page shows what was searched,
+  not just what came back), and `search.run` takes the reader's own words in the request, runs the
+  account read on a worker thread and updates the cache the native page shares. An empty query is
+  refused without a read, exactly as the native page refuses it, and a failed read reports beside
+  whatever rows are held. Rows carry the conversation id the native row uses to open Chat and are
+  dropped without one, exactly as the native paint drops them, so the two lists cannot disagree;
+  the web row itself is read-only, since this slice has no Chat to open. Because the page
+  can read on its own, its Web view button is live from the start rather than waiting for a native
+  fill; the page says plainly when no search has run yet. Eight DOM tests (`Search.test.tsx`) cover
+  the held query and rows, the not-run state, a search carrying its words, the empty query, a
+  refused read, a failed native read, the no-matches sentence, and the sentence for matches the
+  service counted but this build could not map to rows — the live account reports `total` 6 and 20
+  with zero rows for every query tried, so the page must not read that as "no matches". That shape
+  gap is in `muse_account::search`'s mapping, not the page: the native list swallows the same rows. The live check also
+  needed a way to type: `scripts/x11-type.py` joins the other host-side helpers (XTEST keys,
+  `--clear` for select-all first), since this host has no xdotool.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote

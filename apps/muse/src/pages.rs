@@ -456,6 +456,41 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             inner.append(&list);
         }
         "search" => {
+            // The seventh page of the web UI port. Search is the first page
+            // whose native side is a query rather than a listing, so the web
+            // slice carries its own query box and its own read: the button is
+            // live from the start, and the page says plainly that no search
+            // has run yet when the cache is empty.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let heading = gtk4::Label::new(Some("Search"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            heading.set_hexpand(true);
+            head_row.append(&heading);
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("search-web");
+            web_view.set_valign(gtk4::Align::Center);
+            web_view.set_sensitive(crate::webui::available());
+            web_view.set_tooltip_text(Some(
+                "Open Search in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            {
+                // Resolved per press: the window opens on the query and rows
+                // the native search last painted.
+                let chat = ctx.chat.clone();
+                web_view.connect_clicked(move |_| {
+                    let held = search_snapshot();
+                    let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                    if !crate::webui::open_search_window(held, client) {
+                        eprintln!("muse: web view unavailable in this build");
+                    }
+                });
+            }
+            inner.append(&head_row);
             let query = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
             let entry = gtk4::Entry::new();
             entry.set_widget_name("search-query");
@@ -2568,6 +2603,82 @@ pub(crate) fn held_threads_from(threads: &[muse_account::Thread], today: &str) -
     HeldThreads {
         total: rows.len() as u64,
         threads: rows,
+        loaded: true,
+        error: None,
+    }
+}
+
+/// One Search result as the web view shows it: the conversation's id (the
+/// native row opens it in Chat), and the native label's parts - icon, title,
+/// then the kicker/kind/stamp line `feed_item_label` joins. Rows without an
+/// id are dropped, exactly as the native paint drops them.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct SearchRow {
+    pub id: String,
+    pub icon: String,
+    pub title: String,
+    pub meta: String,
+    pub image_url: String,
+}
+
+/// The Search page as the web view opens it: the last query the native page
+/// ran, and the rows it painted.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldSearch {
+    pub query: String,
+    pub rows: Vec<SearchRow>,
+    pub total: u64,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+thread_local! {
+    static SEARCH_STORE: std::cell::RefCell<HeldSearch> =
+        std::cell::RefCell::new(HeldSearch::default());
+}
+
+/// The held search results, for the web UI slice: the query travels with
+/// them, so the page shows what was searched, not just what came back.
+pub(crate) fn search_snapshot() -> HeldSearch {
+    SEARCH_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held search with what a paint just produced.
+pub(crate) fn search_cache(held: HeldSearch) {
+    SEARCH_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// Project one search listing into the page's rows, with the native wording.
+pub(crate) fn held_search_from(query: &str, listing: &muse_account::ServiceListing) -> HeldSearch {
+    let rows = listing
+        .items
+        .iter()
+        .filter_map(|item| {
+            let id = item.id.clone().filter(|id| !id.is_empty())?;
+            let meta: Vec<&str> = [&item.kicker, &item.kind, &item.stamp]
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .filter(|text| !text.is_empty())
+                .collect();
+            Some(SearchRow {
+                id,
+                icon: item
+                    .icon
+                    .as_deref()
+                    .filter(|icon| !icon.is_empty())
+                    .unwrap_or("🔎")
+                    .to_owned(),
+                title: item.title.clone(),
+                meta: meta.join(" \u{00b7} "),
+                image_url: item.image_url.clone().unwrap_or_default(),
+            })
+        })
+        .collect();
+    HeldSearch {
+        query: query.to_owned(),
+        rows,
+        total: listing.total,
         loaded: true,
         error: None,
     }
@@ -6169,6 +6280,10 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) -> bool {
         return false;
     };
     let ctx = ctx.clone();
+    let page_weak = page.downgrade();
+    // The fetch closure takes the query; the paint reports it back, so the
+    // web cache names the words that produced these rows.
+    let query_for_paint = query.clone();
     dispatch(
         chat,
         move || {
@@ -6189,10 +6304,31 @@ fn do_search(ctx: &Ctx, chat: &Rc<Chat>, page: &gtk4::Box) -> bool {
                 Ok(tuple) => tuple,
                 Err(error) => {
                     fill_log("search", "failed", &format!("error=\"{error}\""));
+                    // The failure travels with the query: the web page shows
+                    // the words that failed beside the reason.
+                    search_cache(HeldSearch {
+                        query: query_for_paint,
+                        loaded: true,
+                        error: Some(error.to_string()),
+                        ..HeldSearch::default()
+                    });
+                    if let Some(page) = page_weak.upgrade()
+                        && let Some(button) = named_button(&page, "search-web")
+                    {
+                        button.set_sensitive(crate::webui::available());
+                    }
                     listing_failure(&list, "Search", &error);
                     return;
                 }
             };
+            // The web cache is filled from the same listing the list
+            // paints, so the two cannot word a row differently.
+            search_cache(held_search_from(&query_for_paint, &found));
+            if let Some(page) = page_weak.upgrade()
+                && let Some(button) = named_button(&page, "search-web")
+            {
+                button.set_sensitive(crate::webui::available());
+            }
             clear_list(&list);
             if found.items.is_empty() {
                 list.append(&gtk4::Label::new(Some("No matches.")));
