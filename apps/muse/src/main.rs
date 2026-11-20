@@ -386,7 +386,15 @@ fn show_main(split: &adw::OverlaySplitView) {
     drawer.set_transition_type(gtk4::RevealerTransitionType::SlideRight);
     drawer.set_transition_duration(180);
     drawer.set_reveal_child(false);
-    drawer.set_child(Some(&side));
+    // The drawer's column scrolls instead of asking the window for its
+    // height: the page list, History and footer add up to a tall
+    // minimum, and handed straight to the shell it grew the window
+    // taller than the reader's size the moment the drawer slid out.
+    let drawer_scroll = gtk4::ScrolledWindow::new();
+    drawer_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    drawer_scroll.set_overlay_scrolling(true);
+    drawer_scroll.set_child(Some(&side));
+    drawer.set_child(Some(&drawer_scroll));
     shell.append(&drawer);
     split.set_sidebar(Some(&shell));
     {
