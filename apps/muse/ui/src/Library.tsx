@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
-import type { Artifact, Snapshot } from "./types";
+import type { Artifact, LibrarySnapshot } from "./types";
 
 const TABS = ["All", "Spaces", "Files"] as const;
 type Tab = (typeof TABS)[number];
@@ -36,7 +36,10 @@ function Card({ artifact }: { artifact: Artifact }) {
 }
 
 export function Library() {
-  const [data, setData] = useState<Snapshot | null>(window.__MUSE_BOOT__ ?? null);
+  const boot = window.__MUSE_BOOT__;
+  const [data, setData] = useState<LibrarySnapshot | null>(
+    boot && "artifacts" in boot ? boot : null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<Tab>("All");
@@ -51,7 +54,7 @@ export function Library() {
       return;
     }
     try {
-      setData(await call<Snapshot>("library.snapshot"));
+      setData(await call<LibrarySnapshot>("library.snapshot"));
       setError(null);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -68,7 +71,7 @@ export function Library() {
     }
     setBusy(true);
     try {
-      setData(await call<Snapshot>("library.refresh", 120_000));
+      setData(await call<LibrarySnapshot>("library.refresh", 120_000));
       setError(null);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));

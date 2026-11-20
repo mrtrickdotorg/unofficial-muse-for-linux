@@ -10,8 +10,14 @@ window.__MUSE_ERR__ = "";
 window.addEventListener("error", (event) => {
   window.__MUSE_ERR__ = String(event.message || "");
 });
+import { Goals } from "./Goals";
 import { Library } from "./Library";
 import "./hub.css";
 
+// One bundle, one window per page: the boot payload names which page this
+// document is, so a page never has to be told twice.
+const boot = window.__MUSE_BOOT__;
+const page = boot?.page ?? (boot && "goals" in boot ? "goals" : "library");
+
 const mount = document.getElementById("root");
-if (mount) createRoot(mount).render(<Library />);
+if (mount) createRoot(mount).render(page === "goals" ? <Goals /> : <Library />);

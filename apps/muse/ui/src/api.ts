@@ -1,7 +1,7 @@
 // The JS -> Rust channel: one JSON round trip per command, replied to by the
 // native side through window.museReply. Outside the app (a plain browser
 // preview) the handlers are absent, and callers fall back to boot data.
-import type { Snapshot } from "./types";
+import type { Boot } from "./types";
 
 type Reply = { ok?: boolean; error?: string } & Record<string, unknown>;
 
@@ -12,7 +12,7 @@ declare global {
   interface Window {
     webkit?: { messageHandlers?: { muse?: { postMessage(body: string): void } } };
     museReply?: (id: number, reply: Reply) => void;
-    __MUSE_BOOT__?: Snapshot;
+    __MUSE_BOOT__?: Boot;
   }
 }
 
