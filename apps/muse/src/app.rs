@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use super::widget::describe;
 use adw::prelude::*;
 use muse_account::AccountClient;
 
@@ -357,7 +358,7 @@ impl Chat {
         let menu = gtk4::MenuButton::new();
         menu.set_label("…");
         menu.add_css_class("muse-header-pill");
-        menu.set_tooltip_text(Some("Turn options"));
+        describe(&menu, "Turn options");
         {
             let popover = gtk4::Popover::new();
             popover.set_child(Some(&delete));
@@ -365,13 +366,13 @@ impl Chat {
         }
         let call = gtk4::Button::with_label("Call");
         call.add_css_class("muse-header-pill");
-        call.set_tooltip_text(Some("Call"));
+        describe(&call, "Call");
         let invite = gtk4::Button::with_label("Invite");
         invite.add_css_class("muse-header-pill");
-        invite.set_tooltip_text(Some("Invite"));
+        describe(&invite, "Invite");
         let panel_toggle = gtk4::Button::new();
         panel_toggle.add_css_class("muse-header-icon");
-        panel_toggle.set_tooltip_text(Some("Hide the details panel"));
+        describe(&panel_toggle, "Hide the details panel");
         panel_toggle.set_child(Some(&gtk4::Image::from_icon_name("window-close-symbolic")));
         header.append(&call);
         header.append(&invite);
@@ -417,7 +418,7 @@ impl Chat {
         for (name, icon) in PANEL_TABS {
             let tab = gtk4::Button::new();
             tab.set_child(Some(&gtk4::Image::from_icon_name(icon)));
-            tab.set_tooltip_text(Some(name));
+            describe(&tab, name);
             tab.set_hexpand(true);
             tab.add_css_class("muse-panel-tab");
             let stack = panel_stack.clone();
@@ -683,7 +684,7 @@ impl Chat {
         };
         self.panel_toggle
             .set_child(Some(&gtk4::Image::from_icon_name(icon)));
-        self.panel_toggle.set_tooltip_text(Some(tip));
+        describe(&self.panel_toggle, tip);
     }
 
     /// Whether the keyboard is somewhere inside the panel: the panel is

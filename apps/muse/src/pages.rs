@@ -12,6 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::local_host::Phase;
 
+use super::widget::describe;
 use adw::prelude::*;
 
 use super::app::{Chat, dispatch};
@@ -210,8 +211,9 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             let weak = ctx.chat.clone();
             let stack = ctx.stack.clone();
             let sidebar = ctx.sidebar.clone();
-            list.connect_row_selected(move |list, row| {
-                let Some(row) = row else { return };
+            // Same rule as the drawer's History: a thread opens on
+            // activation, so the arrow keys only move the highlight.
+            list.connect_row_activated(move |list, row| {
                 let name = row.widget_name();
                 let Some(id) = name.as_str().strip_prefix("thread:") else {
                     return;
@@ -3375,7 +3377,7 @@ fn file_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
     more.add_css_class("flat");
     more.add_css_class("circular");
     more.set_valign(gtk4::Align::Start);
-    more.set_tooltip_text(Some("File options"));
+    describe(&more, "File options");
     line.append(&more);
     row.set_child(Some(&line));
     let popover = gtk4::Popover::new();
@@ -3732,7 +3734,7 @@ fn append_thread_row(
     title_row.append(&label);
     if thread.unread_count > 0 {
         let badge = gtk4::Label::new(Some(&format!("{}", thread.unread_count)));
-        badge.set_tooltip_text(Some(&format!("{} unread", thread.unread_count)));
+        describe(&badge, &format!("{} unread", thread.unread_count));
         badge.add_css_class("muse-unread");
         title_row.append(&badge);
     }
@@ -3750,7 +3752,7 @@ fn append_thread_row(
     more.add_css_class("flat");
     more.add_css_class("circular");
     more.set_valign(gtk4::Align::Start);
-    more.set_tooltip_text(Some("Thread options"));
+    describe(&more, "Thread options");
     line.append(&more);
     row.set_child(Some(&line));
     let popover = gtk4::Popover::new();
@@ -3788,12 +3790,30 @@ fn append_thread_row(
     archive.add_css_class("flat");
     menu.append(&archive);
     popover.set_child(Some(&menu));
-    // A press inside the row selects it, and selecting a thread
-    // row navigates to Chat — so the menu button unselects its
-    // row on press (before the list sees it) and restores it
-    // when the menu closes. Keyboard users can't reach this
-    // button (it takes no focus) rather than navigate away.
-    more.set_focusable(false);
+    // A press inside the row activates it, and activating a thread
+    // row navigates to Chat -- so the menu button unselects its row
+    // on press (before the list sees it) and restores it when the
+    // menu closes. The button stays a Tab stop, and Return or Space
+    // opens the same menu, so the row's options are not pointer-only.
+    {
+        let popover_held = popover.clone();
+        let row_weak = row.downgrade();
+        let keys = gtk4::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key != gtk4::gdk::Key::Return
+                && key != gtk4::gdk::Key::KP_Enter
+                && key != gtk4::gdk::Key::space
+            {
+                return gtk4::glib::Propagation::Proceed;
+            }
+            if let Some(row) = row_weak.upgrade() {
+                row.set_selectable(false);
+            }
+            popover_held.popup();
+            gtk4::glib::Propagation::Stop
+        });
+        more.add_controller(keys);
+    }
     let press = gtk4::GestureClick::new();
     {
         let row_weak = row.downgrade();
@@ -4022,13 +4042,6 @@ pub fn open_thread(ctx: &Ctx, id: Option<String>) {
     show(ctx, "chat");
 }
 
-// True while the history refill is marking the open thread. Marking
-// re-fires row_selected, whose handler calls straight back into
-// show(): the mark is a refill echo, never a reader press.
-thread_local! {
-    pub(crate) static MARKING_HISTORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// The sidebar's History section: the thread listing, pinned first,
 /// with the open thread marked. Refilled on every page visit, so a
 /// new or renamed thread appears without a restart. The profile row
@@ -4045,6 +4058,9 @@ fn fill_history(ctx: &Ctx) {
     let current = chat.current_thread();
     for thread in &threads {
         let row = gtk4::ListBoxRow::new();
+        // The drawer's History is a list of Tab stops: Tab reaches it
+        // and the arrow keys walk the threads.
+        row.set_focusable(true);
         row.set_widget_name(&format!("thread:{}", thread.session_id));
         let name = if thread.title.is_empty() {
             "(untitled)".to_owned()
@@ -4066,10 +4082,10 @@ fn fill_history(ctx: &Ctx) {
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         row.set_child(Some(&label));
         ctx.history.append(&row);
+        // Marking the open thread is only a highlight: History opens a
+        // thread on activation, so selecting a row here never navigates.
         if current.as_deref() == Some(thread.session_id.as_str()) {
-            MARKING_HISTORY.set(true);
             ctx.history.select_row(Some(&row));
-            MARKING_HISTORY.set(false);
         }
     }
     let name = chat.session_name().unwrap_or_else(|| "Sign in".to_owned());
@@ -4711,7 +4727,7 @@ fn feed_card(
     let more = gtk4::Button::with_label("⋯");
     more.add_css_class("flat");
     more.add_css_class("circular");
-    more.set_tooltip_text(Some("Feed unit options"));
+    describe(&more, "Feed unit options");
     actions.append(&more);
     card.append(&actions);
     // One press, one write: Love records a heart reaction, the labeled
@@ -4746,7 +4762,7 @@ fn feed_card(
                 move |chat, answer| {
                     let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
                     if accepted {
-                        pressed_inner.set_tooltip_text(Some("Loved"));
+                        describe(&pressed_inner, "Loved");
                     } else {
                         pressed_inner.set_sensitive(true);
                         if let Some(card) = card_inner.upgrade() {
@@ -5392,7 +5408,7 @@ fn goal_row(ctx: &Ctx, item: &ListingItem, index: usize) -> gtk4::ListBoxRow {
     more.add_css_class("flat");
     more.add_css_class("circular");
     more.set_valign(gtk4::Align::Start);
-    more.set_tooltip_text(Some("Goal options"));
+    describe(&more, "Goal options");
     line.append(&more);
     row.set_child(Some(&line));
     // The web's five verbs: discuss proposes a draft, rename and

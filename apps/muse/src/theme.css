@@ -774,3 +774,19 @@ textview placeholder {
     color: @hub_error;
     border-color: alpha(@hub_error, 0.4);
 }
+
+/* Focus. The theme's own ring is not enough here: the rail, the
+ * drawer's rows and the panel tabs paint their own fills, and a reader
+ * tabbing through them had no way to see where the keyboard was. One
+ * ring in the brand blue, drawn as a box shadow just outside the
+ * widget's own fill so it never hides behind it. :focus rather than
+ * :focus-visible: GTK only counts a focus change as keyboard-visible
+ * when the keyboard caused it, and the focus moves this app makes on
+ * purpose (the drawer and the panel handing the keyboard back) are
+ * programmatic, so :focus-visible left them ringless. */
+button:focus,
+row:focus,
+.muse-rail-button:focus,
+.muse-panel-tab:focus {
+    box-shadow: 0 0 0 2px #0084ff;
+}
