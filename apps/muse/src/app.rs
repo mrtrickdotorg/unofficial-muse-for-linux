@@ -669,6 +669,9 @@ impl Chat {
     }
 
     fn face_panel(&self, showing: bool) {
+        if !showing && self.panel_holds_focus() {
+            self.panel_toggle.grab_focus();
+        }
         if showing {
             self.panel_dragged.set(false);
         }
@@ -681,6 +684,25 @@ impl Chat {
         self.panel_toggle
             .set_child(Some(&gtk4::Image::from_icon_name(icon)));
         self.panel_toggle.set_tooltip_text(Some(tip));
+    }
+
+    /// Whether the keyboard is somewhere inside the panel: the panel is
+    /// about to disappear, and focus inside it would have nowhere to go.
+    fn panel_holds_focus(&self) -> bool {
+        let Some(root) = self.panel.root() else {
+            return false;
+        };
+        let Some(focus) = gtk4::prelude::RootExt::focus(&root) else {
+            return false;
+        };
+        let mut widget = Some(focus);
+        while let Some(current) = widget {
+            if current == self.panel {
+                return true;
+            }
+            widget = current.parent();
+        }
+        false
     }
 
     /// Build the whole chat surface for the chat page: transcript plus
