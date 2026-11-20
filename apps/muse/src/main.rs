@@ -282,14 +282,24 @@ fn show_main(split: &adw::OverlaySplitView) {
         row.set_child(Some(&label));
         sidebar.append(&row);
     }
-    side.append(&sidebar);
+    // The page list and History share one scroller: on a short window
+    // they scroll under the tools row while the profile row and build
+    // stamp stay pinned to the drawer's foot, the way muse.ai keeps its
+    // account row in place as the lists move under it.
+    let lists = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    lists.append(&sidebar);
     let section = gtk4::Label::new(Some("History"));
     section.set_halign(gtk4::Align::Start);
     section.add_css_class("muse-section");
-    side.append(&section);
+    lists.append(&section);
     let history = gtk4::ListBox::new();
-    history.set_vexpand(true);
-    side.append(&history);
+    lists.append(&history);
+    let lists_scroll = gtk4::ScrolledWindow::new();
+    lists_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    lists_scroll.set_overlay_scrolling(true);
+    lists_scroll.set_vexpand(true);
+    lists_scroll.set_child(Some(&lists));
+    side.append(&lists_scroll);
     let profile = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     let avatar = gtk4::Label::new(Some("✦"));
     avatar.add_css_class("muse-avatar");
@@ -386,15 +396,7 @@ fn show_main(split: &adw::OverlaySplitView) {
     drawer.set_transition_type(gtk4::RevealerTransitionType::SlideRight);
     drawer.set_transition_duration(180);
     drawer.set_reveal_child(false);
-    // The drawer's column scrolls instead of asking the window for its
-    // height: the page list, History and footer add up to a tall
-    // minimum, and handed straight to the shell it grew the window
-    // taller than the reader's size the moment the drawer slid out.
-    let drawer_scroll = gtk4::ScrolledWindow::new();
-    drawer_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    drawer_scroll.set_overlay_scrolling(true);
-    drawer_scroll.set_child(Some(&side));
-    drawer.set_child(Some(&drawer_scroll));
+    drawer.set_child(Some(&side));
     shell.append(&drawer);
     split.set_sidebar(Some(&shell));
     {
