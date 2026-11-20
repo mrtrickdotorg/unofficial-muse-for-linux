@@ -1,0 +1,29 @@
+name: Web UI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  dom:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/muse/ui
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "22"
+        cache: npm
+        cache-dependency-path: apps/muse/ui/package-lock.json
+    - name: Install the page's dependencies
+      run: npm ci
+    - name: Run the page's DOM tests
+      run: npm test
+    - name: Rebuild the inlined page and check it matches what is committed
+      run: |
+        npm run build
+        git diff --exit-code -- built/library.html

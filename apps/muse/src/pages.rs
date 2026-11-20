@@ -482,9 +482,14 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             }
             head_row.append(&web_view);
             inner.append(&head_row);
+            // The weak chat is resolved per press, not per build: the window
+            // opens late enough that the account link is settled, and a press
+            // after that still finds the same client.
+            let chat = ctx.chat.clone();
             web_view.connect_clicked(move |_| {
                 let (artifacts, total) = library_snapshot();
-                if !crate::webui::open_library_window(artifacts, total) {
+                let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                if !crate::webui::open_library_window(artifacts, total, client) {
                     eprintln!("muse: web view unavailable in this build");
                 }
             });
@@ -2228,6 +2233,14 @@ pub(crate) fn library_snapshot() -> (Vec<ArtifactSummary>, u64) {
         ART_STORE.with(|store| store.borrow().clone()),
         ART_TOTAL.with(|total| total.get()),
     )
+}
+
+/// Replace the held rows with a fresher listing the web view read over the
+/// wire, so the native page, the boot payload and the channel all agree
+/// afterwards. Called on the main loop, from the thread's answer.
+pub(crate) fn library_cache(artifacts: Vec<ArtifactSummary>, total: u64) {
+    ART_STORE.with(|store| *store.borrow_mut() = artifacts);
+    ART_TOTAL.with(|total_cell| total_cell.set(total));
 }
 
 /// Paint the library from held rows: tab bar, Spaces and Recent

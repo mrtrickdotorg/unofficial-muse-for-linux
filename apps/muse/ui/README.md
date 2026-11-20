@@ -16,9 +16,24 @@ would resolve against `about:blank` and fail. There is no dev server and no
 second browser engine in the bundle.
 
 `built/library.html` is committed so a plain `cargo build` (and the AppImage
-container) needs no Node toolchain. Rebuild it whenever `src/` changes.
+container) needs no Node toolchain. Rebuild it whenever `src/` changes; the
+`Web UI` CI job rebuilds it and fails if the committed copy differs.
+
+```sh
+npm test             # the page's DOM tests (vitest + jsdom)
+```
 
 The page talks to Rust through `window.webkit.messageHandlers.muse`: each call
 posts `{"id","cmd"}` and the native side answers with
 `window.museReply(id, reply)`. Commands read native state only; a mutating
 command arrives with the first page that mutates.
+
+| Command | Cost | Use |
+| --- | --- | --- |
+| `library.snapshot` | none — the rows the native page holds | opening the page |
+| `library.refresh` | one listing read on a worker thread | the Refresh button |
+
+Refresh is a real read of the service, not a re-read of the cache, and a slow
+listing is why it waits: the page allows 120 s for that call. A reply of
+`{"ok":false,"error":…}` reaches the page as a failure banner, and the rows
+already on screen stay.
