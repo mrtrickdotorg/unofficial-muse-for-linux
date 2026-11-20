@@ -11,6 +11,7 @@ window.addEventListener("error", (event) => {
   window.__MUSE_ERR__ = String(event.message || "");
 });
 import { Goals } from "./Goals";
+import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
 import "./hub.css";
@@ -20,11 +21,25 @@ import "./hub.css";
 const boot = window.__MUSE_BOOT__;
 const page =
   boot?.page ??
-  (boot && "goals" in boot ? "goals" : boot && "schedules" in boot ? "tasks" : "library");
+  (boot && "goals" in boot
+    ? "goals"
+    : boot && "schedules" in boot
+      ? "tasks"
+      : boot && "ideas" in boot
+        ? "ideas"
+        : "library");
 
 const mount = document.getElementById("root");
 if (mount) {
   createRoot(mount).render(
-    page === "goals" ? <Goals /> : page === "tasks" ? <Tasks /> : <Library />,
+    page === "goals" ? (
+      <Goals />
+    ) : page === "tasks" ? (
+      <Tasks />
+    ) : page === "ideas" ? (
+      <Ideas />
+    ) : (
+      <Library />
+    ),
   );
 }

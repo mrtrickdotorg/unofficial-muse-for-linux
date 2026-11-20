@@ -1,8 +1,8 @@
 # Web UI slice (React)
 
 The pages of the Tauri/React migration so far, rendered by the app's own
-WebKitGTK view: **Library** (the reference page), **Goals** and **Tasks**.
-Sources live here; `built/app.html` is the artifact the Rust side includes
+WebKitGTK view: **Library** (the reference page), **Goals**, **Tasks** and
+**Ideas**. Sources live here; `built/app.html` is the artifact the Rust side includes
 with `include_str!`. One bundle serves every window — the boot payload names
 the page it opens.
 
@@ -38,6 +38,8 @@ command arrives with the first page that mutates.
 | `goals.refresh` | one roster read plus one Tracking read on a worker thread | the Refresh button |
 | `tasks.snapshot` | none — the schedules and runs the native page holds, plus a local store read | opening the page |
 | `tasks.refresh` | one service read on a worker thread, plus a local store read | the Refresh button |
+| `ideas.snapshot` | none — the roster the native page holds | opening the page |
+| `ideas.refresh` | one ideas listing read on a worker thread | the Refresh button |
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
 listing is why it waits: the pages allow 120 s for that call. The native reply
@@ -52,6 +54,11 @@ roster still arrives and the reply carries `tracking_error` beside the held
 Tracking rows, which stay in the cache: a failed read leaves a section stale,
 not empty, and the page says so rather than dropping the rows the native page
 still shows.
+
+`ideas` rows share `src/listing.ts` with `goals`: the same group order
+(category, then kind, then kicker) and the same 240-character body clamp, so
+the two rosters cannot drift. `loaded` separates an empty account from an
+unread page, and a failed read rides beside the held rows.
 
 `tasks` rows carry the native page's own labels (schedule title plus on/off,
 run status plus summary, the reminder line), so the two renderers cannot drift
