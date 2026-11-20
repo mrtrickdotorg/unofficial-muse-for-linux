@@ -176,16 +176,27 @@ fn build_ui(app: &adw::Application) {
         // every key press lands, whatever page widget holds focus -- and
         // when the drawer is already folded it answers "not mine", so
         // the press goes on to the page.
-        let escape = gtk4::EventControllerKey::new();
-        escape.connect_key_pressed(|_, key, _, _| {
+        // Capture phase: the composer's own key handling and the text
+        // entries' Emacs bindings must not eat Ctrl+K or Ctrl+N before
+        // the shell sees them.
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed(|_, key, _, modifiers| {
             if key == gtk4::gdk::Key::Escape
                 && FOLD_DRAWER.with(|slot| slot.borrow().as_ref().is_some_and(|fold| fold()))
             {
                 return gtk4::glib::Propagation::Stop;
             }
+            if SHELL_KEYS.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|handle| handle(key, modifiers))
+            }) {
+                return gtk4::glib::Propagation::Stop;
+            }
             gtk4::glib::Propagation::Proceed
         });
-        window.add_controller(escape);
+        window.add_controller(keys);
     }
     window.present();
     // A fresh install pays one-time setup (config folders, helper
@@ -270,6 +281,10 @@ const DRAWER_WIDTH: i32 = 232;
 /// transcript that still reads as a column.
 const CHAT_MIN_WIDTH: i32 = 560;
 
+/// The shell's own key handler: takes a key and its modifiers and
+/// answers whether it dealt with the press.
+type ShellKeys = std::rc::Rc<dyn Fn(gtk4::gdk::Key, gtk4::gdk::ModifierType) -> bool>;
+
 thread_local! {
     /// The page drawer's Escape action, installed by the shell that owns
     /// the drawer and run by the window: the window sees every key press
@@ -277,6 +292,124 @@ thread_local! {
     /// action folds the drawer and answers whether it did.
     static FOLD_DRAWER: std::cell::RefCell<Option<std::rc::Rc<dyn Fn() -> bool>>> =
         std::cell::RefCell::new(None);
+    /// The shell's own keys, installed by show_main and run by the same
+    /// window handler: the three destinations the rail's tools name, and
+    /// the F6 walk between panes. Absent on the sign-in surface, where a
+    /// Ctrl+N would open a chat the reader cannot reach yet.
+    static SHELL_KEYS: std::cell::RefCell<Option<ShellKeys>> = std::cell::RefCell::new(None);
+}
+
+/// The four places the keyboard can live in the main shell: the icon
+/// rail, the page drawer, the conversation and the details panel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Rail,
+    Drawer,
+    Chat,
+    Details,
+}
+
+/// Which pane a focused widget belongs to, read from its ancestry: the
+/// walk needs to know where the keyboard is without tracking it.
+fn pane_of(
+    widget: &gtk4::Widget,
+    rail: &gtk4::Widget,
+    drawer_body: &gtk4::Widget,
+    panel: &gtk4::Widget,
+) -> Pane {
+    let mut node = Some(widget.clone());
+    while let Some(current) = node {
+        if current == *rail {
+            return Pane::Rail;
+        }
+        if current == *drawer_body {
+            return Pane::Drawer;
+        }
+        if current == *panel {
+            return Pane::Details;
+        }
+        node = current.parent();
+    }
+    Pane::Chat
+}
+
+/// Step the keyboard to the next pane, forward or back. The drawer opens
+/// itself when the walk lands on it, because a folded list cannot take
+/// the keyboard; the details panel does the same inside Chat.
+fn step_pane(
+    ctx: &pages::Ctx,
+    rail: &gtk4::Box,
+    drawer_body: &gtk4::Box,
+    pages_list: &gtk4::ListBox,
+    drawer: &gtk4::Revealer,
+    open_drawer: &Rc<dyn Fn(&gtk4::Button)>,
+    back: bool,
+) {
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let panel = chat.panel_widget();
+    let focus = rail
+        .root()
+        .and_then(|root| gtk4::prelude::RootExt::focus(&root));
+    let current = focus
+        .as_ref()
+        .map(|widget| pane_of(widget, rail.upcast_ref(), drawer_body.upcast_ref(), &panel))
+        .unwrap_or(Pane::Rail);
+    let next = match (current, back) {
+        (Pane::Rail, false) => Pane::Drawer,
+        (Pane::Rail, true) => Pane::Details,
+        (Pane::Drawer, false) => Pane::Chat,
+        (Pane::Drawer, true) => Pane::Rail,
+        (Pane::Chat, false) => Pane::Details,
+        (Pane::Chat, true) => Pane::Drawer,
+        (Pane::Details, false) => Pane::Rail,
+        (Pane::Details, true) => Pane::Chat,
+    };
+    // The rail's own button for the open page is the door the reader
+    // came in by, so it is where the walk lands and what opens the list.
+    let rail_button = ctx
+        .rail
+        .iter()
+        .find(|(_, button)| button.has_css_class("muse-rail-active"))
+        .or_else(|| ctx.rail.first())
+        .map(|(_, button)| button.clone());
+    match next {
+        Pane::Rail => {
+            if let Some(button) = rail_button {
+                button.grab_focus();
+            }
+        }
+        Pane::Drawer => {
+            if !drawer.reveals_child()
+                && let Some(button) = &rail_button
+            {
+                open_drawer(button);
+            }
+            if !pages_list
+                .row_at_index(0)
+                .is_some_and(|row| row.grab_focus())
+            {
+                // The slide keeps the rows unmapped for a moment: land
+                // on the first page once it settles.
+                let list = pages_list.clone();
+                gtk4::glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(230),
+                    move || {
+                        if let Some(row) = list.row_at_index(0) {
+                            row.grab_focus();
+                        }
+                    },
+                );
+            }
+        }
+        Pane::Chat => {
+            chat.focus_chat();
+        }
+        Pane::Details => {
+            chat.focus_panel();
+        }
+    }
 }
 
 /// The main surface: sidebar plus a lazily-filled page stack. Only the
@@ -603,6 +736,54 @@ fn show_main(split: &adw::OverlaySplitView) {
             pages::show(&ctx, &page);
         });
     }
+    // The everyday keys. Ctrl+K, Ctrl+N and Ctrl+, land where the
+    // rail's tools land; F6 walks the four panes — rail, drawer, chat,
+    // details — so crossing the window never means tabbing through every
+    // control on the way, and Shift+F6 walks back.
+    {
+        let ctx = ctx.clone();
+        let rail_pane = rail.clone();
+        let drawer_body = side.clone();
+        let pages_list = sidebar.clone();
+        let drawer_handle = drawer.clone();
+        let open: Rc<dyn Fn(&gtk4::Button)> = open_drawer.clone();
+        SHELL_KEYS.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::new(
+                move |key: gtk4::gdk::Key, modifiers: gtk4::gdk::ModifierType| {
+                    let ctrl = modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
+                    let shift = modifiers.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+                    match key {
+                        gtk4::gdk::Key::k if ctrl => {
+                            pages::show(&ctx, "search");
+                            true
+                        }
+                        gtk4::gdk::Key::n if ctrl => {
+                            pages::open_thread(&ctx, None);
+                            true
+                        }
+                        gtk4::gdk::Key::comma if ctrl => {
+                            pages::show(&ctx, "settings");
+                            true
+                        }
+                        gtk4::gdk::Key::F6 => {
+                            step_pane(
+                                &ctx,
+                                &rail_pane,
+                                &drawer_body,
+                                &pages_list,
+                                &drawer_handle,
+                                &open,
+                                shift,
+                            );
+                            true
+                        }
+                        _ => false,
+                    }
+                },
+            )
+                as Rc<dyn Fn(gtk4::gdk::Key, gtk4::gdk::ModifierType) -> bool>);
+        });
+    }
     // The window's Escape handler runs this: it folds the page list away
     // and says it did, or leaves the key alone when the drawer is already
     // folded, so nothing here swallows an Escape meant for the page.
@@ -632,6 +813,7 @@ fn show_signin(split: &adw::OverlaySplitView) {
     // No page drawer on this surface: an Escape belongs to the sign-in
     // form, not to a drawer the main shell left behind.
     FOLD_DRAWER.with(|slot| *slot.borrow_mut() = None);
+    SHELL_KEYS.with(|slot| *slot.borrow_mut() = None);
     let form = signin::SignIn::build({
         let split = split.clone();
         move |_| show_main(&split)
