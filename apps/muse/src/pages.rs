@@ -1979,6 +1979,12 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
                 let label = gtk4::Label::new(Some(&schedule_label(schedule)));
                 label.set_hexpand(true);
                 label.set_xalign(0.0);
+                // Bounded like the run rows: a single-line label's minimum
+                // width is its whole text, which can widen the window.
+                label.set_wrap(true);
+                label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+                label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                label.set_lines(2);
                 line.append(&label);
                 let run = gtk4::Button::with_label("Run now");
                 let job_id = schedule.id.clone();
@@ -1993,7 +1999,18 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
             }
             clear_list(&runs);
             for run in &snapshot.runs {
-                runs.append(&gtk4::Label::new(Some(&run_label(run))));
+                // A run's summary can be a paragraph. An unwrapped label takes
+                // its whole text as its minimum width, and the window grows
+                // with it -- past the screen on this account -- so the row is
+                // clamped to two wrapped lines.
+                let label = gtk4::Label::new(Some(&run_label(run)));
+                label.set_hexpand(true);
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+                label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                label.set_lines(2);
+                runs.append(&label);
             }
             // The web view opens on exactly these rows; the local reminders
             // are re-read from their store when a page or a reply asks.
