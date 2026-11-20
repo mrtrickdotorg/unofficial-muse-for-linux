@@ -1,10 +1,10 @@
 # Web UI slice (React)
 
 The pages of the Tauri/React migration so far, rendered by the app's own
-WebKitGTK view: **Library** (the reference page) and **Goals**. Sources live
-here; `built/app.html` is the artifact the Rust side includes with
-`include_str!`. One bundle serves every window — the boot payload names the
-page it opens.
+WebKitGTK view: **Library** (the reference page), **Goals** and **Tasks**.
+Sources live here; `built/app.html` is the artifact the Rust side includes
+with `include_str!`. One bundle serves every window — the boot payload names
+the page it opens.
 
 ```sh
 cd apps/muse/ui
@@ -36,6 +36,8 @@ command arrives with the first page that mutates.
 | `library.refresh` | one listing read on a worker thread | the Refresh button |
 | `goals.snapshot` | none — the roster and Tracking rows the native page holds | opening the page |
 | `goals.refresh` | one roster read plus one Tracking read on a worker thread | the Refresh button |
+| `tasks.snapshot` | none — the schedules and runs the native page holds, plus a local store read | opening the page |
+| `tasks.refresh` | one service read on a worker thread, plus a local store read | the Refresh button |
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
 listing is why it waits: the pages allow 120 s for that call. The native reply
@@ -46,5 +48,14 @@ already on screen stay.
 
 `goals.refresh` answers the roster and the Tracking section together, the way
 the native fill reads both under one page ticket. If only Tracking fails, the
-roster still arrives and the reply carries `tracking_error`, so the page says
-that section could not be read instead of showing it empty.
+roster still arrives and the reply carries `tracking_error` beside the held
+Tracking rows, which stay in the cache: a failed read leaves a section stale,
+not empty, and the page says so rather than dropping the rows the native page
+still shows.
+
+`tasks` rows carry the native page's own labels (schedule title plus on/off,
+run status plus summary, the reminder line), so the two renderers cannot drift
+on wording. `loaded` separates "this account has no schedules" from "this page
+has not read them yet", and a failed read is kept beside the rows rather than
+replacing them. The local reminders come from their store, not the wire, so
+opening the page or refreshing re-reads them on the main loop.

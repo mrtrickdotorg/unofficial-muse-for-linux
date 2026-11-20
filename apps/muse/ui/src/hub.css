@@ -255,6 +255,18 @@ html, body {
 
 .tab.more { margin: 12px 0 4px; }
 
+/* Tasks: one line per schedule, run or local reminder, in the native page's
+ * own words. Read-only here, so a row is a label and nothing to press. */
+.task {
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  background-image: var(--card-gradient);
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
 .banner {
   margin: 0 0 16px;
   padding: 10px 14px;

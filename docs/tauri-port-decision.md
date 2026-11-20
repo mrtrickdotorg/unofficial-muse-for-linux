@@ -184,6 +184,15 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   clamp. Two changes came with it: the reply wait is a 100 ms timer instead of an idle handler
   (an idle poll spins a core for the whole of a slow listing), and the bundle is now shared by both
   pages (`built/app.html`, the boot payload names the page), so S3's pages need no second artifact.
+  Tasks is the third page, and the first whose sections are not all one listing: `tasks.snapshot`
+  answers the schedules and runs the native fill held plus a re-read of the local reminder store
+  (local state, so no wire trip), and `tasks.refresh` reads the service on a worker thread and
+  merges the local rows back in on the main loop. Rows carry the native page's own labels
+  (`schedule_label`, `run_label`, `reminder_row_text`), so date and status wording cannot drift
+  between renderers, and a `loaded` flag separates an account with no schedules from a page that
+  has not read them — a distinction an empty list alone cannot make. The Goals slice also got a
+  correction: a failed Tracking read used to clear the web cache's rows; it now keeps the rows the
+  native page still shows, in the cache and in the reply, and reports the failure beside them.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote

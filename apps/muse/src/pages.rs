@@ -187,6 +187,37 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             });
         }
         "tasks" => {
+            // The third page of the web UI port, beside the native one:
+            // the same schedules, runs and local reminders. Insensitive
+            // until a read lands, like the other pages' entry points.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let heading = gtk4::Label::new(Some("Tasks"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            heading.set_hexpand(true);
+            head_row.append(&heading);
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("tasks-web");
+            web_view.set_valign(gtk4::Align::Center);
+            web_view.set_sensitive(false);
+            web_view.set_tooltip_text(Some(
+                "Open these Tasks in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            {
+                let chat = ctx.chat.clone();
+                web_view.connect_clicked(move |_| {
+                    let held = tasks_snapshot();
+                    let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                    if !crate::webui::open_tasks_window(held, client) {
+                        eprintln!("muse: web view unavailable in this build");
+                    }
+                });
+            }
+            inner.append(&head_row);
             let schedules = gtk4::ListBox::new();
             schedules.set_widget_name("tasks-schedules");
             inner.append(&schedules);
@@ -1919,6 +1950,9 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
         return false;
     };
     let chat_strong = chat.clone();
+    // Held by value for the answer closure: the web view's entry point waits
+    // on a read, and the cache is the rows the paint just showed.
+    let page_owned = page.clone();
     dispatch(
         &chat,
         move || client.tasks(),
@@ -1926,7 +1960,18 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
             if !chat.page_accept(&ticket) {
                 return;
             }
-            let Ok(snapshot) = answer else { return };
+            let snapshot = match answer {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    // A failed read is kept beside the rows already shown,
+                    // so the web view can report it instead of showing an
+                    // empty Tasks page.
+                    TASK_STORE.with(|store| {
+                        store.borrow_mut().error = Some(error.to_string());
+                    });
+                    return;
+                }
+            };
             clear_list(&schedules);
             for schedule in &snapshot.schedules {
                 let row = gtk4::ListBoxRow::new();
@@ -1949,6 +1994,14 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
             clear_list(&runs);
             for run in &snapshot.runs {
                 runs.append(&gtk4::Label::new(Some(&run_label(run))));
+            }
+            // The web view opens on exactly these rows; the local reminders
+            // are re-read from their store when a page or a reply asks.
+            tasks_cache(held_tasks_from(&snapshot));
+            if let Some(button) = find_widget(page_owned.upcast_ref(), "tasks-web")
+                .and_then(|widget| widget.downcast::<gtk4::Button>().ok())
+            {
+                button.set_sensitive(crate::webui::available());
             }
         },
     );
@@ -2301,6 +2354,107 @@ pub(crate) fn goals_snapshot() -> HeldGoals {
 /// afterwards. Called on the main loop, from the thread's answer.
 pub(crate) fn goals_cache(held: HeldGoals) {
     GOAL_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// One Tasks row as the web view shows it: the native page's own words, so
+/// the two renderers cannot drift on state, status or due wording.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct TaskRow {
+    pub id: String,
+    pub label: String,
+}
+
+/// The Tasks page as the web view opens it. `loaded` is the difference
+/// between an empty account and a page that has not read it yet, which an
+/// empty list alone cannot make.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldTasks {
+    pub schedules: Vec<TaskRow>,
+    pub runs: Vec<TaskRow>,
+    pub local: Vec<TaskRow>,
+    pub loaded: bool,
+    /// The last read's failure, kept beside whatever rows are held.
+    pub error: Option<String>,
+}
+
+thread_local! {
+    static TASK_STORE: std::cell::RefCell<HeldTasks> =
+        std::cell::RefCell::new(HeldTasks::default());
+}
+
+/// The service rows in the native paint's own labels: schedule title plus
+/// its on/off word, run status plus its summary.
+pub(crate) fn held_tasks_from(snapshot: &muse_account::TasksSnapshot) -> HeldTasks {
+    HeldTasks {
+        schedules: snapshot
+            .schedules
+            .iter()
+            .map(|schedule| TaskRow {
+                id: schedule.id.clone(),
+                label: schedule_label(schedule),
+            })
+            .collect(),
+        runs: snapshot
+            .runs
+            .iter()
+            .map(|run| TaskRow {
+                id: run.run_id.clone(),
+                label: run_label(run),
+            })
+            .collect(),
+        local: Vec::new(),
+        loaded: true,
+        error: None,
+    }
+}
+
+/// The held Tasks rows. Empty rows and `loaded: false` mean the native page
+/// has not read the service yet, never that the account has no schedules.
+pub(crate) fn tasks_snapshot() -> HeldTasks {
+    TASK_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held Tasks rows with a read of the service, keeping the local
+/// reminders the answer did not carry: those are local state, not the wire's.
+pub(crate) fn tasks_cache(held: HeldTasks) {
+    TASK_STORE.with(|store| {
+        let mut current = store.borrow_mut();
+        let local = std::mem::take(&mut current.local);
+        *current = held;
+        if current.local.is_empty() {
+            current.local = local;
+        }
+    });
+}
+
+/// The local reminders in the native page's own words, earliest due first.
+fn local_task_rows() -> Vec<TaskRow> {
+    let Some(dir) = muse_tasks::default_store_dir() else {
+        return Vec::new();
+    };
+    let Ok(store) = muse_tasks::TaskStore::open(&dir) else {
+        return Vec::new();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut tasks = store.list();
+    tasks.sort_by_key(|task| task.due_unix_secs);
+    tasks
+        .iter()
+        .map(|task| TaskRow {
+            id: task.id.to_string(),
+            label: reminder_row_text(task, now),
+        })
+        .collect()
+}
+
+/// Re-read the local reminders into the held Tasks rows. Local state, so no
+/// wire trip: a page open shows the store as it is now.
+pub(crate) fn tasks_local_refresh() {
+    let local = local_task_rows();
+    TASK_STORE.with(|store| store.borrow_mut().local = local);
 }
 
 /// Paint the library from held rows: tab bar, Spaces and Recent
@@ -5501,13 +5655,11 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
                         &format!("section=tracking error=\"{error}\""),
                     );
                     listing_failure(&tracking, "Goals tracking", &error);
-                    // The web view reports the same failure instead of
-                    // reading an unread section as "nothing is tracked".
+                    // The web view reports the same failure and keeps the
+                    // Tracking rows the native page still shows: one failed
+                    // read must not empty a section that is merely stale.
                     GOAL_STORE.with(|store| {
-                        let mut held = store.borrow_mut();
-                        held.tracking.clear();
-                        held.tracking_total = 0;
-                        held.tracking_error = Some(error.to_string());
+                        store.borrow_mut().tracking_error = Some(error.to_string());
                     });
                 }
                 Ok(listing) => {
