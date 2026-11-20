@@ -12,6 +12,7 @@ window.addEventListener("error", (event) => {
 });
 import { Goals } from "./Goals";
 import { Feed } from "./Feed";
+import { Search } from "./Search";
 import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
@@ -33,7 +34,9 @@ const page =
           ? "threads"
           : boot && "cards" in boot
             ? "feed"
-            : "library");
+            : boot && "query" in boot
+              ? "search"
+              : "library");
 
 const mount = document.getElementById("root");
 if (mount) {
@@ -48,6 +51,8 @@ if (mount) {
       <Threads />
     ) : page === "feed" ? (
       <Feed />
+    ) : page === "search" ? (
+      <Search />
     ) : (
       <Library />
     ),

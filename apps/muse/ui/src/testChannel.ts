@@ -3,6 +3,7 @@
 // page suites, so every page is tested against the same channel.
 export function installChannel(
   answer: (command: string) => Record<string, unknown>,
+  seen?: (request: Record<string, unknown>) => void,
 ): string[] {
   const commands: string[] = [];
   const reply = (
@@ -12,8 +13,10 @@ export function installChannel(
     messageHandlers: {
       muse: {
         postMessage(body: string) {
-          const { id, cmd } = JSON.parse(body) as { id: number; cmd: string };
+          const request = JSON.parse(body) as { id: number; cmd: string };
+          const { id, cmd } = request;
           commands.push(cmd);
+          seen?.(request);
           const answerFor = answer(cmd);
           setTimeout(() => reply?.(id, answerFor), 0);
         },

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::{HeldFeed, HeldGoals, HeldIdeas, HeldTasks, HeldThreads};
+use crate::pages::{HeldFeed, HeldGoals, HeldIdeas, HeldSearch, HeldTasks, HeldThreads};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -214,6 +214,29 @@ fn feed_hero(url: &str) -> Option<String> {
     Some(format!("data:{mime};base64,{}", base64(&bytes)))
 }
 
+/// The Search page as both the boot payload and a reply carry it.
+fn search_payload(held: &HeldSearch) -> serde_json::Value {
+    serde_json::json!({
+        "query": held.query,
+        "rows": held.rows,
+        "total": held.total,
+        "loaded": held.loaded,
+        "error": held.error,
+    })
+}
+
+fn search_document(held: &HeldSearch) -> String {
+    let mut boot = search_payload(held);
+    boot["page"] = serde_json::json!("search");
+    document(&boot)
+}
+
+fn search_reply(held: &HeldSearch) -> serde_json::Value {
+    let mut reply = search_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
 /// What a fresh wire read produced off the main loop.
 enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
@@ -224,6 +247,7 @@ enum Fetched {
     Feed(HeldFeed),
     /// A cached hero's data URI, or None when nothing is cached.
     Hero(Option<String>),
+    Search(HeldSearch),
     Failed(String),
 }
 
@@ -283,6 +307,24 @@ fn fresh_ideas(client: Option<AccountClient>) -> Receiver<Fetched> {
                     loaded: true,
                     error: None,
                 }),
+                Err(error) => Fetched::Failed(error.to_string()),
+            },
+        };
+        let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// Run one account-wide conversation search on a worker thread: the same read
+/// the native page makes, and the only page whose read carries the reader's
+/// own words.
+fn fresh_search(client: Option<AccountClient>, query: String) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = match client {
+            None => Fetched::Failed("no account link in this app".into()),
+            Some(client) => match client.search(&query) {
+                Ok(listing) => Fetched::Search(crate::pages::held_search_from(&query, &listing)),
                 Err(error) => Fetched::Failed(error.to_string()),
             },
         };
@@ -435,6 +477,25 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
         "threads.refresh" => Answer::Later(fresh_threads(client)),
         "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
         "feed.refresh" => Answer::Later(fresh_feed(client)),
+        "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
+        "search.run" => {
+            let query = request
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if query.is_empty() {
+                // The native page refuses an empty query without a ticket, and
+                // so does this one: no service read for no words.
+                Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "type words to search for first"
+                }))
+            } else {
+                Answer::Later(fresh_search(client, query))
+            }
+        }
         "feed.hero" => {
             let url = request
                 .get("url")
@@ -536,6 +597,17 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
                 started.elapsed().as_millis()
             );
             feed_reply(&held)
+        }
+        Fetched::Search(held) => {
+            crate::pages::search_cache(held.clone());
+            eprintln!(
+                "muse webui: {command} read the service: rows={} total={} query={:?} ms={}",
+                held.rows.len(),
+                held.total,
+                held.query,
+                started.elapsed().as_millis()
+            );
+            search_reply(&held)
         }
         Fetched::Hero(data) => {
             eprintln!(
@@ -798,6 +870,23 @@ pub(crate) fn open_feed_window(held: HeldFeed, client: Option<AccountClient>) ->
     open_window("Feed · web view", feed_document(&held), client, FEED_PROBE)
 }
 
+const SEARCH_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.search-row').length, \
+     boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.rows || []).length, \
+     query: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.query) || '', \
+     err: window.__MUSE_ERR__ || '', \
+     text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
+/// Open the Search page in its own window, on the query and rows the native
+/// search last painted.
+pub(crate) fn open_search_window(held: HeldSearch, client: Option<AccountClient>) -> bool {
+    open_window(
+        "Search · web view",
+        search_document(&held),
+        client,
+        SEARCH_PROBE,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,6 +1095,7 @@ mod tests {
             Fetched::Threads(..) => panic!("a library read must not answer with threads"),
             Fetched::Feed(..) => panic!("a library read must not answer with a feed"),
             Fetched::Hero(..) => panic!("a library read must not answer with a hero"),
+            Fetched::Search(..) => panic!("a library read must not answer with a search"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -1032,6 +1122,7 @@ mod tests {
             Fetched::Threads(..) => panic!("no client, no threads"),
             Fetched::Feed(..) => panic!("no client, no feed"),
             Fetched::Hero(..) => panic!("no client, no hero"),
+            Fetched::Search(..) => panic!("no client, no search"),
         }
     }
 
@@ -1892,6 +1983,175 @@ mod tests {
     /// The hero command answers a data URI from the cache, and says so
     /// plainly when nothing is cached -- never a `file://` path the page
     /// could not read anyway.
+    /// Search boots with the query that produced the rows, so the page can
+    /// show what was searched. Rows without an id are dropped, as the native
+    /// paint drops them (a result with no conversation cannot be opened).
+    #[test]
+    fn the_search_document_names_its_page_and_carries_query_and_rows() {
+        use muse_account::{ListingItem, ServiceListing};
+
+        let listing = ServiceListing {
+            total: 3,
+            recognized: 2,
+            skipped: 1,
+            items: vec![
+                ListingItem {
+                    id: Some("thread-9".into()),
+                    title: "Visitor parking".into(),
+                    icon: Some("🚗".into()),
+                    kicker: Some("Rowyn".into()),
+                    kind: Some("message".into()),
+                    stamp: Some("2026-11-20T09:14:00Z".into()),
+                    ..ListingItem::default()
+                },
+                ListingItem {
+                    id: None,
+                    title: "No conversation, no row".into(),
+                    ..ListingItem::default()
+                },
+            ],
+            feed_prompt: None,
+            feed_status: None,
+        };
+        let held = crate::pages::held_search_from("parking", &listing);
+        assert_eq!(held.rows.len(), 1, "the id-less item is dropped");
+        assert_eq!(held.rows[0].id, "thread-9");
+        assert_eq!(held.rows[0].icon, "🚗");
+        assert_eq!(held.rows[0].meta, "Rowyn · message · 2026-11-20T09:14:00Z");
+        assert_eq!(held.total, 3, "the service's total, not the row count");
+        assert!(held.loaded);
+
+        let doc = search_document(&held);
+        assert!(doc.contains("\"page\":\"search\""), "page named in boot");
+        assert!(doc.contains("parking"));
+        assert!(doc.contains("Visitor parking"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    #[test]
+    fn search_snapshot_answers_from_the_held_rows() {
+        crate::pages::search_cache(HeldSearch {
+            query: "held query".into(),
+            rows: vec![crate::pages::SearchRow {
+                id: "thread-1".into(),
+                title: "Held result".into(),
+                ..crate::pages::SearchRow::default()
+            }],
+            total: 1,
+            loaded: true,
+            error: None,
+        });
+        let (id, answer, command) = handle_command(r#"{"id":61,"cmd":"search.snapshot"}"#, None);
+        assert_eq!(id, serde_json::json!(61));
+        assert_eq!(command, "search.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["query"], "held query");
+        assert_eq!(reply["rows"][0]["title"], "Held result");
+    }
+
+    /// Search runs the account read for the page's own query, and the answer
+    /// updates the cache the native and web views share.
+    #[test]
+    fn search_run_reads_the_service_with_the_query() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let service = serde_json::json!({
+            "ok": true,
+            "data": {
+                "total": 1, "recognized": 1, "skipped": 0,
+                "items": [{ "id": "thread-4", "title": "A conversation about parking" }]
+            }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(service.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+
+        let (_, answer, command) = handle_command(
+            r#"{"id":62,"cmd":"search.run","query":"parking"}"#,
+            Some(client),
+        );
+        assert_eq!(command, "search.run");
+        let Answer::Later(receiver) = answer else {
+            panic!("a search must leave the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        let Fetched::Search(rows) = fetched else {
+            panic!("the host answered with something else");
+        };
+        assert_eq!(rows.query, "parking");
+        assert_eq!(rows.rows[0].id, "thread-4");
+
+        let reply = reply_for(Fetched::Search(rows), &command, Instant::now());
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["rows"][0]["title"], "A conversation about parking");
+        let cached = crate::pages::search_snapshot();
+        assert_eq!(cached.query, "parking");
+        assert_eq!(cached.rows[0].title, "A conversation about parking");
+
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"search""#), "{request}");
+        assert!(request.contains(r#""query":"parking""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_query_is_refused_without_a_read() {
+        let (_, answer, command) =
+            handle_command(r#"{"id":63,"cmd":"search.run","query":"   "}"#, None);
+        assert_eq!(command, "search.run");
+        let Answer::Now(reply) = answer else {
+            panic!("an empty query must not start a read");
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "type words to search for first");
+    }
+
+    #[test]
+    fn search_run_without_a_client_reports_the_missing_link() {
+        let (_, answer, command) =
+            handle_command(r#"{"id":64,"cmd":"search.run","query":"parking"}"#, None);
+        assert_eq!(command, "search.run");
+        let Answer::Later(receiver) = answer else {
+            panic!("a search must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no rows"),
+        }
+    }
+
     #[test]
     fn the_hero_command_answers_a_data_uri_or_null() {
         assert_eq!(base64(b""), "");
