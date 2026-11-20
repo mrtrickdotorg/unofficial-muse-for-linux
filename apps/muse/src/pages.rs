@@ -460,7 +460,30 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             let heading = gtk4::Label::new(Some("Library"));
             heading.add_css_class("muse-page-title");
             heading.set_halign(gtk4::Align::Start);
-            inner.append(&heading);
+            // The first page of the web UI port, beside the native one:
+            // same rows, rendered by the web slice, so the two can be
+            // compared on the same data.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+            head_row.set_valign(gtk4::Align::Center);
+            head_row.append(&heading);
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_halign(gtk4::Align::End);
+            web_view.set_hexpand(true);
+            web_view.set_tooltip_text(Some(
+                "Open this Library in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_sensitive(false);
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            inner.append(&head_row);
+            web_view.connect_clicked(move |_| {
+                let artifacts = library_snapshot();
+                if !crate::webui::open_library_window(artifacts) {
+                    eprintln!("muse: web view unavailable in this build");
+                }
+            });
             // Quick Open filters titles client-side; the tab bar
             // filters by kind. Both repaint from held rows, never the
             // wire, and both are wired here so fills never double-wire.
@@ -2187,6 +2210,12 @@ fn active_tab(tabs: &gtk4::Box) -> String {
 thread_local! {
     static ART_STORE: std::cell::RefCell<Vec<ArtifactSummary>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The held Library rows, for the web UI slice: it renders exactly what
+/// the native page last read, never a second trip to the wire.
+pub(crate) fn library_snapshot() -> Vec<ArtifactSummary> {
+    ART_STORE.with(|store| store.borrow().clone())
 }
 
 /// Paint the library from held rows: tab bar, Spaces and Recent
