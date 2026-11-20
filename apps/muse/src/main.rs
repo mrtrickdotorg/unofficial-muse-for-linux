@@ -170,6 +170,23 @@ fn build_ui(app: &adw::Application) {
         show_signin(&split);
     }
     window.set_child(Some(&split));
+    {
+        // Escape folds the page drawer away, the way a slide-over
+        // closes. The handler sits on the window because that is where
+        // every key press lands, whatever page widget holds focus -- and
+        // when the drawer is already folded it answers "not mine", so
+        // the press goes on to the page.
+        let escape = gtk4::EventControllerKey::new();
+        escape.connect_key_pressed(|_, key, _, _| {
+            if key == gtk4::gdk::Key::Escape
+                && FOLD_DRAWER.with(|slot| slot.borrow().as_ref().is_some_and(|fold| fold()))
+            {
+                return gtk4::glib::Propagation::Stop;
+            }
+            gtk4::glib::Propagation::Proceed
+        });
+        window.add_controller(escape);
+    }
     window.present();
     // A fresh install pays one-time setup (config folders, helper
     // staging, interpreter probe): a spinner and the reader's sentence
@@ -252,6 +269,15 @@ const DRAWER_WIDTH: i32 = 232;
 /// aside for the open page drawer: enough for its header row and a
 /// transcript that still reads as a column.
 const CHAT_MIN_WIDTH: i32 = 560;
+
+thread_local! {
+    /// The page drawer's Escape action, installed by the shell that owns
+    /// the drawer and run by the window: the window sees every key press
+    /// wherever focus sits on the page, the split view does not. The
+    /// action folds the drawer and answers whether it did.
+    static FOLD_DRAWER: std::cell::RefCell<Option<std::rc::Rc<dyn Fn() -> bool>>> =
+        std::cell::RefCell::new(None);
+}
 
 /// The main surface: sidebar plus a lazily-filled page stack. Only the
 /// chat page builds up front (cheap widgets); every other page builds
@@ -565,6 +591,22 @@ fn show_main(split: &adw::OverlaySplitView) {
             pages::show(&ctx, &page);
         });
     }
+    // The window's Escape handler runs this: it folds the page list away
+    // and says it did, or leaves the key alone when the drawer is already
+    // folded, so nothing here swallows an Escape meant for the page.
+    {
+        let drawer = drawer.clone();
+        let fold_drawer = fold_drawer.clone();
+        FOLD_DRAWER.with(|slot| {
+            *slot.borrow_mut() = Some(Rc::new(move || {
+                if !drawer.reveals_child() {
+                    return false;
+                }
+                fold_drawer();
+                true
+            }) as Rc<dyn Fn() -> bool>);
+        });
+    }
     stack.set_visible_child_name("chat");
     if let Some(first) = sidebar.row_at_index(0) {
         sidebar.select_row(Some(&first));
@@ -575,6 +617,9 @@ fn show_main(split: &adw::OverlaySplitView) {
 /// explicit sign-out. A linked form swaps back to the main surface.
 fn show_signin(split: &adw::OverlaySplitView) {
     split.set_show_sidebar(false);
+    // No page drawer on this surface: an Escape belongs to the sign-in
+    // form, not to a drawer the main shell left behind.
+    FOLD_DRAWER.with(|slot| *slot.borrow_mut() = None);
     let form = signin::SignIn::build({
         let split = split.clone();
         move |_| show_main(&split)
