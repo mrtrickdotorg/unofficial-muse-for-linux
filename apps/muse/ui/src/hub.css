@@ -463,6 +463,7 @@ html, body {
 
 .feed-action {
   justify-self: start;
+  cursor: default;
   padding: 6px 14px;
   border-radius: 999px;
   border: 1px solid var(--accent-border);

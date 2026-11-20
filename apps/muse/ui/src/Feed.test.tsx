@@ -59,7 +59,10 @@ describe("the Feed web page", () => {
     expect(screen.getByText("Second unit")).toBeInTheDocument();
     expect(screen.getByText("Research")).toBeInTheDocument();
     expect(screen.getByText("2h")).toBeInTheDocument();
-    expect(screen.getByText("Open")).toBeInTheDocument();
+    // The service action reads as a label: the page cannot run it, so it
+    // offers no button that does nothing.
+    expect(screen.getByText("Open")).toHaveClass("feed-action");
+    expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
     expect(screen.getByText("2 units")).toBeInTheDocument();
     expect(cardsOnPage()).toBe(2);
     expect(commands).toEqual(["feed.snapshot"]);
