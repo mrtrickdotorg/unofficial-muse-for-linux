@@ -296,3 +296,255 @@ textview placeholder {
     font-size: 17pt;
     font-weight: bold;
 }
+
+/* --- Kyth Hub palette (lifted Nov 20, 2026) -------------------------- *
+ * The rail and the chat column now take the Kyth Hub's look, so the two
+ * apps read as one family on this desktop. The tokens mirror
+ * kyth/src/kyth-hub-web/src/styles/theme.css: a navy ground, three card
+ * surfaces, one hairline pair, and a single blue -> cyan accent ramp.
+ *
+ * Everything else keeps following the system theme, per the Nov 16
+ * decision above; this is deliberately pinned because it is the surface
+ * being compared side by side with the Hub, not a new global theme.
+ * GTK takes colours through @define-color and gradients through
+ * background-image; radii, shadows and transitions are the same ideas as
+ * the web sheet with GTK's own syntax.
+ * -------------------------------------------------------------------- */
+
+@define-color hub_ground #090d1a;
+@define-color hub_ground_2 #060912;
+@define-color hub_surface #111827;
+@define-color hub_surface_raised #1a263a;
+@define-color hub_surface_overlay #23334b;
+@define-color hub_hairline rgba(226, 232, 255, 0.1);
+@define-color hub_hairline_light rgba(226, 232, 255, 0.22);
+@define-color hub_accent #36a3ff;
+@define-color hub_accent_end #55e5c1;
+@define-color hub_accent_tint rgba(54, 163, 255, 0.14);
+@define-color hub_accent_border rgba(54, 163, 255, 0.42);
+@define-color hub_text #f8fafc;
+@define-color hub_text_muted #aebbd0;
+@define-color hub_text_faint #74849d;
+@define-color hub_ok #42d7a4;
+@define-color hub_warn #f59e0b;
+@define-color hub_error #f7768e;
+
+/* The rail: a navy well rather than the theme's window colour, round icon
+ * wells on hover, the open page on the accent ramp. */
+.muse-rail {
+    background-image: linear-gradient(to bottom, #0f1827, #0a101b);
+    padding: 14px 8px;
+}
+
+.muse-rail-button {
+    border-radius: 14px;
+    min-width: 34px;
+    min-height: 34px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: @hub_text_muted;
+    transition: background 0.16s ease-out, border-color 0.16s ease-out, color 0.16s ease-out;
+}
+
+.muse-rail-button image {
+    color: @hub_text_muted;
+}
+
+.muse-rail-button:hover {
+    background-color: alpha(@hub_text, 0.06);
+    border-color: @hub_hairline;
+    color: @hub_text;
+}
+
+.muse-rail-button:hover image {
+    color: @hub_text;
+}
+
+.muse-rail-button:active {
+    background-color: @hub_accent_tint;
+}
+
+.muse-rail-button:active image,
+.muse-rail-active image {
+    color: @hub_text;
+}
+
+.muse-rail-active {
+    background-image: linear-gradient(to bottom, rgba(54, 163, 255, 0.34), rgba(85, 229, 193, 0.2));
+    border: 1px solid @hub_accent_border;
+    color: @hub_text;
+}
+
+/* The chat column sits on the navy ground, so its text is the palette's
+ * own ink rather than the theme's (which may be dark on a light seat). */
+.muse-chat-column {
+    background-color: @hub_ground;
+    color: @hub_text;
+}
+
+/* The reader's words: the accent ramp with the Hub's dark ink on top. */
+.muse-user-bubble {
+    background-image: linear-gradient(to bottom, @hub_accent, @hub_accent_end);
+    color: #04101c;
+    border-radius: 18px;
+    padding: 14px 18px;
+    font-size: 12pt;
+}
+
+/* The assistant's words: a raised card, hairline edge, same radius. */
+.muse-assistant-text {
+    background-image: linear-gradient(to bottom, rgba(24, 34, 52, 0.97), rgba(15, 22, 36, 0.94));
+    color: @hub_text;
+    border: 1px solid @hub_hairline;
+    border-radius: 18px;
+    padding: 14px 18px;
+    font-size: 12pt;
+}
+
+/* Option pills and the small chips read as Hub cards on the dark ground. */
+.muse-option {
+    background-color: @hub_surface;
+    color: @hub_text;
+    border: 1px solid @hub_hairline;
+    border-radius: 9999px;
+    padding: 8px 16px;
+}
+
+.muse-option:hover {
+    border-color: @hub_hairline_light;
+}
+
+.muse-option-selected {
+    border: 1px solid @hub_accent_end;
+    background-color: @hub_accent_tint;
+}
+
+.muse-pill,
+.muse-circle {
+    background-color: @hub_surface_raised;
+    border: 1px solid @hub_hairline;
+    color: @hub_text_muted;
+}
+
+.muse-chip {
+    background-color: @hub_surface_raised;
+    border: 1px solid @hub_hairline;
+    color: @hub_text_muted;
+}
+
+/* The floating composer: Hub's card gradient, card radius, card shadow. */
+.muse-composer-card {
+    background-image: linear-gradient(to bottom, rgba(24, 34, 52, 0.97), rgba(15, 22, 36, 0.94));
+    border: 1px solid @hub_hairline;
+    border-radius: 20px;
+    padding: 12px 12px 10px;
+    box-shadow: 0 24px 54px rgba(0, 0, 0, 0.55);
+}
+
+.muse-ask {
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    color: @hub_text;
+    padding: 8px 10px;
+    font-size: 11.5pt;
+}
+
+.muse-ask placeholder {
+    color: @hub_text_faint;
+}
+
+/* The send circle carries the ramp and the Hub's dark ink. */
+.muse-send {
+    background-image: linear-gradient(to bottom, @hub_accent, @hub_accent_end);
+    color: #04101c;
+    border-radius: 9999px;
+    min-width: 36px;
+    min-height: 36px;
+    font-weight: 800;
+}
+
+/* Status, section labels and quiet text inside the column. */
+.muse-chat-column .muse-connected {
+    color: @hub_ok;
+}
+
+.muse-chat-column .muse-section {
+    color: @hub_text_faint;
+    font-size: 9pt;
+    font-weight: 800;
+    margin-top: 4px;
+}
+
+.muse-chat-column .muse-build-stamp {
+    color: @hub_text_faint;
+}
+
+.muse-chat-column .muse-avatar,
+.muse-chat-column .muse-avatar-small,
+.muse-chat-column .muse-avatar-large {
+    background-image: linear-gradient(to bottom, @hub_accent, @hub_accent_end);
+    color: #04101c;
+}
+
+.muse-chat-column .muse-link-card {
+    background-color: @hub_surface;
+    border: 1px solid @hub_hairline;
+    color: @hub_text;
+    border-radius: 14px;
+    padding: 10px;
+}
+
+/* The page sidebar is part of the same left shell as the rail. Left on the
+ * theme it reads as a light slab beside a navy rail, so it takes the same
+ * well and the same selected-row treatment the Hub's sidebar uses (tinted
+ * gradient, accent edge, hairline). Pages themselves stay theme-following. */
+.muse-side {
+    background-image: linear-gradient(to bottom, #0f1827, #0a101b);
+    color: @hub_text;
+}
+
+.muse-side row {
+    color: @hub_text_muted;
+    border-radius: 12px;
+}
+
+.muse-side row:hover {
+    background-color: alpha(@hub_text, 0.055);
+    color: @hub_text;
+}
+
+.muse-side row:selected {
+    background-image: linear-gradient(to right, rgba(54, 163, 255, 0.2), rgba(85, 229, 193, 0.08));
+    border: 1px solid @hub_accent_border;
+    color: @hub_text;
+}
+
+.muse-side .muse-section {
+    color: @hub_text_faint;
+}
+
+.muse-side label,
+.muse-side button {
+    color: @hub_text_muted;
+}
+
+.muse-side button {
+    background: transparent;
+    border-color: @hub_hairline;
+}
+
+.muse-side button:hover {
+    color: @hub_text;
+    background-color: alpha(@hub_text, 0.08);
+}
+
+.muse-side entry {
+    background-color: rgba(255, 255, 255, 0.04);
+    border-color: @hub_hairline;
+    color: @hub_text;
+}
+
+.muse-side .muse-build-stamp {
+    color: @hub_text_faint;
+}
