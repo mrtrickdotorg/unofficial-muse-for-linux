@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn the_document_carries_style_script_and_rows() {
         let doc = library_document(&[summary("Quarterly plan", true)], 76);
-        assert!(doc.contains("--accent: #36a3ff"), "stylesheet inlined");
+        assert!(doc.contains("--accent: #007ffd"), "stylesheet inlined");
         assert!(doc.contains("__MUSE_BOOT__"), "boot block present");
         assert!(doc.contains("Quarterly plan"), "rows inlined");
         assert!(doc.contains("\"total\":76"), "service total inlined");

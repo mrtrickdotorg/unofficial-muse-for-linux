@@ -253,10 +253,11 @@ fn show_main(split: &adw::OverlaySplitView) {
     // recursion guard keeps working untouched.
     let side = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     side.add_css_class("muse-side");
-    side.set_margin_start(8);
-    side.set_margin_end(8);
-    side.set_margin_top(8);
-    side.set_margin_bottom(8);
+    side.set_size_request(232, -1);
+    side.set_margin_start(6);
+    side.set_margin_end(10);
+    side.set_margin_top(12);
+    side.set_margin_bottom(12);
     let tools = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     let search_button = gtk4::Button::with_label("🔍");
     search_button.add_css_class("flat");
@@ -357,7 +358,16 @@ fn show_main(split: &adw::OverlaySplitView) {
     rail.append(&menu_button);
     let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     shell.append(&rail);
-    shell.append(&side);
+    // The page list is a drawer, not a column: as on muse.ai the rail is
+    // the only permanent navigation, and an icon press slides the list
+    // and its History out beside it. A second press on the open page's
+    // own icon folds it away again.
+    let drawer = gtk4::Revealer::new();
+    drawer.set_transition_type(gtk4::RevealerTransitionType::SlideRight);
+    drawer.set_transition_duration(180);
+    drawer.set_reveal_child(false);
+    drawer.set_child(Some(&side));
+    shell.append(&drawer);
     split.set_sidebar(Some(&shell));
     let stack = gtk4::Stack::new();
     stack.set_hexpand(true);
@@ -456,7 +466,15 @@ fn show_main(split: &adw::OverlaySplitView) {
     for (page, button) in &ctx.rail {
         let ctx = ctx.clone();
         let page = page.clone();
+        let drawer = drawer.clone();
+        let stack = stack.clone();
         button.connect_clicked(move |_| {
+            let current = stack.visible_child_name();
+            if pages::rail_closes(current.as_deref(), &page, drawer.reveals_child()) {
+                drawer.set_reveal_child(false);
+                return;
+            }
+            drawer.set_reveal_child(true);
             pages::show(&ctx, &page);
         });
     }
