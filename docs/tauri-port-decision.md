@@ -161,9 +161,16 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   is empty while the native fill is still in flight (a slow listing here took 27 s); the header
   reads the service's own `total_count` ("50 of 127 items") instead of the page count; and the fill
   keeps that total beside the rows for the channel to read.
-  Gate met for this page: 50 cards rendered from 50 rows, one `library.snapshot` round trip on open
-  and another on Refresh, no JS error, side by side with the native page on the same data. Still to
-  do for S1's full gate: a DOM test suite.
+  Refresh is honest about its name: `library.snapshot` answers a page open from the held rows, and
+  `library.refresh` reads the service on a worker thread and answers when that listing lands (a
+  listing has taken 27 s here, so the page allows 120 s for it and shows "Refreshing…"). A refusal
+  or a timeout reaches the page as a failure banner, never as an empty library.
+  S1's gate is met for this page: 50 cards rendered from 50 rows, a snapshot on open, a wire read on
+  Refresh, no JS error, side by side with the native page on the same data -- and a DOM suite of six
+  tests (`apps/muse/ui/src/Library.test.tsx`, vitest + jsdom) that checks the boot rows and total,
+  the not-loaded state, the wire refresh, a refused refresh, tab+search filtering, and an empty
+  filter result. The `Web UI` CI job runs them and fails if the committed `built/library.html`
+  differs from a fresh build.
 - **S2 — Page migration (2–3 weeks).** Remaining read-only and settings pages, one at a time, behind
   the same GTK shell. Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it

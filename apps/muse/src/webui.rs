@@ -11,10 +11,17 @@
 //!   paints immediately from what the native page last read.
 //! - **Commands out.** A `UserContentManager` script-message handler named
 //!   `muse` receives `{"id","cmd"}` from the page and answers through
-//!   `window.museReply(id, reply)`. Commands read native state only; the
-//!   first mutating command arrives with the first page that mutates.
+//!   `window.museReply(id, reply)`.
+//!
+//! Commands say what they do. `library.snapshot` answers from the held rows,
+//! so a page opens without a wire trip; `library.refresh` reads the service
+//! on a worker thread and answers when that listing lands. A refresh that
+//! only re-read the cache would be a lie in the button's own label.
 
-use muse_account::ArtifactSummary;
+use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::Instant;
+
+use muse_account::{AccountClient, ArtifactSummary};
 
 /// Whether a WebView can be constructed at all (helpers staged and loading).
 pub(crate) fn available() -> bool {
@@ -38,13 +45,45 @@ fn document(artifacts: &[ArtifactSummary], total: u64) -> String {
         .replace("/*__BOOT__*/", &boot_payload(artifacts, total))
 }
 
-/// One command from the page. Reading state only; unknown commands are
-/// refused by name so a typo in the UI is visible in the page and the log.
-fn handle_command(raw: &str) -> (serde_json::Value, serde_json::Value, String) {
+/// What a fresh listing read produced off the main loop.
+enum Fetched {
+    Rows(Vec<ArtifactSummary>, u64),
+    Failed(String),
+}
+
+/// A command's answer. Cache reads answer at once; a wire read answers when
+/// its thread lands, so the window keeps painting during a slow listing.
+enum Answer {
+    Now(serde_json::Value),
+    Later(Receiver<Fetched>),
+}
+
+/// Read the Library from the service on a worker thread. No client means no
+/// account link in this app, which the page reads as a failure rather than
+/// as an empty library.
+fn fresh_listing(client: Option<AccountClient>) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = match client {
+            None => Fetched::Failed("no account link in this app".into()),
+            Some(client) => match client.artifacts() {
+                Ok(listing) => Fetched::Rows(listing.artifacts, listing.total_count),
+                Err(error) => Fetched::Failed(error.to_string()),
+            },
+        };
+        let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// One command from the page. Reads only, and by name: an unknown command is
+/// refused instead of guessed at, so a typo in the UI is visible in the page
+/// and in the log.
+fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Value, Answer, String) {
     let Ok(request) = serde_json::from_str::<serde_json::Value>(raw) else {
         return (
             serde_json::json!(0),
-            serde_json::json!({ "ok": false, "error": "malformed request" }),
+            Answer::Now(serde_json::json!({ "ok": false, "error": "malformed request" })),
             "malformed".into(),
         );
     };
@@ -54,19 +93,33 @@ fn handle_command(raw: &str) -> (serde_json::Value, serde_json::Value, String) {
         .and_then(|value| value.as_str())
         .unwrap_or("")
         .to_owned();
-    let reply = match command.as_str() {
+    let answer = match command.as_str() {
         "library.snapshot" => {
             let (artifacts, total) = crate::pages::library_snapshot();
-            serde_json::json!({ "ok": true, "artifacts": artifacts, "total": total })
+            Answer::Now(serde_json::json!({ "ok": true, "artifacts": artifacts, "total": total }))
         }
-        other => serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
+        "library.refresh" => Answer::Later(fresh_listing(client)),
+        other => Answer::Now(
+            serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
+        ),
     };
-    (id, reply, command)
+    (id, answer, command)
+}
+
+/// Hand one answer back to the page's promise.
+fn send_reply(view: &webkit6::WebView, id: &serde_json::Value, reply: &serde_json::Value) {
+    use webkit6::prelude::WebViewExt;
+    let script = format!("window.museReply({id}, {reply});");
+    view.evaluate_javascript(&script, None, None, gtk4::gio::Cancellable::NONE, |_| {});
 }
 
 /// Open the Library page in its own window, on the rows the native page last
 /// read. Returns false when this build cannot render a WebView.
-pub(crate) fn open_library_window(artifacts: Vec<ArtifactSummary>, total: u64) -> bool {
+pub(crate) fn open_library_window(
+    artifacts: Vec<ArtifactSummary>,
+    total: u64,
+    client: Option<AccountClient>,
+) -> bool {
     if !available() {
         return false;
     }
@@ -93,16 +146,48 @@ pub(crate) fn open_library_window(artifacts: Vec<ArtifactSummary>, total: u64) -
         settings.set_hardware_acceleration_policy(webkit6::HardwareAccelerationPolicy::Never);
     }
 
-    // Commands: parse, answer from native state, hand the answer back to the
-    // page's promise. The reply runs on this same main loop, so no lock or
-    // thread hand-off is involved.
+    // Commands: parse, answer, hand the answer back on this same main loop.
+    // Only the wire read leaves the loop, and it comes back through the idle
+    // poll below, so no lock or widget is touched off the main thread.
     let reply_view = view.clone();
     manager.connect_script_message_received(None, move |_, value| {
         let raw = value.to_str().to_string();
-        let (id, reply, command) = handle_command(&raw);
+        let (id, answer, command) = handle_command(&raw, client.clone());
         eprintln!("muse webui: command {command}");
-        let script = format!("window.museReply({id}, {reply});");
-        reply_view.evaluate_javascript(&script, None, None, gtk4::gio::Cancellable::NONE, |_| {});
+        match answer {
+            Answer::Now(reply) => send_reply(&reply_view, &id, &reply),
+            Answer::Later(receiver) => {
+                let view = reply_view.clone();
+                let started = Instant::now();
+                gtk4::glib::idle_add_local(move || {
+                    let fetched = match receiver.try_recv() {
+                        Ok(fetched) => fetched,
+                        Err(TryRecvError::Empty) => return gtk4::glib::ControlFlow::Continue,
+                        Err(TryRecvError::Disconnected) => return gtk4::glib::ControlFlow::Break,
+                    };
+                    let reply = match fetched {
+                        Fetched::Rows(artifacts, total) => {
+                            // The native page, the boot payload and this
+                            // reply now tell the same story.
+                            crate::pages::library_cache(artifacts.clone(), total);
+                            eprintln!(
+                                "muse webui: library.refresh read the service: rows={} total={} ms={}",
+                                artifacts.len(),
+                                total,
+                                started.elapsed().as_millis()
+                            );
+                            serde_json::json!({ "ok": true, "artifacts": artifacts, "total": total })
+                        }
+                        Fetched::Failed(error) => {
+                            eprintln!("muse webui: library.refresh failed: {error}");
+                            serde_json::json!({ "ok": false, "error": error })
+                        }
+                    };
+                    send_reply(&view, &id, &reply);
+                    gtk4::glib::ControlFlow::Break
+                });
+            }
+        }
     });
 
     // The same navigation lock the feed frames use: a toolbar or link cannot
@@ -180,6 +265,7 @@ pub(crate) fn open_library_window(artifacts: Vec<ArtifactSummary>, total: u64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn summary(title: &str, pinned: bool) -> ArtifactSummary {
         ArtifactSummary {
@@ -224,24 +310,115 @@ mod tests {
         assert!(doc.contains("<\\/script><b>"));
     }
 
-    /// The channel answers a snapshot from the native side and refuses an
-    /// unknown command by name instead of guessing.
+    /// The cache read answers at once and refuses an unknown command by name
+    /// instead of guessing.
     #[test]
-    fn commands_answer_or_refuse_by_name() {
-        let (id, reply, command) = handle_command(r#"{"id":7,"cmd":"library.snapshot"}"#);
+    fn snapshot_answers_at_once_and_unknown_commands_are_refused() {
+        let (id, answer, command) = handle_command(r#"{"id":7,"cmd":"library.snapshot"}"#, None);
         assert_eq!(id, serde_json::json!(7));
         assert_eq!(command, "library.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
         assert_eq!(reply["ok"], true);
         assert!(reply.get("artifacts").is_some());
         assert!(reply.get("total").is_some());
 
-        let (_, reply, command) = handle_command(r#"{"id":8,"cmd":"library.delete"}"#);
+        let (_, answer, command) = handle_command(r#"{"id":8,"cmd":"library.delete"}"#, None);
         assert_eq!(command, "library.delete");
+        let Answer::Now(reply) = answer else {
+            panic!("an unknown command must be refused at once");
+        };
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error"], "unknown command: library.delete");
 
-        let (id, reply, _) = handle_command("not json");
+        let (id, answer, _) = handle_command("not json", None);
         assert_eq!(id, serde_json::json!(0));
+        let Answer::Now(reply) = answer else {
+            panic!("a malformed request must be refused at once");
+        };
         assert_eq!(reply["error"], "malformed request");
+    }
+
+    /// Refresh is a wire read, not the cache: it answers from a thread, and
+    /// with no account link it says so instead of returning zero rows (which
+    /// the page would have to describe as an empty library).
+    #[test]
+    fn refresh_reads_the_service_instead_of_the_held_rows() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let service = summary("Read from the service", false);
+        let reply = serde_json::json!({
+            "ok": true,
+            "data": { "total_count": 128, "has_more": false, "artifacts": [service] }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(reply.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        // The held rows are deliberately different, so an answer that returns
+        // them would prove the button re-read the cache.
+        crate::pages::library_cache(vec![summary("Held, not re-read", false)], 1);
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+
+        let (_, answer, command) =
+            handle_command(r#"{"id":3,"cmd":"library.refresh"}"#, Some(client));
+        assert_eq!(command, "library.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers")
+        {
+            Fetched::Rows(artifacts, total) => {
+                assert_eq!(artifacts.len(), 1);
+                assert_eq!(artifacts[0].title, "Read from the service");
+                assert_eq!(total, 128, "the service's total, not the page count");
+            }
+            Fetched::Failed(error) => panic!("the host answered: {error}"),
+        }
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"artifacts""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_is_a_wire_read_and_reports_a_missing_link() {
+        let (id, answer, command) = handle_command(r#"{"id":9,"cmd":"library.refresh"}"#, None);
+        assert_eq!(id, serde_json::json!(9));
+        assert_eq!(command, "library.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            Fetched::Rows(..) => panic!("no client, no rows"),
+        }
     }
 }

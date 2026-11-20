@@ -42,6 +42,25 @@ export function Library() {
   const [tab, setTab] = useState<Tab>("All");
   const [query, setQuery] = useState("");
 
+  // Opening the page costs nothing on the wire: the native side answers
+  // from the rows it already holds, which is the same list the boot payload
+  // came from.
+  const loadSnapshot = useCallback(async () => {
+    if (!channelAvailable()) {
+      setError("The app's command channel is not available in this window.");
+      return;
+    }
+    try {
+      setData(await call<Snapshot>("library.snapshot"));
+      setError(null);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    }
+  }, []);
+
+  // Refresh reads the service again, which is what the label promises. A
+  // listing has taken 27 s against this service, so the wait is generous
+  // rather than a premature "timed out" over rows that are about to arrive.
   const refresh = useCallback(async () => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
@@ -49,8 +68,7 @@ export function Library() {
     }
     setBusy(true);
     try {
-      const next = await call<Snapshot>("library.snapshot");
-      setData(next);
+      setData(await call<Snapshot>("library.refresh", 120_000));
       setError(null);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -62,8 +80,8 @@ export function Library() {
   // Ask the native side for its rows on mount: boot data is a head start,
   // never the source of truth.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void loadSnapshot();
+  }, [loadSnapshot]);
 
   const rows = useMemo(() => {
     const all = data?.artifacts ?? [];

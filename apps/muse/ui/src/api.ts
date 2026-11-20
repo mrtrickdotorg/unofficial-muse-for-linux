@@ -28,7 +28,7 @@ export function channelAvailable(): boolean {
   return Boolean(window.webkit?.messageHandlers?.muse);
 }
 
-export function call<T>(cmd: string): Promise<T> {
+export function call<T>(cmd: string, timeoutMs = 15_000): Promise<T> {
   const handler = window.webkit?.messageHandlers?.muse;
   if (!handler) return Promise.reject(new Error("no channel"));
   const id = nextId++;
@@ -36,7 +36,7 @@ export function call<T>(cmd: string): Promise<T> {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error("timed out"));
-    }, 5000);
+    }, timeoutMs);
     pending.set(id, (reply) => {
       clearTimeout(timer);
       if (reply && reply.ok === false) {
