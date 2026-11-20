@@ -123,6 +123,20 @@ fn panel_row(icon: &str, body: &gtk4::Box) -> gtk4::ListBoxRow {
     row
 }
 
+/// Hold the panel at its 359px width by pinning the divider to its
+/// largest position, which is exactly the panel's floor. Once the reader
+/// has dragged the divider, their position wins and this does nothing.
+fn pin_panel(chat: &Chat, split: &gtk4::Paned) {
+    if chat.panel_dragged.get() || !chat.panel.is_visible() {
+        return;
+    }
+    let floor = split.max_position();
+    if floor <= 0 || floor == split.position() {
+        return;
+    }
+    split.set_position(floor);
+}
+
 /// A decision button's words: the service's outcome in the reader's
 /// language. Pure so the wording is unit-tested.
 pub fn decision_label(decision: muse_account::Decision) -> &'static str {
@@ -289,7 +303,9 @@ pub struct Chat {
     panel_fetch: RefCell<bool>,
     panel_at: RefCell<Option<std::time::Instant>>,
     panel_tasks: RefCell<Option<muse_account::TasksSnapshot>>,
-    panel_placed: RefCell<bool>,
+    /// Set once the reader has moved the divider by hand: their
+    /// position then wins over the panel's pinned width.
+    panel_dragged: std::cell::Cell<bool>,
 }
 
 impl Chat {
@@ -346,7 +362,9 @@ impl Chat {
         // beside the transcript instead of on a separate visit.
         let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         panel.add_css_class("muse-panel");
-        panel.set_size_request(320, -1);
+        // 359px is the panel's smallest width, which is where its
+        // divider sits unless the reader drags it somewhere else.
+        panel.set_size_request(PANEL_WIDTH, -1);
         panel.set_margin_start(8);
         panel.set_margin_end(0);
         panel.set_margin_top(12);
@@ -537,7 +555,7 @@ impl Chat {
             panel_fetch: RefCell::new(false),
             panel_at: RefCell::new(None),
             panel_tasks: RefCell::new(None),
-            panel_placed: RefCell::new(false),
+            panel_dragged: std::cell::Cell::new(false),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -608,22 +626,14 @@ impl Chat {
     /// Fold the details panel away, or bring it back: the header ×
     /// names what its next press does, so the panel is never lost. The
     /// divider moves too -- a hidden child leaves an empty pane where
-    /// the panel was, and the column must take that room back.
+    /// the panel was, and the column must take that room back. A
+    /// reader who dragged the divider gets it back where it was.
     fn toggle_panel(&self, button: &gtk4::Button) {
         let showing = !self.panel.is_visible();
-        self.panel.set_visible(showing);
-        if let Some(paned) = self
-            .panel
-            .parent()
-            .and_then(|split| split.downcast::<gtk4::Paned>().ok())
-        {
-            let width = paned.allocated_width();
-            paned.set_position(if showing {
-                (width - PANEL_WIDTH).max(0)
-            } else {
-                width
-            });
+        if showing {
+            self.panel_dragged.set(false);
         }
+        self.panel.set_visible(showing);
         let (icon, tip) = if showing {
             ("window-close-symbolic", "Hide the details panel")
         } else {
@@ -708,14 +718,48 @@ impl Chat {
             });
             left.add_controller(scroll);
         }
-        // The divider between transcript and panel drags: the panel
-        // opens at 300px and then holds wherever the reader puts it.
+        // The panel is held at its own 359px by pinning the divider to
+        // its largest position, which is exactly the panel's floor, so
+        // the transcript gets every pixel the window gains. A position
+        // short of that floor is the reader's drag and stops the pin.
         let split = gtk4::Paned::new(gtk4::Orientation::Horizontal);
         split.set_wide_handle(true);
+        split.set_resize_start_child(true);
+        split.set_shrink_start_child(true);
+        split.set_resize_end_child(false);
+        split.set_shrink_end_child(false);
         split.set_start_child(Some(&left));
         split.set_end_child(Some(&chat.panel));
-        split.set_shrink_end_child(false);
         content.append(&split);
+        {
+            let weak = Rc::downgrade(&chat);
+            let split_weak = split.downgrade();
+            split.connect_max_position_notify(move |_| {
+                if let (Some(chat), Some(split)) = (weak.upgrade(), split_weak.upgrade()) {
+                    pin_panel(&chat, &split);
+                }
+            });
+            let weak = Rc::downgrade(&chat);
+            split.connect_position_notify(move |split| {
+                let Some(chat) = weak.upgrade() else { return };
+                if chat.panel_dragged.get() || !chat.panel.is_visible() {
+                    return;
+                }
+                if split.position() < split.max_position() {
+                    chat.panel_dragged.set(true);
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&chat);
+            let split_weak = split.downgrade();
+            gtk4::glib::idle_add_local_once(move || {
+                if let (Some(chat), Some(split)) = (weak.upgrade(), split_weak.upgrade()) {
+                    pin_panel(&chat, &split);
+                }
+            });
+        }
+
         {
             let weak = Rc::downgrade(&chat);
             chat.delete.connect_clicked(move |_| {
@@ -732,17 +776,6 @@ impl Chat {
             let content_weak = content.downgrade();
             gtk4::glib::timeout_add_local(std::time::Duration::from_secs(3), move || {
                 if let (Some(chat), Some(content)) = (weak.upgrade(), content_weak.upgrade()) {
-                    // The panel divider opens at 300px once the page
-                    // knows its width, then holds wherever dragged.
-                    if !*chat.panel_placed.borrow()
-                        && let Some(split) = chat.panel.parent()
-                        && split.allocated_width() > 400
-                    {
-                        if let Some(paned) = split.downcast_ref::<gtk4::Paned>() {
-                            paned.set_position(split.allocated_width() - PANEL_WIDTH);
-                        }
-                        *chat.panel_placed.borrow_mut() = true;
-                    }
                     let hadj = chat.scrolled.hadjustment();
                     eprintln!(
                         "muse layout: page={} panel={} hadj upper={:.0} page={:.0}",
