@@ -137,6 +137,20 @@ fn pin_panel(chat: &Chat, split: &gtk4::Paned) {
     split.set_position(floor);
 }
 
+/// The paned's own handle: the child that is neither of its two panes.
+fn split_handle(split: &gtk4::Paned) -> Option<gtk4::Widget> {
+    let start = split.start_child()?;
+    let end = split.end_child()?;
+    let mut child = split.first_child();
+    while let Some(widget) = child {
+        if widget != start && widget != end {
+            return Some(widget);
+        }
+        child = widget.next_sibling();
+    }
+    None
+}
+
 /// A decision button's words: the service's outcome in the reader's
 /// language. Pure so the wording is unit-tested.
 pub fn decision_label(decision: muse_account::Decision) -> &'static str {
@@ -306,6 +320,9 @@ pub struct Chat {
     /// Set once the reader has moved the divider by hand: their
     /// position then wins over the panel's pinned width.
     panel_dragged: std::cell::Cell<bool>,
+    /// Whether a press is being held on the divider, the only way a
+    /// position change can be the reader's.
+    panel_press: std::cell::Cell<bool>,
 }
 
 impl Chat {
@@ -556,6 +573,7 @@ impl Chat {
             panel_at: RefCell::new(None),
             panel_tasks: RefCell::new(None),
             panel_dragged: std::cell::Cell::new(false),
+            panel_press: std::cell::Cell::new(false),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -739,15 +757,67 @@ impl Chat {
                     pin_panel(&chat, &split);
                 }
             });
+            // Only a press held on the divider makes a position change
+            // the reader's: a clamp or a relayout moves it without one,
+            // and that belongs to the pin, which puts it straight back
+            // rather than giving the width away for good.
+            if let Some(handle) = split_handle(&split) {
+                let weak = Rc::downgrade(&chat);
+                let handle_weak = handle.downgrade();
+                let split_weak = split.downgrade();
+                let press = gtk4::EventControllerLegacy::new();
+                press.set_propagation_phase(gtk4::PropagationPhase::Capture);
+                press.connect_event(move |_, event| {
+                    if let Some(chat) = weak.upgrade() {
+                        match event.event_type() {
+                            gtk4::gdk::EventType::ButtonPress => {
+                                // Only a press on the divider is the reader
+                                // taking the width; one on the column is not.
+                                // The event arrives in the window's
+                                // coordinates, so the handle's bounds are
+                                // measured against the root before the two
+                                // are compared.
+                                let on_divider = match (
+                                    event.position(),
+                                    handle_weak.upgrade(),
+                                    split_weak.upgrade(),
+                                ) {
+                                    (Some((x, _)), Some(handle), Some(split)) => split
+                                        .root()
+                                        .and_then(|root| handle.compute_bounds(&root))
+                                        .is_some_and(|rect| {
+                                            let left = f64::from(rect.x());
+                                            x >= left && x < left + f64::from(rect.width())
+                                        }),
+                                    _ => false,
+                                };
+                                chat.panel_press.set(on_divider);
+                            }
+                            gtk4::gdk::EventType::ButtonRelease => chat.panel_press.set(false),
+                            _ => {}
+                        }
+                    }
+                    gtk4::glib::Propagation::Proceed
+                });
+                split.add_controller(press);
+            }
             let weak = Rc::downgrade(&chat);
             split.connect_position_notify(move |split| {
                 let Some(chat) = weak.upgrade() else { return };
                 if chat.panel_dragged.get() || !chat.panel.is_visible() {
                     return;
                 }
-                if split.position() < split.max_position() {
+                if chat.panel_press.get() {
                     chat.panel_dragged.set(true);
+                    return;
                 }
+                let weak = Rc::downgrade(&chat);
+                let split_weak = split.downgrade();
+                gtk4::glib::idle_add_local_once(move || {
+                    if let (Some(chat), Some(split)) = (weak.upgrade(), split_weak.upgrade()) {
+                        pin_panel(&chat, &split);
+                    }
+                });
             });
         }
         {
