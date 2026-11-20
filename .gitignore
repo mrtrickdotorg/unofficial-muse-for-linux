@@ -14,3 +14,8 @@ flatpak/vendor/
 flatpak/build-dir/
 flatpak/repo/
 .flatpak-builder/
+
+# The React toolchain for the web UI slice: sources and the built single-file
+# page are committed; dependencies and the multi-file Vite output are not.
+node_modules/
+apps/muse/ui/dist/

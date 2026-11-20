@@ -467,20 +467,24 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             head_row.set_valign(gtk4::Align::Center);
             head_row.append(&heading);
             let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("library-web");
             web_view.set_halign(gtk4::Align::End);
             web_view.set_hexpand(true);
+            // Insensitive until a listing exists: a window that opened on
+            // nothing would claim the library is empty when the truth is
+            // that this page has not read it yet.
+            web_view.set_sensitive(false);
             web_view.set_tooltip_text(Some(
                 "Open this Library in the web UI slice of the port (read-only)",
             ));
             if !crate::webui::available() {
-                web_view.set_sensitive(false);
                 web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
             }
             head_row.append(&web_view);
             inner.append(&head_row);
             web_view.connect_clicked(move |_| {
-                let artifacts = library_snapshot();
-                if !crate::webui::open_library_window(artifacts) {
+                let (artifacts, total) = library_snapshot();
+                if !crate::webui::open_library_window(artifacts, total) {
                     eprintln!("muse: web view unavailable in this build");
                 }
             });
@@ -2210,12 +2214,20 @@ fn active_tab(tabs: &gtk4::Box) -> String {
 thread_local! {
     static ART_STORE: std::cell::RefCell<Vec<ArtifactSummary>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The service's own total for the listing, not this page's length:
+    /// the web view must say "50 of 76", never "50 items".
+    static ART_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// The held Library rows, for the web UI slice: it renders exactly what
-/// the native page last read, never a second trip to the wire.
-pub(crate) fn library_snapshot() -> Vec<ArtifactSummary> {
-    ART_STORE.with(|store| store.borrow().clone())
+/// The held Library rows and the service's total, for the web UI slice: it
+/// renders exactly what the native page last read, never a second trip to
+/// the wire. Empty rows means the native page has not loaded yet -- the
+/// web view shows that state, never an empty library.
+pub(crate) fn library_snapshot() -> (Vec<ArtifactSummary>, u64) {
+    (
+        ART_STORE.with(|store| store.borrow().clone()),
+        ART_TOTAL.with(|total| total.get()),
+    )
 }
 
 /// Paint the library from held rows: tab bar, Spaces and Recent
@@ -2877,6 +2889,10 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
         list.append(&gtk4::Label::new(Some("Link your account first.")));
         return true;
     };
+    // Held by value so the answer closure can enable the web view's entry
+    // point once a listing exists, without borrowing the page.
+    let web_button = find_widget(page.upcast_ref(), "library-web")
+        .and_then(|widget| widget.downcast::<gtk4::Button>().ok());
     clear_list(&list);
     let loading = gtk4::Label::new(Some("Loading the library…"));
     loading.add_css_class("dim-label");
@@ -2907,6 +2923,10 @@ fn fill_library(ctx: &Ctx, page: &gtk4::Box) -> bool {
             ART_STORE.with(|store| {
                 *store.borrow_mut() = listing.artifacts.clone();
             });
+            ART_TOTAL.with(|total| total.set(listing.total_count));
+            if let Some(button) = &web_button {
+                button.set_sensitive(!listing.artifacts.is_empty() && crate::webui::available());
+            }
             paint_library(
                 &ctx_owned,
                 &list,

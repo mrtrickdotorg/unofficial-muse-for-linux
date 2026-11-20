@@ -141,17 +141,29 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the chat shell; pages keep following the system theme. Gate met: Patrick reviewed it on his seat
   and asked for the glows removed, which is in. No architecture change, no lost tests.
 - **S1 — Reference page in HTML (1–2 weeks). STARTED Nov 20, 2026.** Library is the reference page:
-  `apps/muse/src/webui.rs` renders it in a `webkit6` view inside its own window, from
-  `apps/muse/ui/{library.html,library.js,hub.css}` (`include_str!`ed, so no dev server, bundler or
-  second engine), over the rows the native page last read (`library_snapshot()`). Read-only: the
-  JS→Rust command channel is not built yet, and arrives with the first page that mutates.
+  `apps/muse/src/webui.rs` renders it in a `webkit6` view inside its own window. The page is a React
+  18 + TypeScript app under `apps/muse/ui` (Vite build, then `scripts/inline.mjs` folds CSS and JS
+  into one `built/library.html`, `include_str!`ed — no dev server, bundler or second engine at
+  runtime, and the built file is committed so a plain `cargo build` needs no Node).
+  Data comes in as a boot payload inlined into the document, so the page paints from what the native
+  page last read; `library.snapshot` then reads through `library_snapshot()`.
+  **The JS→Rust command channel is built for this page** and is the pattern the rest will copy:
+  a `UserContentManager` message handler named `muse` takes `{"id","cmd"}` and answers through
+  `window.museReply(id, reply)`; every command is logged with its name. Commands read native state
+  only, and a mutating command arrives with the first page that mutates.
   Two findings from the first run, both fixed in the same slice: WebKit's accelerated surface paints
   nothing capturable on a seat without working GL (the page forces
   `HardwareAccelerationPolicy::Never`, which is also the right default for a static local page), and
-  a load-finished probe (`JSON.stringify({cards, rows, err, text})` to stderr) is what distinguishes
-  a blank document from an empty one. Gate met for this page: 50 cards rendered from 50 rows, no JS
-  error, side by side with the native page on the same data. Still to do for S1's full gate: the
-  same page as React (today it is plain ES modules), and a DOM test suite.
+  a load-finished probe (`JSON.stringify({cards, rows, boot, err, text})` to stderr) is what
+  distinguishes a blank document from an empty one.
+  Three fixes from comparing the two pages on the same data: the web view's entry point now starts
+  insensitive and is enabled only once a listing lands, so the page cannot open claiming the library
+  is empty while the native fill is still in flight (a slow listing here took 27 s); the header
+  reads the service's own `total_count` ("50 of 127 items") instead of the page count; and the fill
+  keeps that total beside the rows for the channel to read.
+  Gate met for this page: 50 cards rendered from 50 rows, one `library.snapshot` round trip on open
+  and another on Refresh, no JS error, side by side with the native page on the same data. Still to
+  do for S1's full gate: a DOM test suite.
 - **S2 — Page migration (2–3 weeks).** Remaining read-only and settings pages, one at a time, behind
   the same GTK shell. Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
