@@ -121,11 +121,6 @@ fn message_widget(
         name.add_css_class("dim-label");
         head.append(&avatar);
         head.append(&name);
-        if let Some(time) = super::chat::format_time(*sent_at) {
-            let when = gtk4::Label::new(Some(&time));
-            when.add_css_class("dim-label");
-            head.append(&when);
-        }
         column.append(&head);
     }
 
@@ -241,6 +236,20 @@ fn message_widget(
                 column.append(&link_card(preview, &link, thumb.as_deref()));
             }
         }
+    }
+    // The web centres one quiet stamp above the reader's turn; the
+    // answer below it carries the group's own time. The stamp sits on
+    // the full-width row, never on the end-aligned bubble column.
+    if matches!(role, Role::User)
+        && let Some(time) = super::chat::format_time(*sent_at)
+    {
+        let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+        let stamp = gtk4::Label::new(Some(&time));
+        stamp.set_halign(gtk4::Align::Center);
+        stamp.add_css_class("muse-time");
+        outer.append(&stamp);
+        outer.append(&column);
+        return outer.upcast();
     }
     column.upcast()
 }
