@@ -1,13 +1,15 @@
 # Web UI slice (React)
 
-The first page of the Tauri/React migration, rendered by the app's own
-WebKitGTK view. Sources live here; `built/library.html` is the artifact the
-Rust side includes with `include_str!`.
+The pages of the Tauri/React migration so far, rendered by the app's own
+WebKitGTK view: **Library** (the reference page) and **Goals**. Sources live
+here; `built/app.html` is the artifact the Rust side includes with
+`include_str!`. One bundle serves every window — the boot payload names the
+page it opens.
 
 ```sh
 cd apps/muse/ui
 npm install          # once
-npm run build        # tsc --noEmit && vite build && inline into built/library.html
+npm run build        # tsc --noEmit && vite build && inline into built/app.html
 ```
 
 `scripts/inline.mjs` folds the Vite output into one HTML file because the page
@@ -15,12 +17,12 @@ is handed to WebKit with `load_html()` — a `<script src>` or `<link href>`
 would resolve against `about:blank` and fail. There is no dev server and no
 second browser engine in the bundle.
 
-`built/library.html` is committed so a plain `cargo build` (and the AppImage
+`built/app.html` is committed so a plain `cargo build` (and the AppImage
 container) needs no Node toolchain. Rebuild it whenever `src/` changes; the
 `Web UI` CI job rebuilds it and fails if the committed copy differs.
 
 ```sh
-npm test             # the page's DOM tests (vitest + jsdom)
+npm test             # the pages' DOM tests (vitest + jsdom)
 ```
 
 The page talks to Rust through `window.webkit.messageHandlers.muse`: each call
@@ -32,8 +34,17 @@ command arrives with the first page that mutates.
 | --- | --- | --- |
 | `library.snapshot` | none — the rows the native page holds | opening the page |
 | `library.refresh` | one listing read on a worker thread | the Refresh button |
+| `goals.snapshot` | none — the roster and Tracking rows the native page holds | opening the page |
+| `goals.refresh` | one roster read plus one Tracking read on a worker thread | the Refresh button |
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
-listing is why it waits: the page allows 120 s for that call. A reply of
+listing is why it waits: the pages allow 120 s for that call. The native reply
+is collected by a 100 ms timer on the main loop, not an idle handler, so a
+27 s listing costs a handful of wakeups instead of a core. A reply of
 `{"ok":false,"error":…}` reaches the page as a failure banner, and the rows
 already on screen stay.
+
+`goals.refresh` answers the roster and the Tracking section together, the way
+the native fill reads both under one page ticket. If only Tracking fails, the
+roster still arrives and the reply carries `tracking_error`, so the page says
+that section could not be read instead of showing it empty.

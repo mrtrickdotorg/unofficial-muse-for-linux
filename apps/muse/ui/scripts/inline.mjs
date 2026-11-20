@@ -1,7 +1,7 @@
 // Fold the Vite build into one HTML file: the app is handed to WebKit with
 // load_html(), so a <script src> or <link href> would resolve against
-// about:blank and fail. Output is apps/muse/ui/built/library.html, which the
-// Rust side includes verbatim.
+// about:blank and fail. Output is apps/muse/ui/built/app.html, which the
+// Rust side includes verbatim; one bundle serves every page window.
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,5 +33,5 @@ if (/<script[^>]+src=|<link[^>]+href=/.test(html)) {
 
 const out = join(root, "built");
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, "library.html"), html);
-console.log("inline: built/library.html " + statSync(join(out, "library.html")).size + " bytes");
+writeFileSync(join(out, "app.html"), html);
+console.log("inline: built/app.html " + statSync(join(out, "app.html")).size + " bytes");

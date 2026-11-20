@@ -1,9 +1,10 @@
 # Porting the client to Rust + Tauri + React: analysis and staging plan
 
-**Status: S0 shipped, S1 begun (Nov 20, 2026).** The decision was made to continue toward the
-Tauri/React end state. Stage S0 (the palette lift) is in the tree, and S1's first page — Library,
-read-only, in the existing WebKitGTK view with real rows — is implemented and verified on this
-seat. Everything below the stage list is the analysis that produced the plan.
+**Status: S0 shipped, S1 gate met, S2 started (Nov 20, 2026).** The decision was made to continue
+toward the Tauri/React end state. Stage S0 (the palette lift) is in the tree; S1's reference page —
+Library, read-only, in the existing WebKitGTK view with real rows — is implemented and verified on
+this seat; S2 has its first page, Goals, on the same contract. Everything below the stage list is
+the analysis that produced the plan.
 
 _Nov 20, 2026. Evidence: the inventory below is read from this tree at `3e652e1`; the Kyth Hub
 comparison is read from `kyth/src/kyth-hub-web` (Tauri 2.11, React 18, `gtk 0.18.2` /
@@ -143,7 +144,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
 - **S1 — Reference page in HTML (1–2 weeks). STARTED Nov 20, 2026.** Library is the reference page:
   `apps/muse/src/webui.rs` renders it in a `webkit6` view inside its own window. The page is a React
   18 + TypeScript app under `apps/muse/ui` (Vite build, then `scripts/inline.mjs` folds CSS and JS
-  into one `built/library.html`, `include_str!`ed — no dev server, bundler or second engine at
+  into one `built/app.html`, `include_str!`ed — no dev server, bundler or second engine at
   runtime, and the built file is committed so a plain `cargo build` needs no Node).
   Data comes in as a boot payload inlined into the document, so the page paints from what the native
   page last read; `library.snapshot` then reads through `library_snapshot()`.
@@ -169,10 +170,21 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   Refresh, no JS error, side by side with the native page on the same data -- and a DOM suite of six
   tests (`apps/muse/ui/src/Library.test.tsx`, vitest + jsdom) that checks the boot rows and total,
   the not-loaded state, the wire refresh, a refused refresh, tab+search filtering, and an empty
-  filter result. The `Web UI` CI job runs them and fails if the committed `built/library.html`
+  filter result. The `Web UI` CI job runs them and fails if the committed `built/app.html`
   differs from a fresh build.
-- **S2 — Page migration (2–3 weeks).** Remaining read-only and settings pages, one at a time, behind
-  the same GTK shell. Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
+- **S2 — Page migration (2–3 weeks). IN PROGRESS: Goals is the second page (Nov 20, 2026).**
+  Remaining read-only and settings pages, one at a time, behind the same GTK shell. Goals copies
+  S1's contract: `open_goals_window` renders a boot payload of the roster and the Tracking section
+  the native fill last held; `goals.snapshot` answers from those held rows, `goals.refresh` reads
+  both listings from the service on one worker thread and updates the cache. A Tracking read that
+  fails travels as `tracking_error` with the roster, so the page never reports an unread section as
+  an empty one. The page mirrors the native roster: one screenful of Tracking with an in-place
+  "Show more", category filters built only from categories in hand, group headers where the group
+  changes, the service's completion state on a disabled box, and the same 240-character body
+  clamp. Two changes came with it: the reply wait is a 100 ms timer instead of an idle handler
+  (an idle poll spins a core for the whole of a slow listing), and the bundle is now shared by both
+  pages (`built/app.html`, the boot payload names the page), so S3's pages need no second artifact.
+  Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote
   staging and unread badges behave identically under the same manual script.

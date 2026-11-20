@@ -398,6 +398,35 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 let create = gtk4::Button::with_label("＋ Create a goal");
                 create.add_css_class("muse-cta");
                 head_row.append(&create);
+                // The second page of the web UI port, beside the native
+                // one: the same roster and Tracking rows, so the two can
+                // be compared on the same data. Insensitive until a fill
+                // lands, for the same reason the Library's is: a window
+                // opened on nothing would claim the page is empty.
+                let web_view = gtk4::Button::with_label("Web view");
+                web_view.set_widget_name("goals-web");
+                web_view.set_valign(gtk4::Align::Center);
+                web_view.set_sensitive(false);
+                web_view.set_tooltip_text(Some(
+                    "Open these Goals in the web UI slice of the port (read-only)",
+                ));
+                if !crate::webui::available() {
+                    web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+                }
+                head_row.append(&web_view);
+                {
+                    // The weak chat is resolved per press: the window opens
+                    // late enough that the account link is settled, and the
+                    // snapshot is the rows the native fill last held.
+                    let chat = ctx.chat.clone();
+                    web_view.connect_clicked(move |_| {
+                        let held = goals_snapshot();
+                        let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                        if !crate::webui::open_goals_window(held, client) {
+                            eprintln!("muse: web view unavailable in this build");
+                        }
+                    });
+                }
                 inner.append(&head_row);
                 {
                     let ctx = ctx.clone();
@@ -2241,6 +2270,37 @@ pub(crate) fn library_snapshot() -> (Vec<ArtifactSummary>, u64) {
 pub(crate) fn library_cache(artifacts: Vec<ArtifactSummary>, total: u64) {
     ART_STORE.with(|store| *store.borrow_mut() = artifacts);
     ART_TOTAL.with(|total_cell| total_cell.set(total));
+}
+
+/// The Goals page as the web view opens it: the roster and the Tracking
+/// section from the last fill, the service's own totals, and the Tracking
+/// failure when that section could not be read -- so an unread section is
+/// never shown as an empty one.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldGoals {
+    pub goals: Vec<ListingItem>,
+    pub goals_total: u64,
+    pub tracking: Vec<ListingItem>,
+    pub tracking_total: u64,
+    pub tracking_error: Option<String>,
+}
+
+thread_local! {
+    static GOAL_STORE: std::cell::RefCell<HeldGoals> =
+        std::cell::RefCell::new(HeldGoals::default());
+}
+
+/// The held Goals rows, for the web UI slice: never a second trip to the
+/// wire, and empty rows mean the native page has not loaded yet.
+pub(crate) fn goals_snapshot() -> HeldGoals {
+    GOAL_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held Goals rows with a listing the web view read over the
+/// wire, so the native page, the boot payload and the channel agree
+/// afterwards. Called on the main loop, from the thread's answer.
+pub(crate) fn goals_cache(held: HeldGoals) {
+    GOAL_STORE.with(|store| *store.borrow_mut() = held);
 }
 
 /// Paint the library from held rows: tab bar, Spaces and Recent
@@ -5407,6 +5467,20 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
                         );
                     });
                     paint_roster(&ctx_owned, &list, "goals", &listing.items, &heroes, None);
+                    // The web view opens on exactly these rows, and its
+                    // entry point stays off until some exist. A failed
+                    // roster is not cached: the page keeps what it has.
+                    GOAL_STORE.with(|store| {
+                        let mut held = store.borrow_mut();
+                        held.goals = listing.items.clone();
+                        held.goals_total = listing.total;
+                    });
+                    if let Some(button) = find_widget(page_owned.upcast_ref(), "goals-web")
+                        .and_then(|widget| widget.downcast::<gtk4::Button>().ok())
+                    {
+                        button
+                            .set_sensitive(!listing.items.is_empty() && crate::webui::available());
+                    }
                     let cached = heroes.iter().filter(|hero| hero.is_some()).count();
                     fill_log(
                         "goals",
@@ -5427,6 +5501,14 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
                         &format!("section=tracking error=\"{error}\""),
                     );
                     listing_failure(&tracking, "Goals tracking", &error);
+                    // The web view reports the same failure instead of
+                    // reading an unread section as "nothing is tracked".
+                    GOAL_STORE.with(|store| {
+                        let mut held = store.borrow_mut();
+                        held.tracking.clear();
+                        held.tracking_total = 0;
+                        held.tracking_error = Some(error.to_string());
+                    });
                 }
                 Ok(listing) => {
                     IDEA_STORE.with(|store| {
@@ -5439,6 +5521,12 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
                         );
                     });
                     paint_tracking(&ctx_owned, &tracking, &page_owned, &listing.items, 10);
+                    GOAL_STORE.with(|store| {
+                        let mut held = store.borrow_mut();
+                        held.tracking = listing.items.clone();
+                        held.tracking_total = listing.total;
+                        held.tracking_error = None;
+                    });
                     fill_log(
                         "goals",
                         "painted",

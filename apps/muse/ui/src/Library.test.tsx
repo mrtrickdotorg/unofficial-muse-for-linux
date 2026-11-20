@@ -3,7 +3,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Library } from "./Library";
-import type { Artifact, Snapshot } from "./types";
+import { installChannel } from "./testChannel";
+import type { Artifact } from "./types";
 
 const artifact = (overrides: Partial<Artifact>): Artifact => ({
   artifact_ref: "ref",
@@ -26,29 +27,7 @@ function rows(count: number, prefix: string, extra: Partial<Artifact> = {}): Art
   );
 }
 
-type Reply = Partial<Snapshot> & { ok?: boolean; error?: string };
-
-/// Stand in for the WebKit message handler: record every command and answer
-/// it the way the native side would, through window.museReply.
-function installChannel(answer: (command: string) => Reply): string[] {
-  const commands: string[] = [];
-  const reply = (window as unknown as {
-    museReply?: (id: number, body: unknown) => void;
-  }).museReply;
-  (window as unknown as { webkit?: unknown }).webkit = {
-    messageHandlers: {
-      muse: {
-        postMessage(body: string) {
-          const { id, cmd } = JSON.parse(body) as { id: number; cmd: string };
-          commands.push(cmd);
-          const answerFor = answer(cmd);
-          setTimeout(() => reply?.(id, answerFor), 0);
-        },
-      },
-    },
-  };
-  return commands;
-}
+type Reply = Record<string, unknown>;
 
 const cards = () => document.querySelectorAll(".card").length;
 
