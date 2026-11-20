@@ -11,6 +11,21 @@
 
 use std::rc::Rc;
 
+use gtk4::glib::object::IsA;
+use gtk4::prelude::*;
+
+/// Name a control for assistive tech. Icon-only buttons carry no text
+/// for a screen reader, so the name is set explicitly; the tooltip
+/// says the same words to a pointer reader, and setting both here is
+/// what keeps the two from drifting apart.
+pub fn describe<W>(control: &W, text: &str)
+where
+    W: IsA<gtk4::Widget> + IsA<gtk4::Accessible>,
+{
+    control.set_tooltip_text(Some(text));
+    control.update_property(&[gtk4::accessible::Property::Label(text)]);
+}
+
 /// A measured pixel height out of a JS evaluation answer. The
 /// answer's string form varies (bare digits, quoted strings), so this
 /// keeps only the number instead of trusting one shape; `None` logs

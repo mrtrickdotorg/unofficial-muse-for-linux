@@ -298,16 +298,19 @@ fn show_main(split: &adw::OverlaySplitView) {
     let tools = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     let search_button = gtk4::Button::with_label("🔍");
     search_button.add_css_class("flat");
-    search_button.set_tooltip_text(Some("Search"));
+    widget::describe(&search_button, "Search");
     let new_button = gtk4::Button::with_label("✎");
     new_button.add_css_class("flat");
-    new_button.set_tooltip_text(Some("New chat"));
+    widget::describe(&new_button, "New chat");
     tools.append(&search_button);
     tools.append(&new_button);
     side.append(&tools);
     let sidebar = gtk4::ListBox::new();
     for name in pages::PAGES {
         let row = gtk4::ListBoxRow::new();
+        // A row is a Tab stop: the keyboard reaches the page list, and
+        // the arrow keys move down it without opening anything.
+        row.set_focusable(true);
         let label = gtk4::Label::new(Some(pages::title(name)));
         label.set_halign(gtk4::Align::Start);
         row.set_child(Some(&label));
@@ -340,7 +343,7 @@ fn show_main(split: &adw::OverlaySplitView) {
     profile_name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     let gear = gtk4::Button::with_label("⚙");
     gear.add_css_class("flat");
-    gear.set_tooltip_text(Some("Settings"));
+    widget::describe(&gear, "Settings");
     profile.append(&avatar);
     profile.append(&profile_name);
     profile.append(&gear);
@@ -368,7 +371,7 @@ fn show_main(split: &adw::OverlaySplitView) {
         let button = gtk4::Button::new();
         button.set_child(Some(&image));
         button.add_css_class("muse-rail-button");
-        button.set_tooltip_text(Some(tooltip));
+        widget::describe(&button, tooltip);
         button
     }
     let rail = gtk4::Box::new(gtk4::Orientation::Vertical, 28);
@@ -467,8 +470,10 @@ fn show_main(split: &adw::OverlaySplitView) {
     };
     let ctx = Rc::new(ctx);
     let nav_ctx = ctx.clone();
-    sidebar.connect_row_selected(move |_, row| {
-        let Some(row) = row else { return };
+    // A page opens on activation — Return, Space or a press — not on
+    // selection: browsing the list with the arrow keys would otherwise
+    // swap the page at every step.
+    sidebar.connect_row_activated(move |_, row| {
         let index = row.index();
         if let Some(name) = pages::PAGES.get(index as usize) {
             pages::show(&nav_ctx, name);
@@ -478,14 +483,9 @@ fn show_main(split: &adw::OverlaySplitView) {
     // does: the row name carries the id, a `None` row would mean new.
     {
         let ctx = ctx.clone();
-        history.connect_row_selected(move |list, row| {
-            let Some(row) = row else { return };
-            // The refill's own mark echoes through this same signal;
-            // only a reader press opens anything.
-            let marking = pages::MARKING_HISTORY.with(|marking| marking.get());
-            if marking {
-                return;
-            }
+        // Activation opens a thread, selection does not: the arrow
+        // keys walk History without yanking the reader into a thread.
+        history.connect_row_activated(move |list, row| {
             let name = row.widget_name();
             let Some(id) = name.as_str().strip_prefix("thread:") else {
                 return;

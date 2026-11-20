@@ -7,6 +7,7 @@
 //! until then the live app does not reference them yet.
 #![allow(dead_code)]
 
+use super::widget::describe;
 use adw::prelude::*;
 
 /// One pasted picture waiting to send. The bytes ride the
@@ -307,7 +308,7 @@ impl ComposerRow {
         let attach = gtk4::Button::with_label("+");
         attach.set_valign(gtk4::Align::Start);
         attach.add_css_class("muse-circle");
-        attach.set_tooltip_text(Some("Paste a picture from the clipboard"));
+        describe(&attach, "Paste a picture from the clipboard");
         // A growing multi-line input under an "Ask Meta AI…" overlay,
         // one line tall at rest, scrolling past six.
         let input = gtk4::TextView::new();
@@ -333,11 +334,11 @@ impl ComposerRow {
         let send = gtk4::Button::with_label("↑");
         send.set_valign(gtk4::Align::End);
         send.add_css_class("muse-send");
-        send.set_tooltip_text(Some("Send"));
+        describe(&send, "Send");
         let stop = gtk4::Button::with_label("■");
         stop.set_valign(gtk4::Align::End);
         stop.add_css_class("muse-circle");
-        stop.set_tooltip_text(Some("Stop"));
+        describe(&stop, "Stop");
         stop.set_sensitive(false);
         stop.set_visible(false);
         // Thinking is the service's own model picker in a pill face:
@@ -345,13 +346,13 @@ impl ComposerRow {
         let thinking = gtk4::ComboBoxText::new();
         thinking.set_valign(gtk4::Align::End);
         thinking.add_css_class("muse-pill");
-        thinking.set_tooltip_text(Some("Thinking mode"));
+        describe(&thinking, "Thinking mode");
         // Voice dictation: records the microphone, then asks the
         // service what it heard. The pill is real on both legs.
         let mic = gtk4::Button::with_label("🎤");
         mic.set_valign(gtk4::Align::End);
         mic.add_css_class("muse-circle");
-        mic.set_tooltip_text(Some("Dictate"));
+        describe(&mic, "Dictate");
         card.append(&attach);
         card.append(&overlay);
         card.append(&thinking);
@@ -370,7 +371,7 @@ impl ComposerRow {
         reply_label.add_css_class("dim-label");
         let reply_cancel = gtk4::Button::with_label("×");
         reply_cancel.add_css_class("flat");
-        reply_cancel.set_tooltip_text(Some("Cancel reply"));
+        describe(&reply_cancel, "Cancel reply");
         reply_bar.append(&reply_label);
         reply_bar.append(&reply_cancel);
         reply_bar.set_visible(false);

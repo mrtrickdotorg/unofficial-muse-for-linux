@@ -7,6 +7,7 @@
 //! until then the live app does not reference them yet.
 #![allow(dead_code)]
 
+use super::widget::describe;
 use adw::prelude::*;
 use muse_account::MessageAttachment;
 
@@ -152,7 +153,7 @@ fn message_widget(
         if is_assistant {
             let copy = gtk4::Button::with_label("Copy");
             copy.add_css_class("flat");
-            copy.set_tooltip_text(Some("Copy response"));
+            describe(&copy, "Copy response");
             let text = text.to_string();
             copy.connect_clicked(move |button| {
                 button.clipboard().set_text(&text);
@@ -164,7 +165,7 @@ fn message_widget(
             // the row itself carries no reaction display to go stale.
             let react = gtk4::Button::with_label("❤");
             react.add_css_class("flat");
-            react.set_tooltip_text(Some("React to this message"));
+            describe(&react, "React to this message");
             {
                 let react_on = on_react.clone();
                 let id: String = (*id).into();
@@ -176,7 +177,7 @@ fn message_widget(
         }
         let reply = gtk4::Button::with_label("Reply");
         reply.add_css_class("flat");
-        reply.set_tooltip_text(Some("Reply to this message"));
+        describe(&reply, "Reply to this message");
         {
             let reply_on = on_reply.clone();
             let id: String = (*id).into();
