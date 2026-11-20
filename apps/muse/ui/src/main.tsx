@@ -14,6 +14,7 @@ import { Goals } from "./Goals";
 import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
+import { Threads } from "./Threads";
 import "./hub.css";
 
 // One bundle, one window per page: the boot payload names which page this
@@ -27,7 +28,9 @@ const page =
       ? "tasks"
       : boot && "ideas" in boot
         ? "ideas"
-        : "library");
+        : boot && "threads" in boot
+          ? "threads"
+          : "library");
 
 const mount = document.getElementById("root");
 if (mount) {
@@ -38,6 +41,8 @@ if (mount) {
       <Tasks />
     ) : page === "ideas" ? (
       <Ideas />
+    ) : page === "threads" ? (
+      <Threads />
     ) : (
       <Library />
     ),

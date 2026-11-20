@@ -163,6 +163,40 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
     inner.set_margin_top(12);
     match name {
         "threads" => {
+            // The fifth page of the web UI port, beside the native one:
+            // the same rows, groups and side-chat split. Insensitive until
+            // the native fill has a listing, so a window cannot open
+            // claiming the account has no threads.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let heading = gtk4::Label::new(Some("Threads"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            heading.set_hexpand(true);
+            head_row.append(&heading);
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("threads-web");
+            web_view.set_valign(gtk4::Align::Center);
+            web_view.set_sensitive(false);
+            web_view.set_tooltip_text(Some(
+                "Open these Threads in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            {
+                // Resolved per press: the snapshot is the rows the native
+                // fill last held.
+                let chat = ctx.chat.clone();
+                web_view.connect_clicked(move |_| {
+                    let held = threads_snapshot();
+                    let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                    if !crate::webui::open_threads_window(held, client) {
+                        eprintln!("muse: web view unavailable in this build");
+                    }
+                });
+            }
+            inner.append(&head_row);
             let list = gtk4::ListBox::new();
             list.set_widget_name("threads-list");
             inner.append(&list);
@@ -2434,6 +2468,82 @@ pub(crate) fn ideas_cache(held: HeldIdeas) {
     IDEAS_STORE.with(|store| *store.borrow_mut() = held);
 }
 
+/// One Threads row as the web view shows it. The group header, the
+/// snippet-and-clock line, the pin order and the side-chat split are all
+/// computed here by the helpers the native rows use, so the web page cannot
+/// word a row differently from the list beside it.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct ThreadRow {
+    pub id: String,
+    pub title: String,
+    /// The listing's snippet and its clock time, or empty when it named
+    /// neither; the day itself lives in the group header.
+    pub meta: String,
+    pub group: String,
+    pub unread: u64,
+    pub pinned: bool,
+    /// A side chat files under its own header instead of a day group.
+    pub side: bool,
+}
+
+/// The Threads page as the web view opens it. `loaded` separates an account
+/// with no conversations from a page that has not read the listing yet.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldThreads {
+    pub threads: Vec<ThreadRow>,
+    pub total: u64,
+    pub loaded: bool,
+    /// The last read's failure, kept beside whatever rows are held.
+    pub error: Option<String>,
+}
+
+thread_local! {
+    static THREAD_STORE: std::cell::RefCell<HeldThreads> =
+        std::cell::RefCell::new(HeldThreads::default());
+}
+
+/// The held Threads rows, for the web UI slice: never a second trip to the
+/// wire.
+pub(crate) fn threads_snapshot() -> HeldThreads {
+    THREAD_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held Threads rows with a listing the native paint or a wire
+/// read produced, so the page, the boot payload and the channel agree.
+pub(crate) fn threads_cache(held: HeldThreads) {
+    THREAD_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// Project a thread listing into the page's rows: pinned first (the listing's
+/// own order inside each half), day groups for the main list, side chats
+/// apart. `today` is the caller's, so the labels are testable.
+pub(crate) fn held_threads_from(threads: &[muse_account::Thread], today: &str) -> HeldThreads {
+    let mut rows: Vec<ThreadRow> = threads
+        .iter()
+        .map(|thread| ThreadRow {
+            id: thread.session_id.clone(),
+            title: if thread.title.is_empty() {
+                "(untitled)".to_owned()
+            } else {
+                thread.title.clone()
+            },
+            meta: thread_meta(thread.snippet.as_deref(), thread.updated_at.as_deref()),
+            group: thread_group_label(thread.updated_at.as_deref(), today),
+            unread: thread.unread_count,
+            pinned: thread.pinned,
+            side: !thread.is_primary,
+        })
+        .collect();
+    // Stable: a pinned row keeps the listing's order among its peers.
+    rows.sort_by_key(|row| !row.pinned);
+    HeldThreads {
+        total: rows.len() as u64,
+        threads: rows,
+        loaded: true,
+        error: None,
+    }
+}
+
 /// One Tasks row as the web view shows it: the native page's own words, so
 /// the two renderers cannot drift on state, status or due wording.
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -3584,11 +3694,18 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) -> bool {
         return true;
     };
     let mut threads = chat.threads();
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
+    // The web slice opens on exactly these rows: one cache fill per paint,
+    // built by the same helpers that word the native rows, so the two
+    // renderers cannot drift on groups, clock times or pin order.
+    threads_cache(held_threads_from(&threads, &super::app::local_today()));
+    if let Some(button) = named_button(page, "threads-web") {
+        button.set_sensitive(!threads.is_empty() && crate::webui::available());
+    }
     if threads.is_empty() {
         list.append(&gtk4::Label::new(Some("No threads yet.")));
         return true;
     }
-    threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
     let (side, main) = split_side_chats(threads);
     // Pinned threads keep their pride of place above the day groups;
     // the rest file under Today / Yesterday / date / Earlier headers.
