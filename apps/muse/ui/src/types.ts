@@ -48,6 +48,35 @@ export type IdeasSnapshot = {
   error?: string | null;
 };
 
+// One Feed card: the native page's own meta line, relative time, action
+// label and graphic rule. `widget_html` is service markup for the card's
+// frame; `widget_text` is the extracted text the native page falls back to.
+export type FeedCard = {
+  id: string;
+  icon: string;
+  meta: string;
+  title: string;
+  when: string;
+  body: string;
+  action: string;
+  why: string;
+  image_url: string;
+  widget_html: string;
+  widget_text: string;
+  live: boolean;
+};
+
+// The feed as the web view opens it: the generating prompt, the service's
+// generation line, and the cards.
+export type FeedSnapshot = {
+  cards: FeedCard[];
+  prompt: string;
+  status: string;
+  total: number;
+  loaded: boolean;
+  error?: string | null;
+};
+
 // One Threads row: the group header, the snippet-and-clock line and the
 // side/pin flags are computed natively, so the page cannot word a row
 // differently from the list beside it.
@@ -89,4 +118,5 @@ export type Boot =
   | (GoalsSnapshot & { page?: "goals" })
   | (TasksSnapshot & { page?: "tasks" })
   | (IdeasSnapshot & { page?: "ideas" })
-  | (ThreadsSnapshot & { page?: "threads" });
+  | (ThreadsSnapshot & { page?: "threads" })
+  | (FeedSnapshot & { page?: "feed" });

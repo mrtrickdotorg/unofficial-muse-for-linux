@@ -356,3 +356,127 @@ html, body {
   color: #f7768e;
   font-size: 12.5px;
 }
+
+/* Feed: the prompt card, the generation line, then the unit cards in the
+ * native order -- meta, icon/title/time, body, hero, graphic. */
+.feed-prompt {
+  margin: 0 0 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-card);
+  background: var(--card-gradient);
+}
+
+.feed-prompt-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+}
+
+.feed-prompt-text {
+  margin: 6px 0 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.feed-status {
+  margin: 0 0 14px;
+  color: var(--accent);
+  font-size: 12.5px;
+}
+
+.feed-cards { display: grid; gap: 14px; }
+
+.feed-card {
+  padding: 16px 18px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-card);
+  background: var(--card-gradient);
+  display: grid;
+  gap: 10px;
+}
+
+.feed-meta {
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
+.feed-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.feed-icon { flex: none; font-size: 15px; }
+
+.feed-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.feed-when {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.feed-body {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.feed-hero {
+  display: block;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+
+.feed-hero.pending { min-height: 0; }
+
+.feed-graphic {
+  width: 100%;
+  border-radius: var(--radius-sm);
+  /* The service's widgets are authored for a light page. */
+  background: #ffffff;
+  color: #14161a;
+  color-scheme: light;
+  overflow: hidden;
+}
+
+.feed-graphic-text {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+
+.feed-action {
+  justify-self: start;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-tint);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.feed-why {
+  color: var(--text-faint);
+  font-size: 12px;
+  border-top: 1px solid var(--hairline);
+  padding-top: 8px;
+}
+
+.feed-body a { color: var(--accent); }
