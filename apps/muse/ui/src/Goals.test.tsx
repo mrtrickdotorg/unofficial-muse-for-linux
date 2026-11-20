@@ -172,4 +172,35 @@ describe("the Goals web page", () => {
     expect(screen.queryByText("Nothing is being tracked right now.")).toBeNull();
     expect(screen.getByText("Kept goal")).toBeInTheDocument();
   });
+
+  it("keeps the held Tracking rows when a refresh cannot read them", async () => {
+    const tracked = [goal({ id: "t1", title: "Held tracking" })];
+    window.__MUSE_BOOT__ = bootPayload([goal({ id: "g1", title: "Kept goal" })], tracked);
+    installChannel((command) =>
+      command === "goals.refresh"
+        ? {
+            ok: true,
+            ...bootPayload([goal({ id: "g2", title: "Fresh goal" })], tracked, {
+              tracking_error: "tracking read timed out",
+            }),
+          }
+        : {
+            ok: true,
+            ...bootPayload([goal({ id: "g1", title: "Kept goal" })], tracked),
+          },
+    );
+
+    render(<Goals />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(
+      await screen.findByText("Tracking failed: tracking read timed out"),
+    ).toBeInTheDocument();
+    // The failure is beside rows that are still shown, not instead of them.
+    expect(screen.getByText("Held tracking")).toBeInTheDocument();
+    expect(screen.getByText("Fresh goal")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/The Tracking section could not be read/),
+    ).toBeNull();
+  });
 });

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::HeldGoals;
+use crate::pages::{HeldGoals, HeldTasks};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -68,10 +68,34 @@ fn goals_document(held: &HeldGoals) -> String {
     }))
 }
 
+/// The Tasks rows, shaped once for both the boot payload and the reply.
+fn tasks_payload(held: &HeldTasks) -> serde_json::Value {
+    serde_json::json!({
+        "schedules": held.schedules,
+        "runs": held.runs,
+        "local": held.local,
+        "loaded": held.loaded,
+        "error": held.error,
+    })
+}
+
+fn tasks_document(held: &HeldTasks) -> String {
+    let mut boot = tasks_payload(held);
+    boot["page"] = serde_json::json!("tasks");
+    document(&boot)
+}
+
+fn tasks_reply(held: &HeldTasks) -> serde_json::Value {
+    let mut reply = tasks_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
 /// What a fresh wire read produced off the main loop.
 enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
-    Goals(HeldGoals, Option<String>),
+    Goals(HeldGoals),
+    Tasks(HeldTasks),
     Failed(String),
 }
 
@@ -92,6 +116,24 @@ fn fresh_listing(client: Option<AccountClient>) -> Receiver<Fetched> {
             None => Fetched::Failed("no account link in this app".into()),
             Some(client) => match client.artifacts() {
                 Ok(listing) => Fetched::Rows(listing.artifacts, listing.total_count),
+                Err(error) => Fetched::Failed(error.to_string()),
+            },
+        };
+        let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// Read the Tasks page from the service on a worker thread. The rows keep
+/// the native page's wording; the local reminders are local state and are
+/// merged in on the main loop.
+fn fresh_tasks(client: Option<AccountClient>) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = match client {
+            None => Fetched::Failed("no account link in this app".into()),
+            Some(client) => match client.tasks() {
+                Ok(snapshot) => Fetched::Tasks(crate::pages::held_tasks_from(&snapshot)),
                 Err(error) => Fetched::Failed(error.to_string()),
             },
         };
@@ -128,8 +170,7 @@ fn fresh_goals(client: Option<AccountClient>) -> Receiver<Fetched> {
                             tracking_error: Some(error.to_string()),
                         },
                     };
-                    let tracking_error = held.tracking_error.clone();
-                    Fetched::Goals(held, tracking_error)
+                    Fetched::Goals(held)
                 }
             },
         };
@@ -173,6 +214,13 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
             }))
         }
         "goals.refresh" => Answer::Later(fresh_goals(client)),
+        "tasks.snapshot" => {
+            // Local reminders cost no wire trip, and a page open should see
+            // the store as it is now rather than as of the last fill.
+            crate::pages::tasks_local_refresh();
+            Answer::Now(tasks_reply(&crate::pages::tasks_snapshot()))
+        }
+        "tasks.refresh" => Answer::Later(fresh_tasks(client)),
         other => Answer::Now(
             serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
         ),
@@ -195,7 +243,15 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
             );
             serde_json::json!({ "ok": true, "artifacts": artifacts, "total": total })
         }
-        Fetched::Goals(held, tracking_error) => {
+        Fetched::Goals(mut held) => {
+            // A failed Tracking read must not empty a section that is merely
+            // stale: the rows the native page still shows stay in the cache
+            // and in the reply, with the failure beside them.
+            if held.tracking_error.is_some() && held.tracking.is_empty() {
+                let previous = crate::pages::goals_snapshot();
+                held.tracking = previous.tracking;
+                held.tracking_total = previous.tracking_total;
+            }
             crate::pages::goals_cache(held.clone());
             eprintln!(
                 "muse webui: {command} read the service: goals={} goals_total={} \
@@ -212,8 +268,23 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
                 "goals_total": held.goals_total,
                 "tracking": held.tracking,
                 "tracking_total": held.tracking_total,
-                "tracking_error": tracking_error,
+                "tracking_error": held.tracking_error,
             })
+        }
+        Fetched::Tasks(held) => {
+            crate::pages::tasks_cache(held);
+            // Local reminders are local state: the worker did not read them,
+            // so they are re-read here, on the main loop.
+            crate::pages::tasks_local_refresh();
+            let held = crate::pages::tasks_snapshot();
+            eprintln!(
+                "muse webui: {command} read the service: schedules={} runs={} local={} ms={}",
+                held.schedules.len(),
+                held.runs.len(),
+                held.local.len(),
+                started.elapsed().as_millis()
+            );
+            tasks_reply(&held)
         }
         Fetched::Failed(error) => {
             eprintln!("muse webui: {command} failed: {error}");
@@ -381,6 +452,11 @@ const GOALS_PROBE: &str = "JSON.stringify({rows: (window.__MUSE_ROWS__ || 0), \
      err: window.__MUSE_ERR__ || '', \
      text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
 
+const TASKS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.task').length, \
+     boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.schedules || []).length, \
+     err: window.__MUSE_ERR__ || '', \
+     text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
 /// Open the Library page in its own window, on the rows the native page last
 /// read.
 pub(crate) fn open_library_window(
@@ -404,6 +480,17 @@ pub(crate) fn open_goals_window(held: HeldGoals, client: Option<AccountClient>) 
         goals_document(&held),
         client,
         GOALS_PROBE,
+    )
+}
+
+/// Open the Tasks page in its own window, on the schedules, runs and local
+/// reminders the native page last read.
+pub(crate) fn open_tasks_window(held: HeldTasks, client: Option<AccountClient>) -> bool {
+    open_window(
+        "Tasks · web view",
+        tasks_document(&held),
+        client,
+        TASKS_PROBE,
     )
 }
 
@@ -437,6 +524,13 @@ mod tests {
             body: body.map(str::to_owned),
             kind: kind.map(str::to_owned),
             ..ListingItem::default()
+        }
+    }
+
+    fn task_row(id: &str, label: &str) -> crate::pages::TaskRow {
+        crate::pages::TaskRow {
+            id: id.into(),
+            label: label.into(),
         }
     }
 
@@ -603,6 +697,7 @@ mod tests {
             }
             Fetched::Failed(error) => panic!("the host answered: {error}"),
             Fetched::Goals(..) => panic!("a library read must not answer with goals"),
+            Fetched::Tasks(..) => panic!("a library read must not answer with tasks"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -624,6 +719,7 @@ mod tests {
             Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
             Fetched::Rows(..) => panic!("no client, no rows"),
             Fetched::Goals(..) => panic!("no client, no goals"),
+            Fetched::Tasks(..) => panic!("no client, no tasks"),
         }
     }
 
@@ -696,20 +792,16 @@ mod tests {
         let fetched = receiver
             .recv_timeout(Duration::from_secs(10))
             .expect("the worker answers");
-        let Fetched::Goals(rows, tracking_error) = fetched else {
+        let Fetched::Goals(rows) = fetched else {
             panic!("the host answered with something else");
         };
         assert_eq!(rows.goals[0].title, "Read from the service");
         assert_eq!(rows.goals_total, 40);
         assert_eq!(rows.tracking[0].title, "Tracked from the service");
         assert_eq!(rows.tracking_total, 3);
-        assert!(tracking_error.is_none());
+        assert!(rows.tracking_error.is_none());
 
-        let reply = reply_for(
-            Fetched::Goals(rows, tracking_error),
-            &command,
-            Instant::now(),
-        );
+        let reply = reply_for(Fetched::Goals(rows), &command, Instant::now());
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["goals_total"], 40);
         let cached = crate::pages::goals_snapshot();
@@ -753,6 +845,189 @@ mod tests {
         );
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error"], "no account link in this app");
+    }
+
+    /// One failed Tracking read must not empty a section the native page
+    /// still shows: the held rows stay in the cache and in the reply, and
+    /// the failure rides beside them.
+    #[test]
+    fn a_failed_tracking_read_keeps_the_rows_the_page_still_shows() {
+        crate::pages::goals_cache(held(
+            vec![goal("Held goal", None, None)],
+            vec![
+                goal("Held tracking one", None, None),
+                goal("Held tracking two", None, None),
+            ],
+        ));
+
+        // The worker could read the roster but not Tracking: its answer
+        // carries the fresh goals and no tracking rows.
+        let fetched = Fetched::Goals(HeldGoals {
+            goals: vec![goal("Fresh goal", None, None)],
+            goals_total: 7,
+            tracking: Vec::new(),
+            tracking_total: 0,
+            tracking_error: Some("tracking read timed out".into()),
+        });
+        let reply = reply_for(fetched, "goals.refresh", Instant::now());
+
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["goals"][0]["title"], "Fresh goal");
+        assert_eq!(reply["tracking_error"], "tracking read timed out");
+        assert_eq!(reply["tracking"][0]["title"], "Held tracking one");
+        assert_eq!(reply["tracking"][1]["title"], "Held tracking two");
+        assert_eq!(reply["tracking_total"], 2, "the held total, not zero");
+
+        let cached = crate::pages::goals_snapshot();
+        assert_eq!(cached.goals[0].title, "Fresh goal", "the roster is fresh");
+        assert_eq!(
+            cached.tracking.len(),
+            2,
+            "the cache keeps the rows the native page still shows"
+        );
+        assert_eq!(cached.tracking_total, 2);
+        assert_eq!(
+            cached.tracking_error.as_deref(),
+            Some("tracking read timed out")
+        );
+    }
+
+    /// Tasks boot: one page-tagged payload with the native page's own labels,
+    /// including the difference between "not read yet" and "empty".
+    #[test]
+    fn the_tasks_document_names_its_page_and_carries_all_three_sections() {
+        let rows = HeldTasks {
+            schedules: vec![task_row("job-1", "Nightly build (on)")],
+            runs: vec![task_row("run-1", "ok: built")],
+            local: vec![task_row("7", "Call the dentist · in 2h · pending")],
+            loaded: true,
+            error: None,
+        };
+        let doc = tasks_document(&rows);
+        assert!(doc.contains("\"page\":\"tasks\""), "page named in boot");
+        assert!(doc.contains("Nightly build (on)"));
+        assert!(doc.contains("ok: built"));
+        assert!(doc.contains("Call the dentist"));
+        assert!(doc.contains("\"loaded\":true"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    #[test]
+    fn tasks_snapshot_answers_from_the_held_rows() {
+        crate::pages::tasks_cache(HeldTasks {
+            schedules: vec![task_row("job-1", "Nightly build (on)")],
+            runs: vec![task_row("run-1", "failed")],
+            local: Vec::new(),
+            loaded: true,
+            error: None,
+        });
+        let (id, answer, command) = handle_command(r#"{"id":21,"cmd":"tasks.snapshot"}"#, None);
+        assert_eq!(id, serde_json::json!(21));
+        assert_eq!(command, "tasks.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["schedules"][0]["label"], "Nightly build (on)");
+        assert_eq!(reply["runs"][0]["label"], "failed");
+        assert_eq!(reply["loaded"], true);
+    }
+
+    /// Tasks refresh reads the service on a thread and keeps the native
+    /// page's words for both service sections.
+    #[test]
+    fn tasks_refresh_reads_the_service() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-tasks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let service = serde_json::json!({
+            "ok": true,
+            "data": {
+                "schedules": [{
+                    "id": "job-1", "title": "Nightly build", "enabled": true,
+                    "next_run_at_utc": null
+                }],
+                "runs": [{
+                    "run_id": "run-1", "job_id": "job-1", "status": "ok",
+                    "result_summary": "built"
+                }],
+                "agents": []
+            }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(service.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        crate::pages::tasks_cache(HeldTasks {
+            schedules: vec![task_row("held", "Held, not re-read (on)")],
+            loaded: true,
+            ..HeldTasks::default()
+        });
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+
+        let (_, answer, command) =
+            handle_command(r#"{"id":22,"cmd":"tasks.refresh"}"#, Some(client));
+        assert_eq!(command, "tasks.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        let Fetched::Tasks(rows) = fetched else {
+            panic!("the host answered with something else");
+        };
+        assert_eq!(rows.schedules[0].label, "Nightly build (on)");
+        assert_eq!(rows.runs[0].label, "ok: built");
+        assert!(rows.loaded);
+
+        let reply = reply_for(Fetched::Tasks(rows), &command, Instant::now());
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["schedules"][0]["id"], "job-1");
+        let cached = crate::pages::tasks_snapshot();
+        assert_eq!(cached.schedules[0].label, "Nightly build (on)");
+        assert!(cached.loaded);
+
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"tasks""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tasks_refresh_without_a_client_reports_the_missing_link() {
+        let (_, answer, command) = handle_command(r#"{"id":23,"cmd":"tasks.refresh"}"#, None);
+        assert_eq!(command, "tasks.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no rows"),
+        }
     }
 
     /// The wait is a timer, not an idle handler: an idle source would run the

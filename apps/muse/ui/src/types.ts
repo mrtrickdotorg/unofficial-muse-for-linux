@@ -36,7 +36,21 @@ export type GoalsSnapshot = {
   tracking_error?: string | null;
 };
 
+// One Tasks row: the native page's own words, so the two renderers agree.
+export type TaskRow = { id: string; label: string };
+
+// `loaded` is the difference between an empty account and a page that has
+// not read it yet, which the row lists alone cannot make.
+export type TasksSnapshot = {
+  schedules: TaskRow[];
+  runs: TaskRow[];
+  local: TaskRow[];
+  loaded: boolean;
+  error?: string | null;
+};
+
 // One bundle serves every window: the boot payload names the page it opens.
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
-  | (GoalsSnapshot & { page?: "goals" });
+  | (GoalsSnapshot & { page?: "goals" })
+  | (TasksSnapshot & { page?: "tasks" });

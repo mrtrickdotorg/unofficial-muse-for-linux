@@ -12,12 +12,19 @@ window.addEventListener("error", (event) => {
 });
 import { Goals } from "./Goals";
 import { Library } from "./Library";
+import { Tasks } from "./Tasks";
 import "./hub.css";
 
 // One bundle, one window per page: the boot payload names which page this
 // document is, so a page never has to be told twice.
 const boot = window.__MUSE_BOOT__;
-const page = boot?.page ?? (boot && "goals" in boot ? "goals" : "library");
+const page =
+  boot?.page ??
+  (boot && "goals" in boot ? "goals" : boot && "schedules" in boot ? "tasks" : "library");
 
 const mount = document.getElementById("root");
-if (mount) createRoot(mount).render(page === "goals" ? <Goals /> : <Library />);
+if (mount) {
+  createRoot(mount).render(
+    page === "goals" ? <Goals /> : page === "tasks" ? <Tasks /> : <Library />,
+  );
+}
