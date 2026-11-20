@@ -94,7 +94,8 @@ function FeedCard({ card }: { card: Card }) {
           so it must not offer a button that does nothing. */}
       {card.action && (
         <span className="feed-action" title="Read-only in the web slice">
-          {card.action}
+          <span className="feed-action-name">Action</span>
+          <span className="feed-action-value">{card.action}</span>
         </span>
       )}
       {card.why && <div className="feed-why">{card.why}</div>}

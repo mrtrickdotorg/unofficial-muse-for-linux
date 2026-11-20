@@ -61,7 +61,13 @@ describe("the Feed web page", () => {
     expect(screen.getByText("2h")).toBeInTheDocument();
     // The service action reads as a label: the page cannot run it, so it
     // offers no button that does nothing.
-    expect(screen.getByText("Open")).toHaveClass("feed-action");
+    const action = screen.getByText("Open");
+    expect(action).toHaveClass("feed-action-value");
+    expect(action.closest(".feed-action")).toHaveAttribute(
+      "title",
+      "Read-only in the web slice",
+    );
+    expect(screen.getByText("Action")).toHaveClass("feed-action-name");
     expect(screen.queryByRole("button", { name: "Open" })).not.toBeInTheDocument();
     expect(screen.getByText("2 units")).toBeInTheDocument();
     expect(cardsOnPage()).toBe(2);

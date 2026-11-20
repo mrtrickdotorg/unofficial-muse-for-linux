@@ -461,15 +461,26 @@ html, body {
   white-space: pre-wrap;
 }
 
+/* The service's action reads as metadata, not a control: a quiet caption
+ * line, no pill, border or fill to invite a press the page cannot honour. */
 .feed-action {
   justify-self: start;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   cursor: default;
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--accent-border);
-  background: var(--accent-tint);
-  color: var(--text);
-  font: inherit;
+}
+
+.feed-action-name {
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.feed-action-value {
+  color: var(--text-muted);
   font-size: 12.5px;
 }
 
