@@ -234,7 +234,12 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   both the cached and the fresh path, enabling the page's button only once a listing exists. Ten
   DOM tests (`Feed.test.tsx`) cover the prompt and status, the card order and native wording, the
   shadow-root graphic and its fallback text, the body's link markup, the hero data URI, both empty
-  states, a wire refresh, a refused refresh and a failed read beside held cards.
+  states, a wire refresh, a refused refresh and a failed read beside held cards. A card's service
+  action reads as a label, not a button: the slice cannot run the action, so it cannot offer a
+  control that does nothing. `feed.hero` is cache-only by construction — it goes through
+  `fetch_hero_cached`, which refuses every non-http(s) address (a `file:` path can never be read)
+  and only calls `is_file()`, so a page open issues no download; the download stays with the
+  native fill (`fetch_hero`).
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote

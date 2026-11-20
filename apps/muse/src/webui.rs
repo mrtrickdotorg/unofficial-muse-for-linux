@@ -1888,5 +1888,24 @@ mod tests {
         };
         assert_eq!(reply["ok"], true);
         assert!(reply["data"].is_null(), "nothing cached, no data URI");
+
+        // Only http(s) artwork is ever offered: `feed_hero` goes through
+        // `fetch_hero_cached`, which refuses other schemes before it looks
+        // at the cache, and nothing here can reach the network.
+        for url in [
+            "file:///etc/passwd",
+            "../muse-feed.json",
+            "data:image/png;base64,iVBORw0KGgo=",
+            "",
+        ] {
+            let (_, answer, _) = handle_command(
+                &serde_json::json!({ "id": 55, "cmd": "feed.hero", "url": url }).to_string(),
+                None,
+            );
+            let Answer::Now(reply) = answer else {
+                panic!("a cache read must answer without a thread");
+            };
+            assert!(reply["data"].is_null(), "{url} must never be served");
+        }
     }
 }

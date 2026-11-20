@@ -90,7 +90,13 @@ function FeedCard({ card }: { card: Card }) {
       ) : (
         card.widget_text && <p className="feed-graphic-text">{card.widget_text}</p>
       )}
-      {card.action && <button className="feed-action">{card.action}</button>}
+      {/* A label, not a control: this page cannot run the service action,
+          so it must not offer a button that does nothing. */}
+      {card.action && (
+        <span className="feed-action" title="Read-only in the web slice">
+          {card.action}
+        </span>
+      )}
       {card.why && <div className="feed-why">{card.why}</div>}
     </article>
   );
