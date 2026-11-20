@@ -301,6 +301,9 @@ pub struct Chat {
     recording: RefCell<Option<super::voice::Recording>>,
     preview_fetch: RefCell<bool>,
     panel: gtk4::Box,
+    /// The header button that opens and folds the panel: the one place
+    /// that names the next press, whoever makes it.
+    panel_toggle: gtk4::Button,
     panel_name: gtk4::Label,
     panel_status: gtk4::Label,
     panel_sched_head: gtk4::Label,
@@ -557,6 +560,7 @@ impl Chat {
             preview_fetch: RefCell::new(false),
             panel,
             panel_name,
+            panel_toggle: panel_toggle.clone(),
             panel_status,
             panel_sched_head,
             panel_schedules,
@@ -630,10 +634,9 @@ impl Chat {
         }
         {
             let weak = Rc::downgrade(&chat);
-            let button = panel_toggle.clone();
             panel_toggle.connect_clicked(move |_| {
                 if let Some(chat) = weak.upgrade() {
-                    chat.toggle_panel(&button);
+                    chat.toggle_panel();
                 }
             });
         }
@@ -646,8 +649,26 @@ impl Chat {
     /// divider moves too -- a hidden child leaves an empty pane where
     /// the panel was, and the column must take that room back. A
     /// reader who dragged the divider gets it back where it was.
-    fn toggle_panel(&self, button: &gtk4::Button) {
-        let showing = !self.panel.is_visible();
+    fn toggle_panel(&self) {
+        self.face_panel(!self.panel.is_visible());
+    }
+
+    /// Show or fold the panel without a reader press -- the page drawer
+    /// steps aside for it while it is open. Same state a press leaves
+    /// behind, header button included, so the two never disagree.
+    pub fn set_panel_shown(&self, showing: bool) {
+        if self.panel.is_visible() == showing {
+            return;
+        }
+        self.face_panel(showing);
+    }
+
+    /// Whether the details panel is on screen.
+    pub fn panel_shown(&self) -> bool {
+        self.panel.is_visible()
+    }
+
+    fn face_panel(&self, showing: bool) {
         if showing {
             self.panel_dragged.set(false);
         }
@@ -657,8 +678,9 @@ impl Chat {
         } else {
             ("sidebar-show-symbolic", "Show the details panel")
         };
-        button.set_child(Some(&gtk4::Image::from_icon_name(icon)));
-        button.set_tooltip_text(Some(tip));
+        self.panel_toggle
+            .set_child(Some(&gtk4::Image::from_icon_name(icon)));
+        self.panel_toggle.set_tooltip_text(Some(tip));
     }
 
     /// Build the whole chat surface for the chat page: transcript plus

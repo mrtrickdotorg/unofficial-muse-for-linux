@@ -520,19 +520,10 @@ textview placeholder {
 }
 
 /* The page drawer: the web's 232px list on the same ground as the rail,
- * 36px rows with a 12px radius and a white 6% wash on the open page. It
- * slides over the page rather than taking its width, so a hairline on
- * its outer edge is what tells the reader it is a layer above. */
+ * 36px rows with a 12px radius and a white 6% wash on the open page. */
 .muse-side {
     background-color: @hub_ground;
     color: @hub_text;
-    border-right: 1px solid @hub_hairline;
-}
-
-/* The drawer's scrim: the page dims behind the sliding list, so the
- * drawer reads as a layer above it instead of a column that clips it. */
-.muse-scrim {
-    background-color: alpha(#000000, 0.28);
 }
 
 .muse-side row {
