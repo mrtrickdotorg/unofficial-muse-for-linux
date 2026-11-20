@@ -255,6 +255,43 @@ html, body {
 
 .tab.more { margin: 12px 0 4px; }
 
+/* Ideas: the native roster's row -- icon, bold title, clamped body -- on the
+ * same card as the Goals rows, with the groups as section headers. */
+.idea {
+  display: flex;
+  gap: 10px;
+  padding: 14px 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  background-image: var(--card-gradient);
+}
+
+.idea-icon {
+  flex: none;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.idea-words { min-width: 0; }
+
+.idea h3 {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.1px;
+  overflow-wrap: anywhere;
+}
+
+.idea-body {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 /* Tasks: one line per schedule, run or local reminder, in the native page's
  * own words. Read-only here, so a row is a label and nothing to press. */
 .task {

@@ -193,6 +193,14 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   has not read them — a distinction an empty list alone cannot make. The Goals slice also got a
   correction: a failed Tracking read used to clear the web cache's rows; it now keeps the rows the
   native page still shows, in the cache and in the reply, and reports the failure beside them.
+  Ideas is the fourth page and the first that shares its row code: `ideas.snapshot` and
+  `ideas.refresh` follow the same contract, and the roster's group order and body clamp live in
+  one `apps/muse/ui/src/listing.ts` used by both Ideas and Goals, so the two cannot drift. Its rows
+  carry the service's own icon (the native default when none), and `loaded` again separates an
+  empty account from an unread page. The host-side GUI helpers this migration needs for visual
+  checks -- screen capture of one window, a click, window close/raise/unminimise, and a launcher
+  that waits for a viewable window -- now live in `scripts/x11-shot.py`, `scripts/x11-click.py`,
+  `scripts/x11-window.py` and `scripts/muse-gui.sh` instead of a temp directory.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote

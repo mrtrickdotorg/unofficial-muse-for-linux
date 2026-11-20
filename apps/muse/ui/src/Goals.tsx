@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { groupOf, snippet } from "./listing";
 import type { GoalsSnapshot, ListingItem } from "./types";
 
 // The Tracking section's first screenful, and how much each "Show more"
@@ -7,33 +8,7 @@ import type { GoalsSnapshot, ListingItem } from "./types";
 // hand, so expanding never touches the wire.
 const TRACKING_PAGE = 10;
 
-const SNIPPET_LIMIT = 240;
-
-/// The row's group, in the native row's order: the service's category
-/// first, then its kind, then the kicker. `null` means it named none and
-/// the row stands ungrouped.
-function group(item: ListingItem): string | null {
-  for (const value of [item.category, item.kind, item.kicker]) {
-    if (value && value.length > 0) return value;
-  }
-  return null;
-}
-
 const isDone = (item: ListingItem) => item.kind === "completed";
-
-/// The row's second block: the body's first three non-empty lines joined,
-/// capped at 240 characters, the same words the native row clamps.
-function snippet(body?: string | null): string {
-  const text = (body ?? "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .slice(0, 3)
-    .join(" ");
-  return text.length <= SNIPPET_LIMIT
-    ? text
-    : `${text.slice(0, SNIPPET_LIMIT)}…`;
-}
 
 /// The category filters this fill offers: only categories present in the
 /// rows in hand, in the order the service sent them.
@@ -211,7 +186,7 @@ export function Goals() {
           ) : (
             <div className="rows">
               {visible.map((item, index) => {
-                const name = group(item);
+                const name = groupOf(item);
                 const header = name !== section ? name : null;
                 section = name;
                 return (

@@ -482,7 +482,38 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 goals_head.set_halign(gtk4::Align::Start);
                 inner.append(&goals_head);
             } else {
-                inner.append(&heading);
+                // The fourth page of the web UI port, beside the native
+                // one: the same roster, so the two can be compared on the
+                // same data. Insensitive until a listing lands, so a window
+                // cannot open claiming the page is empty.
+                let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+                heading.set_hexpand(true);
+                head_row.append(&heading);
+                let web_view = gtk4::Button::with_label("Web view");
+                web_view.set_widget_name("ideas-web");
+                web_view.set_valign(gtk4::Align::Center);
+                web_view.set_sensitive(false);
+                web_view.set_tooltip_text(Some(
+                    "Open these Ideas in the web UI slice of the port (read-only)",
+                ));
+                if !crate::webui::available() {
+                    web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+                }
+                head_row.append(&web_view);
+                {
+                    // Resolved per press: the account link is settled long
+                    // before a press, and the snapshot is the rows the
+                    // native fill last held.
+                    let chat = ctx.chat.clone();
+                    web_view.connect_clicked(move |_| {
+                        let held = ideas_snapshot();
+                        let client = chat.upgrade().and_then(|chat| chat.client_handle());
+                        if !crate::webui::open_ideas_window(held, client) {
+                            eprintln!("muse: web view unavailable in this build");
+                        }
+                    });
+                }
+                inner.append(&head_row);
             }
             // The web's roster is one scrolling list: icon, title,
             // clamped description, overflow menu. Ideas rows open the
@@ -2371,6 +2402,36 @@ pub(crate) fn goals_snapshot() -> HeldGoals {
 /// afterwards. Called on the main loop, from the thread's answer.
 pub(crate) fn goals_cache(held: HeldGoals) {
     GOAL_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// The Ideas page as the web view opens it. `loaded` is the difference
+/// between an account with no ideas and a page that has not read them, which
+/// an empty list alone cannot make.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldIdeas {
+    pub ideas: Vec<ListingItem>,
+    pub total: u64,
+    pub loaded: bool,
+    /// The last read's failure, kept beside whatever rows are held.
+    pub error: Option<String>,
+}
+
+thread_local! {
+    static IDEAS_STORE: std::cell::RefCell<HeldIdeas> =
+        std::cell::RefCell::new(HeldIdeas::default());
+}
+
+/// The held Ideas rows, for the web UI slice: never a second trip to the
+/// wire.
+pub(crate) fn ideas_snapshot() -> HeldIdeas {
+    IDEAS_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held Ideas rows with a listing the web view read over the
+/// wire, so the native page, the boot payload and the channel agree
+/// afterwards. Called on the main loop, from the thread's answer.
+pub(crate) fn ideas_cache(held: HeldIdeas) {
+    IDEAS_STORE.with(|store| *store.borrow_mut() = held);
 }
 
 /// One Tasks row as the web view shows it: the native page's own words, so
@@ -5470,7 +5531,13 @@ fn warm_dialog_heroes(
     );
 }
 
-fn fill_service_listing<F>(ctx: &Ctx, list: &gtk4::ListBox, op: Op, fetch: F) -> bool
+fn fill_service_listing<F>(
+    ctx: &Ctx,
+    page: &gtk4::Box,
+    list: &gtk4::ListBox,
+    op: Op,
+    fetch: F,
+) -> bool
 where
     F: FnOnce(
             &muse_account::AccountClient,
@@ -5482,19 +5549,25 @@ where
         return true;
     };
     let ctx_owned = ctx.clone();
-    let page = list.widget_name().to_string();
-    let page = page.strip_suffix("-list").unwrap_or(&page).to_owned();
-    fill_log(&page, "visit", "");
+    // Held by value for the answer closure: the web view's entry point waits
+    // on a read, so the page has to outlive the dispatch.
+    let page_owned = page.clone();
+    let page_name = list.widget_name().to_string();
+    let page_name = page_name
+        .strip_suffix("-list")
+        .unwrap_or(&page_name)
+        .to_owned();
+    fill_log(&page_name, "visit", "");
     let ticket = match chat.page_begin(op) {
         Some(ticket) => ticket,
         None => {
-            fill_log(&page, "skip-no-ticket", "");
+            fill_log(&page_name, "skip-no-ticket", "");
             return false;
         }
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
-        fill_log(&page, "no-client", "");
+        fill_log(&page_name, "no-client", "");
         return false;
     };
     let list = list.clone();
@@ -5511,7 +5584,7 @@ where
         },
         move |chat, answer| {
             if !chat.page_accept(&ticket) {
-                fill_log(&page, "stale-answer-dropped", "");
+                fill_log(&page_name, "stale-answer-dropped", "");
                 return;
             }
             // A failed listing read says so on the page: a blank list
@@ -5519,8 +5592,15 @@ where
             let (listing, heroes, request_ms) = match answer {
                 Ok(tuple) => tuple,
                 Err(error) => {
-                    fill_log(&page, "failed", &format!("error=\"{error}\""));
-                    listing_failure(&list, title(&page), &error);
+                    fill_log(&page_name, "failed", &format!("error=\"{error}\""));
+                    listing_failure(&list, title(&page_name), &error);
+                    // The web view reports the same failure beside the rows
+                    // it holds, never as an empty page.
+                    if page_name == "ideas" {
+                        IDEAS_STORE.with(|store| {
+                            store.borrow_mut().error = Some(error.to_string());
+                        });
+                    }
                     return;
                 }
             };
@@ -5528,24 +5608,42 @@ where
             // and heroes beside the rows on every fill.
             IDEA_STORE.with(|store| {
                 store.borrow_mut().insert(
-                    page.clone(),
+                    page_name.clone(),
                     IdeaStore {
                         items: listing.items.clone(),
                         heroes: heroes.clone(),
                     },
                 );
             });
-            paint_roster(&ctx_owned, &list, &page, &listing.items, &heroes, None);
+            paint_roster(&ctx_owned, &list, &page_name, &listing.items, &heroes, None);
+            // Ideas keeps the roster the web view opens on, with `loaded`
+            // beside it: an account with no ideas is a real answer that an
+            // empty list alone cannot give.
+            if page_name == "ideas" {
+                IDEAS_STORE.with(|store| {
+                    let mut held = store.borrow_mut();
+                    held.ideas = listing.items.clone();
+                    held.total = listing.total;
+                    held.loaded = true;
+                    held.error = None;
+                });
+            }
+            // The web view's entry point stays off until a listing exists.
+            if let Some(button) = find_widget(page_owned.upcast_ref(), &format!("{page_name}-web"))
+                .and_then(|widget| widget.downcast::<gtk4::Button>().ok())
+            {
+                button.set_sensitive(!listing.items.is_empty() && crate::webui::available());
+            }
             let cached = heroes.iter().filter(|hero| hero.is_some()).count();
             fill_log(
-                &page,
+                &page_name,
                 "painted",
                 &format!(
                     "rows={} request_ms={request_ms} heroes_cached={cached}",
                     listing.items.len(),
                 ),
             );
-            warm_dialog_heroes(chat, &page, &listing.items, &heroes);
+            warm_dialog_heroes(chat, &page_name, &listing.items, &heroes);
         },
     );
     true
@@ -5555,7 +5653,7 @@ fn fill_ideas(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "ideas-list") else {
         return true;
     };
-    fill_service_listing(ctx, &list, Op::Ideas, |client| client.ideas())
+    fill_service_listing(ctx, page, &list, Op::Ideas, |client| client.ideas())
 }
 
 /// Fill the Goals page: the roster plus the Tracking section under
@@ -5568,7 +5666,7 @@ fn fill_goals(ctx: &Ctx, page: &gtk4::Box) -> bool {
         return true;
     };
     let Some(tracking) = named_list(page, "goals-tracking-list") else {
-        return fill_service_listing(ctx, &list, Op::Goals, |client| client.goals());
+        return fill_service_listing(ctx, page, &list, Op::Goals, |client| client.goals());
     };
     clear_list(&tracking);
     if let Some(old) = find_widget(page.upcast_ref(), "goals-tracking-more") {

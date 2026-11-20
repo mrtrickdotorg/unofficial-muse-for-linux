@@ -26,6 +26,9 @@ export type ListingItem = {
   category?: string | null;
   kicker?: string | null;
   stamp?: string | null;
+  /// The service's own emoji for the row (Ideas); the page falls back to
+  /// the native default when it is absent.
+  icon?: string | null;
 };
 
 export type GoalsSnapshot = {
@@ -34,6 +37,15 @@ export type GoalsSnapshot = {
   tracking: ListingItem[];
   tracking_total: number;
   tracking_error?: string | null;
+};
+
+// The Ideas roster, with `loaded` separating an account with no ideas from a
+// page that has not read them yet.
+export type IdeasSnapshot = {
+  ideas: ListingItem[];
+  total: number;
+  loaded: boolean;
+  error?: string | null;
 };
 
 // One Tasks row: the native page's own words, so the two renderers agree.
@@ -53,4 +65,5 @@ export type TasksSnapshot = {
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
   | (GoalsSnapshot & { page?: "goals" })
-  | (TasksSnapshot & { page?: "tasks" });
+  | (TasksSnapshot & { page?: "tasks" })
+  | (IdeasSnapshot & { page?: "ideas" });

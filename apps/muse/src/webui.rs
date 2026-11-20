@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::{HeldGoals, HeldTasks};
+use crate::pages::{HeldGoals, HeldIdeas, HeldTasks};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -91,11 +91,34 @@ fn tasks_reply(held: &HeldTasks) -> serde_json::Value {
     reply
 }
 
+/// The Ideas rows, shaped once for both the boot payload and the reply.
+fn ideas_payload(held: &HeldIdeas) -> serde_json::Value {
+    serde_json::json!({
+        "ideas": held.ideas,
+        "total": held.total,
+        "loaded": held.loaded,
+        "error": held.error,
+    })
+}
+
+fn ideas_document(held: &HeldIdeas) -> String {
+    let mut boot = ideas_payload(held);
+    boot["page"] = serde_json::json!("ideas");
+    document(&boot)
+}
+
+fn ideas_reply(held: &HeldIdeas) -> serde_json::Value {
+    let mut reply = ideas_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
 /// What a fresh wire read produced off the main loop.
 enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
     Goals(HeldGoals),
     Tasks(HeldTasks),
+    Ideas(HeldIdeas),
     Failed(String),
 }
 
@@ -134,6 +157,27 @@ fn fresh_tasks(client: Option<AccountClient>) -> Receiver<Fetched> {
             None => Fetched::Failed("no account link in this app".into()),
             Some(client) => match client.tasks() {
                 Ok(snapshot) => Fetched::Tasks(crate::pages::held_tasks_from(&snapshot)),
+                Err(error) => Fetched::Failed(error.to_string()),
+            },
+        };
+        let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// Read the Ideas page from the service on a worker thread.
+fn fresh_ideas(client: Option<AccountClient>) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = match client {
+            None => Fetched::Failed("no account link in this app".into()),
+            Some(client) => match client.ideas() {
+                Ok(listing) => Fetched::Ideas(HeldIdeas {
+                    ideas: listing.items,
+                    total: listing.total,
+                    loaded: true,
+                    error: None,
+                }),
                 Err(error) => Fetched::Failed(error.to_string()),
             },
         };
@@ -221,6 +265,8 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
             Answer::Now(tasks_reply(&crate::pages::tasks_snapshot()))
         }
         "tasks.refresh" => Answer::Later(fresh_tasks(client)),
+        "ideas.snapshot" => Answer::Now(ideas_reply(&crate::pages::ideas_snapshot())),
+        "ideas.refresh" => Answer::Later(fresh_ideas(client)),
         other => Answer::Now(
             serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
         ),
@@ -270,6 +316,16 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
                 "tracking_total": held.tracking_total,
                 "tracking_error": held.tracking_error,
             })
+        }
+        Fetched::Ideas(held) => {
+            crate::pages::ideas_cache(held.clone());
+            eprintln!(
+                "muse webui: {command} read the service: ideas={} total={} ms={}",
+                held.ideas.len(),
+                held.total,
+                started.elapsed().as_millis()
+            );
+            ideas_reply(&held)
         }
         Fetched::Tasks(held) => {
             crate::pages::tasks_cache(held);
@@ -457,6 +513,12 @@ const TASKS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.tas
      err: window.__MUSE_ERR__ || '', \
      text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
 
+const IDEAS_PROBE: &str = "JSON.stringify({cards: document.querySelectorAll('.idea').length, \
+     rows: (window.__MUSE_ROWS__ || 0), \
+     boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.ideas || []).length, \
+     err: window.__MUSE_ERR__ || '', \
+     text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
 /// Open the Library page in its own window, on the rows the native page last
 /// read.
 pub(crate) fn open_library_window(
@@ -491,6 +553,17 @@ pub(crate) fn open_tasks_window(held: HeldTasks, client: Option<AccountClient>) 
         tasks_document(&held),
         client,
         TASKS_PROBE,
+    )
+}
+
+/// Open the Ideas page in its own window, on the roster the native page last
+/// read.
+pub(crate) fn open_ideas_window(held: HeldIdeas, client: Option<AccountClient>) -> bool {
+    open_window(
+        "Ideas · web view",
+        ideas_document(&held),
+        client,
+        IDEAS_PROBE,
     )
 }
 
@@ -698,6 +771,7 @@ mod tests {
             Fetched::Failed(error) => panic!("the host answered: {error}"),
             Fetched::Goals(..) => panic!("a library read must not answer with goals"),
             Fetched::Tasks(..) => panic!("a library read must not answer with tasks"),
+            Fetched::Ideas(..) => panic!("a library read must not answer with ideas"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -720,6 +794,7 @@ mod tests {
             Fetched::Rows(..) => panic!("no client, no rows"),
             Fetched::Goals(..) => panic!("no client, no goals"),
             Fetched::Tasks(..) => panic!("no client, no tasks"),
+            Fetched::Ideas(..) => panic!("no client, no ideas"),
         }
     }
 
@@ -1018,6 +1093,134 @@ mod tests {
     fn tasks_refresh_without_a_client_reports_the_missing_link() {
         let (_, answer, command) = handle_command(r#"{"id":23,"cmd":"tasks.refresh"}"#, None);
         assert_eq!(command, "tasks.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no rows"),
+        }
+    }
+
+    /// Ideas boot: one page-tagged payload with the roster and the
+    /// not-loaded/loaded distinction.
+    #[test]
+    fn the_ideas_document_names_its_page_and_carries_the_roster() {
+        let held = HeldIdeas {
+            ideas: vec![goal("A calmer inbox", Some("Work"), Some("digest only"))],
+            total: 9,
+            loaded: true,
+            error: None,
+        };
+        let doc = ideas_document(&held);
+        assert!(doc.contains("\"page\":\"ideas\""), "page named in boot");
+        assert!(doc.contains("A calmer inbox"));
+        assert!(doc.contains("\"total\":9"));
+        assert!(doc.contains("\"loaded\":true"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    #[test]
+    fn ideas_snapshot_answers_from_the_held_rows() {
+        crate::pages::ideas_cache(HeldIdeas {
+            ideas: vec![goal("Held idea", None, None)],
+            total: 3,
+            loaded: true,
+            error: None,
+        });
+        let (id, answer, command) = handle_command(r#"{"id":31,"cmd":"ideas.snapshot"}"#, None);
+        assert_eq!(id, serde_json::json!(31));
+        assert_eq!(command, "ideas.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["ideas"][0]["title"], "Held idea");
+        assert_eq!(reply["total"], 3);
+        assert_eq!(reply["loaded"], true);
+    }
+
+    /// Ideas refresh reads the service on a thread and updates the cache.
+    #[test]
+    fn ideas_refresh_reads_the_service() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-ideas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let service = serde_json::json!({
+            "ok": true,
+            "data": {
+                "total": 12, "recognized": 1, "skipped": 0,
+                "items": [{ "title": "Read from the service", "kind": "idea" }]
+            }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(service.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        crate::pages::ideas_cache(HeldIdeas {
+            ideas: vec![goal("Held, not re-read", None, None)],
+            total: 1,
+            loaded: true,
+            error: None,
+        });
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+
+        let (_, answer, command) =
+            handle_command(r#"{"id":32,"cmd":"ideas.refresh"}"#, Some(client));
+        assert_eq!(command, "ideas.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        let Fetched::Ideas(rows) = fetched else {
+            panic!("the host answered with something else");
+        };
+        assert_eq!(rows.ideas[0].title, "Read from the service");
+        assert_eq!(rows.total, 12);
+        assert!(rows.loaded);
+
+        let reply = reply_for(Fetched::Ideas(rows), &command, Instant::now());
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["ideas"][0]["title"], "Read from the service");
+        let cached = crate::pages::ideas_snapshot();
+        assert_eq!(cached.ideas[0].title, "Read from the service");
+        assert_eq!(cached.total, 12);
+
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"ideas""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ideas_refresh_without_a_client_reports_the_missing_link() {
+        let (_, answer, command) = handle_command(r#"{"id":33,"cmd":"ideas.refresh"}"#, None);
+        assert_eq!(command, "ideas.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
         };
