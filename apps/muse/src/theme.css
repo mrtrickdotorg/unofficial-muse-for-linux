@@ -575,6 +575,17 @@ textview placeholder {
     color: @hub_text_faint;
 }
 
+/* The drawer's list and its margins sit on the same ground as the rail:
+ * the split view's own background must never show between them. */
+.muse-side list,
+.muse-side row {
+    background-color: transparent;
+}
+
+.muse-shell {
+    background-color: @hub_ground;
+}
+
 /* The chat header: the column's own name, the thread title centered,
  * then the web's Call / Invite pills and the panel toggle. */
 .muse-chat-header {
