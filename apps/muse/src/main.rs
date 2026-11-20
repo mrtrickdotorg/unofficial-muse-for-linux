@@ -242,6 +242,12 @@ fn show_first_run(parent: &gtk4::ApplicationWindow) {
     });
 }
 
+/// The rail's own width (the web's 72px icon column) and the page
+/// drawer's (232px). The shell asks the split view for exactly these,
+/// so the rail is the only width that is always there.
+const RAIL_WIDTH: i32 = 72;
+const DRAWER_WIDTH: i32 = 232;
+
 /// The main surface: sidebar plus a lazily-filled page stack. Only the
 /// chat page builds up front (cheap widgets); every other page builds
 /// on first visit and refills on every visit.
@@ -357,11 +363,25 @@ fn show_main(split: &adw::OverlaySplitView) {
     rail.append(&download_button);
     rail.append(&menu_button);
     let shell = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    shell.add_css_class("muse-shell");
+    // The split view hands the sidebar a width of its own choosing; the
+    // shell asks for exactly the rail (and the drawer, while it shows),
+    // so the chat column starts right after the icons when the drawer
+    // is folded away.
+    shell.set_size_request(RAIL_WIDTH, -1);
     shell.append(&rail);
     // The page list is a drawer, not a column: as on muse.ai the rail is
     // the only permanent navigation, and an icon press slides the list
     // and its History out beside it. A second press on the open page's
     // own icon folds it away again.
+    // Without this the split view hands its sidebar a quarter of the
+    // window (sidebar-width-fraction's default), which parks a strip
+    // of empty sidebar between the icons and the chat column. The
+    // shell's own request is the width instead: the rail alone when
+    // the drawer is folded, rail plus drawer while it shows.
+    split.set_sidebar_width_fraction(0.0);
+    split.set_min_sidebar_width(0.0);
+    split.set_max_sidebar_width(f64::from(RAIL_WIDTH + DRAWER_WIDTH));
     let drawer = gtk4::Revealer::new();
     drawer.set_transition_type(gtk4::RevealerTransitionType::SlideRight);
     drawer.set_transition_duration(180);
@@ -369,6 +389,17 @@ fn show_main(split: &adw::OverlaySplitView) {
     drawer.set_child(Some(&side));
     shell.append(&drawer);
     split.set_sidebar(Some(&shell));
+    {
+        // The drawer's width request falls back to the rail once the
+        // fold animation has actually finished, so the slide is never
+        // squeezed and the chat column still gets the room.
+        let shell = shell.clone();
+        drawer.connect_notify_local(Some("child-revealed"), move |drawer, _| {
+            if !drawer.is_child_revealed() {
+                shell.set_size_request(RAIL_WIDTH, -1);
+            }
+        });
+    }
     let stack = gtk4::Stack::new();
     stack.set_hexpand(true);
     stack.set_vexpand(true);
@@ -467,6 +498,7 @@ fn show_main(split: &adw::OverlaySplitView) {
         let ctx = ctx.clone();
         let page = page.clone();
         let drawer = drawer.clone();
+        let shell = shell.clone();
         let stack = stack.clone();
         button.connect_clicked(move |_| {
             let current = stack.visible_child_name();
@@ -474,6 +506,7 @@ fn show_main(split: &adw::OverlaySplitView) {
                 drawer.set_reveal_child(false);
                 return;
             }
+            shell.set_size_request(RAIL_WIDTH + DRAWER_WIDTH, -1);
             drawer.set_reveal_child(true);
             pages::show(&ctx, &page);
         });
