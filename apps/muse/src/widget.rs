@@ -14,6 +14,20 @@ use std::rc::Rc;
 use gtk4::glib::object::IsA;
 use gtk4::prelude::*;
 
+/// A button that shows a glyph and nothing else. The glyph rides a
+/// child label rather than the button's own label, because GTK derives
+/// a button's accessible name from its label and a name set beside it
+/// never wins: a screen reader read "↑" and "❤" for controls whose job
+/// is a word. With no label of its own the button keeps the name given
+/// to it, and it paints the same glyph as before.
+pub fn glyph_button(glyph: &str, label: &str) -> gtk4::Button {
+    let button = gtk4::Button::new();
+    let face = gtk4::Label::new(Some(glyph));
+    button.set_child(Some(&face));
+    describe(&button, label);
+    button
+}
+
 /// Name a control for assistive tech. Icon-only buttons carry no text
 /// for a screen reader, so the name is set explicitly; the tooltip
 /// says the same words to a pointer reader, and setting both here is

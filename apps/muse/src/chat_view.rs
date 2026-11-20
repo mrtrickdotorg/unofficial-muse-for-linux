@@ -7,7 +7,7 @@
 //! until then the live app does not reference them yet.
 #![allow(dead_code)]
 
-use super::widget::describe;
+use super::widget::{describe, glyph_button};
 use adw::prelude::*;
 use muse_account::MessageAttachment;
 
@@ -163,9 +163,8 @@ fn message_widget(
             // toggles a heart on the message through the live-probed
             // reactions.toggle shape. The answer names the new state;
             // the row itself carries no reaction display to go stale.
-            let react = gtk4::Button::with_label("❤");
+            let react = glyph_button("❤", "React to this message");
             react.add_css_class("flat");
-            describe(&react, "React to this message");
             {
                 let react_on = on_react.clone();
                 let id: String = (*id).into();
