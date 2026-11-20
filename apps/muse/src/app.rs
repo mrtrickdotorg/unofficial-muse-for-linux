@@ -80,9 +80,48 @@ pub fn delete_label(armed: bool) -> &'static str {
     }
 }
 
-/// The web's right-panel tabs, in the web's order. Mail has no client
-/// route yet; its tab owns the honest note, never a fake list.
-pub const PANEL_TABS: [&str; 4] = ["Activity", "Approvals", "Identity", "Mail"];
+/// The details panel's width, measured on the web (359px): the divider
+/// opens there and the header × folds it from there.
+pub const PANEL_WIDTH: i32 = 359;
+
+/// The web's right-panel tabs, in the web's order: the name each one
+/// means plus the icon it shows. The web's strip is icons only, so the
+/// name lives in the tooltip. Mail has no client route yet; its tab
+/// owns the honest note, never a fake list.
+pub const PANEL_TABS: [(&str, &str); 4] = [
+    ("Activity", "utilities-system-monitor-symbolic"),
+    ("Approvals", "dialog-question-symbolic"),
+    ("Identity", "avatar-default-symbolic"),
+    ("Mail", "mail-unread-symbolic"),
+];
+
+/// One 32px tile at a panel row's head: a rounded square holding a
+/// symbolic glyph, the web's list ornament.
+fn panel_tile(icon: &str) -> gtk4::Box {
+    let tile = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    tile.add_css_class("muse-panel-tile");
+    tile.set_valign(gtk4::Align::Center);
+    let glyph = gtk4::Image::from_icon_name(icon);
+    glyph.set_pixel_size(16);
+    glyph.set_halign(gtk4::Align::Center);
+    glyph.set_valign(gtk4::Align::Center);
+    tile.append(&glyph);
+    tile
+}
+
+/// One panel row: the tile, then the row's own text column, sized to
+/// the web's 56px pitch by the sheet.
+fn panel_row(icon: &str, body: &gtk4::Box) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.set_selectable(false);
+    let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    line.append(&panel_tile(icon));
+    body.set_valign(gtk4::Align::Center);
+    body.set_hexpand(true);
+    line.append(body);
+    row.set_child(Some(&line));
+    row
+}
 
 /// A decision button's words: the service's outcome in the reader's
 /// language. Pure so the wording is unit-tested.
@@ -267,29 +306,47 @@ impl Chat {
         scrolled.set_overlay_scrolling(true);
         // The Mac panel names its thread up top, centered, with the
         // turn menu behind a "…" button at the row's end.
+        let column_title = gtk4::Label::new(Some("Chats"));
+        column_title.add_css_class("muse-column-title");
         let heading = gtk4::Label::new(Some("New chat"));
         heading.set_hexpand(true);
         heading.set_halign(gtk4::Align::Center);
-        heading.add_css_class("title-4");
+        heading.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        heading.add_css_class("muse-thread-title");
         let delete = gtk4::Button::with_label("Delete turn");
         let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        header.add_css_class("muse-chat-header");
+        header.append(&column_title);
         header.append(&heading);
         let menu = gtk4::MenuButton::new();
         menu.set_label("…");
-        menu.add_css_class("flat");
+        menu.add_css_class("muse-header-pill");
         menu.set_tooltip_text(Some("Turn options"));
         {
             let popover = gtk4::Popover::new();
             popover.set_child(Some(&delete));
             menu.set_popover(Some(&popover));
         }
+        let call = gtk4::Button::with_label("Call");
+        call.add_css_class("muse-header-pill");
+        call.set_tooltip_text(Some("Call"));
+        let invite = gtk4::Button::with_label("Invite");
+        invite.add_css_class("muse-header-pill");
+        invite.set_tooltip_text(Some("Invite"));
+        let panel_toggle = gtk4::Button::new();
+        panel_toggle.add_css_class("muse-header-icon");
+        panel_toggle.set_tooltip_text(Some("Hide the details panel"));
+        panel_toggle.set_child(Some(&gtk4::Image::from_icon_name("window-close-symbolic")));
+        header.append(&call);
+        header.append(&invite);
         header.append(&menu);
+        header.append(&panel_toggle);
         // The web's right panel: profile, scheduled tasks, Today. It
         // reads the same tasks snapshot as the Tasks page, refreshed
         // beside the transcript instead of on a separate visit.
         let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         panel.add_css_class("muse-panel");
-        panel.set_size_request(280, -1);
+        panel.set_size_request(320, -1);
         panel.set_margin_start(8);
         panel.set_margin_end(0);
         panel.set_margin_top(12);
@@ -311,30 +368,37 @@ impl Chat {
         // and Mail swap the body under the strip.
         let panel_stack = gtk4::Stack::new();
         panel_stack.set_vexpand(true);
-        let tabs = gtk4::Box::new(gtk4::Orientation::Horizontal, 4);
-        tabs.set_halign(gtk4::Align::Center);
-        let tab_bar: Rc<RefCell<Vec<gtk4::Button>>> = Rc::new(RefCell::new(Vec::new()));
-        for name in PANEL_TABS {
-            let tab = gtk4::Button::with_label(name);
-            tab.add_css_class("flat");
+        // The web's strip is icons only: four equal segments in one
+        // raised well, the open one on the lighter overlay. The name
+        // each segment means rides its tooltip.
+        let tabs = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        tabs.set_halign(gtk4::Align::Fill);
+        tabs.add_css_class("muse-panel-tabs");
+        let tab_bar: Rc<RefCell<Vec<(&'static str, gtk4::Button)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        for (name, icon) in PANEL_TABS {
+            let tab = gtk4::Button::new();
+            tab.set_child(Some(&gtk4::Image::from_icon_name(icon)));
+            tab.set_tooltip_text(Some(name));
+            tab.set_hexpand(true);
+            tab.add_css_class("muse-panel-tab");
             let stack = panel_stack.clone();
             let bar = tab_bar.clone();
-            let active = name.to_owned();
             tab.connect_clicked(move |_| {
-                stack.set_visible_child_name(&active.to_lowercase());
-                for other in bar.borrow().iter() {
-                    if other.label().as_deref() == Some(active.as_str()) {
-                        other.add_css_class("muse-rail-active");
+                stack.set_visible_child_name(&name.to_lowercase());
+                for (label, other) in bar.borrow().iter() {
+                    if *label == name {
+                        other.add_css_class("muse-panel-tab-active");
                     } else {
-                        other.remove_css_class("muse-rail-active");
+                        other.remove_css_class("muse-panel-tab-active");
                     }
                 }
             });
-            tab_bar.borrow_mut().push(tab.clone());
+            tab_bar.borrow_mut().push((name, tab.clone()));
             tabs.append(&tab);
         }
-        if let Some(first) = tab_bar.borrow().first() {
-            first.add_css_class("muse-rail-active");
+        if let Some((_, first)) = tab_bar.borrow().first() {
+            first.add_css_class("muse-panel-tab-active");
         }
         panel.append(&tabs);
         let panel_sched_head = gtk4::Label::new(Some("Scheduled tasks"));
@@ -509,8 +573,64 @@ impl Chat {
                     }
                 }) as ReplyCallback);
         }
+        // Call and Invite have no client route: the press says so in
+        // the notice line rather than pretending. The × folds the
+        // details panel and names the press that brings it back.
+        {
+            let weak = Rc::downgrade(&chat);
+            call.connect_clicked(move |_| {
+                if let Some(chat) = weak.upgrade() {
+                    chat.say_send_note("Calls have no client route yet.");
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&chat);
+            invite.connect_clicked(move |_| {
+                if let Some(chat) = weak.upgrade() {
+                    chat.say_send_note("Invites have no client route yet.");
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&chat);
+            let button = panel_toggle.clone();
+            panel_toggle.connect_clicked(move |_| {
+                if let Some(chat) = weak.upgrade() {
+                    chat.toggle_panel(&button);
+                }
+            });
+        }
         chat.wire();
         chat
+    }
+
+    /// Fold the details panel away, or bring it back: the header ×
+    /// names what its next press does, so the panel is never lost. The
+    /// divider moves too -- a hidden child leaves an empty pane where
+    /// the panel was, and the column must take that room back.
+    fn toggle_panel(&self, button: &gtk4::Button) {
+        let showing = !self.panel.is_visible();
+        self.panel.set_visible(showing);
+        if let Some(paned) = self
+            .panel
+            .parent()
+            .and_then(|split| split.downcast::<gtk4::Paned>().ok())
+        {
+            let width = paned.allocated_width();
+            paned.set_position(if showing {
+                (width - PANEL_WIDTH).max(0)
+            } else {
+                width
+            });
+        }
+        let (icon, tip) = if showing {
+            ("window-close-symbolic", "Hide the details panel")
+        } else {
+            ("sidebar-show-symbolic", "Show the details panel")
+        };
+        button.set_child(Some(&gtk4::Image::from_icon_name(icon)));
+        button.set_tooltip_text(Some(tip));
     }
 
     /// Build the whole chat surface for the chat page: transcript plus
@@ -619,7 +739,7 @@ impl Chat {
                         && split.allocated_width() > 400
                     {
                         if let Some(paned) = split.downcast_ref::<gtk4::Paned>() {
-                            paned.set_position(split.allocated_width() - 300);
+                            paned.set_position(split.allocated_width() - PANEL_WIDTH);
                         }
                         *chat.panel_placed.borrow_mut() = true;
                     }
@@ -1383,7 +1503,6 @@ impl Chat {
             .map(|span| span.as_secs() as i64)
             .unwrap_or(0);
         for schedule in &snapshot.schedules {
-            let row = gtk4::ListBoxRow::new();
             let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
             let title = gtk4::Label::new(Some(&schedule.title));
             title.set_xalign(0.0);
@@ -1397,8 +1516,8 @@ impl Chat {
             next.add_css_class("dim-label");
             line.append(&title);
             line.append(&next);
-            row.set_child(Some(&line));
-            self.panel_schedules.append(&row);
+            self.panel_schedules
+                .append(&panel_row("alarm-symbolic", &line));
         }
         while let Some(child) = self.panel_today.first_child() {
             self.panel_today.remove(&child);
@@ -1414,11 +1533,14 @@ impl Chat {
             if section != Some(bucket) {
                 let head = gtk4::Label::new(Some(bucket));
                 head.set_halign(gtk4::Align::Start);
-                head.add_css_class("muse-section");
-                self.panel_today.append(&head);
+                head.add_css_class("muse-panel-bucket");
+                let head_row = gtk4::ListBoxRow::new();
+                head_row.set_selectable(false);
+                head_row.add_css_class("muse-panel-heading");
+                head_row.set_child(Some(&head));
+                self.panel_today.append(&head_row);
                 section = Some(bucket);
             }
-            let row = gtk4::ListBoxRow::new();
             let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
             let prompt = if agent.prompt.is_empty() {
                 "(activity)".to_owned()
@@ -1440,8 +1562,8 @@ impl Chat {
                 state.add_css_class("dim-label");
                 line.append(&state);
             }
-            row.set_child(Some(&line));
-            self.panel_today.append(&row);
+            self.panel_today
+                .append(&panel_row("system-run-symbolic", &line));
         }
     }
     /// True when the transcript shows its newest row: a repaint may
@@ -2415,7 +2537,15 @@ mod tests {
 
     #[test]
     fn panel_tabs_match_the_web() {
-        assert_eq!(PANEL_TABS, ["Activity", "Approvals", "Identity", "Mail"]);
+        assert_eq!(
+            PANEL_TABS.map(|(name, _)| name),
+            ["Activity", "Approvals", "Identity", "Mail"]
+        );
+        assert!(
+            PANEL_TABS
+                .iter()
+                .all(|(_, icon)| icon.ends_with("-symbolic"))
+        );
     }
 
     #[test]

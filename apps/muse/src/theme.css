@@ -10,7 +10,9 @@
  * colors (@card_bg_color, alpha of @window_fg_color), so they track
  * whatever theme and scheme is active. */
 
-listbox row {
+/* GTK4 names the list node `list` (GTK3's `listbox` no longer matches),
+ * so these rules have to say so or they never apply. */
+list row {
     background-color: transparent;
     padding: 10px 12px;
 }
@@ -26,9 +28,10 @@ textview placeholder {
     color: alpha(@window_fg_color, 0.55);
 }
 
-/* The transcript list paints nothing of its own, so the theme's
- * view color shows through between the bubbles. */
-.muse-transcript listbox {
+/* The transcript list paints nothing of its own, so the column's own
+ * ground shows through between the bubbles. */
+.muse-transcript,
+.muse-transcript list {
     background-color: transparent;
 }
 
@@ -385,11 +388,22 @@ textview placeholder {
     color: @hub_text;
 }
 
-/* The chat column sits on the navy ground, so its text is the palette's
- * own ink rather than the theme's (which may be dark on a light seat). */
+/* The chat column sits on the same ground, so its text is the palette's
+ * own ink rather than the theme's (which may be dark on a light seat).
+ * The transcript scrolls on that ground too: the column must read as
+ * one surface, never a lighter strip inside a dark frame. */
 .muse-chat-column {
     background-color: @hub_ground;
     color: @hub_text;
+}
+
+.muse-transcript {
+    background-color: transparent;
+}
+
+.muse-chat-column .muse-connected,
+.muse-panel .muse-connected {
+    color: @hub_ok;
 }
 
 /* The reader's words: muse.ai's solid blue pill, white ink on top. */
@@ -559,4 +573,193 @@ textview placeholder {
 
 .muse-side .muse-build-stamp {
     color: @hub_text_faint;
+}
+
+/* The chat header: the column's own name, the thread title centered,
+ * then the web's Call / Invite pills and the panel toggle. */
+.muse-chat-header {
+    padding: 10px 12px;
+}
+
+.muse-column-title {
+    color: @hub_text;
+    font-size: 16px;
+    font-weight: 500;
+}
+
+.muse-thread-title {
+    color: @hub_text_muted;
+    font-size: 12pt;
+}
+
+.muse-header-pill {
+    background-color: @hub_surface_raised;
+    border: 1px solid @hub_hairline;
+    color: @hub_text;
+    border-radius: 9999px;
+    padding: 3px 14px;
+    min-height: 26px;
+    font-size: 11pt;
+}
+
+.muse-header-pill:hover {
+    background-color: @hub_surface_overlay;
+    border-color: @hub_hairline_light;
+}
+
+.muse-header-icon {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    color: @hub_text_muted;
+    border-radius: 9999px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+}
+
+.muse-header-icon:hover {
+    background-color: alpha(@hub_text, 0.08);
+    color: @hub_text;
+}
+
+/* The web's centred stamp: one quiet line above the reader's turn. */
+.muse-time {
+    color: @hub_text_faint;
+    font-size: 9pt;
+    margin: 6px 0 1px;
+}
+
+/* Inside the pill the controls are flat glyphs: the composer reads as
+ * one rounded bar, never a row of framed buttons. */
+.muse-composer-card .muse-circle,
+.muse-composer-card .muse-pill {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    color: @hub_text_muted;
+}
+
+.muse-composer-card .muse-circle:hover,
+.muse-composer-card .muse-pill:hover {
+    background-color: alpha(@hub_text, 0.08);
+    color: @hub_text;
+}
+
+/* The details panel: muse.ai's 359px column on the same ground, white
+ * ink, a 120px avatar and one raised icon strip. */
+.muse-panel {
+    background-color: @hub_ground;
+    color: @hub_text;
+    border-left: 1px solid @hub_hairline;
+    padding: 0 12px 12px;
+}
+
+.muse-panel .dim-label {
+    color: @hub_text_muted;
+}
+
+.muse-panel .muse-avatar-large {
+    min-width: 120px;
+    min-height: 120px;
+    font-size: 34pt;
+    margin-top: 8px;
+}
+
+.muse-panel .muse-section {
+    color: @hub_text;
+    font-size: 16px;
+    font-weight: 500;
+    margin-top: 10px;
+}
+
+/* The icon strip: four equal segments in one raised well, the open
+ * one on the lighter overlay. */
+.muse-panel .muse-panel-tabs {
+    background-color: @hub_surface_raised;
+    border-radius: 16px;
+    padding: 4px;
+    margin-top: 4px;
+}
+
+.muse-panel .muse-panel-tab {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 12px;
+    min-height: 28px;
+    padding: 0;
+    color: @hub_text_muted;
+}
+
+.muse-panel .muse-panel-tab:hover {
+    background-color: alpha(@hub_text, 0.06);
+    color: @hub_text;
+}
+
+.muse-panel .muse-panel-tab-active,
+.muse-panel .muse-panel-tab-active:hover {
+    background-color: @hub_surface_overlay;
+    color: @hub_text;
+}
+
+/* Rows: the web's 56px pitch with a 32px tile at the head. */
+.muse-panel row {
+    min-height: 56px;
+    border-radius: 10px;
+    padding: 8px 10px;
+    background-color: transparent;
+    color: @hub_text;
+}
+
+.muse-panel row:hover {
+    background-color: alpha(@hub_text, 0.04);
+}
+
+.muse-panel .muse-panel-heading {
+    min-height: 0;
+    padding: 8px 2px 2px;
+}
+
+.muse-panel .muse-panel-heading:hover {
+    background-color: transparent;
+}
+
+.muse-panel-bucket {
+    color: @hub_text_faint;
+    font-size: 11pt;
+    font-weight: 600;
+}
+
+.muse-panel-tile {
+    min-width: 32px;
+    min-height: 32px;
+    border-radius: 10px;
+    background-color: @hub_surface_raised;
+    color: @hub_text_muted;
+}
+
+.muse-panel-tile image {
+    color: @hub_text_muted;
+}
+
+/* Panel buttons wear the web's quiet outline, never the theme's fill. */
+.muse-panel button {
+    background: transparent;
+    border: 1px solid @hub_hairline;
+    box-shadow: none;
+    color: @hub_text_muted;
+    border-radius: 8px;
+    padding: 4px 10px;
+    min-height: 24px;
+}
+
+.muse-panel button:hover {
+    background-color: alpha(@hub_text, 0.06);
+    color: @hub_text;
+}
+
+.muse-panel .muse-danger {
+    color: @hub_error;
+    border-color: alpha(@hub_error, 0.4);
 }
