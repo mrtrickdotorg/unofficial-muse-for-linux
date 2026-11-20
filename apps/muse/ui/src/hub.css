@@ -1,26 +1,25 @@
-/* The web UI's base sheet: Kyth Hub's tokens, shared with the GTK rail and
- * chat shell so the two renderers read as one family. This file is the
- * migration's web stylesheet -- it starts with the Library page and grows
- * with every page that moves over. */
+/* The web UI's base sheet: the same tokens as the GTK rail and chat shell,
+ * read from the signed-in muse.ai app on Nov 20, 2026 -- a near-black
+ * ground, three grey surfaces and one blue accent. */
 
 :root {
-  --ground: #090d1a;
-  --ground-2: #060912;
-  --surface-solid: #111827;
-  --surface-raised: #1a263a;
-  --surface-overlay: #23334b;
-  --card-gradient: linear-gradient(145deg, rgba(24, 34, 52, 0.97), rgba(15, 22, 36, 0.94));
-  --hairline: rgba(226, 232, 255, 0.1);
-  --hairline-light: rgba(226, 232, 255, 0.22);
-  --accent: #36a3ff;
-  --accent-end: #55e5c1;
+  --ground: #181819;
+  --ground-2: #111112;
+  --surface-solid: #1f1f20;
+  --surface-raised: #28292b;
+  --surface-overlay: #323435;
+  --card-gradient: linear-gradient(145deg, rgba(31, 31, 32, 0.97), rgba(24, 24, 25, 0.94));
+  --hairline: rgba(255, 255, 255, 0.1);
+  --hairline-light: rgba(255, 255, 255, 0.22);
+  --accent: #007ffd;
+  --accent-end: #0074e8;
   --accent-gradient: linear-gradient(135deg, var(--accent), var(--accent-end));
-  --accent-tint: rgba(54, 163, 255, 0.14);
-  --accent-border: rgba(54, 163, 255, 0.42);
-  --text: #f8fafc;
-  --text-muted: #aebbd0;
-  --text-faint: #74849d;
-  --ok: #42d7a4;
+  --accent-tint: rgba(0, 127, 253, 0.14);
+  --accent-border: rgba(0, 127, 253, 0.42);
+  --text: #ffffff;
+  --text-muted: #a1a4a8;
+  --text-faint: #8f9296;
+  --ok: #3ddc84;
   --warn: #f59e0b;
   --radius-card: 20px;
   --radius-sm: 12px;
@@ -98,12 +97,12 @@ html, body {
   transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
 }
 
-.tab:hover { color: var(--text); background: rgba(226, 232, 255, 0.055); }
+.tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.055); }
 
 .tab.active {
   color: var(--text);
   border-color: var(--accent-border);
-  background: linear-gradient(to right, rgba(54, 163, 255, 0.2), rgba(85, 229, 193, 0.08));
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .section {

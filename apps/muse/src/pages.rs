@@ -89,6 +89,13 @@ pub fn needs_select(selected: Option<i32>, target: usize) -> bool {
     selected != Some(target as i32)
 }
 
+/// Whether a rail press folds the page drawer away instead of
+/// navigating: pressing the icon of the page already on screen while
+/// the drawer is open closes the drawer, the way muse.ai's rail does.
+pub fn rail_closes(current: Option<&str>, page: &str, drawer_open: bool) -> bool {
+    drawer_open && current == Some(page)
+}
+
 /// Show a page: build its structure on first visit, refill on every
 /// visit, then navigate the stack and the sidebar together. A visit
 /// the ticket slot refuses does not leave a blank page behind:
@@ -6457,6 +6464,14 @@ mod tests {
         assert!(needs_select(None, 2));
         assert!(needs_select(Some(1), 2));
         assert!(!needs_select(Some(2), 2));
+    }
+
+    #[test]
+    fn rail_closes_only_the_open_page() {
+        assert!(rail_closes(Some("feed"), "feed", true));
+        assert!(!rail_closes(None, "feed", true));
+        assert!(!rail_closes(Some("goals"), "feed", true));
+        assert!(!rail_closes(Some("feed"), "feed", false));
     }
 
     #[test]
