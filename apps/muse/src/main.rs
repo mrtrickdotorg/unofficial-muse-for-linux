@@ -538,6 +538,11 @@ fn show_main(split: &adw::OverlaySplitView) {
     // this code made is undone when the drawer goes back, so a reader
     // who wants the panel gone keeps it gone.
     let panel_folded = Rc::new(std::cell::Cell::new(false));
+    // The rail button the open list belongs to. Folding hands it the
+    // keyboard back, so a reader who opened the list from the rail is
+    // never dropped on a pane that just disappeared.
+    let drawer_opener: Rc<std::cell::RefCell<Option<gtk4::Button>>> =
+        Rc::new(std::cell::RefCell::new(None));
     // The drawer pushes the page, so the chat column gives up the
     // drawer's width. When that would leave the column too narrow for
     // its header and transcript, the details panel steps aside for as
@@ -549,7 +554,9 @@ fn show_main(split: &adw::OverlaySplitView) {
         let drawer = drawer.clone();
         let shell = shell.clone();
         let panel_folded = panel_folded.clone();
-        Rc::new(move || {
+        let opener = drawer_opener.clone();
+        Rc::new(move |button: &gtk4::Button| {
+            *opener.borrow_mut() = Some(button.clone());
             shell.set_size_request(RAIL_WIDTH + DRAWER_WIDTH, -1);
             drawer.set_reveal_child(true);
             if let Some(chat) = chat.upgrade()
@@ -565,12 +572,16 @@ fn show_main(split: &adw::OverlaySplitView) {
         let chat = ctx.chat.clone();
         let drawer = drawer.clone();
         let panel_folded = panel_folded.clone();
+        let opener = drawer_opener.clone();
         Rc::new(move || {
             drawer.set_reveal_child(false);
             if panel_folded.replace(false)
                 && let Some(chat) = chat.upgrade()
             {
                 chat.set_panel_shown(true);
+            }
+            if let Some(button) = opener.borrow().as_ref() {
+                button.grab_focus();
             }
         })
     };
@@ -581,13 +592,14 @@ fn show_main(split: &adw::OverlaySplitView) {
         let stack = stack.clone();
         let open_drawer = open_drawer.clone();
         let fold_drawer = fold_drawer.clone();
+        let rail_button = button.clone();
         button.connect_clicked(move |_| {
             let current = stack.visible_child_name();
             if pages::rail_closes(current.as_deref(), &page, drawer.reveals_child()) {
                 fold_drawer();
                 return;
             }
-            open_drawer();
+            open_drawer(&rail_button);
             pages::show(&ctx, &page);
         });
     }
