@@ -234,6 +234,13 @@ textview placeholder {
     border-radius: 12px;
 }
 
+/* A widget frame is a light graphic in a dark card: the web shell's white
+ * ground. Square on purpose -- the WebView child does not follow a parent
+ * radius, so a rounded cage shows its corners as a white notch. */
+.muse-widget-cage {
+    background: #ffffff;
+}
+
 .muse-feed-icon {
     font-size: 22pt;
 }

@@ -26,16 +26,22 @@ fn js_height(raw: &str) -> Option<f64> {
     digits.parse::<f64>().ok()
 }
 
-/// Wrap service markup in a minimal dark document shell. The shell
-/// kills the defaults that would frame the unit in white: the
-/// WebView paints white where nothing covers it, so the ground and
-/// the body margin are set, not left to the UA stylesheet.
+/// Wrap service markup in a minimal light document shell. The shell
+/// sets its own ground and body margin rather than leaving them to the
+/// UA stylesheet, and the ground is light because the service authors
+/// its widgets for a white page: their text is near-black and their
+/// cards assume a light surface, so a dark shell paints them into
+/// itself. `color-scheme: light` is declared too, so a widget's own
+/// `prefers-color-scheme` rules resolve to the palette they were
+/// written against instead of the desktop's dark theme.
 fn document(html: &str) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"> \
-         <style>html,body{{margin:0;padding:0;background:#1e1e1e;color:#e4e6eb}} \
+         <meta name=\"color-scheme\" content=\"light\"> \
+         <style>:root{{color-scheme:light}} \
+         html,body{{margin:0;padding:0;background:#ffffff;color:#14161a}} \
          body{{font-family:system-ui,sans-serif;overflow:hidden}} \
-         img{{max-width:100%}}</style> \
+         img{{max-width:100%}} a{{color:#2f6fed}}</style> \
          </head><body>{html}</body></html>"
     )
 }
@@ -167,8 +173,12 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     // escape; height is fitted, never guessed.
     let cage = gtk4::ScrolledWindow::new();
     cage.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Never);
-    cage.set_min_content_height(120);
-    cage.set_max_content_height(120);
+    // The frame's height rides an explicit size request: a `Never`-policy
+    // scroller ignores min/max *content* height for its own allocation, so
+    // the measured height has to reach `set_size_request` or the frame lays
+    // out at zero and paints nothing at all.
+    cage.set_size_request(-1, 120);
+    cage.add_css_class("muse-widget-cage");
     cage.set_child(Some(&view));
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_enable_javascript(true);
@@ -235,8 +245,7 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                     Ok(value) => match js_height(&value.to_string()) {
                         Some(height) => {
                             let fit_height = height.clamp(48.0, 1400.0) as i32;
-                            cage_for_fit.set_min_content_height(fit_height);
-                            cage_for_fit.set_max_content_height(fit_height);
+                            cage_for_fit.set_size_request(-1, fit_height);
                         }
                         None => {
                             eprintln!("muse: widget height unreadable: {value}");
@@ -275,8 +284,7 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
                             && let Some(height) = js_height(&value.to_string())
                         {
                             let settle_height = height.clamp(48.0, 1400.0) as i32;
-                            cage_for_settle.set_min_content_height(settle_height);
-                            cage_for_settle.set_max_content_height(settle_height);
+                            cage_for_settle.set_size_request(-1, settle_height);
                         }
                     },
                 );
@@ -298,7 +306,10 @@ pub fn widget_frame(html: &str, fallback: Option<&str>) -> gtk4::Widget {
     });
     {
         let fallback = Rc::clone(&fallback);
-        view.connect_load_failed(move |_, _, _, _| {
+        view.connect_load_failed(move |_, event, uri, error| {
+            // Visible in the launch log: a silent frame used to hide both a
+            // broken shell and a missing helper behind the same blank card.
+            eprintln!("muse: widget frame failed on {uri} ({:?}): {error}", event);
             fallback();
             true
         });
@@ -319,6 +330,22 @@ mod tests {
         assert_eq!(js_height("JsValue(432)"), Some(432.0));
         assert_eq!(js_height(""), None);
         assert_eq!(js_height("null"), None);
+    }
+
+    /// The shell the service's widgets are painted on: light ground, dark
+    /// text, and a declared light colour scheme, because the widgets are
+    /// authored for a white page and vanish on a dark one.
+    #[test]
+    fn the_widget_shell_is_light_on_purpose() {
+        let shell = document("<div class=\"hwk\">x</div>");
+        assert!(shell.contains("background:#ffffff"), "{shell}");
+        assert!(shell.contains("color:#14161a"), "{shell}");
+        assert!(shell.contains("color-scheme:light"), "{shell}");
+        assert!(!shell.contains("#1e1e1e"), "no dark ground left: {shell}");
+        assert!(
+            shell.contains("<div class=\"hwk\">x</div>"),
+            "markup intact"
+        );
     }
 
     #[test]
