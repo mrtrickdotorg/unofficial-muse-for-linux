@@ -304,6 +304,49 @@ html, body {
   overflow-wrap: anywhere;
 }
 
+/* Threads: one card per conversation -- pin, title, unread badge, then the
+ * listing's snippet and clock time. Read-only here: opening a thread is the
+ * chat surface, which S3 owns. */
+.thread {
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline);
+  background-image: var(--card-gradient);
+}
+
+.thread.pinned { border-color: var(--accent-border); }
+
+.thread-words { min-width: 0; }
+
+.thread h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.1px;
+  overflow-wrap: anywhere;
+}
+
+.thread-pin { flex: none; font-size: 12px; }
+
+.thread-title { min-width: 0; }
+
+.thread-unread {
+  flex: none;
+  margin-left: auto;
+}
+
+.thread-meta {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .banner {
   margin: 0 0 16px;
   padding: 10px 14px;

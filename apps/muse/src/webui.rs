@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::{HeldGoals, HeldIdeas, HeldTasks};
+use crate::pages::{HeldGoals, HeldIdeas, HeldTasks, HeldThreads};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -113,12 +113,35 @@ fn ideas_reply(held: &HeldIdeas) -> serde_json::Value {
     reply
 }
 
+/// The Threads rows, shaped once for both the boot payload and the reply.
+fn threads_payload(held: &HeldThreads) -> serde_json::Value {
+    serde_json::json!({
+        "threads": held.threads,
+        "total": held.total,
+        "loaded": held.loaded,
+        "error": held.error,
+    })
+}
+
+fn threads_document(held: &HeldThreads) -> String {
+    let mut boot = threads_payload(held);
+    boot["page"] = serde_json::json!("threads");
+    document(&boot)
+}
+
+fn threads_reply(held: &HeldThreads) -> serde_json::Value {
+    let mut reply = threads_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
 /// What a fresh wire read produced off the main loop.
 enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
     Goals(HeldGoals),
     Tasks(HeldTasks),
     Ideas(HeldIdeas),
+    Threads(HeldThreads),
     Failed(String),
 }
 
@@ -178,6 +201,27 @@ fn fresh_ideas(client: Option<AccountClient>) -> Receiver<Fetched> {
                     loaded: true,
                     error: None,
                 }),
+                Err(error) => Fetched::Failed(error.to_string()),
+            },
+        };
+        let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// Read the Threads listing from the service on a worker thread. The
+/// account listing carries every conversation, so this is the same read the
+/// native connect makes -- expensive, which is why Refresh leaves the loop.
+fn fresh_threads(client: Option<AccountClient>) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let fetched = match client {
+            None => Fetched::Failed("no account link in this app".into()),
+            Some(client) => match client.connect() {
+                Ok(snapshot) => Fetched::Threads(crate::pages::held_threads_from(
+                    &snapshot.threads,
+                    &crate::app::local_today(),
+                )),
                 Err(error) => Fetched::Failed(error.to_string()),
             },
         };
@@ -267,6 +311,8 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
         "tasks.refresh" => Answer::Later(fresh_tasks(client)),
         "ideas.snapshot" => Answer::Now(ideas_reply(&crate::pages::ideas_snapshot())),
         "ideas.refresh" => Answer::Later(fresh_ideas(client)),
+        "threads.snapshot" => Answer::Now(threads_reply(&crate::pages::threads_snapshot())),
+        "threads.refresh" => Answer::Later(fresh_threads(client)),
         other => Answer::Now(
             serde_json::json!({ "ok": false, "error": format!("unknown command: {other}") }),
         ),
@@ -341,6 +387,16 @@ fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::V
                 started.elapsed().as_millis()
             );
             tasks_reply(&held)
+        }
+        Fetched::Threads(held) => {
+            crate::pages::threads_cache(held.clone());
+            eprintln!(
+                "muse webui: {command} read the service: threads={} total={} ms={}",
+                held.threads.len(),
+                held.total,
+                started.elapsed().as_millis()
+            );
+            threads_reply(&held)
         }
         Fetched::Failed(error) => {
             eprintln!("muse webui: {command} failed: {error}");
@@ -519,6 +575,11 @@ const IDEAS_PROBE: &str = "JSON.stringify({cards: document.querySelectorAll('.id
      err: window.__MUSE_ERR__ || '', \
      text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
 
+const THREADS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.thread').length, \
+     boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.threads || []).length, \
+     err: window.__MUSE_ERR__ || '', \
+     text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
 /// Open the Library page in its own window, on the rows the native page last
 /// read.
 pub(crate) fn open_library_window(
@@ -564,6 +625,17 @@ pub(crate) fn open_ideas_window(held: HeldIdeas, client: Option<AccountClient>) 
         ideas_document(&held),
         client,
         IDEAS_PROBE,
+    )
+}
+
+/// Open the Threads page in its own window, on the rows the native page last
+/// painted.
+pub(crate) fn open_threads_window(held: HeldThreads, client: Option<AccountClient>) -> bool {
+    open_window(
+        "Threads · web view",
+        threads_document(&held),
+        client,
+        THREADS_PROBE,
     )
 }
 
@@ -772,6 +844,7 @@ mod tests {
             Fetched::Goals(..) => panic!("a library read must not answer with goals"),
             Fetched::Tasks(..) => panic!("a library read must not answer with tasks"),
             Fetched::Ideas(..) => panic!("a library read must not answer with ideas"),
+            Fetched::Threads(..) => panic!("a library read must not answer with threads"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -795,6 +868,7 @@ mod tests {
             Fetched::Goals(..) => panic!("no client, no goals"),
             Fetched::Tasks(..) => panic!("no client, no tasks"),
             Fetched::Ideas(..) => panic!("no client, no ideas"),
+            Fetched::Threads(..) => panic!("no client, no threads"),
         }
     }
 
@@ -1239,5 +1313,231 @@ mod tests {
     fn the_answer_wait_is_a_timed_poll() {
         assert!(ANSWER_POLL >= Duration::from_millis(50));
         assert!(ANSWER_POLL <= Duration::from_millis(500));
+    }
+
+    /// Threads boot: one page-tagged payload with the native page's grouping,
+    /// pin order and side-chat split.
+    #[test]
+    fn the_threads_document_names_its_page_and_carries_the_rows() {
+        let held = HeldThreads {
+            threads: vec![
+                crate::pages::ThreadRow {
+                    id: "s-1".into(),
+                    title: "A calmer inbox".into(),
+                    meta: "digest only · 09:14".into(),
+                    group: "Today".into(),
+                    unread: 2,
+                    pinned: false,
+                    side: false,
+                },
+                crate::pages::ThreadRow {
+                    id: "s-2".into(),
+                    title: "Side question".into(),
+                    pinned: true,
+                    side: true,
+                    ..crate::pages::ThreadRow::default()
+                },
+            ],
+            total: 2,
+            loaded: true,
+            error: None,
+        };
+        let doc = threads_document(&held);
+        assert!(doc.contains("\"page\":\"threads\""), "page named in boot");
+        assert!(doc.contains("A calmer inbox"));
+        assert!(doc.contains("digest only"));
+        assert!(doc.contains("\"unread\":2"));
+        assert!(doc.contains("\"side\":true"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    #[test]
+    fn threads_snapshot_answers_from_the_held_rows() {
+        crate::pages::threads_cache(HeldThreads {
+            threads: vec![crate::pages::ThreadRow {
+                id: "s-7".into(),
+                title: "Held thread".into(),
+                group: "Yesterday".into(),
+                ..crate::pages::ThreadRow::default()
+            }],
+            total: 1,
+            loaded: true,
+            error: None,
+        });
+        let (id, answer, command) = handle_command(r#"{"id":41,"cmd":"threads.snapshot"}"#, None);
+        assert_eq!(id, serde_json::json!(41));
+        assert_eq!(command, "threads.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["threads"][0]["title"], "Held thread");
+        assert_eq!(reply["threads"][0]["group"], "Yesterday");
+        assert_eq!(reply["total"], 1);
+        assert_eq!(reply["loaded"], true);
+    }
+
+    /// Threads refresh reads the account listing on a thread: the same
+    /// conversation read the native connect makes.
+    #[test]
+    fn threads_refresh_reads_the_service() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-threads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let service = serde_json::json!({
+            "ok": true,
+            "data": {
+                "identity_name": "Muse",
+                "vm_id": "vm-1",
+                "threads": [
+                    {
+                        "session_id": "s-1", "title": "Read from the service",
+                        "archived": false, "pinned": true, "unread_count": 4,
+                        "snippet": "latest activity", "updated_at": "2026-11-20T09:14:00Z"
+                    },
+                    {
+                        "session_id": "s-2", "title": "A side chat",
+                        "archived": false, "is_primary": false,
+                        "updated_at": "2026-11-19T18:00:00Z"
+                    }
+                ]
+            }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(service.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        crate::pages::threads_cache(HeldThreads {
+            threads: vec![crate::pages::ThreadRow {
+                id: "held".into(),
+                title: "Held, not re-read".into(),
+                ..crate::pages::ThreadRow::default()
+            }],
+            total: 1,
+            loaded: true,
+            error: None,
+        });
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+
+        let (_, answer, command) =
+            handle_command(r#"{"id":42,"cmd":"threads.refresh"}"#, Some(client));
+        assert_eq!(command, "threads.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        let Fetched::Threads(rows) = fetched else {
+            panic!("the host answered with something else");
+        };
+        // Pinned first, the side chat kept apart, the meta line joined.
+        assert_eq!(rows.threads[0].title, "Read from the service");
+        assert!(rows.threads[0].pinned);
+        assert_eq!(rows.threads[0].meta, "latest activity · 09:14");
+        assert_eq!(rows.threads[0].unread, 4);
+        assert_eq!(rows.threads[1].title, "A side chat");
+        assert!(rows.threads[1].side);
+        assert_eq!(rows.total, 2);
+
+        let reply = reply_for(Fetched::Threads(rows), &command, Instant::now());
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["threads"][0]["title"], "Read from the service");
+        let cached = crate::pages::threads_snapshot();
+        assert_eq!(cached.threads[0].title, "Read from the service");
+        assert_eq!(cached.total, 2);
+
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"connect""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn threads_refresh_without_a_client_reports_the_missing_link() {
+        let (_, answer, command) = handle_command(r#"{"id":43,"cmd":"threads.refresh"}"#, None);
+        assert_eq!(command, "threads.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("refresh must leave the main loop");
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no rows"),
+        }
+    }
+
+    /// The row projection is the native wording: pinned first, day groups
+    /// from the stamp against the caller's today, side chats apart, and an
+    /// untitled conversation still gets a row.
+    #[test]
+    fn thread_rows_group_the_way_the_native_list_does() {
+        use muse_account::Thread;
+
+        fn thread(id: &str, title: &str, stamp: Option<&str>) -> Thread {
+            Thread {
+                session_id: id.into(),
+                title: title.into(),
+                archived: false,
+                pinned: false,
+                is_thread: true,
+                unread_count: 0,
+                snippet: None,
+                is_primary: true,
+                updated_at: stamp.map(str::to_owned),
+            }
+        }
+
+        let today = "2026-11-20";
+        let mut pinned = thread("s-0", "Pinned", Some("2026-11-18T08:00:00Z"));
+        pinned.pinned = true;
+        let mut side = thread("s-3", "Side", Some("2026-11-20T10:00:00Z"));
+        side.is_primary = false;
+        let rows = crate::pages::held_threads_from(
+            &[
+                thread("s-1", "Today thread", Some("2026-11-20T09:14:00Z")),
+                pinned,
+                thread("s-2", "Older thread", Some("2026-11-17T09:00:00Z")),
+                side,
+                thread("s-4", "", None),
+            ],
+            today,
+        );
+
+        assert_eq!(rows.threads[0].title, "Pinned", "pinned rows lead");
+        assert!(rows.threads[0].pinned);
+        assert_eq!(rows.threads[1].group, "Today");
+        assert_eq!(rows.threads[1].meta, "09:14");
+        assert_eq!(rows.threads[2].group, "2026-11-17");
+        // The side chat keeps its listing position; only the pin order is
+        // imposed, and it is stable.
+        assert_eq!(rows.threads[3].title, "Side");
+        assert!(rows.threads[3].side);
+        assert_eq!(rows.threads[4].title, "(untitled)");
+        assert_eq!(rows.threads[4].group, "Earlier");
+        assert_eq!(rows.total, 5);
+        assert!(rows.loaded);
     }
 }

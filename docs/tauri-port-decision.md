@@ -201,6 +201,17 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   checks -- screen capture of one window, a click, window close/raise/unminimise, and a launcher
   that waits for a viewable window -- now live in `scripts/x11-shot.py`, `scripts/x11-click.py`,
   `scripts/x11-window.py` and `scripts/muse-gui.sh` instead of a temp directory.
+  Threads is the fifth page and the first whose row wording is projected natively rather than
+  queried per field: `fill_threads` already computes each row's day group, snippet-and-clock meta
+  line, pin order and side-chat split with the helpers the native list uses, so the cache is
+  filled by that same paint (`held_threads_from`) and the page cannot word a row differently from
+  the list beside it. `threads.snapshot` answers from those rows; `threads.refresh` re-reads the
+  account listing -- the expensive connect read, which is why it leaves the main loop -- and the
+  reply and cache update together. The page keeps the native shape: pinned rows above the day
+  groups, one header per group, unread badges from the listing's own count, side chats under their
+  own header, and `loaded` again separating "no conversations" from "not read yet". Seven DOM
+  tests (`Threads.test.tsx`) cover the groups, the unread and meta line, both empty states, a wire
+  refresh, a refused refresh and a failed read beside held rows.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
   is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote

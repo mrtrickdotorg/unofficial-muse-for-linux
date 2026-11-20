@@ -48,6 +48,28 @@ export type IdeasSnapshot = {
   error?: string | null;
 };
 
+// One Threads row: the group header, the snippet-and-clock line and the
+// side/pin flags are computed natively, so the page cannot word a row
+// differently from the list beside it.
+export type ThreadRow = {
+  id: string;
+  title: string;
+  meta: string;
+  group: string;
+  unread: number;
+  pinned: boolean;
+  side: boolean;
+};
+
+// The conversation listing, with `loaded` separating an account with no
+// conversations from a page that has not read them yet.
+export type ThreadsSnapshot = {
+  threads: ThreadRow[];
+  total: number;
+  loaded: boolean;
+  error?: string | null;
+};
+
 // One Tasks row: the native page's own words, so the two renderers agree.
 export type TaskRow = { id: string; label: string };
 
@@ -66,4 +88,5 @@ export type Boot =
   | (LibrarySnapshot & { page?: "library" })
   | (GoalsSnapshot & { page?: "goals" })
   | (TasksSnapshot & { page?: "tasks" })
-  | (IdeasSnapshot & { page?: "ideas" });
+  | (IdeasSnapshot & { page?: "ideas" })
+  | (ThreadsSnapshot & { page?: "threads" });
