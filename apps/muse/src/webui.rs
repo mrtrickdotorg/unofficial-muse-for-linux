@@ -456,6 +456,22 @@ fn fresh_goals(client: Option<AccountClient>) -> Receiver<Fetched> {
     receiver
 }
 
+/// Whether a command earns a line in the launch log. The Chat page re-asks
+/// for its cached transcript on a timer, so a mirror window left open would
+/// otherwise fill the log with the same line thousands of times; each cache
+/// read is named once per window instead. A wire read is named every time --
+/// it is the thing a launch log is actually for, and it is rare. The cache/
+/// wire split is the command's own suffix, the same one the page's contract
+/// uses: `.refresh` and `search.run` go to the service, the rest are answered
+/// from held rows.
+pub(crate) fn should_log_command(
+    command: &str,
+    named: &mut std::collections::HashSet<String>,
+) -> bool {
+    let wire = command.ends_with(".refresh") || command.ends_with(".run");
+    wire || named.insert(command.to_owned())
+}
+
 /// One command from the page. Reads only, and by name: an unknown command is
 /// refused instead of guessed at, so a typo in the UI is visible in the page
 /// and in the log.
@@ -719,10 +735,15 @@ fn open_window(
     // Only the wire read leaves the loop, and it comes back through the timed
     // poll below, so no lock or widget is touched off the main thread.
     let reply_view = view.clone();
+    // Named commands so far, per window: see `should_log_command`.
+    let named: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
     manager.connect_script_message_received(None, move |_, value| {
         let raw = value.to_str().to_string();
         let (id, answer, command) = handle_command(&raw, client.clone());
-        eprintln!("muse webui: command {command}");
+        if should_log_command(&command, &mut named.borrow_mut()) {
+            eprintln!("muse webui: command {command}");
+        }
         match answer {
             Answer::Now(reply) => send_reply(&reply_view, &id, &reply),
             Answer::Later(receiver) => {
@@ -1646,6 +1667,33 @@ mod tests {
         assert!(doc.contains("\"kind\":\"day\""));
         assert!(doc.contains("Usage limit reached"));
         assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    /// A mirror page polls its cache, so the log names each cache command
+    /// once per window; a wire read is named every time, because that is what
+    /// the launch log is for. Without this, one chat window left open wrote a
+    /// line every two seconds.
+    #[test]
+    fn the_log_names_cache_reads_once_and_wire_reads_every_time() {
+        use std::collections::HashSet;
+        let mut named = HashSet::new();
+        assert!(should_log_command("chat.snapshot", &mut named));
+        for _ in 0..200 {
+            assert!(!should_log_command("chat.snapshot", &mut named));
+        }
+        // Another window has its own set, so it still names its first read.
+        let mut other = HashSet::new();
+        assert!(should_log_command("chat.snapshot", &mut other));
+        // A Refresh press goes to the service: never swallowed.
+        for _ in 0..3 {
+            assert!(should_log_command("library.refresh", &mut named));
+        }
+        assert!(should_log_command("search.run", &mut named));
+        assert!(should_log_command("search.run", &mut named));
+        // A cache read asked twice is named once, but a different one is
+        // still new to the log.
+        assert!(should_log_command("threads.snapshot", &mut named));
+        assert!(!should_log_command("threads.snapshot", &mut named));
     }
 
     /// The page follows the app: `chat.snapshot` answers from the held
