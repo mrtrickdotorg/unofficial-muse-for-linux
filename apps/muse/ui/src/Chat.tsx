@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { call, channelAvailable } from "./api";
 import type { ChatRow as Row, ChatSnapshot } from "./types";
 
@@ -88,6 +95,42 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     return () => clearInterval(timer);
   }, [loadSnapshot, pollMs]);
 
+  // The draft lives here, but the send does not: `chat.send` hands the words
+  // back to the app's controller, which owns the `Send` slot, the receipt and
+  // the history reload. This window never dispatches on its own.
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const sendable = draft.trim().length > 0 && !pending;
+
+  const send = async (event?: FormEvent) => {
+    event?.preventDefault();
+    const text = draft.trim();
+    if (!text || pending) return;
+    setPending(true);
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.send", 30_000, { text });
+      // The app took it: the entry clears, exactly as a press in that window
+      // clears it. The transcript and the status line carry the outcome.
+      setDraft("");
+      void loadSnapshot();
+    } catch (failure) {
+      // The app's own sentence (a held slot, a signed-out window), and the
+      // draft stays: nothing typed is lost to a refusal.
+      setNote(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const draftKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void send();
+    }
+  };
+
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const loaded = data?.loaded ?? false;
 
@@ -133,6 +176,27 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               ),
             )
           )}
+
+          <form className="chat-composer" onSubmit={send}>
+            <textarea
+              className="chat-draft"
+              aria-label="Message"
+              placeholder="Message"
+              rows={1}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={draftKey}
+            />
+            <button
+              className="chat-send"
+              type="submit"
+              disabled={!sendable}
+              aria-label="Send"
+            >
+              ↑
+            </button>
+          </form>
+          {note && <div className="chat-note">{note}</div>}
         </div>
 
         <aside className="chat-panel">
@@ -142,8 +206,9 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
             {data?.thread ? `Thread ${data.thread.slice(0, 8)}…` : "New chat"}
           </div>
           <div className="chat-panel-note">
-            Read-only mirror of the native transcript. Sending, attachments and
-            approvals stay in the app window until this slice learns to mutate.
+            Sends go through the app's own send: the same slot, the same
+            receipt, the same history read. Pictures, approvals, Stop and
+            dictation still live in the app window.
           </div>
         </aside>
       </div>

@@ -672,3 +672,48 @@ html, body {
 .chat-panel-name { font-size: 14px; font-weight: 700; }
 .chat-status { color: var(--warn); font-size: 12.5px; }
 .chat-panel-meta, .chat-panel-note { color: var(--text-faint); font-size: 11.5px; }
+
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background-image: var(--card-gradient);
+}
+
+.chat-draft {
+  flex: 1;
+  min-width: 0;
+  max-height: 168px;
+  padding: 6px 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  resize: none;
+}
+
+.chat-send {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background-image: var(--accent-gradient);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.chat-note {
+  color: var(--text-faint);
+  font-size: 12.5px;
+}
