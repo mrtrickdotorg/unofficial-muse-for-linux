@@ -1590,10 +1590,10 @@ def community_client(config):
                 body["session_id"] = thread
             if reply_to is not None:
                 # The quoted turn rides the stream params the way the shipped
-                # 12.1 client sends it: one id, never the quote's text. That
-                # shape is not live-verified (a real reply is a non-reversible
-                # turn), so the app keeps showing the quote as its own context
-                # rather than claiming the service recorded it.
+                # 12.1 client sends it: one id, never the quote's text.
+                # Verified live (Nov 21, 2026): the landed row carried that id
+                # back as reply_to_message_id, with the service's own
+                # reply_to_target for the quoted text beside it.
                 body["in_reply_to"] = reply_to
             # The dispatch rides the connection this request already holds: it
             # served only this send (the identity check, then the baseline

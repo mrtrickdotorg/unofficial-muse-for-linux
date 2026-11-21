@@ -89,20 +89,21 @@ an honest idle no-op with nothing running to kill. Already
 wired end-to-end (button outside the ticket slot,
 fire-and-forget, the answer's `cancelled` travels as data), so
 no change; the probe just closed the "never verified" line.
-Message reply (Nov 19, 2026; wired Nov 21, 2026): the send
-shape is mined from the 12.1 bundle and now wired, but still NOT
-live-verified. A quoted chat message rides as
-`{in_reply_to: <messageId>}` in the stream params (plus an image
-`reply_to_target` when the quote carries one); other targets ride
-`reply_to_target` (`goal`, `feed_unit`, `presentation`,
-`mail_message` kinds), and the subscribe handshake advertises
-`supported_reply_to_target_types` per session. Verification is
-blocked on safety, not knowledge: scratch-session sends never
-land in history, and a real-thread reply is a non-reversible
-user-visible turn (message plus the agent run it triggers). The
-field ships unverified against that, because the app's own quote
-is what the reader sees and no receipt claims the service
-recorded the target.
+Message reply (Nov 19, 2026; wired and verified Nov 21, 2026):
+A quoted chat message rides as `{in_reply_to: <messageId>}` in
+the stream params (plus an image `reply_to_target` when the
+quote carries one); other targets ride `reply_to_target`
+(`goal`, `feed_unit`, `presentation`, `mail_message` kinds), and
+the subscribe handshake advertises
+`supported_reply_to_target_types` per session. Live proof, from
+one authorized quoted send at the web page's composer: the
+landed user row (`seq` 146571) carried
+`payload.reply_to_message_id` equal to the quoted turn's id
+(`assistant-msg-0887257b…`), and the service added its own
+`reply_to_target` with that turn's text beside it — recorded,
+not inferred. The earlier caution still held and was spent on
+purpose: scratch sessions never land in history, and a real
+reply is a non-reversible user-visible turn.
 Shipped (Gap 1 slice): every message row carries a Reply button
 that stages the row as a capped one-line quote above the
 composer, with Cancel × to drop it. The staged id rides the send
