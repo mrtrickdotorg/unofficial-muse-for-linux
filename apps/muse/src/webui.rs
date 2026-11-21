@@ -836,6 +836,15 @@ fn open_window_with(
     // channel answered: the rows the page built and holds, and any script
     // error. Read after a beat so the React effects and the first command
     // round trip have finished.
+    //
+    // The probe must be a plain expression with a synchronous value.
+    // `evaluate_javascript` does NOT await a returned promise: it answers
+    // `Err("Unsupported result type")`, which the `if let Ok` below drops
+    // silently, so a promise-shaped probe looks exactly like a probe that never
+    // ran. For anything that needs a delay -- typing, clicking, waiting for a
+    // reply -- evaluate in steps on separate `timeout_add_local_once` ticks
+    // and keep each script synchronous. A probe written the async way cost a
+    // debugging cycle while proving the composer's send.
     view.connect_load_changed(move |view, event| {
         if event != webkit6::LoadEvent::Finished {
             return;
