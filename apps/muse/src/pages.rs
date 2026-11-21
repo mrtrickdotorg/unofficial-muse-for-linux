@@ -2587,6 +2587,9 @@ pub(crate) struct HeldChat {
     pub title: String,
     pub account: String,
     pub status: Option<String>,
+    /// Whether the app has a send in flight: the same flag the native card
+    /// swaps Send for Stop on.
+    pub sending: bool,
     pub rows: Vec<ChatRow>,
     pub loaded: bool,
     pub error: Option<String>,

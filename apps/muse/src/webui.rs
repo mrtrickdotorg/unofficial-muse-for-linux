@@ -246,6 +246,7 @@ fn chat_payload(held: &HeldChat) -> serde_json::Value {
         "title": held.title,
         "account": held.account,
         "status": held.status,
+        "sending": held.sending,
         "rows": held.rows,
         "loaded": held.loaded,
         "error": held.error,
@@ -462,30 +463,39 @@ fn fresh_goals(client: Option<AccountClient>) -> Receiver<Fetched> {
 /// read is named once per window instead. A trip to the service is named
 /// every time -- it is the thing a launch log is actually for, and it is
 /// rare. The cache/wire split is the command's own suffix, the same one the
-/// page's contract uses: `.refresh`, `.run` and `.send` go out, the rest are
-/// answered from held rows.
+/// page's contract uses: `.refresh`, `.run`, `.send` and `.stop` go out, the
+/// rest are answered from held rows.
 pub(crate) fn should_log_command(
     command: &str,
     named: &mut std::collections::HashSet<String>,
 ) -> bool {
-    let wire =
-        command.ends_with(".refresh") || command.ends_with(".run") || command.ends_with(".send");
+    let wire = command.ends_with(".refresh")
+        || command.ends_with(".run")
+        || command.ends_with(".send")
+        || command.ends_with(".stop");
     wire || named.insert(command.to_owned())
 }
 
-/// A page's way into the app's own send path: the Chat window hands its draft
-/// back to the controller that owns the `Send` slot, so the window and the
-/// page cannot dispatch different things.
+/// The routes a page has back into the app for its two mutating controls.
+/// Neither is a dispatcher of its own: a send goes through the app's single
+/// sender, and Stop takes no session ticket at all -- which is the point of
+/// stop, since it has to fire while a send holds the `Send` slot.
 pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+pub(crate) type WebStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+
+pub(crate) struct WebRoutes {
+    pub send: WebSend,
+    pub stop: WebStop,
+}
 
 /// One command from the page. Reads only, and by name: an unknown command is
 /// refused instead of guessed at, so a typo in the UI is visible in the page
-/// and in the log. `send` is the Chat window's route back into the app's own
-/// send path; every other page passes `None` and cannot mutate at all.
+/// and in the log. `routes` is the Chat window's way back into the app; every
+/// other page passes `None` and cannot mutate at all.
 fn handle_command_with(
     raw: &str,
     client: Option<AccountClient>,
-    send: Option<&WebSend>,
+    routes: Option<&WebRoutes>,
 ) -> (serde_json::Value, Answer, String) {
     let Ok(request) = serde_json::from_str::<serde_json::Value>(raw) else {
         return (
@@ -543,12 +553,12 @@ fn handle_command_with(
                 .get("text")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            match send {
+            match routes {
                 None => Answer::Now(serde_json::json!({
                     "ok": false,
                     "error": "this window cannot send"
                 })),
-                Some(send) => match send(text) {
+                Some(routes) => match (routes.send)(text) {
                     Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
                     Err(sentence) => {
                         Answer::Now(serde_json::json!({ "ok": false, "error": sentence }))
@@ -556,6 +566,22 @@ fn handle_command_with(
                 },
             }
         }
+        // Stop, the other control the native card has. It goes back to the app
+        // the same way, and the app's stop takes no ticket -- so pressing this
+        // while a send holds the `Send` slot still reaches the service. The
+        // answer says only that the cancel went out; whether anything was
+        // running is the service's word, and the transcript and the status
+        // line carry what actually landed.
+        "chat.stop" => match routes {
+            None => Answer::Now(serde_json::json!({
+                "ok": false,
+                "error": "this window cannot stop"
+            })),
+            Some(routes) => match (routes.stop)() {
+                Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
+                Err(sentence) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
+            },
+        },
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -750,7 +776,7 @@ fn open_window_with(
     document: String,
     client: Option<AccountClient>,
     probe: &'static str,
-    send: Option<WebSend>,
+    routes: Option<WebRoutes>,
 ) -> bool {
     if !available() {
         return false;
@@ -787,7 +813,7 @@ fn open_window_with(
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
     manager.connect_script_message_received(None, move |_, value| {
         let raw = value.to_str().to_string();
-        let (id, answer, command) = handle_command_with(&raw, client.clone(), send.as_ref());
+        let (id, answer, command) = handle_command_with(&raw, client.clone(), routes.as_ref());
         if should_log_command(&command, &mut named.borrow_mut()) {
             eprintln!("muse webui: command {command}");
         }
@@ -992,14 +1018,14 @@ const CHAT_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.chat
 pub(crate) fn open_chat_window(
     held: HeldChat,
     client: Option<AccountClient>,
-    send: WebSend,
+    routes: WebRoutes,
 ) -> bool {
     open_window_with(
         "Chat · web view",
         chat_document(&held),
         client,
         CHAT_PROBE,
-        Some(send),
+        Some(routes),
     )
 }
 
@@ -1714,6 +1740,7 @@ mod tests {
             title: "A calmer inbox".into(),
             account: "Muse".into(),
             status: Some("Send failed (Timeout).".into()),
+            sending: false,
             rows: vec![
                 crate::pages::ChatRow {
                     kind: "day",
@@ -1765,9 +1792,11 @@ mod tests {
         }
         assert!(should_log_command("search.run", &mut named));
         assert!(should_log_command("search.run", &mut named));
-        // A send goes out: two presses are two lines.
+        // A send and a stop go out: two presses are two lines.
         assert!(should_log_command("chat.send", &mut named));
         assert!(should_log_command("chat.send", &mut named));
+        assert!(should_log_command("chat.stop", &mut named));
+        assert!(should_log_command("chat.stop", &mut named));
         // A cache read asked twice is named once, but a different one is
         // still new to the log.
         assert!(should_log_command("threads.snapshot", &mut named));
@@ -1788,10 +1817,14 @@ mod tests {
             recorded.borrow_mut().push(text.to_owned());
             Ok(())
         });
+        let routes = WebRoutes {
+            send,
+            stop: Rc::new(|| Ok(())),
+        };
         let (id, answer, command) = handle_command_with(
             r#"{"id":61,"cmd":"chat.send","text":"hello there"}"#,
             None,
-            Some(&send),
+            Some(&routes),
         );
         assert_eq!(id, serde_json::json!(61));
         assert_eq!(command, "chat.send");
@@ -1801,9 +1834,12 @@ mod tests {
         assert_eq!(reply["ok"], serde_json::json!(true));
         assert_eq!(seen.borrow().as_slice(), ["hello there"]);
 
-        let refusing: WebSend = Rc::new(|_: &str| {
-            Err("Still working — your message is kept; send again in a moment.".to_owned())
-        });
+        let refusing = WebRoutes {
+            send: Rc::new(|_: &str| {
+                Err("Still working — your message is kept; send again in a moment.".to_owned())
+            }),
+            stop: Rc::new(|| Ok(())),
+        };
         let (_, answer, _) = handle_command_with(
             r#"{"id":62,"cmd":"chat.send","text":"again"}"#,
             None,
@@ -1830,6 +1866,53 @@ mod tests {
         assert_eq!(reply["error"], serde_json::json!("this window cannot send"));
     }
 
+    /// Stop is the other control the native card has. Its route takes no
+    /// ticket, so a press while a send holds the `Send` slot still goes out:
+    /// here that is proven by the send route being held (it never answers) and
+    /// the stop route still being reached.
+    #[test]
+    fn chat_stop_fires_its_own_route_and_refuses_a_closed_one() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let stopped = Rc::new(Cell::new(0));
+        let counted = stopped.clone();
+        let refusing = WebRoutes {
+            send: Rc::new(|_: &str| Err("Still working — your message is kept.".to_owned())),
+            stop: Rc::new(move || {
+                counted.set(counted.get() + 1);
+                Ok(())
+            }),
+        };
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":71,"cmd":"chat.stop"}"#, None, Some(&refusing));
+        assert_eq!(id, serde_json::json!(71));
+        assert_eq!(command, "chat.stop");
+        let Answer::Now(reply) = answer else {
+            panic!("a stop answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(true));
+        assert_eq!(stopped.get(), 1);
+        // The send route still refuses: stop is not a way around a held slot,
+        // it is a way to cancel what holds it.
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":72,"cmd":"chat.send","text":"not yet"}"#,
+            None,
+            Some(&refusing),
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a refused send answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert_eq!(stopped.get(), 1);
+
+        // A window without the routes cannot stop on the page's say-so.
+        let (_, answer, _) = handle_command_with(r#"{"id":73,"cmd":"chat.stop"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a closed route answers at once")
+        };
+        assert_eq!(reply["error"], serde_json::json!("this window cannot stop"));
+    }
+
     /// The page follows the app: `chat.snapshot` answers from the held
     /// transcript without a wire trip, and a grown reply is in the answer, so
     /// a poll while a reply streams sees the words arrive.
@@ -1840,6 +1923,7 @@ mod tests {
             title: "Streaming".into(),
             account: "Muse".into(),
             status: None,
+            sending: true,
             rows: vec![crate::pages::ChatRow {
                 kind: "message",
                 id: "m-9".into(),
