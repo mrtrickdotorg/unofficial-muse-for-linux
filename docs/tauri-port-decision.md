@@ -1,6 +1,6 @@
 # Porting the client to Rust + Tauri + React: analysis and staging plan
 
-**Status: S0 shipped, S1 gate met, S2 started (Nov 20, 2026).** The decision was made to continue
+**Status: S0 shipped, S1 gate met, S2 seven pages, S3 started (Nov 20, 2026).** The decision was made to continue
 toward the Tauri/React end state. Stage S0 (the palette lift) is in the tree; S1's reference page —
 Library, read-only, in the existing WebKitGTK view with real rows — is implemented and verified on
 this seat; S2 has its first page, Goals, on the same contract. Everything below the stage list is
@@ -268,9 +268,24 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   needed a way to type: `scripts/x11-type.py` joins the other host-side helpers (XTEST keys,
   `--clear` for select-all first), since this host has no xdotool.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
-- **S3 — Chat surface (2–3 weeks).** Transcript, composer, attachments, side panel. Last, because it
-  is where a webview's feel differs most from GTK's. Gate: streaming, cancellation, approvals, quote
-  staging and unread badges behave identically under the same manual script.
+- **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only.** This
+  slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the
+  app's ~185 geometry-changing UI commits in chat and shell, so this is the surface that can decide
+  S4, while settings (25 commits, 19 geometry) and local host (8, 5) are the quietest in the tree.
+  The page renders the native transcript's own three row shapes -- day dividers, bubbles (with the
+  service's option pills and attachment chips) and notices -- plus the details panel's account,
+  thread and composer status line, all projected from `chat::build_rows`, so the two renderers
+  cannot word a turn differently. It is the first page with no refresh command: it follows
+  `chat.snapshot`, refilled by every native render *including* the in-place rewrite of a growing
+  reply, so the page costs no wire trips, cannot show a different conversation than the window
+  beside it, and needs no second copy of the ticket discipline. It opens from the chat's turn menu
+  ("Open in web view"), not the header row, so the port costs the chat header no pixel. Five DOM
+  tests (`Chat.test.tsx`) cover the three row shapes and the option pills, the unread-thread state,
+  the status line, a failed read beside held rows, and -- the reason this page exists -- a reply
+  that grows keeping its element: the same DOM node takes the new words, which is the web half of
+  the in-place rewrite. **Remaining for S3's gate:** the composer and a mutating `chat.send`,
+  attachments, cancellation, approvals, quote staging and unread badges; the native window is still
+  the only one that sends.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).

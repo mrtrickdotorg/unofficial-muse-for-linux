@@ -132,6 +132,34 @@ export type TasksSnapshot = {
   error?: string | null;
 };
 
+// One transcript row, in the three shapes the native list builds: a day
+// divider, a message, or a service notice. `id` is the service's own message
+// id, which is what lets a reply that grows keep its element.
+export type ChatRow = {
+  kind: "day" | "message" | "notice";
+  id: string;
+  role: "user" | "assistant" | "";
+  text: string;
+  day: string;
+  sent_at?: string | null;
+  attachments: string[];
+  options: string[];
+  selected?: string | null;
+};
+
+// The Chat surface as this window opens it: the open thread, the rows the
+// native transcript last built, and the composer's status line. `loaded`
+// separates a thread nobody has read yet from an empty one.
+export type ChatSnapshot = {
+  thread?: string | null;
+  title: string;
+  account: string;
+  status?: string | null;
+  rows: ChatRow[];
+  loaded: boolean;
+  error?: string | null;
+};
+
 // One bundle serves every window: the boot payload names the page it opens.
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
@@ -140,4 +168,5 @@ export type Boot =
   | (IdeasSnapshot & { page?: "ideas" })
   | (ThreadsSnapshot & { page?: "threads" })
   | (FeedSnapshot & { page?: "feed" })
-  | (SearchSnapshot & { page?: "search" });
+  | (SearchSnapshot & { page?: "search" })
+  | (ChatSnapshot & { page?: "chat" });

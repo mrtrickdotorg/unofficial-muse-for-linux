@@ -376,9 +376,20 @@ impl Chat {
         menu.set_label("…");
         menu.add_css_class("muse-header-pill");
         describe(&menu, "Turn options");
+        // The web slice, beside the native transcript: a read-only mirror
+        // that follows this window's reads. Kept in the turn menu rather
+        // than the header row, so the port costs the chat header no pixel.
+        let web_view = gtk4::Button::with_label("Open in web view");
+        web_view.add_css_class("flat");
+        web_view.set_tooltip_text(Some(
+            "Open this chat in the web UI slice of the port (read-only)",
+        ));
         {
             let popover = gtk4::Popover::new();
-            popover.set_child(Some(&delete));
+            let body = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+            body.append(&web_view);
+            body.append(&delete);
+            popover.set_child(Some(&body));
             menu.set_popover(Some(&popover));
         }
         let call = gtk4::Button::with_label("Call");
@@ -660,6 +671,21 @@ impl Chat {
             panel_toggle.connect_clicked(move |_| {
                 if let Some(chat) = weak.upgrade() {
                     chat.toggle_panel();
+                }
+            });
+        }
+        {
+            // Resolved per press: the mirror is the rows this window
+            // holds right now, so pressing after a reply shows the reply.
+            let weak = Rc::downgrade(&chat);
+            web_view.connect_clicked(move |_| {
+                let Some(chat) = weak.upgrade() else {
+                    return;
+                };
+                chat.cache_web_chat();
+                let held = crate::pages::chat_snapshot();
+                if !crate::webui::open_chat_window(held, chat.client_handle()) {
+                    eprintln!("muse: web view unavailable in this build");
                 }
             });
         }
@@ -1863,6 +1889,9 @@ impl Chat {
             }
             *self.painted.borrow_mut() = Some(fingerprint);
         }
+        // The web slice's copy follows this render: after a rebuild or an
+        // in-place rewrite, the page and the list tell the same story.
+        self.cache_web_chat();
         // Link cards resolve a render behind: the row shows text-only
         // first, the card version repaints when the fetch lands.
         self.fetch_previews();
@@ -1911,22 +1940,61 @@ impl Chat {
             .set_label(delete_label(armed.is_some() && armed == latest));
     }
 
+    /// The open thread's title from the service listing, or "New chat"
+    /// before anything is picked. One place, so the heading and the web
+    /// slice's copy of it cannot word the thread differently.
+    pub(crate) fn thread_title(&self) -> String {
+        let thread = self.thread.borrow().clone();
+        thread
+            .as_deref()
+            .and_then(|id| {
+                self.session.borrow().account.clone().and_then(|account| {
+                    account
+                        .threads
+                        .iter()
+                        .find(|row| row.session_id == id)
+                        .map(|row| row.title.clone())
+                })
+            })
+            .unwrap_or_else(|| "New chat".to_owned())
+    }
+
     /// The heading names the open thread from the service listing, or
     /// "New chat" before anything is picked. Cheap enough to repaint
     /// on every render; the label only changes on a thread switch.
     fn refresh_title(&self) {
+        self.heading.set_text(&self.thread_title());
+    }
+
+    /// Keep the web slice's copy of the transcript in step with the native
+    /// list: the same rows, the same thread, the same status line. Runs on
+    /// every render -- including the in-place rewrite of a growing reply --
+    /// so a page following `chat.snapshot` sees the sentence arrive rather
+    /// than a stale copy of its first chunk.
+    pub(crate) fn cache_web_chat(&self) {
+        let (rows, loaded, account, status) = {
+            let session = self.session.borrow();
+            (
+                build_rows(&session.history),
+                !session.history.is_empty() || self.thread.borrow().is_some(),
+                self.session_name(),
+                self.send_note
+                    .borrow()
+                    .clone()
+                    .or_else(|| session.latest_quota.clone()),
+            )
+        };
+        let title = self.thread_title();
         let thread = self.thread.borrow().clone();
-        let title = thread.as_deref().and_then(|id| {
-            self.session.borrow().account.clone().and_then(|account| {
-                account
-                    .threads
-                    .iter()
-                    .find(|row| row.session_id == id)
-                    .map(|row| row.title.clone())
-            })
+        crate::pages::chat_cache(crate::pages::HeldChat {
+            thread,
+            title,
+            account: account.unwrap_or_else(|| "Sign in".to_owned()),
+            status,
+            rows: crate::pages::held_chat_from(&rows),
+            loaded,
+            error: None,
         });
-        self.heading
-            .set_text(title.as_deref().unwrap_or("New chat"));
     }
 
     /// The older button names its own state: loading, exhausted, or

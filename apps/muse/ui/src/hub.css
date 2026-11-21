@@ -549,3 +549,126 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The Chat surface: the native transcript's three shapes (day divider,
+ * bubble, notice) plus the details panel beside them. Widths are capped in
+ * em, not px, so a long reply wraps at the reading column instead of
+ * widening the window -- the failure the native label clamp exists for. */
+.chat-page { max-width: 1240px; }
+
+.chat-live {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+}
+
+.chat-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 260px;
+  gap: 18px;
+  align-items: start;
+}
+
+.chat-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.chat-day {
+  align-self: center;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.chat-notice {
+  align-self: center;
+  max-width: 46em;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.chat-row { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.chat-row.user { align-items: flex-end; }
+.chat-row.assistant { align-items: flex-start; }
+
+.chat-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.chat-avatar { color: var(--accent); }
+.chat-who { font-weight: 600; }
+.chat-time { font-size: 11.5px; }
+
+.chat-bubble {
+  max-width: 42em;
+  padding: 11px 15px;
+  border-radius: 16px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.chat-bubble p { margin: 0 0 8px; }
+.chat-bubble p:last-child { margin-bottom: 0; }
+
+.chat-bubble.assistant {
+  border: 1px solid var(--hairline);
+  background: var(--surface-solid);
+  border-bottom-left-radius: 6px;
+}
+
+.chat-bubble.user {
+  background-image: var(--accent-gradient);
+  color: #fff;
+  border-bottom-right-radius: 6px;
+}
+
+.chat-files { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chat-file {
+  max-width: 28em;
+  padding: 3px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-options { display: flex; flex-wrap: wrap; gap: 6px; max-width: 42em; }
+
+.chat-option {
+  padding: 6px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  font-size: 12.5px;
+}
+
+.chat-option.chosen { border-color: var(--accent-border); color: var(--accent); }
+
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background-image: var(--card-gradient);
+}
+
+.chat-panel-name { font-size: 14px; font-weight: 700; }
+.chat-status { color: var(--warn); font-size: 12.5px; }
+.chat-panel-meta, .chat-panel-note { color: var(--text-faint); font-size: 11.5px; }

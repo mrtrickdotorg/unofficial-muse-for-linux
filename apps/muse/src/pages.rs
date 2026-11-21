@@ -2559,6 +2559,109 @@ pub(crate) struct ThreadRow {
     pub side: bool,
 }
 
+/// One transcript row as the web page draws it: the same three shapes the
+/// native list builds (a day divider, a message, a service notice), carried
+/// across with the native values so the two renderers cannot disagree on a
+/// word.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct ChatRow {
+    /// `day`, `message` or `notice`.
+    pub kind: &'static str,
+    pub id: String,
+    /// `user`, `assistant`, or empty for rows that are not a message.
+    pub role: String,
+    pub text: String,
+    pub day: String,
+    pub sent_at: Option<String>,
+    pub attachments: Vec<String>,
+    pub options: Vec<String>,
+    pub selected: Option<String>,
+}
+
+/// The Chat surface as the web view opens it: the open thread, the rows the
+/// native transcript last built, and the status line the composer is showing.
+/// `loaded` separates a thread nobody has read yet from an empty one.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeldChat {
+    pub thread: Option<String>,
+    pub title: String,
+    pub account: String,
+    pub status: Option<String>,
+    pub rows: Vec<ChatRow>,
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+thread_local! {
+    static CHAT_STORE: std::cell::RefCell<HeldChat> =
+        std::cell::RefCell::new(HeldChat::default());
+}
+
+/// The transcript the native list last painted. A cache read by construction:
+/// the page follows the app's own reads, so the two can never show different
+/// conversations.
+pub(crate) fn chat_snapshot() -> HeldChat {
+    CHAT_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the held transcript. Called on every native render, including the
+/// in-place rewrite of a growing reply, so a page following `chat.snapshot`
+/// sees the words arrive instead of the first chunk.
+pub(crate) fn chat_cache(held: HeldChat) {
+    CHAT_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// Project the rows `chat::build_rows` produced into the page's rows. Pure, so
+/// the day dividers, notices and option pills can be checked without a window.
+pub(crate) fn held_chat_from(rows: &[super::chat::TranscriptRow]) -> Vec<ChatRow> {
+    use super::chat::{Role, TranscriptRow};
+    rows.iter()
+        .map(|row| match row {
+            TranscriptRow::DayDivider { label } => ChatRow {
+                kind: "day",
+                day: label.clone(),
+                ..ChatRow::default()
+            },
+            TranscriptRow::Notice { text } => ChatRow {
+                kind: "notice",
+                text: text.clone(),
+                ..ChatRow::default()
+            },
+            TranscriptRow::Message {
+                id,
+                role,
+                text,
+                attachments,
+                options,
+                selected_option,
+                sent_at,
+            } => ChatRow {
+                kind: "message",
+                id: id.clone(),
+                role: match role {
+                    Role::User => "user",
+                    _ => "assistant",
+                }
+                .to_owned(),
+                text: text.clone(),
+                sent_at: sent_at.clone(),
+                attachments: attachments
+                    .iter()
+                    .map(|file| match file.kind.as_deref() {
+                        Some(kind) if !kind.is_empty() => {
+                            format!("{} · {kind}", file.filename)
+                        }
+                        _ => file.filename.clone(),
+                    })
+                    .collect(),
+                options: options.clone(),
+                selected: selected_option.clone(),
+                day: String::new(),
+            },
+        })
+        .collect()
+}
+
 /// The Threads page as the web view opens it. `loaded` separates an account
 /// with no conversations from a page that has not read the listing yet.
 #[derive(Clone, Debug, Default)]

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::{HeldFeed, HeldGoals, HeldIdeas, HeldSearch, HeldTasks, HeldThreads};
+use crate::pages::{HeldChat, HeldFeed, HeldGoals, HeldIdeas, HeldSearch, HeldTasks, HeldThreads};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -233,6 +233,33 @@ fn search_document(held: &HeldSearch) -> String {
 
 fn search_reply(held: &HeldSearch) -> serde_json::Value {
     let mut reply = search_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
+/// The Chat surface, shaped once for both the boot payload and the reply.
+/// Every field is the native window's own: the thread title, the rows the
+/// transcript last built, the composer's status line.
+fn chat_payload(held: &HeldChat) -> serde_json::Value {
+    serde_json::json!({
+        "thread": held.thread,
+        "title": held.title,
+        "account": held.account,
+        "status": held.status,
+        "rows": held.rows,
+        "loaded": held.loaded,
+        "error": held.error,
+    })
+}
+
+fn chat_document(held: &HeldChat) -> String {
+    let mut boot = chat_payload(held);
+    boot["page"] = serde_json::json!("chat");
+    document(&boot)
+}
+
+fn chat_reply(held: &HeldChat) -> serde_json::Value {
+    let mut reply = chat_payload(held);
     reply["ok"] = serde_json::json!(true);
     reply
 }
@@ -477,6 +504,7 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
         "threads.refresh" => Answer::Later(fresh_threads(client)),
         "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
         "feed.refresh" => Answer::Later(fresh_feed(client)),
+        "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -875,6 +903,18 @@ const SEARCH_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.se
      query: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.query) || '', \
      err: window.__MUSE_ERR__ || '', \
      text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
+const CHAT_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.chat-row').length, \
+     boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.rows || []).length, \
+     err: window.__MUSE_ERR__ || '', \
+     text: document.body ? document.body.innerText.slice(0, 40) : 'no body'})";
+
+/// Open the Chat surface in its own window, on the rows the native transcript
+/// last built. The page follows `chat.snapshot`, so it keeps up with the
+/// app's own reads and with a reply that grows while it arrives.
+pub(crate) fn open_chat_window(held: HeldChat, client: Option<AccountClient>) -> bool {
+    open_window("Chat · web view", chat_document(&held), client, CHAT_PROBE)
+}
 
 /// Open the Search page in its own window, on the query and rows the native
 /// search last painted.
@@ -1567,6 +1607,86 @@ mod tests {
     fn the_answer_wait_is_a_timed_poll() {
         assert!(ANSWER_POLL >= Duration::from_millis(50));
         assert!(ANSWER_POLL <= Duration::from_millis(500));
+    }
+
+    /// Chat boot: one page-tagged payload with the native transcript's own
+    /// rows -- day dividers, bubbles and notices -- and its thread title.
+    #[test]
+    fn the_chat_document_names_its_page_and_carries_the_rows() {
+        let held = HeldChat {
+            thread: Some("s-1".into()),
+            title: "A calmer inbox".into(),
+            account: "Muse".into(),
+            status: Some("Send failed (Timeout).".into()),
+            rows: vec![
+                crate::pages::ChatRow {
+                    kind: "day",
+                    day: "Today".into(),
+                    ..crate::pages::ChatRow::default()
+                },
+                crate::pages::ChatRow {
+                    kind: "message",
+                    id: "m-1".into(),
+                    role: "assistant".into(),
+                    text: "**Hello** there".into(),
+                    ..crate::pages::ChatRow::default()
+                },
+                crate::pages::ChatRow {
+                    kind: "notice",
+                    text: "Usage limit reached".into(),
+                    ..crate::pages::ChatRow::default()
+                },
+            ],
+            loaded: true,
+            error: None,
+        };
+        let doc = chat_document(&held);
+        assert!(doc.contains("\"page\":\"chat\""), "page named in boot");
+        assert!(doc.contains("A calmer inbox"));
+        assert!(doc.contains("\"kind\":\"day\""));
+        assert!(doc.contains("Usage limit reached"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    /// The page follows the app: `chat.snapshot` answers from the held
+    /// transcript without a wire trip, and a grown reply is in the answer, so
+    /// a poll while a reply streams sees the words arrive.
+    #[test]
+    fn chat_snapshot_answers_the_held_transcript_and_follows_growth() {
+        crate::pages::chat_cache(HeldChat {
+            thread: Some("s-2".into()),
+            title: "Streaming".into(),
+            account: "Muse".into(),
+            status: None,
+            rows: vec![crate::pages::ChatRow {
+                kind: "message",
+                id: "m-9".into(),
+                role: "assistant".into(),
+                text: "Hel".into(),
+                ..crate::pages::ChatRow::default()
+            }],
+            loaded: true,
+            error: None,
+        });
+        let (id, answer, command) = handle_command(r#"{"id":51,"cmd":"chat.snapshot"}"#, None);
+        assert_eq!(id, serde_json::json!(51));
+        assert_eq!(command, "chat.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["rows"][0]["text"], "Hel");
+        assert_eq!(reply["title"], "Streaming");
+
+        let mut grown = crate::pages::chat_snapshot();
+        grown.rows[0].text = "Hello there, arriving in pieces.".into();
+        crate::pages::chat_cache(grown);
+        let (_, answer, _) = handle_command(r#"{"id":52,"cmd":"chat.snapshot"}"#, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read must answer without a thread");
+        };
+        assert_eq!(reply["rows"][0]["text"], "Hello there, arriving in pieces.");
+        assert_eq!(reply["rows"][0]["id"], "m-9", "the same turn, grown");
     }
 
     /// Threads boot: one page-tagged payload with the native page's grouping,

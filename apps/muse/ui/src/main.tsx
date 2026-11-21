@@ -17,6 +17,7 @@ import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
 import { Threads } from "./Threads";
+import { Chat } from "./Chat";
 import "./hub.css";
 
 // One bundle, one window per page: the boot payload names which page this
@@ -36,12 +37,16 @@ const page =
             ? "feed"
             : boot && "query" in boot
               ? "search"
-              : "library");
+              : boot && "title" in boot
+                ? "chat"
+                : "library");
 
 const mount = document.getElementById("root");
 if (mount) {
   createRoot(mount).render(
-    page === "goals" ? (
+    page === "chat" ? (
+      <Chat />
+    ) : page === "goals" ? (
       <Goals />
     ) : page === "tasks" ? (
       <Tasks />
