@@ -1,8 +1,9 @@
 # Web UI slice (React)
 
 The pages of the Tauri/React migration so far, rendered by the app's own
-WebKitGTK view: **Library** (the reference page), **Goals**, **Tasks** and
-**Ideas**. Sources live here; `built/app.html` is the artifact the Rust side includes
+WebKitGTK view: **Library** (the reference page), **Goals**, **Tasks**,
+**Ideas**, **Threads**, **Feed**, **Search** and **Chat** (S3's first slice:
+the transcript the native list holds, followed live). Sources live here; `built/app.html` is the artifact the Rust side includes
 with `include_str!`. One bundle serves every window — the boot payload names
 the page it opens.
 
@@ -40,6 +41,14 @@ command arrives with the first page that mutates.
 | `tasks.refresh` | one service read on a worker thread, plus a local store read | the Refresh button |
 | `ideas.snapshot` | none — the roster the native page holds | opening the page |
 | `ideas.refresh` | one ideas listing read on a worker thread | the Refresh button |
+| `chat.snapshot` | none — the transcript the native list holds | opening the page, then every 2 s |
+
+Chat is the first page with no refresh of its own: it follows
+`chat.snapshot`, which the native render refills — including the in-place
+rewrite of a reply that is still arriving — so the page costs no wire trips
+and cannot show a different conversation than the window beside it. It is
+read-only on purpose: sending, attachments, approvals and quote staging need
+mutating commands, which arrive with the increment that adds the composer.
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
 listing is why it waits: the pages allow 120 s for that call. The native reply
