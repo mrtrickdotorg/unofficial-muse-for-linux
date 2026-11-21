@@ -18,7 +18,7 @@ fn probe(client: &AccountClient) -> Result<(), AccountError> {
         && let Ok(text) = env::var("MUSE_ACCOUNT_PROBE_SEND_TEXT")
     {
         let thread = env::var("MUSE_ACCOUNT_PROBE_THREAD").ok();
-        let receipt = client.send(thread.as_deref(), &text)?;
+        let receipt = client.send(thread.as_deref(), &text, None)?;
         println!(
             "send_attempts=1 sent={} confirmed={}",
             receipt.sent, receipt.confirmed

@@ -89,24 +89,27 @@ an honest idle no-op with nothing running to kill. Already
 wired end-to-end (button outside the ticket slot,
 fire-and-forget, the answer's `cancelled` travels as data), so
 no change; the probe just closed the "never verified" line.
-Message reply (Nov 19, 2026): the send shape is mined from the
-12.1 bundle but NOT wired and NOT live-verified. A quoted chat
-message rides as `{in_reply_to: <messageId>}` in the stream
-params (plus an image `reply_to_target` when the quote carries
-one); other targets ride as `reply_to_target` (`goal`,
-`feed_unit`, `presentation`, `mail_message` kinds), and the
-subscribe handshake advertises
+Message reply (Nov 19, 2026; wired Nov 21, 2026): the send
+shape is mined from the 12.1 bundle and now wired, but still NOT
+live-verified. A quoted chat message rides as
+`{in_reply_to: <messageId>}` in the stream params (plus an image
+`reply_to_target` when the quote carries one); other targets ride
+`reply_to_target` (`goal`, `feed_unit`, `presentation`,
+`mail_message` kinds), and the subscribe handshake advertises
 `supported_reply_to_target_types` per session. Verification is
 blocked on safety, not knowledge: scratch-session sends never
 land in history, and a real-thread reply is a non-reversible
-user-visible turn (message plus the agent run it triggers). No
-wire-level reply code ships until a reversible proof exists.
-Shipped instead (Gap 1 slice): every message row carries a Reply
-button that stages the row as a capped one-line quote above the
-composer, with Cancel × to drop it. The send itself stays a
-plain send — the community gateway records no reply param and
-the web's in_reply_to shape is web-transport only — so the quote
-is reader context, never a protocol claim.
+user-visible turn (message plus the agent run it triggers). The
+field ships unverified against that, because the app's own quote
+is what the reader sees and no receipt claims the service
+recorded the target.
+Shipped (Gap 1 slice): every message row carries a Reply button
+that stages the row as a capped one-line quote above the
+composer, with Cancel × to drop it. The staged id rides the send
+as `chat.stream`'s `in_reply_to` — the bridge validates it as one
+message id and adds it to the stream body, the image send's body
+included, and a send with no quote stays byte for byte what
+shipped before — while the excerpt never travels.
 Message ⋯ / View details / View scheduled task (Gap 2, investigated
 Nov 19, 2026): the web puts React and Reply inline on every row and
 keeps the rest behind a separate ⋯ button (the AX tree shows

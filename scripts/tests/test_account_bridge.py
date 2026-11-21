@@ -230,6 +230,30 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(bridge.BridgeFailure):
                 bridge.validate_request(dict(request, device_id=invalid))
 
+    def test_a_quoted_send_forwards_the_reply_target_and_a_plain_one_does_not(self):
+        # The quote's id is the service's own message id; a plain send must
+        # reach the client with no target at all, exactly as before.
+        bridge = load_bridge()
+        class Client:
+            def history(self, **kwargs):
+                return []
+            def send(self, **kwargs):
+                self.sent = kwargs
+                return {"ok": True, "sent": True}
+        client = Client()
+        quoted = {"op": "send", "message": "hello", "config_dir": "/unused",
+                  "reply_to": "m-9"}
+        bridge.validate_request(quoted)
+        bridge.Adapter(client, {}, confirmation_window=0).dispatch(quoted)
+        self.assertEqual(client.sent["reply_to"], "m-9")
+        plain = {"op": "send", "message": "hello", "config_dir": "/unused"}
+        bridge.validate_request(plain)
+        bridge.Adapter(client, {}, confirmation_window=0).dispatch(plain)
+        self.assertNotIn("reply_to", client.sent)
+        for bad in ["", "x" * 257, "\x00m", 3, ["m-9"]]:
+            with self.subTest(bad=bad), self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(quoted, reply_to=bad))
+
     def test_watch_returns_on_a_new_message_and_times_out_on_a_quiet_talk(self):
         # A watch must hold one request instead of making the caller tick a
         # history poll per two seconds, and it must never hang past its timeout.
@@ -1847,6 +1871,17 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(events[-2][1]['body']['device_id'], 'linux-new-session')
         self.assertEqual(events[-2][1]['body']['node_id'], 'old-config-node')
         self.assertEqual(config, {'node_id': 'old-config-node'})
+        # A quoted send rides the same stream with the quoted turn's id; the
+        # quote's text never reaches the service.
+        with patch.dict('sys.modules', {'muse_mcp.client': module}):
+            client = bridge.community_client({'node_id': 'linux-test'})
+            client.send(message='replying to it', thread='selected-thread',
+                        reply_to='m-9')
+        body = events[-2][1]['body']
+        self.assertEqual(body['in_reply_to'], 'm-9')
+        self.assertEqual(body['items'],
+                         [{'type': 'text', 'text': 'replying to it'}])
+        self.assertNotIn('in_reply_to', events[0][1]['body'])
 
     def test_connect_projects_only_typed_identity_and_threads(self):
         bridge = load_bridge()
@@ -4156,6 +4191,26 @@ class PasteSendTests(unittest.TestCase):
         with self.assertRaises(bridge.BridgeFailure):
             bridge.validate_request({**base, "images": ["notes.txt"]})
         bridge.validate_request({**base, "images": ["pasted-1-1.png"]})
+        with self.assertRaises(bridge.BridgeFailure):
+            bridge.validate_request({
+                **base, "images": ["pasted-1-1.png"], "reply_to": "x" * 257})
+
+    def test_a_quoted_image_send_carries_the_reply_target(self):
+        # The image path builds its own stream body; a quoted turn has to
+        # reach that one too, or a picture sent with Reply would lose it.
+        import tempfile
+        bridge = load_bridge()
+        client, calls = self._client(bridge)
+        with tempfile.TemporaryDirectory() as config_dir:
+            self._stage(config_dir)
+            bridge.Adapter(client, {}).dispatch({
+                "op": "send_images", "thread": "thread-9",
+                "message": "look at this", "images": ["pasted-1-1.png"],
+                "reply_to": "m-9", "config_dir": config_dir})
+        method, body = calls["opened"][0]
+        self.assertEqual(method, "chat.stream")
+        self.assertEqual(body["session_id"], "thread-9")
+        self.assertEqual(body["in_reply_to"], "m-9")
 
     def test_a_staged_image_is_written_sent_and_verified(self):
         import tempfile

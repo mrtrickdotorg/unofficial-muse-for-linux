@@ -2399,6 +2399,9 @@ impl Chat {
         }
         let scope = self.thread_scope();
         let reply_worker = reply.clone();
+        // The staged quote's id is what the service records the reply against:
+        // the excerpt never travels, and a plain send stays a plain send.
+        let reply_target = reply.as_ref().map(|quote| quote.id.clone());
         dispatch(
             self,
             move || {
@@ -2417,11 +2420,16 @@ impl Chat {
                         &account_images,
                         &vm_id,
                         &identity,
+                        reply_target.as_deref(),
                     ),
-                    Some((vm_id, identity)) => {
-                        client.send_verified(scope.as_deref(), &draft, &vm_id, &identity)
-                    }
-                    None => client.send(scope.as_deref(), &draft),
+                    Some((vm_id, identity)) => client.send_verified(
+                        scope.as_deref(),
+                        &draft,
+                        &vm_id,
+                        &identity,
+                        reply_target.as_deref(),
+                    ),
+                    None => client.send(scope.as_deref(), &draft, reply_target.as_deref()),
                 };
                 // The pictures ride back out with the answer: a failed
                 // send restores exactly what it took, dims and all.

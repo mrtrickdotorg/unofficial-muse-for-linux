@@ -354,11 +354,37 @@ marker.touch()
 print(json.dumps({'ok':True,'data':{'sent':True,'confirmed':False,'message_id':None}}))
 "#,
     );
-    let receipt = f.client().send(Some("thread-1"), "exact prompt").unwrap();
+    let receipt = f
+        .client()
+        .send(Some("thread-1"), "exact prompt", None)
+        .unwrap();
     assert!(receipt.sent);
     assert!(!receipt.confirmed);
     assert!(receipt.message_id.is_none());
-    assert!(f.client().send(None, "  ").is_err());
+    assert!(f.client().send(None, "  ", None).is_err());
+}
+
+#[test]
+fn a_quoted_send_carries_the_reply_target_and_a_plain_send_does_not() {
+    let f = Fixture::new(
+        r#"
+import json, sys
+r = json.load(sys.stdin)
+assert r['op'] == 'send'
+expected = 'm-9' if r['message'].startswith('answer') else None
+assert r.get('reply_to') == expected, r.get('reply_to')
+print(json.dumps({'ok':True,'data':{'sent':True,'confirmed':False,'message_id':None}}))
+"#,
+    );
+    let client = f.client();
+    client
+        .send(Some("thread-1"), "answer the quote", Some("m-9"))
+        .unwrap();
+    client.send(Some("thread-1"), "a plain send", None).unwrap();
+    // One service message id: an empty field or a stray NUL is refused here,
+    // before any request leaves the process.
+    assert!(client.send(None, "prompt", Some("")).is_err());
+    assert!(client.send(None, "prompt", Some("m\0-9")).is_err());
 }
 
 #[test]
@@ -439,7 +465,7 @@ fn malformed_output_and_failed_child_never_echo_stdout_or_stderr() {
         ),
     ] {
         let f = Fixture::new(script);
-        let error = f.client().send(None, "prompt").unwrap_err();
+        let error = f.client().send(None, "prompt", None).unwrap_err();
         assert_eq!(error.code, expected);
         assert!(error.uncertain);
         assert!(!format!("{error} {error:?}").contains("SECRET"));
@@ -465,7 +491,7 @@ fn construction_is_inert_and_invalid_inputs_never_spawn_a_child() {
     );
     assert_eq!(
         client
-            .send(None, &"x".repeat(512 * 1024 + 1))
+            .send(None, &"x".repeat(512 * 1024 + 1), None)
             .unwrap_err()
             .code,
         ErrorCode::InvalidRequest
@@ -487,7 +513,7 @@ fn inconsistent_confirmation_receipt_is_rejected_as_uncertain() {
     let f = Fixture::new(
         "print('{\"ok\":true,\"data\":{\"sent\":true,\"confirmed\":true,\"message_id\":null}}')",
     );
-    let error = f.client().send(None, "prompt").unwrap_err();
+    let error = f.client().send(None, "prompt", None).unwrap_err();
     assert_eq!(error.code, ErrorCode::ProtocolError);
     assert!(error.uncertain);
 }
@@ -624,7 +650,7 @@ print(json.dumps({'ok': False, 'error': {'code': 'account_changed', 'uncertain':
     );
     let error = f
         .client()
-        .send_verified(None, "hello", "vm-1", "User")
+        .send_verified(None, "hello", "vm-1", "User", None)
         .unwrap_err();
     assert_eq!(error.code, muse_account::ErrorCode::AccountChanged);
     assert!(!error.uncertain);

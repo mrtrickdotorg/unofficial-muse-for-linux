@@ -662,6 +662,21 @@ SUBSCRIBE_METHODS = frozenset({
 })
 
 
+def validate_reply_to(request):
+    """The quoted turn a send answers, when the caller staged one.
+
+    The id is the service's own message id, under the same bounds the
+    reaction path uses. Absence is a plain send, and that path must stay
+    exactly what shipped before, so nothing is filled in here.
+    """
+    reply_to = request.get("reply_to")
+    if reply_to is None:
+        return
+    if (not isinstance(reply_to, str) or not 1 <= len(reply_to) <= 256
+            or "\x00" in reply_to):
+        raise BridgeFailure("invalid_request")
+
+
 def validate_request(request):
     if not isinstance(request, dict):
         raise BridgeFailure("invalid_request")
@@ -728,10 +743,11 @@ def validate_request(request):
                "ideas": set(),
                "goals": set(),
                "feed": set(),
-               "send": {"thread", "message", "device_id", "expect_vm_id",
-                        "expect_identity_name"},
-               "send_images": {"thread", "message", "images", "device_id",
-                               "expect_vm_id", "expect_identity_name"},
+               "send": {"thread", "message", "reply_to", "device_id",
+                        "expect_vm_id", "expect_identity_name"},
+               "send_images": {"thread", "message", "images", "reply_to",
+                               "device_id", "expect_vm_id",
+                               "expect_identity_name"},
                "attach_probe": {"thread"},
                "stream_probe": {"thread"},
                "dictate": {"pcm_b64", "sample_rate_hz"},
@@ -1254,6 +1270,7 @@ def validate_request(request):
         message = request.get("message")
         if not isinstance(message, str) or not message.strip() or len(message.encode("utf-8")) > 512 * 1024:
             raise BridgeFailure("invalid_request")
+        validate_reply_to(request)
     if op == "send_images":
         # An image send may carry no text at all -- the web sends
         # image-only messages -- but it must carry at least one
@@ -1269,6 +1286,7 @@ def validate_request(request):
         for name in images:
             if not _paste_name_ok(name):
                 raise BridgeFailure("invalid_request")
+        validate_reply_to(request)
 
 
 def provides_checkout(site_dir):
@@ -1549,7 +1567,8 @@ def community_client(config):
             with super()._gateway(config) as gateway:
                 yield gateway
 
-        def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True, device_id=None):
+        def send(self, message, thread=None, wait_seconds=0, fire_and_forget=True,
+                 device_id=None, reply_to=None):
             # Dispatch only: open the chat stream, write the prompt, return.
             # An earlier version read the stream's response to its end to
             # keep the connection alive until the server processed the
@@ -1569,6 +1588,13 @@ def community_client(config):
                 body["device_id"] = device_id
             if thread is not None:
                 body["session_id"] = thread
+            if reply_to is not None:
+                # The quoted turn rides the stream params the way the shipped
+                # 12.1 client sends it: one id, never the quote's text. That
+                # shape is not live-verified (a real reply is a non-reversible
+                # turn), so the app keeps showing the quote as its own context
+                # rather than claiming the service recorded it.
+                body["in_reply_to"] = reply_to
             # The dispatch rides the connection this request already holds: it
             # served only this send (the identity check, then the baseline
             # read), so the write is not exposed to unrelated traffic, and the
@@ -4862,7 +4888,12 @@ class Adapter:
             baseline_ids = {r["message_id"] for r in baseline}
             self.send_started = True
             device = {"device_id": request["device_id"]} if "device_id" in request else {}
-            result = checked(self.client.send(message=message, thread=thread, fire_and_forget=True, wait_seconds=0, **device), dict)
+            # Both stay absent when the caller named neither, so a plain send
+            # calls the client exactly as it did before reply targets existed.
+            reply = {"reply_to": request["reply_to"]} if "reply_to" in request else {}
+            result = checked(self.client.send(
+                message=message, thread=thread, fire_and_forget=True,
+                wait_seconds=0, **device, **reply), dict)
             if result.get("sent") is not True:
                 raise BridgeFailure("protocol_error", uncertain=True)
             deadline = time.monotonic() + self.confirmation_window
@@ -5019,6 +5050,8 @@ class Adapter:
                 body["node_id"] = node_id
             if thread:
                 body["session_id"] = thread
+            if request.get("reply_to") is not None:
+                body["in_reply_to"] = request["reply_to"]
             try:
                 with self.client._gateway(self.config) as gateway:
                     gateway._open("chat.stream", body=body)

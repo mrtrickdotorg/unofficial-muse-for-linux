@@ -158,9 +158,9 @@ fn message_widget(
 
     // The web hangs actions under the answer: a Copy button that
     // writes the response text to the clipboard. Local-only, never
-    // a write. Reply stages the row as a quote above the composer;
-    // the send itself stays a plain send (the community gateway
-    // records no reply param), so the quote is context, not protocol.
+    // a write. Reply stages the row as a quote above the composer,
+    // and the send carries that turn's id as the stream's
+    // `in_reply_to`; the excerpt stays in the bar.
     let is_assistant = matches!(role, Role::Assistant);
     if is_assistant || matches!(role, Role::User) {
         let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);

@@ -74,15 +74,11 @@ pub fn remove_image(images: &mut Vec<StagedImage>, name: &str) {
 pub struct Dispatch {
     pub text: String,
     pub images: Vec<StagedImage>,
-    /// The quoted row's id, staged by Reply and cleared on dispatch.
-    /// The wire still sends plain text (the community gateway records
-    /// no reply param; the web's in_reply_to shape is web-transport
-    /// only), so this is reader-side context, never a protocol claim.
-    pub reply_to: Option<String>,
 }
 
-/// A staged reply quote: the quoted row's id plus one capped line.
-/// Reader-side context only — the dispatch below stays a plain send.
+/// A staged reply quote: the quoted row's id plus one capped line. The id
+/// rides the send as the stream's `in_reply_to`, so the service can record
+/// the target; the excerpt is only the bar's text and never travels.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReplyQuote {
     pub id: String,
@@ -155,10 +151,12 @@ impl Composer {
             return None;
         }
         self.sending = true;
+        // One Reply answers one send: the quote clears with the dispatch,
+        // and `send_text` hands it back if the send never goes out.
+        self.reply = None;
         let dispatch = Dispatch {
             text: self.text.trim().to_owned(),
             images: std::mem::take(&mut self.images),
-            reply_to: self.reply.take().map(|quote| quote.id),
         };
         self.text.clear();
         Some(dispatch)
@@ -619,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn begin_send_carries_and_clears_the_quote() {
+    fn begin_send_clears_the_staged_quote() {
         let mut composer = Composer::new();
         composer.set_text("answer");
         composer
@@ -627,7 +625,6 @@ mod tests {
             .expect("stage");
         let dispatch = composer.begin_send().expect("sendable");
         assert_eq!(dispatch.text, "answer");
-        assert_eq!(dispatch.reply_to.as_deref(), Some("m9"));
         assert!(composer.reply().is_none());
     }
 }

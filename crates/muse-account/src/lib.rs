@@ -2416,12 +2416,16 @@ impl AccountClient {
     }
     /// Dispatch once; an unconfirmed receipt or uncertain error must not be
     /// automatically retried. Confirmation proves only prompt persistence.
+    /// `reply_to` names the turn this send answers, if any: it rides the
+    /// stream as the shipped client's `in_reply_to`, and a `None` here is a
+    /// plain send, byte for byte what shipped before.
     pub fn send(
         &self,
         thread: Option<&str>,
         message: &str,
+        reply_to: Option<&str>,
     ) -> Result<DispatchReceipt, AccountError> {
-        self.send_checked(thread, message, None, None)
+        self.send_checked(thread, message, None, None, reply_to)
     }
     /// Dispatch only after proving, in the same request, that the saved session
     /// is still `vm_id` for `identity_name`. One account check instead of a
@@ -2432,8 +2436,15 @@ impl AccountClient {
         message: &str,
         vm_id: &str,
         identity_name: &str,
+        reply_to: Option<&str>,
     ) -> Result<DispatchReceipt, AccountError> {
-        self.send_checked(thread, message, None, Some((vm_id, identity_name)))
+        self.send_checked(
+            thread,
+            message,
+            None,
+            Some((vm_id, identity_name)),
+            reply_to,
+        )
     }
 
     /// Voice dictation: the recorded bytes go out raw with the rate in
@@ -2491,6 +2502,7 @@ impl AccountClient {
             message,
             Some(device_id),
             Some((vm_id, identity_name)),
+            None,
         )
     }
     /// Send one message carrying pasted images. The bytes never
@@ -2509,8 +2521,10 @@ impl AccountClient {
         images: &[StagedImage],
         vm_id: &str,
         identity_name: &str,
+        reply_to: Option<&str>,
     ) -> Result<DispatchReceipt, AccountError> {
         validate_thread(thread)?;
+        validate_reply_to(reply_to)?;
         if message.len() > 512 * 1024 || images.is_empty() || images.len() > 4 {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
@@ -2548,7 +2562,7 @@ impl AccountClient {
                 std::fs::write(path, &image.bytes)
                     .map_err(|_| AccountError::new(ErrorCode::ProtocolError, false))?;
             }
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "op": "send_images",
                 "thread": thread,
                 "message": message,
@@ -2557,6 +2571,9 @@ impl AccountClient {
                 "expect_vm_id": vm_id,
                 "expect_identity_name": identity_name,
             });
+            if let Some(reply_to) = reply_to {
+                request["reply_to"] = reply_to.into();
+            }
             let receipt: DispatchReceipt = self.request(request, true)?;
             if receipt.confirmed
                 && (!receipt.sent || receipt.message_id.as_deref().is_none_or(str::is_empty))
@@ -2586,7 +2603,7 @@ impl AccountClient {
         {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
-        self.send_checked(thread, message, Some(device_id), None)
+        self.send_checked(thread, message, Some(device_id), None, None)
     }
     fn send_checked(
         &self,
@@ -2594,8 +2611,10 @@ impl AccountClient {
         message: &str,
         device_id: Option<&str>,
         expect: Option<(&str, &str)>,
+        reply_to: Option<&str>,
     ) -> Result<DispatchReceipt, AccountError> {
         validate_thread(thread)?;
+        validate_reply_to(reply_to)?;
         if message.trim().is_empty() || message.len() > 512 * 1024 {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
@@ -2611,6 +2630,9 @@ impl AccountClient {
         let mut request = serde_json::json!({"op": "send", "thread": thread, "message": message});
         if let Some(device_id) = device_id {
             request["device_id"] = device_id.into();
+        }
+        if let Some(reply_to) = reply_to {
+            request["reply_to"] = reply_to.into();
         }
         if let Some((vm_id, identity_name)) = expect {
             if vm_id.is_empty()
@@ -3119,6 +3141,15 @@ fn wait_for_socket(path: &Path) -> Option<UnixStream> {
 
 fn validate_thread(thread: Option<&str>) -> Result<(), AccountError> {
     if thread.is_some_and(|s| s.trim().is_empty() || s.len() > 4096 || s.contains('\0')) {
+        return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+    }
+    Ok(())
+}
+
+/// A quoted turn's id, under the bounds the bridge applies to the same field:
+/// one service message id, never a row index or a whole quote.
+fn validate_reply_to(reply_to: Option<&str>) -> Result<(), AccountError> {
+    if reply_to.is_some_and(|s| s.is_empty() || s.len() > 256 || s.contains('\0')) {
         return Err(AccountError::new(ErrorCode::InvalidRequest, false));
     }
     Ok(())

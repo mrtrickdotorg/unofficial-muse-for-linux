@@ -318,8 +318,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   is the app's own reply bar in page form, and the quote rides `chat.send` as data that the app
   guards with `staged_quote` -- one definition, shared with the composer's Reply -- before handing
   it to `send_text` as the native quote. No new command, no second dispatch route, and the quote
-  clears on the same two events that clear the app's: the send goes, or the reader cancels. It stays
-  reader-side context, as it always was: the send on the wire is a plain send.
+  clears on the same two events that clear the app's: the send goes, or the reader cancels. The id
+  then rides the send as the stream's `in_reply_to`, the shape the shipped 12.1 client uses, so the
+  service can record the target; the excerpt never travels. That shape is not live-verified (a real
+  reply is a non-reversible turn), so the bar stays as the app's own readable context either way.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).
