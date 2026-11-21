@@ -296,9 +296,22 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   (there is one command entry point, `handle_command_with`, and the tests ask it with `None`), and
   `chat.send` is
   logged on every press like the other wire commands while the polling snapshot is still named
-  once per window. **Remaining for S3's gate:** attachments and their verified-send receipts,
-  cancellation, approvals, quote staging and unread badges; the native composer is still where
-  pictures, Stop and dictation live.
+  once per window.
+
+  Stop followed the same rule and needed one honest correction. It is the same control on the same
+  circle, and `chat.stop` goes back through the app's own `stop_pressed`, which takes no session
+  ticket at all -- the point of stop is that it fires while a send holds `Send`. But the app's send
+  is a *dispatch*, about a second long, while the reply streams for many seconds after it: measured
+  in the running app, the mirrored `sending` flag was never observed as true, so a page that only
+  copied the native card's rule would have shown Stop for a window no reader could hit. Two fixes,
+  both recorded here because they are the kind of gap a port hides: the app publishes the flag to
+  the cache the moment it dispatches instead of waiting for the next render, and the page keeps
+  Stop through the same beat in which it watches fast for the reply. With those, a press sent from
+  this window and stopped a second later ended at `status: "Stopped."` -- the service's own
+  `cancelled: true`, not an assumption -- and the transcript's last row stayed the reader's turn
+  with no reply behind it. **Remaining for S3's gate:** attachments and their verified-send
+  receipts, approvals, quote staging and unread badges; the native composer is still where
+  pictures and dictation live.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).

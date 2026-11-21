@@ -155,6 +155,9 @@ export type ChatSnapshot = {
   title: string;
   account: string;
   status?: string | null;
+  // Whether the app has a send in flight: the flag the native card swaps
+  // Send for Stop on, so the page swaps the same circle.
+  sending?: boolean;
   rows: ChatRow[];
   loaded: boolean;
   error?: string | null;

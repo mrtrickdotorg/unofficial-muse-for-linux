@@ -95,6 +95,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     return () => clearInterval(timer);
   }, [loadSnapshot, pollMs]);
 
+
   // The draft lives here, but the send does not: `chat.send` hands the words
   // back to the app's controller, which owns the `Send` slot, the receipt and
   // the history reload. This window never dispatches on its own.
@@ -102,6 +103,11 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const [pending, setPending] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const sendable = draft.trim().length > 0 && !pending;
+  // A send is in flight for about a second, so the two-second poll would
+  // usually miss it -- and Stop is only shown while the app says a send is in
+  // flight. Watch fast for a beat after a dispatch, the way the app's own send
+  // does, so a reader can actually reach Stop.
+  const [watching, setWatching] = useState(false);
 
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -115,6 +121,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
       // clears it. The transcript and the status line carry the outcome.
       setDraft("");
       void loadSnapshot();
+      setWatching(true);
     } catch (failure) {
       // The app's own sentence (a held slot, a signed-out window), and the
       // draft stays: nothing typed is lost to a refusal.
@@ -123,6 +130,30 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
       setPending(false);
     }
   };
+
+  // Stop is the app's stop, not the page's: it goes back through `chat.stop`
+  // and the app's own cancel path, which takes no session ticket precisely so
+  // it can fire while a send holds the `Send` slot. What the service said it
+  // did comes back in the status line, and what actually landed in the
+  // transcript.
+  const stop = async () => {
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.stop", 30_000);
+    } catch (failure) {
+      setNote(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
+
+useEffect(() => {
+    if (!watching) return;
+    const fast = setInterval(() => void loadSnapshot(), 300);
+    const done = setTimeout(() => setWatching(false), 8000);
+    return () => {
+      clearInterval(fast);
+      clearTimeout(done);
+    };
+  }, [watching, loadSnapshot]);
 
   const draftKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -187,14 +218,30 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={draftKey}
             />
-            <button
-              className="chat-send"
-              type="submit"
-              disabled={!sendable}
-              aria-label="Send"
-            >
-              ↑
-            </button>
+            {data?.sending || watching ? (
+              // The native card swaps the same circle while a send is in
+              // flight. The app's send is the dispatch, which is over in about
+              // a second, so the page keeps Stop a beat longer -- the same
+              // window in which it watches fast for the reply -- or a reader
+              // could never reach it before the reply is done streaming.
+              <button
+                className="chat-send chat-stop"
+                type="button"
+                onClick={stop}
+                aria-label="Stop"
+              >
+                ■
+              </button>
+            ) : (
+              <button
+                className="chat-send"
+                type="submit"
+                disabled={!sendable}
+                aria-label="Send"
+              >
+                ↑
+              </button>
+            )}
           </form>
           {note && <div className="chat-note">{note}</div>}
         </div>
@@ -206,8 +253,8 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
             {data?.thread ? `Thread ${data.thread.slice(0, 8)}…` : "New chat"}
           </div>
           <div className="chat-panel-note">
-            Sends go through the app's own send: the same slot, the same
-            receipt, the same history read. Pictures, approvals, Stop and
+            Sends and Stop go through the app's own: the same sender, the same
+            cancel path, the same history read. Pictures, approvals and
             dictation still live in the app window.
           </div>
         </aside>

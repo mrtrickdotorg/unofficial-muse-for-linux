@@ -717,3 +717,10 @@ html, body {
   color: var(--text-faint);
   font-size: 12.5px;
 }
+
+.chat-stop {
+  background-image: none;
+  border: 1px solid var(--hairline);
+  color: inherit;
+  font-size: 12px;
+}

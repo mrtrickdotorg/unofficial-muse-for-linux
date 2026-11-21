@@ -25,6 +25,7 @@ const snapshot = (rows: ChatRow[], over: Partial<ChatSnapshot> = {}): ChatSnapsh
   title: "A calmer inbox",
   account: "Muse",
   status: null,
+  sending: false,
   rows,
   loaded: true,
   error: null,
@@ -156,6 +157,46 @@ describe("the Chat web page", () => {
     expect(await screen.findByText(/your message is kept/)).toBeInTheDocument();
     // A refused press is never a lost draft.
     expect(screen.getByPlaceholderText("Message")).toHaveValue("kept draft");
+  });
+
+  it("swaps Send for Stop while a send is in flight and posts chat.stop", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
+      sending: true,
+    });
+    let stops = 0;
+    const commands = installChannel(
+      (cmd) => {
+        if (cmd === "chat.stop") {
+          stops += 1;
+          return { ok: true };
+        }
+        return { ok: true, ...snapshot([], { sending: true }) };
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+
+    // The native card's swap: Stop where Send was, and no separate Send.
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(stops).toBe(1));
+    expect(commands).toContain("chat.stop");
+  });
+
+  it("says the app's sentence when a stop is refused", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
+      sending: true,
+    });
+    installChannel((cmd) =>
+      cmd === "chat.stop"
+        ? { ok: false, error: "Sign in before stopping." }
+        : { ok: true, ...snapshot([], { sending: true }) },
+    );
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+
+    expect(await screen.findByText("Sign in before stopping.")).toBeInTheDocument();
   });
 
   it("reports a failed snapshot and keeps the rows already on screen", async () => {

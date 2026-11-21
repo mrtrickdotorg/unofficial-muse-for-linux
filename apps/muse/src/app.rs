@@ -693,8 +693,7 @@ impl Chat {
                 };
                 chat.cache_web_chat();
                 let held = crate::pages::chat_snapshot();
-                if !crate::webui::open_chat_window(held, chat.client_handle(), chat.web_send_hook())
-                {
+                if !crate::webui::open_chat_window(held, chat.client_handle(), chat.web_routes()) {
                     eprintln!("muse: web view unavailable in this build");
                 }
             });
@@ -1088,7 +1087,7 @@ impl Chat {
         let weak = Rc::downgrade(self);
         self.composer_row.stop.connect_clicked(move |_| {
             if let Some(chat) = weak.upgrade() {
-                chat.stop_pressed();
+                let _ = chat.stop_pressed();
             }
         });
         let weak = Rc::downgrade(self);
@@ -1996,11 +1995,13 @@ impl Chat {
         };
         let title = self.thread_title();
         let thread = self.thread.borrow().clone();
+        let sending = self.composer.borrow().sending();
         crate::pages::chat_cache(crate::pages::HeldChat {
             thread,
             title,
             account: account.unwrap_or_else(|| "Sign in".to_owned()),
             status,
+            sending,
             rows: crate::pages::held_chat_from(&rows),
             loaded,
             error: None,
@@ -2510,6 +2511,11 @@ impl Chat {
                 }
             },
         );
+        // The flag the card swaps Send for Stop on is only true for the length
+        // of the dispatch, and a mirror page reads it from this cache -- so it
+        // is published the moment the send goes out rather than at the next
+        // render, or a page watching at 300ms would never see it at all.
+        self.cache_web_chat();
         SendStart::Dispatched
     }
 
@@ -2534,14 +2540,22 @@ impl Chat {
         }
     }
 
-    /// The Chat window's way back into this controller: one closure, so the
-    /// page cannot reach the session slot by any other route.
-    pub(crate) fn web_send_hook(self: &Rc<Self>) -> crate::webui::WebSend {
+    /// The Chat window's ways back into this controller: two closures, one for
+    /// each of its controls, so the page cannot reach the session slot or the
+    /// cancel route by any other path.
+    pub(crate) fn web_routes(self: &Rc<Self>) -> crate::webui::WebRoutes {
         let weak = Rc::downgrade(self);
-        std::rc::Rc::new(move |text: &str| match weak.upgrade() {
-            Some(chat) => chat.web_send(text),
-            None => Err("The app window is gone.".to_owned()),
-        })
+        let send_weak = weak.clone();
+        crate::webui::WebRoutes {
+            send: std::rc::Rc::new(move |text: &str| match send_weak.upgrade() {
+                Some(chat) => chat.web_send(text),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            stop: std::rc::Rc::new(move || match weak.upgrade() {
+                Some(chat) => chat.stop_pressed(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+        }
     }
 
     /// Armed two-press turn delete. The first press arms the latest
@@ -2589,14 +2603,25 @@ impl Chat {
     }
 
     /// Stop cancels outside the ticket slot: it must fire while a
-    /// send holds it. Fire-and-forget; the next history read shows
-    /// whatever actually landed.
-    fn stop_pressed(&self) {
-        if let Some(client) = self.client.borrow().clone() {
-            std::thread::spawn(move || {
-                let _ = client.cancel();
-            });
-        }
+    /// send holds it, so no session slot is taken here at all. The answer
+    /// names only what the service said it did -- a press with nothing
+    /// running is not a stop -- and the next history read shows whatever
+    /// actually landed. Shared by the app's own card and the web mirror, so
+    /// there is one stop path as well as one sender.
+    pub(crate) fn stop_pressed(self: &Rc<Self>) -> Result<(), String> {
+        let Some(client) = self.client.borrow().clone() else {
+            return Err("Sign in before stopping.".to_owned());
+        };
+        dispatch(
+            self,
+            move || client.cancel(),
+            move |chat, answer| match answer {
+                Ok(verdict) if verdict.cancelled => chat.say_send_note("Stopped."),
+                Ok(_) => chat.say_send_note("Nothing was running."),
+                Err(_) => chat.say_send_note("The stop did not reach the service."),
+            },
+        );
+        Ok(())
     }
 
     /// Toggle one heart on one message row: one press, one write.

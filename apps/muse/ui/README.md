@@ -43,6 +43,7 @@ command arrives with the first page that mutates.
 | `ideas.refresh` | one ideas listing read on a worker thread | the Refresh button |
 | `chat.snapshot` | none — the transcript the native list holds | opening the page, then every 2 s |
 | `chat.send` | one message, through the app's own send path (the `Send` slot) | the Send button, or Enter |
+| `chat.stop` | one cancel, outside every session slot (so it fires while a send holds `Send`) | the Stop button |
 
 Chat is the first page with no refresh of its own: it follows
 `chat.snapshot`, which the native render refills — including the in-place
@@ -57,8 +58,19 @@ history reload as a press in the app: there is exactly one sender, and a send
 from this window cannot race one from that one. The answer says only whether
 the app took the press — a held slot or a signed-out window comes back as the
 app's own sentence and the draft stays — while what the service said arrives
-the way everything else does, in the transcript and the status line. Pictures,
-approvals, Stop and dictation remain in the app window.
+the way everything else does, in the transcript and the status line.
+
+Stop is the other half of that, and it is built the same way: it takes Send's
+place on the same circle while a send is in flight, and `chat.stop` goes back
+through the app's own `stop_pressed`, which takes no session ticket at all —
+that is the point of stop, since it has to fire while a send holds the `Send`
+slot. The app's send is a dispatch that ends in about a second, so the page
+keeps Stop a beat longer, through the same window in which it watches fast for
+the reply; otherwise a reader could never reach it. The answer says only that
+the cancel went out, and the app writes the service's own verdict on its status
+line: "Stopped." when something was running, "Nothing was running." when the
+press was a little late. Pictures, approvals and dictation remain in the app
+window.
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
 listing is why it waits: the pages allow 120 s for that call. The native reply
