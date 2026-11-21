@@ -9,6 +9,10 @@
 //! hidden setters instead; only the app's own startup is allowed to shape its
 //! environment. Comments and string literals are ignored, so prose and this
 //! guard's own patterns cannot trip it.
+//!
+//! The last test pins the guard's own enforcement: `.github/workflows/rust.yml`
+//! must run it from a step of its own, so narrowing the workspace test
+//! invocation cannot quietly stop running it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,6 +33,12 @@ const SKIP_DIRS: &[&str] = &[
 ];
 
 const FORBIDDEN: &[&str] = &["set_var(", "remove_var("];
+
+/// The workflow that must keep running the guard from its own step, and the
+/// step's name and command.
+const WORKFLOW: &str = ".github/workflows/rust.yml";
+const GUARD_STEP: &str = "Run environment mutation guard";
+const GUARD_COMMAND: &str = "cargo test -p muse --locked --test env_guard";
 
 fn workspace_root() -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -215,6 +225,41 @@ fn offenders(relative: &str, source: &str) -> Vec<String> {
         .collect()
 }
 
+/// The workflow's `steps:` entries, one text block per step, so a command can
+/// be located in the step that owns it instead of anywhere in the file. Each
+/// line loses its indentation and any leading `- ` item marker.
+fn steps(workflow: &str) -> Vec<String> {
+    let mut steps: Vec<String> = Vec::new();
+    let mut indent = 0;
+    let mut in_steps = false;
+    for line in workflow.lines() {
+        let trimmed = line.trim();
+        let leading = line.len() - line.trim_start().len();
+        if !in_steps {
+            if trimmed == "steps:" {
+                in_steps = true;
+                indent = leading;
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        // `steps:` may share its indentation with its own `- ` items.
+        if leading < indent {
+            break;
+        }
+        if trimmed.starts_with("- ") {
+            steps.push(String::new());
+        }
+        if let Some(step) = steps.last_mut() {
+            step.push_str(trimmed.strip_prefix("- ").unwrap_or(trimmed));
+            step.push('\n');
+        }
+    }
+    steps
+}
+
 #[test]
 fn no_source_mutates_the_process_environment() {
     let root = workspace_root();
@@ -248,6 +293,38 @@ fn no_source_mutates_the_process_environment() {
          instead of writing shared process state.",
         ALLOWED.join(", "),
         found.join("\n  ")
+    );
+}
+
+#[test]
+fn ci_runs_the_guard_as_its_own_step() {
+    let root = workspace_root();
+    let path = root.join(WORKFLOW);
+    let workflow =
+        fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let steps = steps(&workflow);
+    // A workflow shape this parser cannot follow must fail loudly, not pass.
+    assert!(!steps.is_empty(), "no steps found in {}", path.display());
+
+    let named: Vec<&String> = steps
+        .iter()
+        .filter(|step| {
+            step.lines()
+                .any(|line| line.strip_prefix("name:").map(str::trim) == Some(GUARD_STEP))
+        })
+        .collect();
+    assert_eq!(
+        named.len(),
+        1,
+        "{WORKFLOW} needs exactly one `{GUARD_STEP}` step, found {}",
+        named.len()
+    );
+
+    let step = named[0];
+    assert!(
+        step.lines().any(|line| line.starts_with("run:"))
+            && step.lines().any(|line| line.contains(GUARD_COMMAND)),
+        "`{GUARD_STEP}` must run `{GUARD_COMMAND}` itself, got:\n{step}"
     );
 }
 
@@ -344,6 +421,35 @@ fn same_line<'a>(text: &'a str) { std::env::remove_var(\"C\"); }\n";
     fn a_call_after_a_char_literal_is_still_seen() {
         let source = "let quote = '\"'; std::env::remove_var(\"X\");\n";
         assert_eq!(lines(source), vec![1]);
+    }
+
+    #[test]
+    fn workflow_steps_are_split_at_their_own_markers() {
+        let workflow = "\
+jobs:\n\
+  build:\n\
+    runs-on: ubuntu-latest\n\
+    steps:\n\
+    - name: Run tests\n\
+      run: cargo test --workspace\n\
+    - name: Lint\n\
+      run: |\n\
+        cargo clippy\n\
+    - uses: actions/checkout@v4\n";
+        let steps = steps(workflow);
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].contains("run: cargo test --workspace"));
+        assert!(
+            !steps[0].contains("cargo clippy"),
+            "steps leaked: {steps:?}"
+        );
+        assert!(steps[1].contains("cargo clippy"));
+        assert!(steps[2].contains("actions/checkout"));
+    }
+
+    #[test]
+    fn a_workflow_without_a_steps_list_yields_nothing() {
+        assert!(steps("jobs:\n  build:\n    runs-on: ubuntu-latest\n").is_empty());
     }
 
     #[test]
