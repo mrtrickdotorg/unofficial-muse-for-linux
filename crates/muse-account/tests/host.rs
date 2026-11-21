@@ -191,10 +191,13 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
     fs::write(fixture.0.join("muse_account_host.py"), STUB_HOST).unwrap();
     // The runtime dir must be SHORT: AF_UNIX paths cap at ~108 bytes, and
     // nesting it inside the fixture pushed the socket path past the limit
-    // on CI (TMPDIR=/home/runner/work/_temp), so the stub's bind failed
-    // and the client fell back to the one-shot bridge (ProtocolError).
+    // on CI (TMPDIR=/home/runner/work/_temp) and again on a host whose
+    // TMPDIR is $HOME/.cache/muse-tmp once the pid reached six digits, so
+    // the stub's bind failed ("AF_UNIX path too long") and the client
+    // fell back to the one-shot bridge (ProtocolError). A short sibling
+    // name keeps the socket under the cap whatever the temp root is.
     let runtime = fixture.0.with_file_name(format!(
-        "umfl-rt-{}-{}",
+        "hm{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
