@@ -1,7 +1,7 @@
 // The Chat page's DOM tests: the transcript the native list built, the states
 // that keep an unread thread from reading as an empty one, and -- the reason
 // this page exists -- a reply that grows keeping its element.
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Chat } from "./Chat";
 import { installChannel } from "./testChannel";
@@ -110,6 +110,52 @@ describe("the Chat web page", () => {
     expect(grown).toBe(bubble);
     expect(document.querySelectorAll('[data-testid^="turn-"]')).toHaveLength(1);
     expect(reads).toBeGreaterThan(1);
+  });
+
+  it("sends through the app's own command and clears the entry", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })]);
+    let sent: { text?: string } | null = null;
+    installChannel(
+      (cmd) => (cmd === "chat.send" ? { ok: true } : { ok: true, ...snapshot([]) }),
+      (request) => {
+        if (request.cmd === "chat.send") sent = request as unknown as { text?: string };
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.change(screen.getByPlaceholderText("Message"), {
+      target: { value: "  hello there  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    // The words leave trimmed, on the one command that mutates.
+    await waitFor(() => expect(sent?.text).toBe("hello there"));
+    // Accepted, so the entry clears the way a press in the app clears it.
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText("Message")).toHaveValue(""),
+    );
+  });
+
+  it("keeps the draft and says the app's sentence when a send is refused", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })]);
+    installChannel((cmd) =>
+      cmd === "chat.send"
+        ? {
+            ok: false,
+            error: "Still working — your message is kept; send again in a moment.",
+          }
+        : { ok: true, ...snapshot([]) },
+    );
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.change(screen.getByPlaceholderText("Message"), {
+      target: { value: "kept draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(await screen.findByText(/your message is kept/)).toBeInTheDocument();
+    // A refused press is never a lost draft.
+    expect(screen.getByPlaceholderText("Message")).toHaveValue("kept draft");
   });
 
   it("reports a failed snapshot and keeps the rows already on screen", async () => {

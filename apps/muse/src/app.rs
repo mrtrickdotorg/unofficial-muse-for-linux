@@ -346,6 +346,15 @@ fn focus_first(widget: &gtk4::Widget) -> bool {
     false
 }
 
+/// What one press of Send did. The native window ignores this -- its refusals
+/// are already notes on the same screen -- and the web mirror reports it back,
+/// so a second surface can be honest about a press without owning a second
+/// sender.
+pub(crate) enum SendStart {
+    Dispatched,
+    Refused(&'static str),
+}
+
 impl Chat {
     pub fn build(transcript: gtk4::ListBox, composer_row: ComposerRow) -> Rc<Self> {
         let scrolled = gtk4::ScrolledWindow::new();
@@ -626,7 +635,7 @@ impl Chat {
             if let Some(chat) = weak.upgrade() {
                 // An option press sends its text as the reader's next
                 // message -- the same single-press path as the composer.
-                chat.send_text(text, Vec::new(), None);
+                let _ = chat.send_text(text, Vec::new(), None);
             }
         }) as OptionCallback);
         {
@@ -684,7 +693,8 @@ impl Chat {
                 };
                 chat.cache_web_chat();
                 let held = crate::pages::chat_snapshot();
-                if !crate::webui::open_chat_window(held, chat.client_handle()) {
+                if !crate::webui::open_chat_window(held, chat.client_handle(), chat.web_send_hook())
+                {
                     eprintln!("muse: web view unavailable in this build");
                 }
             });
@@ -2163,7 +2173,7 @@ impl Chat {
         self.paint_chips();
         self.paint_reply();
         self.composer_row.refresh(&self.composer.borrow());
-        self.send_text(dispatch.text, dispatch.images, staged);
+        let _ = self.send_text(dispatch.text, dispatch.images, staged);
     }
 
     /// Stage the clipboard's picture as a chip. Returns whether the
@@ -2341,7 +2351,7 @@ impl Chat {
         draft: String,
         images: Vec<StagedImage>,
         reply: Option<super::composer::ReplyQuote>,
-    ) {
+    ) -> SendStart {
         // A send that never dispatches hands the quote back, like the
         // pictures below: the reader's context is never eaten by a
         // held slot or a missing link.
@@ -2366,7 +2376,9 @@ impl Chat {
                 // message is kept and the log names the contention.
                 eprintln!("muse: send pressed while the session slot is held; message kept");
                 self.say_send_note("Still working — your message is kept; send again in a moment.");
-                return;
+                return SendStart::Refused(
+                    "Still working — your message is kept; send again in a moment.",
+                );
             }
         };
         let Some(client) = self.client.borrow().clone() else {
@@ -2376,7 +2388,7 @@ impl Chat {
             self.paint_chips();
             restore_reply(self);
             self.composer_row.refresh(&self.composer.borrow());
-            return;
+            return SendStart::Refused("Sign in before sending.");
         };
         let verified = self
             .session
@@ -2394,7 +2406,7 @@ impl Chat {
             restore_reply(self);
             self.say_send_note("Sign in before sending pictures.");
             self.composer_row.refresh(&self.composer.borrow());
-            return;
+            return SendStart::Refused("Sign in before sending pictures.");
         }
         let scope = self.thread_scope();
         let reply_worker = reply.clone();
@@ -2498,6 +2510,38 @@ impl Chat {
                 }
             },
         );
+        SendStart::Dispatched
+    }
+
+    /// A send from the web mirror. The page owns the draft, but the dispatch
+    /// is the native one -- the same `Send` slot, the same receipt closure,
+    /// the same history reload -- so there is exactly one sender in the app.
+    /// The answer says whether the app took the press; what the service said
+    /// lands in the transcript and the status line the page already follows.
+    pub(crate) fn web_send(self: &Rc<Self>, text: &str) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("Type a message before sending.".to_owned());
+        }
+        // Same as a press here: yesterday's note belongs to the last send.
+        *self.send_note.borrow_mut() = None;
+        match self.send_text(text.to_owned(), Vec::new(), None) {
+            SendStart::Dispatched => Ok(()),
+            SendStart::Refused(sentence) => {
+                self.refresh_notice();
+                Err(sentence.to_owned())
+            }
+        }
+    }
+
+    /// The Chat window's way back into this controller: one closure, so the
+    /// page cannot reach the session slot by any other route.
+    pub(crate) fn web_send_hook(self: &Rc<Self>) -> crate::webui::WebSend {
+        let weak = Rc::downgrade(self);
+        std::rc::Rc::new(move |text: &str| match weak.upgrade() {
+            Some(chat) => chat.web_send(text),
+            None => Err("The app window is gone.".to_owned()),
+        })
     }
 
     /// Armed two-press turn delete. The first press arms the latest

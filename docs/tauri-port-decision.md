@@ -283,9 +283,21 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   tests (`Chat.test.tsx`) cover the three row shapes and the option pills, the unread-thread state,
   the status line, a failed read beside held rows, and -- the reason this page exists -- a reply
   that grows keeping its element: the same DOM node takes the new words, which is the web half of
-  the in-place rewrite. **Remaining for S3's gate:** the composer and a mutating `chat.send`,
-  attachments, cancellation, approvals, quote staging and unread badges; the native window is still
-  the only one that sends.
+  the in-place rewrite.
+
+  The page's composer is the slice's one mutating control, and it was built to the rule that made
+  the shell worth porting at all: **one dispatcher**. `chat.send` dispatches nothing in `webui.rs`;
+  it hands the trimmed draft to a closure the Chat window is opened with, and that closure is the
+  controller's own `web_send`, which calls the very `send_text` a press in the app calls -- the
+  same `Send` ticket slot, the same receipt closure, the same history reload and quick-poll burst,
+  the same quota notice. `send_text` now returns what it did (`Dispatched` or a `Refused` sentence)
+  so the page can report a refusal without inventing one, and a refusal keeps the draft. Two
+  consequences worth recording: a page opened without the hook has no route to the service at all
+  (`handle_command` is test-only; windows go through `handle_command_with`), and `chat.send` is
+  logged on every press like the other wire commands while the polling snapshot is still named
+  once per window. **Remaining for S3's gate:** attachments and their verified-send receipts,
+  cancellation, approvals, quote staging and unread badges; the native composer is still where
+  pictures, Stop and dictation live.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).

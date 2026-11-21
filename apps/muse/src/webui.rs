@@ -459,23 +459,42 @@ fn fresh_goals(client: Option<AccountClient>) -> Receiver<Fetched> {
 /// Whether a command earns a line in the launch log. The Chat page re-asks
 /// for its cached transcript on a timer, so a mirror window left open would
 /// otherwise fill the log with the same line thousands of times; each cache
-/// read is named once per window instead. A wire read is named every time --
-/// it is the thing a launch log is actually for, and it is rare. The cache/
-/// wire split is the command's own suffix, the same one the page's contract
-/// uses: `.refresh` and `search.run` go to the service, the rest are answered
-/// from held rows.
+/// read is named once per window instead. A trip to the service is named
+/// every time -- it is the thing a launch log is actually for, and it is
+/// rare. The cache/wire split is the command's own suffix, the same one the
+/// page's contract uses: `.refresh`, `.run` and `.send` go out, the rest are
+/// answered from held rows.
 pub(crate) fn should_log_command(
     command: &str,
     named: &mut std::collections::HashSet<String>,
 ) -> bool {
-    let wire = command.ends_with(".refresh") || command.ends_with(".run");
+    let wire =
+        command.ends_with(".refresh") || command.ends_with(".run") || command.ends_with(".send");
     wire || named.insert(command.to_owned())
+}
+
+/// A page's way into the app's own send path: the Chat window hands its draft
+/// back to the controller that owns the `Send` slot, so the window and the
+/// page cannot dispatch different things.
+pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+
+/// One command from the page, on a window with no mutating route: every page
+/// but Chat. The windows themselves go through `handle_command_with`, so this
+/// is the shape the read tests ask in.
+#[cfg(test)]
+fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Value, Answer, String) {
+    handle_command_with(raw, client, None)
 }
 
 /// One command from the page. Reads only, and by name: an unknown command is
 /// refused instead of guessed at, so a typo in the UI is visible in the page
-/// and in the log.
-fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Value, Answer, String) {
+/// and in the log. `send` is the Chat window's route back into the app's own
+/// send path; every other page passes `None` and cannot mutate at all.
+fn handle_command_with(
+    raw: &str,
+    client: Option<AccountClient>,
+    send: Option<&WebSend>,
+) -> (serde_json::Value, Answer, String) {
     let Ok(request) = serde_json::from_str::<serde_json::Value>(raw) else {
         return (
             serde_json::json!(0),
@@ -521,6 +540,30 @@ fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Valu
         "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
         "feed.refresh" => Answer::Later(fresh_feed(client)),
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
+        // The one mutating command, and it dispatches nothing itself: the
+        // draft goes back to the controller that owns the `Send` slot, which
+        // is the path the app's own Send button takes -- same slot, same
+        // receipt, same history reload. The answer says whether the app took
+        // the press; what the service said arrives in the transcript and the
+        // status line the page already follows.
+        "chat.send" => {
+            let text = request
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            match send {
+                None => Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "this window cannot send"
+                })),
+                Some(send) => match send(text) {
+                    Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
+                    Err(sentence) => {
+                        Answer::Now(serde_json::json!({ "ok": false, "error": sentence }))
+                    }
+                },
+            }
+        }
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -705,6 +748,18 @@ fn open_window(
     client: Option<AccountClient>,
     probe: &'static str,
 ) -> bool {
+    open_window_with(title, document, client, probe, None)
+}
+
+/// The same window, with a page's route back into the app for its one
+/// mutating command. Only Chat passes one.
+fn open_window_with(
+    title: &str,
+    document: String,
+    client: Option<AccountClient>,
+    probe: &'static str,
+    send: Option<WebSend>,
+) -> bool {
     if !available() {
         return false;
     }
@@ -740,7 +795,7 @@ fn open_window(
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
     manager.connect_script_message_received(None, move |_, value| {
         let raw = value.to_str().to_string();
-        let (id, answer, command) = handle_command(&raw, client.clone());
+        let (id, answer, command) = handle_command_with(&raw, client.clone(), send.as_ref());
         if should_log_command(&command, &mut named.borrow_mut()) {
             eprintln!("muse webui: command {command}");
         }
@@ -933,8 +988,18 @@ const CHAT_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.chat
 /// Open the Chat surface in its own window, on the rows the native transcript
 /// last built. The page follows `chat.snapshot`, so it keeps up with the
 /// app's own reads and with a reply that grows while it arrives.
-pub(crate) fn open_chat_window(held: HeldChat, client: Option<AccountClient>) -> bool {
-    open_window("Chat · web view", chat_document(&held), client, CHAT_PROBE)
+pub(crate) fn open_chat_window(
+    held: HeldChat,
+    client: Option<AccountClient>,
+    send: WebSend,
+) -> bool {
+    open_window_with(
+        "Chat · web view",
+        chat_document(&held),
+        client,
+        CHAT_PROBE,
+        Some(send),
+    )
 }
 
 /// Open the Search page in its own window, on the query and rows the native
@@ -1690,10 +1755,68 @@ mod tests {
         }
         assert!(should_log_command("search.run", &mut named));
         assert!(should_log_command("search.run", &mut named));
+        // A send goes out: two presses are two lines.
+        assert!(should_log_command("chat.send", &mut named));
+        assert!(should_log_command("chat.send", &mut named));
         // A cache read asked twice is named once, but a different one is
         // still new to the log.
         assert!(should_log_command("threads.snapshot", &mut named));
         assert!(!should_log_command("threads.snapshot", &mut named));
+    }
+
+    /// The one mutating command dispatches nothing here: the draft goes back
+    /// to the app's own send path, and the answer says whether that path took
+    /// it. A refusal travels as the app's own sentence, and a window opened
+    /// without the hook cannot send at all -- so there is exactly one sender.
+    #[test]
+    fn chat_send_hands_the_draft_to_the_app_and_reports_a_refusal() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorded = seen.clone();
+        let send: WebSend = Rc::new(move |text: &str| {
+            recorded.borrow_mut().push(text.to_owned());
+            Ok(())
+        });
+        let (id, answer, command) = handle_command_with(
+            r#"{"id":61,"cmd":"chat.send","text":"hello there"}"#,
+            None,
+            Some(&send),
+        );
+        assert_eq!(id, serde_json::json!(61));
+        assert_eq!(command, "chat.send");
+        let Answer::Now(reply) = answer else {
+            panic!("a send answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(true));
+        assert_eq!(seen.borrow().as_slice(), ["hello there"]);
+
+        let refusing: WebSend = Rc::new(|_: &str| {
+            Err("Still working — your message is kept; send again in a moment.".to_owned())
+        });
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":62,"cmd":"chat.send","text":"again"}"#,
+            None,
+            Some(&refusing),
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a refusal answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("message is kept")
+        );
+
+        // A page with no hook has no route to the service.
+        let (_, answer, _) = handle_command(r#"{"id":63,"cmd":"chat.send","text":"hi"}"#, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a closed route answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert_eq!(reply["error"], serde_json::json!("this window cannot send"));
     }
 
     /// The page follows the app: `chat.snapshot` answers from the held

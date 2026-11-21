@@ -2,8 +2,8 @@
 
 The pages of the Tauri/React migration so far, rendered by the app's own
 WebKitGTK view: **Library** (the reference page), **Goals**, **Tasks**,
-**Ideas**, **Threads**, **Feed**, **Search** and **Chat** (S3's first slice:
-the transcript the native list holds, followed live). Sources live here; `built/app.html` is the artifact the Rust side includes
+**Ideas**, **Threads**, **Feed**, **Search** and **Chat** (S3: the transcript
+the native list holds, followed live, plus a composer that sends). Sources live here; `built/app.html` is the artifact the Rust side includes
 with `include_str!`. One bundle serves every window — the boot payload names
 the page it opens.
 
@@ -42,13 +42,23 @@ command arrives with the first page that mutates.
 | `ideas.snapshot` | none — the roster the native page holds | opening the page |
 | `ideas.refresh` | one ideas listing read on a worker thread | the Refresh button |
 | `chat.snapshot` | none — the transcript the native list holds | opening the page, then every 2 s |
+| `chat.send` | one message, through the app's own send path (the `Send` slot) | the Send button, or Enter |
 
 Chat is the first page with no refresh of its own: it follows
 `chat.snapshot`, which the native render refills — including the in-place
 rewrite of a reply that is still arriving — so the page costs no wire trips
-and cannot show a different conversation than the window beside it. It is
-read-only on purpose: sending, attachments, approvals and quote staging need
-mutating commands, which arrive with the increment that adds the composer.
+and cannot show a different conversation than the window beside it.
+
+Its composer is the slice's one mutating control, and `chat.send` dispatches
+nothing itself. The command hands the trimmed draft back to the app's
+controller through the closure the Chat window is opened with, so a press here
+takes the same `Send` ticket slot, the same receipt handling and the same
+history reload as a press in the app: there is exactly one sender, and a send
+from this window cannot race one from that one. The answer says only whether
+the app took the press — a held slot or a signed-out window comes back as the
+app's own sentence and the draft stays — while what the service said arrives
+the way everything else does, in the transcript and the status line. Pictures,
+approvals, Stop and dictation remain in the app window.
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
 listing is why it waits: the pages allow 120 s for that call. The native reply
