@@ -2353,25 +2353,13 @@ impl Chat {
         images: Vec<StagedImage>,
         reply: Option<super::composer::ReplyQuote>,
     ) -> SendStart {
-        // A send that never dispatches hands the quote back, like the
-        // pictures below: the reader's context is never eaten by a
-        // held slot or a missing link.
-        let restore_reply = |chat: &Self| {
-            if let Some(quote) = reply.clone() {
-                let _ = chat
-                    .composer
-                    .borrow_mut()
-                    .stage_reply(quote.id, quote.excerpt);
-                chat.paint_reply();
-            }
-        };
         let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
             Some(ticket) => ticket,
             None => {
                 self.composer.borrow_mut().finish_send();
                 self.composer.borrow_mut().restore(images);
                 self.paint_chips();
-                restore_reply(self);
+                self.restore_quote(reply.clone());
                 self.composer_row.refresh(&self.composer.borrow());
                 // A held slot is never silent: the reader sees the
                 // message is kept and the log names the contention.
@@ -2387,7 +2375,7 @@ impl Chat {
             self.composer.borrow_mut().finish_send();
             self.composer.borrow_mut().restore(images);
             self.paint_chips();
-            restore_reply(self);
+            self.restore_quote(reply.clone());
             self.composer_row.refresh(&self.composer.borrow());
             return SendStart::Refused("Sign in before sending.");
         };
@@ -2404,7 +2392,7 @@ impl Chat {
             self.composer.borrow_mut().finish_send();
             self.composer.borrow_mut().restore(images);
             self.paint_chips();
-            restore_reply(self);
+            self.restore_quote(reply.clone());
             self.say_send_note("Sign in before sending pictures.");
             self.composer_row.refresh(&self.composer.borrow());
             return SendStart::Refused("Sign in before sending pictures.");
@@ -2444,14 +2432,8 @@ impl Chat {
                 chat.session.borrow_mut().accept(&ticket);
                 chat.composer.borrow_mut().finish_send();
                 chat.composer_row.refresh(&chat.composer.borrow());
-                if let Some(quote) = reply
-                    && answer.is_err()
-                {
-                    let _ = chat
-                        .composer
-                        .borrow_mut()
-                        .stage_reply(quote.id, quote.excerpt);
-                    chat.paint_reply();
+                if answer.is_err() {
+                    chat.restore_quote(reply);
                 }
                 match answer {
                     Ok(receipt) => {
@@ -2524,26 +2506,23 @@ impl Chat {
     /// the same history reload -- so there is exactly one sender in the app.
     /// The answer says whether the app took the press; what the service said
     /// lands in the transcript and the status line the page already follows.
-    /// `quote` is the page's Reply, staged as `(message id, row text)`. It
-    /// goes through the same guard the composer's own Reply uses, and then
-    /// rides `send_text` as the native quote -- the page does not get a second
-    /// notion of what a quote is, or a second way to dispatch one.
+    /// `quote` is the page's Reply: the turn it answers and the line it
+    /// showed. It goes through the same guard the composer's own Reply uses,
+    /// and then rides `send_text` as the native quote -- the page does not get
+    /// a second notion of what a quote is, or a second way to dispatch one.
     pub(crate) fn web_send(
         self: &Rc<Self>,
         text: &str,
-        quote: Option<(String, String)>,
+        quote: Option<crate::webui::WebQuote>,
     ) -> Result<(), String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("Type a message before sending.".to_owned());
         }
-        let reply = match quote {
-            None => None,
-            Some((id, excerpt)) => Some(
-                super::composer::staged_quote(id, excerpt)
-                    .map_err(|limit| format!("That quote cannot be staged: {limit}."))?,
-            ),
-        };
+        let reply = quote
+            .map(|quote| super::composer::staged_quote(quote.id, quote.excerpt))
+            .transpose()
+            .map_err(|_| "That message cannot be quoted.".to_owned())?;
         // Same as a press here: yesterday's note belongs to the last send.
         *self.send_note.borrow_mut() = None;
         match self.send_text(text.to_owned(), Vec::new(), reply) {
@@ -2682,6 +2661,20 @@ impl Chat {
                 self.composer_row.refresh(&self.composer.borrow());
             }
             Err(_) => self.say_send_note("That message cannot be quoted."),
+        }
+    }
+
+    /// Put a quote back after a send that never went out. A held slot, a
+    /// signed-out window and a failed dispatch all hand it back here, so the
+    /// reader's context is never eaten and the handing-back lives in one
+    /// place.
+    fn restore_quote(&self, quote: Option<super::composer::ReplyQuote>) {
+        if let Some(quote) = quote {
+            let _ = self
+                .composer
+                .borrow_mut()
+                .stage_reply(quote.id, quote.excerpt);
+            self.paint_reply();
         }
     }
 

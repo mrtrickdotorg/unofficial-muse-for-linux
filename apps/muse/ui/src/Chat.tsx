@@ -14,15 +14,11 @@ import type { ChatRow as Row, ChatSnapshot } from "./types";
 // trips of its own: it follows the rows the native list last built.
 const POLL_MS = 2000;
 
-/// The quote the page stages with Reply: the row's first line, trimmed, 200
-/// characters at most. The app applies the same cap again to whatever it is
-/// sent, so the two cannot disagree about how long a quote may be.
+/// The quote the page stages with Reply: the row's first line, trimmed. The
+/// app owns the stored quote and caps it there; this bar ellipsises, so the
+/// page needs no second copy of the limit.
 export function quoteExcerpt(text: string): string {
-  return text
-    .split("\n")[0]
-    .trim()
-    .slice(0, 200)
-    .trim();
+  return text.split("\n")[0].trim();
 }
 
 /// A message turn: the reader's words in the blue pill, Muse's in the grey
@@ -176,7 +172,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     }
   };
 
-useEffect(() => {
+  useEffect(() => {
     if (!watching) return;
     const fast = setInterval(() => void loadSnapshot(), 300);
     const done = setTimeout(() => setWatching(false), 8000);

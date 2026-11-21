@@ -476,15 +476,22 @@ pub(crate) fn should_log_command(
     wire || named.insert(command.to_owned())
 }
 
+/// The page's staged quote as the wire carries it: the turn it answers and
+/// the line the page showed. Not trusted: `web_send` runs it through the
+/// composer's own guard before the app stages anything.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub(crate) struct WebQuote {
+    pub id: String,
+    pub excerpt: String,
+}
+
+pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str, Option<WebQuote>) -> Result<(), String>>;
+pub(crate) type WebStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+
 /// The routes a page has back into the app for its two mutating controls.
 /// Neither is a dispatcher of its own: a send goes through the app's single
 /// sender, and Stop takes no session ticket at all -- which is the point of
 /// stop, since it has to fire while a send holds the `Send` slot.
-/// A draft plus the page's staged quote, if any: `(message id, row text)`.
-pub(crate) type WebQuote = (String, String);
-pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str, Option<WebQuote>) -> Result<(), String>>;
-pub(crate) type WebStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
-
 pub(crate) struct WebRoutes {
     pub send: WebSend,
     pub stop: WebStop,
@@ -544,12 +551,12 @@ fn handle_command_with(
         "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
         "feed.refresh" => Answer::Later(fresh_feed(client)),
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
-        // The one mutating command, and it dispatches nothing itself: the
-        // draft goes back to the controller that owns the `Send` slot, which
-        // is the path the app's own Send button takes -- same slot, same
-        // receipt, same history reload. The answer says whether the app took
-        // the press; what the service said arrives in the transcript and the
-        // status line the page already follows.
+        // Send dispatches nothing itself: the draft goes back to the
+        // controller that owns the `Send` slot, which is the path the app's
+        // own Send button takes -- same slot, same receipt, same history
+        // reload. The answer says whether the app took the press; what the
+        // service said arrives in the transcript and the status line the page
+        // already follows.
         "chat.send" => {
             let text = request
                 .get("text")
@@ -559,11 +566,9 @@ fn handle_command_with(
             // as data and guarded by the app, never trusted as a row: the page
             // says which turn it is answering, the composer decides whether
             // that is a quotable turn.
-            let quote = request.get("quote").and_then(|value| {
-                let id = value.get("id")?.as_str()?.to_owned();
-                let excerpt = value.get("excerpt")?.as_str()?.to_owned();
-                Some((id, excerpt))
-            });
+            let quote = request
+                .get("quote")
+                .and_then(|value| serde_json::from_value(value.clone()).ok());
             match routes {
                 None => Answer::Now(serde_json::json!({
                     "ok": false,
@@ -1862,7 +1867,10 @@ mod tests {
         assert_eq!(reply["ok"], serde_json::json!(true));
         assert_eq!(
             quotes.borrow().last().cloned().flatten(),
-            Some(("m-9".to_owned(), "hello".to_owned()))
+            Some(WebQuote {
+                id: "m-9".to_owned(),
+                excerpt: "hello".to_owned(),
+            })
         );
 
         let refusing = WebRoutes {
