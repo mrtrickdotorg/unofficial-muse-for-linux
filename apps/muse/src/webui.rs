@@ -478,14 +478,6 @@ pub(crate) fn should_log_command(
 /// page cannot dispatch different things.
 pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 
-/// One command from the page, on a window with no mutating route: every page
-/// but Chat. The windows themselves go through `handle_command_with`, so this
-/// is the shape the read tests ask in.
-#[cfg(test)]
-fn handle_command(raw: &str, client: Option<AccountClient>) -> (serde_json::Value, Answer, String) {
-    handle_command_with(raw, client, None)
-}
-
 /// One command from the page. Reads only, and by name: an unknown command is
 /// refused instead of guessed at, so a typo in the UI is visible in the page
 /// and in the log. `send` is the Chat window's route back into the app's own
@@ -1115,7 +1107,8 @@ mod tests {
     /// unknown command by name instead of guessing.
     #[test]
     fn snapshots_answer_at_once_and_unknown_commands_are_refused() {
-        let (id, answer, command) = handle_command(r#"{"id":7,"cmd":"library.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":7,"cmd":"library.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(7));
         assert_eq!(command, "library.snapshot");
         let Answer::Now(reply) = answer else {
@@ -1129,7 +1122,8 @@ mod tests {
             vec![goal("Held goal", Some("in_progress"), None)],
             vec![goal("Held tracking", None, None)],
         ));
-        let (id, answer, command) = handle_command(r#"{"id":9,"cmd":"goals.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":9,"cmd":"goals.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(9));
         assert_eq!(command, "goals.snapshot");
         let Answer::Now(reply) = answer else {
@@ -1140,7 +1134,8 @@ mod tests {
         assert_eq!(reply["tracking"][0]["title"], "Held tracking");
         assert_eq!(reply["goals_total"], 1);
 
-        let (_, answer, command) = handle_command(r#"{"id":8,"cmd":"library.delete"}"#, None);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":8,"cmd":"library.delete"}"#, None, None);
         assert_eq!(command, "library.delete");
         let Answer::Now(reply) = answer else {
             panic!("an unknown command must be refused at once");
@@ -1148,7 +1143,7 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["error"], "unknown command: library.delete");
 
-        let (id, answer, _) = handle_command("not json", None);
+        let (id, answer, _) = handle_command_with("not json", None, None);
         assert_eq!(id, serde_json::json!(0));
         let Answer::Now(reply) = answer else {
             panic!("a malformed request must be refused at once");
@@ -1200,7 +1195,7 @@ mod tests {
         .use_host_socket(socket);
 
         let (_, answer, command) =
-            handle_command(r#"{"id":3,"cmd":"library.refresh"}"#, Some(client));
+            handle_command_with(r#"{"id":3,"cmd":"library.refresh"}"#, Some(client), None);
         assert_eq!(command, "library.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1230,7 +1225,8 @@ mod tests {
 
     #[test]
     fn refresh_is_a_wire_read_and_reports_a_missing_link() {
-        let (id, answer, command) = handle_command(r#"{"id":9,"cmd":"library.refresh"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":9,"cmd":"library.refresh"}"#, None, None);
         assert_eq!(id, serde_json::json!(9));
         assert_eq!(command, "library.refresh");
         let Answer::Later(receiver) = answer else {
@@ -1313,7 +1309,7 @@ mod tests {
         .use_host_socket(socket);
 
         let (_, answer, command) =
-            handle_command(r#"{"id":12,"cmd":"goals.refresh"}"#, Some(client));
+            handle_command_with(r#"{"id":12,"cmd":"goals.refresh"}"#, Some(client), None);
         assert_eq!(command, "goals.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1349,7 +1345,8 @@ mod tests {
 
     #[test]
     fn goals_refresh_without_a_client_reports_the_missing_link() {
-        let (_, answer, command) = handle_command(r#"{"id":13,"cmd":"goals.refresh"}"#, None);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":13,"cmd":"goals.refresh"}"#, None, None);
         assert_eq!(command, "goals.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1450,7 +1447,8 @@ mod tests {
             loaded: true,
             error: None,
         });
-        let (id, answer, command) = handle_command(r#"{"id":21,"cmd":"tasks.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":21,"cmd":"tasks.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(21));
         assert_eq!(command, "tasks.snapshot");
         let Answer::Now(reply) = answer else {
@@ -1516,7 +1514,7 @@ mod tests {
         .use_host_socket(socket);
 
         let (_, answer, command) =
-            handle_command(r#"{"id":22,"cmd":"tasks.refresh"}"#, Some(client));
+            handle_command_with(r#"{"id":22,"cmd":"tasks.refresh"}"#, Some(client), None);
         assert_eq!(command, "tasks.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1545,7 +1543,8 @@ mod tests {
 
     #[test]
     fn tasks_refresh_without_a_client_reports_the_missing_link() {
-        let (_, answer, command) = handle_command(r#"{"id":23,"cmd":"tasks.refresh"}"#, None);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":23,"cmd":"tasks.refresh"}"#, None, None);
         assert_eq!(command, "tasks.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1585,7 +1584,8 @@ mod tests {
             loaded: true,
             error: None,
         });
-        let (id, answer, command) = handle_command(r#"{"id":31,"cmd":"ideas.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":31,"cmd":"ideas.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(31));
         assert_eq!(command, "ideas.snapshot");
         let Answer::Now(reply) = answer else {
@@ -1644,7 +1644,7 @@ mod tests {
         .use_host_socket(socket);
 
         let (_, answer, command) =
-            handle_command(r#"{"id":32,"cmd":"ideas.refresh"}"#, Some(client));
+            handle_command_with(r#"{"id":32,"cmd":"ideas.refresh"}"#, Some(client), None);
         assert_eq!(command, "ideas.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1673,7 +1673,8 @@ mod tests {
 
     #[test]
     fn ideas_refresh_without_a_client_reports_the_missing_link() {
-        let (_, answer, command) = handle_command(r#"{"id":33,"cmd":"ideas.refresh"}"#, None);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":33,"cmd":"ideas.refresh"}"#, None, None);
         assert_eq!(command, "ideas.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -1811,7 +1812,8 @@ mod tests {
         );
 
         // A page with no hook has no route to the service.
-        let (_, answer, _) = handle_command(r#"{"id":63,"cmd":"chat.send","text":"hi"}"#, None);
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":63,"cmd":"chat.send","text":"hi"}"#, None, None);
         let Answer::Now(reply) = answer else {
             panic!("a closed route answers at once")
         };
@@ -1839,7 +1841,8 @@ mod tests {
             loaded: true,
             error: None,
         });
-        let (id, answer, command) = handle_command(r#"{"id":51,"cmd":"chat.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":51,"cmd":"chat.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(51));
         assert_eq!(command, "chat.snapshot");
         let Answer::Now(reply) = answer else {
@@ -1852,7 +1855,7 @@ mod tests {
         let mut grown = crate::pages::chat_snapshot();
         grown.rows[0].text = "Hello there, arriving in pieces.".into();
         crate::pages::chat_cache(grown);
-        let (_, answer, _) = handle_command(r#"{"id":52,"cmd":"chat.snapshot"}"#, None);
+        let (_, answer, _) = handle_command_with(r#"{"id":52,"cmd":"chat.snapshot"}"#, None, None);
         let Answer::Now(reply) = answer else {
             panic!("a cache read must answer without a thread");
         };
@@ -1909,7 +1912,8 @@ mod tests {
             loaded: true,
             error: None,
         });
-        let (id, answer, command) = handle_command(r#"{"id":41,"cmd":"threads.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":41,"cmd":"threads.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(41));
         assert_eq!(command, "threads.snapshot");
         let Answer::Now(reply) = answer else {
@@ -1986,7 +1990,7 @@ mod tests {
         .use_host_socket(socket);
 
         let (_, answer, command) =
-            handle_command(r#"{"id":42,"cmd":"threads.refresh"}"#, Some(client));
+            handle_command_with(r#"{"id":42,"cmd":"threads.refresh"}"#, Some(client), None);
         assert_eq!(command, "threads.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -2020,7 +2024,8 @@ mod tests {
 
     #[test]
     fn threads_refresh_without_a_client_reports_the_missing_link() {
-        let (_, answer, command) = handle_command(r#"{"id":43,"cmd":"threads.refresh"}"#, None);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":43,"cmd":"threads.refresh"}"#, None, None);
         assert_eq!(command, "threads.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -2163,7 +2168,8 @@ mod tests {
             loaded: true,
             ..HeldFeed::default()
         });
-        let (id, answer, command) = handle_command(r#"{"id":51,"cmd":"feed.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":51,"cmd":"feed.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(51));
         assert_eq!(command, "feed.snapshot");
         let Answer::Now(reply) = answer else {
@@ -2228,7 +2234,7 @@ mod tests {
         .use_host_socket(socket);
 
         let (_, answer, command) =
-            handle_command(r#"{"id":52,"cmd":"feed.refresh"}"#, Some(client));
+            handle_command_with(r#"{"id":52,"cmd":"feed.refresh"}"#, Some(client), None);
         assert_eq!(command, "feed.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -2257,7 +2263,8 @@ mod tests {
 
     #[test]
     fn feed_refresh_without_a_client_reports_the_missing_link() {
-        let (_, answer, command) = handle_command(r#"{"id":53,"cmd":"feed.refresh"}"#, None);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":53,"cmd":"feed.refresh"}"#, None, None);
         assert_eq!(command, "feed.refresh");
         let Answer::Later(receiver) = answer else {
             panic!("refresh must leave the main loop");
@@ -2332,7 +2339,8 @@ mod tests {
             loaded: true,
             error: None,
         });
-        let (id, answer, command) = handle_command(r#"{"id":61,"cmd":"search.snapshot"}"#, None);
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":61,"cmd":"search.snapshot"}"#, None, None);
         assert_eq!(id, serde_json::json!(61));
         assert_eq!(command, "search.snapshot");
         let Answer::Now(reply) = answer else {
@@ -2384,9 +2392,10 @@ mod tests {
         })
         .use_host_socket(socket);
 
-        let (_, answer, command) = handle_command(
+        let (_, answer, command) = handle_command_with(
             r#"{"id":62,"cmd":"search.run","query":"parking"}"#,
             Some(client),
+            None,
         );
         assert_eq!(command, "search.run");
         let Answer::Later(receiver) = answer else {
@@ -2417,7 +2426,7 @@ mod tests {
     #[test]
     fn an_empty_query_is_refused_without_a_read() {
         let (_, answer, command) =
-            handle_command(r#"{"id":63,"cmd":"search.run","query":"   "}"#, None);
+            handle_command_with(r#"{"id":63,"cmd":"search.run","query":"   "}"#, None, None);
         assert_eq!(command, "search.run");
         let Answer::Now(reply) = answer else {
             panic!("an empty query must not start a read");
@@ -2428,8 +2437,11 @@ mod tests {
 
     #[test]
     fn search_run_without_a_client_reports_the_missing_link() {
-        let (_, answer, command) =
-            handle_command(r#"{"id":64,"cmd":"search.run","query":"parking"}"#, None);
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":64,"cmd":"search.run","query":"parking"}"#,
+            None,
+            None,
+        );
         assert_eq!(command, "search.run");
         let Answer::Later(receiver) = answer else {
             panic!("a search must leave the main loop");
@@ -2451,8 +2463,9 @@ mod tests {
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
 
-        let (id, answer, command) = handle_command(
+        let (id, answer, command) = handle_command_with(
             r#"{"id":54,"cmd":"feed.hero","url":"https://example.test/never-cached.jpg"}"#,
+            None,
             None,
         );
         assert_eq!(id, serde_json::json!(54));
@@ -2482,8 +2495,9 @@ mod tests {
             "data:image/png;base64,iVBORw0KGgo=",
             "",
         ] {
-            let (_, answer, _) = handle_command(
+            let (_, answer, _) = handle_command_with(
                 &serde_json::json!({ "id": 55, "cmd": "feed.hero", "url": url }).to_string(),
+                None,
                 None,
             );
             let Answer::Later(receiver) = answer else {

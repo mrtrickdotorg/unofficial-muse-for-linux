@@ -293,7 +293,8 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the same quota notice. `send_text` now returns what it did (`Dispatched` or a `Refused` sentence)
   so the page can report a refusal without inventing one, and a refusal keeps the draft. Two
   consequences worth recording: a page opened without the hook has no route to the service at all
-  (`handle_command` is test-only; windows go through `handle_command_with`), and `chat.send` is
+  (there is one command entry point, `handle_command_with`, and the tests ask it with `None`), and
+  `chat.send` is
   logged on every press like the other wire commands while the polling snapshot is still named
   once per window. **Remaining for S3's gate:** attachments and their verified-send receipts,
   cancellation, approvals, quote staging and unread badges; the native composer is still where
