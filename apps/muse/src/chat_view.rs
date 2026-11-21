@@ -169,9 +169,14 @@ fn message_widget(
             let copy = gtk4::Button::with_label("Copy");
             copy.add_css_class("flat");
             describe(&copy, "Copy response");
-            let text = text.to_string();
+            // The row can grow after it is built: a reply that arrives
+            // in pieces is rewritten in place, not rebuilt. Both
+            // actions therefore read the bubble at press time, so a
+            // half-arrived answer is never all that gets copied or
+            // quoted.
+            let live = bubble.clone();
             copy.connect_clicked(move |button| {
-                button.clipboard().set_text(&text);
+                button.clipboard().set_text(&live.text());
             });
             actions.append(&copy);
             // The web hangs a React action beside Copy: one press
@@ -195,9 +200,9 @@ fn message_widget(
         {
             let reply_on = on_reply.clone();
             let id: String = (*id).into();
-            let text: String = (*text).into();
+            let live = bubble.clone();
             reply.connect_clicked(move |_| {
-                reply_on(id.clone(), text.clone());
+                reply_on(id.clone(), live.text().to_string());
             });
         }
         actions.append(&reply);
