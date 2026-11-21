@@ -69,8 +69,16 @@ keeps Stop a beat longer, through the same window in which it watches fast for
 the reply; otherwise a reader could never reach it. The answer says only that
 the cancel went out, and the app writes the service's own verdict on its status
 line: "Stopped." when something was running, "Nothing was running." when the
-press was a little late. Pictures, approvals and dictation remain in the app
-window.
+press was a little late.
+
+Reply stages a quote on the page — the turn's first line, trimmed and capped at
+200 characters, with the × that drops it — and the quote rides `chat.send` as
+`{id, excerpt}`. The app guards it with the same `staged_quote` the composer's
+own Reply uses and passes it into `send_text`, so a quote from the page is the
+native quote and not a second notion of one; the page clears it on a send that
+goes and on a cancel, which are the two things that clear the app's. It is
+reader-side context either way: the send on the wire is a plain send. Pictures,
+approvals and dictation remain in the app window.
 
 Refresh is a real read of the service, not a re-read of the cache, and a slow
 listing is why it waits: the pages allow 120 s for that call. The native reply

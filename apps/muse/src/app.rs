@@ -2524,14 +2524,29 @@ impl Chat {
     /// the same history reload -- so there is exactly one sender in the app.
     /// The answer says whether the app took the press; what the service said
     /// lands in the transcript and the status line the page already follows.
-    pub(crate) fn web_send(self: &Rc<Self>, text: &str) -> Result<(), String> {
+    /// `quote` is the page's Reply, staged as `(message id, row text)`. It
+    /// goes through the same guard the composer's own Reply uses, and then
+    /// rides `send_text` as the native quote -- the page does not get a second
+    /// notion of what a quote is, or a second way to dispatch one.
+    pub(crate) fn web_send(
+        self: &Rc<Self>,
+        text: &str,
+        quote: Option<(String, String)>,
+    ) -> Result<(), String> {
         let text = text.trim();
         if text.is_empty() {
             return Err("Type a message before sending.".to_owned());
         }
+        let reply = match quote {
+            None => None,
+            Some((id, excerpt)) => Some(
+                super::composer::staged_quote(id, excerpt)
+                    .map_err(|limit| format!("That quote cannot be staged: {limit}."))?,
+            ),
+        };
         // Same as a press here: yesterday's note belongs to the last send.
         *self.send_note.borrow_mut() = None;
-        match self.send_text(text.to_owned(), Vec::new(), None) {
+        match self.send_text(text.to_owned(), Vec::new(), reply) {
             SendStart::Dispatched => Ok(()),
             SendStart::Refused(sentence) => {
                 self.refresh_notice();
@@ -2547,8 +2562,8 @@ impl Chat {
         let weak = Rc::downgrade(self);
         let send_weak = weak.clone();
         crate::webui::WebRoutes {
-            send: std::rc::Rc::new(move |text: &str| match send_weak.upgrade() {
-                Some(chat) => chat.web_send(text),
+            send: std::rc::Rc::new(move |text: &str, quote| match send_weak.upgrade() {
+                Some(chat) => chat.web_send(text, quote),
                 None => Err("The app window is gone.".to_owned()),
             }),
             stop: std::rc::Rc::new(move || match weak.upgrade() {

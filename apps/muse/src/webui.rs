@@ -480,7 +480,9 @@ pub(crate) fn should_log_command(
 /// Neither is a dispatcher of its own: a send goes through the app's single
 /// sender, and Stop takes no session ticket at all -- which is the point of
 /// stop, since it has to fire while a send holds the `Send` slot.
-pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+/// A draft plus the page's staged quote, if any: `(message id, row text)`.
+pub(crate) type WebQuote = (String, String);
+pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str, Option<WebQuote>) -> Result<(), String>>;
 pub(crate) type WebStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 
 pub(crate) struct WebRoutes {
@@ -553,12 +555,21 @@ fn handle_command_with(
                 .get("text")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
+            // The staged quote, if the page's Reply put one up. It is passed
+            // as data and guarded by the app, never trusted as a row: the page
+            // says which turn it is answering, the composer decides whether
+            // that is a quotable turn.
+            let quote = request.get("quote").and_then(|value| {
+                let id = value.get("id")?.as_str()?.to_owned();
+                let excerpt = value.get("excerpt")?.as_str()?.to_owned();
+                Some((id, excerpt))
+            });
             match routes {
                 None => Answer::Now(serde_json::json!({
                     "ok": false,
                     "error": "this window cannot send"
                 })),
-                Some(routes) => match (routes.send)(text) {
+                Some(routes) => match (routes.send)(text, quote) {
                     Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
                     Err(sentence) => {
                         Answer::Now(serde_json::json!({ "ok": false, "error": sentence }))
@@ -1813,8 +1824,11 @@ mod tests {
         use std::rc::Rc;
         let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let recorded = seen.clone();
-        let send: WebSend = Rc::new(move |text: &str| {
+        let quotes: Rc<RefCell<Vec<Option<WebQuote>>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_quotes = quotes.clone();
+        let send: WebSend = Rc::new(move |text: &str, quote| {
             recorded.borrow_mut().push(text.to_owned());
+            seen_quotes.borrow_mut().push(quote);
             Ok(())
         });
         let routes = WebRoutes {
@@ -1833,9 +1847,26 @@ mod tests {
         };
         assert_eq!(reply["ok"], serde_json::json!(true));
         assert_eq!(seen.borrow().as_slice(), ["hello there"]);
+        assert_eq!(quotes.borrow().as_slice(), [None::<WebQuote>]);
+
+        // A staged quote rides the same command, as data: the page says which
+        // turn it answers, the app's own guard decides whether it is quotable.
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":64,"cmd":"chat.send","text":"answering","quote":{"id":"m-9","excerpt":"hello"}}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a quoted send answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(true));
+        assert_eq!(
+            quotes.borrow().last().cloned().flatten(),
+            Some(("m-9".to_owned(), "hello".to_owned()))
+        );
 
         let refusing = WebRoutes {
-            send: Rc::new(|_: &str| {
+            send: Rc::new(|_: &str, _: Option<WebQuote>| {
                 Err("Still working — your message is kept; send again in a moment.".to_owned())
             }),
             stop: Rc::new(|| Ok(())),
@@ -1877,7 +1908,9 @@ mod tests {
         let stopped = Rc::new(Cell::new(0));
         let counted = stopped.clone();
         let refusing = WebRoutes {
-            send: Rc::new(|_: &str| Err("Still working — your message is kept.".to_owned())),
+            send: Rc::new(|_: &str, _: Option<WebQuote>| {
+                Err("Still working — your message is kept.".to_owned())
+            }),
             stop: Rc::new(move || {
                 counted.set(counted.get() + 1);
                 Ok(())

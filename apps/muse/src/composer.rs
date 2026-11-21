@@ -97,6 +97,21 @@ pub fn quote_excerpt(text: &str) -> String {
     capped.trim().to_owned()
 }
 
+/// One quote, guarded exactly once: the id bounded (1-256, no NUL) and the
+/// excerpt taken through the capped one-line helper. Both the composer's own
+/// Reply and a page's staging come through here, so a quote cannot be built
+/// two different ways.
+pub fn staged_quote(id: String, excerpt: String) -> Result<ReplyQuote, &'static str> {
+    if id.is_empty() || id.len() > 256 || id.contains('\0') {
+        return Err("bad id");
+    }
+    let excerpt = quote_excerpt(&excerpt);
+    if excerpt.is_empty() {
+        return Err("empty quote");
+    }
+    Ok(ReplyQuote { id, excerpt })
+}
+
 /// Draft plus in-flight send flag. One press dispatches once; a second
 /// press while the send holds the slot waits instead of duplicating.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -154,14 +169,7 @@ impl Composer {
     /// excerpt derived through the capped one-line helper, never raw).
     /// Re-staging replaces the quote; a quote alone never arms send.
     pub fn stage_reply(&mut self, id: String, excerpt: String) -> Result<(), &'static str> {
-        if id.is_empty() || id.len() > 256 || id.contains('\0') {
-            return Err("bad id");
-        }
-        let excerpt = quote_excerpt(&excerpt);
-        if excerpt.is_empty() {
-            return Err("empty quote");
-        }
-        self.reply = Some(ReplyQuote { id, excerpt });
+        self.reply = Some(staged_quote(id, excerpt)?);
         Ok(())
     }
 
@@ -588,6 +596,17 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(composer.reply().map(|quote| quote.id.as_str()), Some("m2"));
+    }
+
+    #[test]
+    fn a_quote_is_guarded_the_same_way_wherever_it_is_staged() {
+        assert!(staged_quote("".to_owned(), "hi".to_owned()).is_err());
+        assert!(staged_quote("m1".to_owned(), "   ".to_owned()).is_err());
+        let quote = staged_quote("m1".to_owned(), "  one line\ntwo  ".to_owned()).expect("quote");
+        assert_eq!(quote.id, "m1");
+        assert_eq!(quote.excerpt, "one line");
+        let long = staged_quote("m1".to_owned(), "x".repeat(500)).expect("quote");
+        assert_eq!(long.excerpt.chars().count(), 200);
     }
 
     #[test]
