@@ -124,9 +124,16 @@ def fnv(data):
 config_dir = sys.argv[sys.argv.index("--config-dir") + 1]
 with open(os.path.join(config_dir, "stub-boot.log"), "a") as fh:
     fh.write("boot argv=%r\n" % (sys.argv,))
-root = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.environ.get("HOME", ""), ".cache")
-path = os.path.join(root, "unofficial-muse-for-linux",
-                    "account-%016x.sock" % fnv(os.fsencode(config_dir)))
+# The lifetime test pins the socket by writing this file; the derived path
+# below stays the fallback for anything else that runs this stub.
+pinned = os.path.join(config_dir, "host-socket-path")
+if os.path.exists(pinned):
+    with open(pinned) as fh:
+        path = fh.read().strip()
+else:
+    root = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(os.environ.get("HOME", ""), ".cache")
+    path = os.path.join(root, "unofficial-muse-for-linux",
+                        "account-%016x.sock" % fnv(os.fsencode(config_dir)))
 os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
 probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 try:
@@ -189,28 +196,33 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
     let script = fixture.0.join("muse_account_bridge.py");
     fs::write(&script, "# stub: only the sibling host script matters\n").unwrap();
     fs::write(fixture.0.join("muse_account_host.py"), STUB_HOST).unwrap();
-    // The runtime dir must be SHORT: AF_UNIX paths cap at ~108 bytes, and
-    // nesting it inside the fixture pushed the socket path past the limit
-    // on CI (TMPDIR=/home/runner/work/_temp) and again on a host whose
-    // TMPDIR is $HOME/.cache/muse-tmp once the pid reached six digits, so
-    // the stub's bind failed ("AF_UNIX path too long") and the client
-    // fell back to the one-shot bridge (ProtocolError). A short sibling
-    // name keeps the socket under the cap whatever the temp root is.
-    let runtime = fixture.0.with_file_name(format!(
-        "hm{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&runtime).unwrap();
-    // SAFETY: this test owns the variable's meaning for its fixture; the
-    // other host tests either pin their socket explicitly or fall back to
-    // the one-shot path when no host answers, so a concurrent reader can
-    // only land in this fixture's empty runtime dir and miss.
-    unsafe {
-        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
-    }
+    // The socket is pinned, not derived from a mutated XDG_RUNTIME_DIR:
+    // `std::env::set_var` writes process-global state that every other test
+    // thread reads (each account client copies the environment into every
+    // child it spawns), so a parallel workspace run failed once in whichever
+    // test happened to be reading at that instant -- the failure moved with
+    // timing, not with any one test's logic. Pinning leaves this process's
+    // environment untouched: the client gets the path through
+    // `use_host_socket`, and the stub host reads the same path from a file in
+    // its config dir. The derived path is still covered by
+    // `the_socket_name_matches_the_published_fnv_1a_64_vectors`.
+    //
+    // The path stays SHORT: AF_UNIX paths cap at ~108 bytes, and nesting it
+    // inside the fixture named after the pid pushed the socket past the limit
+    // on CI (TMPDIR=/home/runner/work/_temp) and again on a host whose TMPDIR
+    // is $HOME/.cache/muse-tmp once the pid reached six digits, so the stub's
+    // bind failed ("AF_UNIX path too long") and the client fell back to the
+    // one-shot bridge (ProtocolError).
+    let socket = fixture.0.join("host.sock");
+    fs::write(
+        config_dir.join("host-socket-path"),
+        socket.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
 
-    let first = fixture.client("/usr/bin/python3", script.clone());
+    let first = fixture
+        .client("/usr/bin/python3", script.clone())
+        .use_host_socket(socket.clone());
     let first_outcome = std::thread::spawn(move || first.identity()).join().unwrap();
     if let Err(error) = &first_outcome {
         let boot = fs::read_to_string(config_dir.join("stub-boot.log"))
@@ -224,7 +236,9 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
         );
     }
     std::thread::sleep(std::time::Duration::from_millis(700));
-    let second = fixture.client("/usr/bin/python3", script);
+    let second = fixture
+        .client("/usr/bin/python3", script)
+        .use_host_socket(socket);
     second.identity().unwrap();
 
     let starts = fs::read_to_string(config_dir.join("serve-starts.log")).unwrap();
@@ -233,7 +247,6 @@ fn a_host_spawned_by_a_short_lived_job_thread_survives_it() {
         1,
         "one host must serve both calls: {starts}"
     );
-    let _ = fs::remove_dir_all(&runtime);
 }
 
 #[test]
