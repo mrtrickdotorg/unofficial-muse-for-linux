@@ -40,6 +40,17 @@ where
     control.update_property(&[gtk4::accessible::Property::Label(text)]);
 }
 
+/// Mark a text surface as a live region: content that changes on its
+/// own and is worth hearing without the reader going to look for it.
+/// GTK has no `aria-live` attribute (announcements proper arrive in
+/// GTK 4.18, past this build's 4.14 floor), so the status role is the
+/// toolkit's mapping: assistive tech treats a status node as advisory
+/// content whose changing name it speaks. The node's own text is its
+/// name, so the words that arrive are the words read out.
+pub fn live_region(text: &gtk4::Label) {
+    text.set_accessible_role(gtk4::AccessibleRole::Status);
+}
+
 /// A measured pixel height out of a JS evaluation answer. The
 /// answer's string form varies (bare digits, quoted strings), so this
 /// keeps only the number instead of trusting one shape; `None` logs

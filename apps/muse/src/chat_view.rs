@@ -7,7 +7,7 @@
 //! until then the live app does not reference them yet.
 #![allow(dead_code)]
 
-use super::widget::{describe, glyph_button};
+use super::widget::{describe, glyph_button, live_region};
 use adw::prelude::*;
 use muse_account::MessageAttachment;
 
@@ -16,6 +16,8 @@ use super::chat::{Role, TranscriptRow};
 /// One rendered row, ready to append to the transcript list. Held link
 /// cards ride along so an assistant row paints its previews with the
 /// row; urls with no held card stay text-only until a fetch lands.
+/// `newest` marks the last row of the log, whose words are the
+/// transcript's live region: a reply that lands is heard as it lands.
 pub fn row_widget(
     row: &TranscriptRow,
     on_option: &std::rc::Rc<dyn Fn(String)>,
@@ -26,6 +28,7 @@ pub fn row_widget(
         (muse_account::LinkPreview, Option<std::path::PathBuf>),
     >,
     show_head: bool,
+    newest: bool,
 ) -> gtk4::Widget {
     match row {
         TranscriptRow::DayDivider { label } => {
@@ -53,6 +56,7 @@ pub fn row_widget(
                 selected: selected_option.as_deref(),
                 sent_at: sent_at.as_deref(),
                 show_head,
+                newest,
                 attachments,
                 id,
             };
@@ -65,6 +69,9 @@ pub fn row_widget(
             widget.set_margin_top(8);
             widget.set_margin_bottom(8);
             widget.add_css_class("dim-label");
+            if newest {
+                live_region(&widget);
+            }
             widget.upcast()
         }
     }
@@ -80,6 +87,7 @@ struct MessageParts<'a> {
     selected: Option<&'a str>,
     sent_at: Option<&'a str>,
     show_head: bool,
+    newest: bool,
     attachments: &'a [MessageAttachment],
     id: &'a str,
 }
@@ -101,6 +109,7 @@ fn message_widget(
         selected,
         sent_at,
         show_head,
+        newest,
         attachments,
         id,
     } = parts;
@@ -138,6 +147,12 @@ fn message_widget(
         bubble.add_css_class("muse-user-bubble");
     } else {
         bubble.add_css_class("muse-assistant-text");
+    }
+    // The newest turn is the log's live region: one status node whose
+    // words change while a reply arrives, instead of a reader hunting
+    // the bottom of a thread that filled in behind them.
+    if *newest {
+        live_region(&bubble);
     }
     column.append(&bubble);
 
@@ -327,6 +342,48 @@ pub fn link_card(
     card.upcast()
 }
 
+/// The message bubble inside a built row: the label the reader's words
+/// or the answer's words are painted into. Pre-order, so the bubble is
+/// reached before the action buttons that follow it.
+fn bubble_in(row: &gtk4::Widget) -> Option<gtk4::Label> {
+    let mut stack = vec![row.clone()];
+    while let Some(widget) = stack.pop() {
+        let is_bubble =
+            widget.has_css_class("muse-assistant-text") || widget.has_css_class("muse-user-bubble");
+        if is_bubble && let Ok(label) = widget.clone().downcast::<gtk4::Label>() {
+            return Some(label);
+        }
+        let mut children: Vec<gtk4::Widget> = Vec::new();
+        let mut child = widget.first_child();
+        while let Some(next) = child {
+            children.push(next.clone());
+            child = next.next_sibling();
+        }
+        for child in children.into_iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+/// Rewrite the newest turn's words where they are, leaving the rows
+/// above untouched. A reply that arrives in pieces keeps its row and
+/// its widgets this way: the words change under the reader instead of
+/// a second turn taking the first one's place, which is what makes the
+/// growing turn's live region speak. Answers false when the newest row
+/// has no bubble (a notice, a divider, an empty log), so the caller
+/// rebuilds instead of guessing.
+pub fn set_newest_text(list: &gtk4::ListBox, text: &str) -> bool {
+    let Some(row) = list.last_child() else {
+        return false;
+    };
+    let Some(bubble) = bubble_in(&row) else {
+        return false;
+    };
+    bubble.set_markup(&super::chat::render_markup(text));
+    true
+}
+
 /// Replace the transcript list contents with freshly built rows.
 pub fn populate(
     list: &gtk4::ListBox,
@@ -345,7 +402,8 @@ pub fn populate(
     // One assistant header opens each assistant turn: a row shows it
     // when the row before it was not an assistant row.
     let mut prev_assistant = false;
-    for row in rows {
+    let newest = rows.len().saturating_sub(1);
+    for (index, row) in rows.iter().enumerate() {
         let assistant = matches!(
             row,
             TranscriptRow::Message {
@@ -360,6 +418,7 @@ pub fn populate(
             on_reply,
             previews,
             assistant && !prev_assistant,
+            index == newest,
         ));
         prev_assistant = assistant;
     }
