@@ -9,6 +9,13 @@
 
 use std::path::{Path, PathBuf};
 
+/// What the transcript compares to decide whether its rows still match
+/// the held history: row count, the newest row's id, the preview
+/// version, and a hash of the newest row's words. The last part is
+/// what makes a streaming turn visible: it keeps its id and its place
+/// while its text grows.
+pub type HistoryFingerprint = (usize, Option<String>, u64, u64);
+
 /// Which service read currently owns the session's one in-flight slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Op {
@@ -331,14 +338,26 @@ impl Session {
     }
 
     /// A cheap fingerprint of the held history: row count, the newest
-    /// row's id, and the preview version. The transcript skips its
-    /// full widget rebuild when this is unchanged -- rebuilding
-    /// hundreds of labels every poll is what made long threads
-    /// stutter. A newly arrived link card bumps the version so its
-    /// row repaints without a history change.
-    pub fn history_fingerprint(&self) -> (usize, Option<String>, u64) {
-        let last = self.history.last().map(|row| row.message_id.clone());
-        (self.history.len(), last, self.preview_version)
+    /// row's id, the preview version, and the newest row's own words.
+    /// The transcript skips its full widget rebuild when this is
+    /// unchanged -- rebuilding hundreds of labels every poll is what
+    /// made long threads stutter. A newly arrived link card bumps the
+    /// version so its row repaints without a history change.
+    ///
+    /// The words ride the fingerprint because a reply that streams in
+    /// keeps its id, its seq and its place: without its text the
+    /// transcript could not tell a growing answer from a settled one,
+    /// and would either miss the growth or rebuild the log for it.
+    pub fn history_fingerprint(&self) -> HistoryFingerprint {
+        let last = self.history.last();
+        let id = last.map(|row| row.message_id.clone());
+        let words = last.map_or(0, |row| {
+            use std::hash::{Hash, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            row.text.hash(&mut hasher);
+            hasher.finish()
+        });
+        (self.history.len(), id, self.preview_version, words)
     }
 
     /// Record a finished history read: the rows land only on success.
@@ -840,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn history_fingerprint_moves_with_new_rows_only() {
+    fn history_fingerprint_moves_with_rows_and_with_the_newest_words() {
         let mut session = Session::new();
         let empty = session.history_fingerprint();
         session.history = vec![history_row("b", 2), history_row("c", 3)];
@@ -853,6 +872,18 @@ mod tests {
         assert_eq!(older.1.as_deref(), Some("c"));
         session.preview_version += 1;
         assert_ne!(older, session.history_fingerprint());
+
+        // A reply that grows keeps every other part of the fingerprint:
+        // same count, same id, same previews. Only its words move, and
+        // that is what tells the transcript to rewrite one label
+        // instead of rebuilding the log.
+        let settled = session.history_fingerprint();
+        session.history.last_mut().unwrap().text = "c, and then some".to_owned();
+        let grown = session.history_fingerprint();
+        assert_eq!(grown.0, settled.0);
+        assert_eq!(grown.1, settled.1);
+        assert_eq!(grown.2, settled.2);
+        assert_ne!(grown.3, settled.3);
     }
 
     #[test]

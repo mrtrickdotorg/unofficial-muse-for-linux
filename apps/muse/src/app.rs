@@ -10,12 +10,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::widget::describe;
+use super::widget::{describe, live_region};
 use adw::prelude::*;
 use muse_account::AccountClient;
 
 use super::chat::build_rows;
-use super::chat_view::populate;
+use super::chat_view::{populate, set_newest_text};
 use super::composer::{Composer, ComposerRow, StagedImage};
 use super::session::{Op, Session, bridge_script, load_saved_link};
 
@@ -295,7 +295,7 @@ pub struct Chat {
     notice: gtk4::Label,
     send_note: RefCell<Option<String>>,
     armed_delete: RefCell<Option<String>>,
-    painted: RefCell<Option<(usize, Option<String>, u64)>>,
+    painted: RefCell<Option<super::session::HistoryFingerprint>>,
     follow_after_render: RefCell<bool>,
     thread: RefCell<Option<String>>,
     model_combo: gtk4::ComboBoxText,
@@ -566,6 +566,11 @@ impl Chat {
                 notice.set_wrap(true);
                 notice.set_halign(gtk4::Align::Center);
                 notice.set_visible(false);
+                // The status line's own words are the shell's other live
+                // region: a refused paste or a failed send replaces the
+                // text in place, and the node keeps its identity, so the
+                // change is heard instead of passing unseen.
+                live_region(&notice);
                 notice
             },
             armed_delete: RefCell::new(None),
@@ -1793,39 +1798,68 @@ impl Chat {
         // teardown and rebuild. The labels below are cheap; the
         // ListBox reconstruction is what stalled long threads.
         if *self.painted.borrow() != Some(fingerprint.clone()) {
-            if let Some(on_option) = self.on_option.borrow().clone() {
-                let session = self.session.borrow();
-                let rows = build_rows(&session.history);
-                let quotas: Vec<String> = rows
-                    .iter()
-                    .filter_map(|row| match row {
-                        super::chat::TranscriptRow::Notice { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                let previews = session.previews.clone();
-                drop(session);
-                for text in quotas {
-                    self.session.borrow_mut().note_quota(text);
+            // A reply that streams in keeps its id, its place and the
+            // row count: only its words grow. Rewriting that one label
+            // leaves every row above it -- and the newest turn's
+            // live-region node -- exactly where they were, so a reader
+            // hears the sentence change instead of a replacement. A
+            // new row, a landing link card or a thread switch still
+            // rebuilds the log.
+            let grown = {
+                let held = self.painted.borrow().clone();
+                held.is_some_and(|previous| {
+                    previous.0 == fingerprint.0
+                        && previous.1 == fingerprint.1
+                        && previous.2 == fingerprint.2
+                        && previous.3 != fingerprint.3
+                })
+            };
+            let newest_text = self
+                .session
+                .borrow()
+                .history
+                .last()
+                .map(|row| row.text.clone());
+            let rewritten = match newest_text {
+                Some(text) if grown => set_newest_text(&self.transcript, &text),
+                _ => false,
+            };
+            if !rewritten {
+                let on_option = self.on_option.borrow().clone();
+                if let Some(on_option) = on_option {
+                    let session = self.session.borrow();
+                    let rows = build_rows(&session.history);
+                    let quotas: Vec<String> = rows
+                        .iter()
+                        .filter_map(|row| match row {
+                            super::chat::TranscriptRow::Notice { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    let previews = session.previews.clone();
+                    drop(session);
+                    for text in quotas {
+                        self.session.borrow_mut().note_quota(text);
+                    }
+                    let on_react = self
+                        .on_react
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
+                    let on_reply = self
+                        .on_reply
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
+                    populate(
+                        &self.transcript,
+                        &rows,
+                        &on_option,
+                        &on_react,
+                        &on_reply,
+                        &previews,
+                    );
                 }
-                let on_react = self
-                    .on_react
-                    .borrow()
-                    .clone()
-                    .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
-                let on_reply = self
-                    .on_reply
-                    .borrow()
-                    .clone()
-                    .unwrap_or_else(|| std::rc::Rc::new(|_: String, _: String| {}));
-                populate(
-                    &self.transcript,
-                    &rows,
-                    &on_option,
-                    &on_react,
-                    &on_reply,
-                    &previews,
-                );
             }
             *self.painted.borrow_mut() = Some(fingerprint);
         }
