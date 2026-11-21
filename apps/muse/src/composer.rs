@@ -162,6 +162,26 @@ impl Composer {
         Some(dispatch)
     }
 
+    /// Arm the same dispatch for words that did not come from this entry:
+    /// the web mirror's composer owns its own draft, so its send hands the
+    /// words in and this takes the staged pictures. The entry's own draft is
+    /// left alone -- the page is not allowed to type into the app's card --
+    /// and every other part of the press (the in-flight flag, the cleared
+    /// quote, the taken chips) is exactly what `begin_send` does. `None`
+    /// when there is nothing sendable or a send is already in flight.
+    pub fn begin_remote(&mut self, text: &str) -> Option<Dispatch> {
+        let text = text.trim();
+        if self.sending || (text.is_empty() && self.images.is_empty()) {
+            return None;
+        }
+        self.sending = true;
+        self.reply = None;
+        Some(Dispatch {
+            text: text.to_owned(),
+            images: std::mem::take(&mut self.images),
+        })
+    }
+
     /// Stage a reply quote from a row press: the row's id plus its
     /// excerpt. Guards mirror the reaction path (id 1–256, no NUL;
     /// excerpt derived through the capped one-line helper, never raw).
@@ -614,6 +634,30 @@ mod tests {
         assert_eq!(quote_excerpt("   "), "");
         let long = "x".repeat(500);
         assert_eq!(quote_excerpt(&long).chars().count(), 200);
+    }
+
+    #[test]
+    fn a_remote_send_takes_the_staged_pictures_and_leaves_the_entry_alone() {
+        let mut composer = Composer::new();
+        composer.set_text("the app's own draft");
+        composer
+            .stage("pasted-1.png".to_owned(), vec![7], 4, 5)
+            .expect("stage");
+        let dispatch = composer.begin_remote(" from the page ").expect("sendable");
+        assert_eq!(dispatch.text, "from the page");
+        assert_eq!(
+            dispatch.images.len(),
+            1,
+            "the page's send carries the chips"
+        );
+        assert!(composer.staged().is_empty());
+        assert!(composer.sending(), "Stop shows for a page send too");
+        assert_eq!(composer.text(), "the app's own draft");
+        // A second press while the first is in flight is dropped, not queued.
+        assert!(composer.begin_remote("again").is_none());
+        composer.finish_send();
+        // Nothing words and no picture: nothing to send.
+        assert!(composer.begin_remote("   ").is_none());
     }
 
     #[test]

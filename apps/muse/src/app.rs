@@ -1169,6 +1169,7 @@ impl Chat {
                 chat.composer.borrow_mut().unstage(&name);
                 chat.paint_chips();
                 chat.composer_row.refresh(&chat.composer.borrow());
+                chat.cache_web_chat();
             }
         });
         *self.on_remove.borrow_mut() = Some(on_remove);
@@ -1358,6 +1359,13 @@ impl Chat {
                 .set_text("Link your account first.");
             self.panel_approvals_empty
                 .set_text("Link your account first.");
+            // The page reads the panel's own state, so its cards say the same
+            // thing: nothing can be pending before there is an account.
+            crate::pages::approvals_cache(crate::pages::ApprovalsView {
+                cards: Vec::new(),
+                loaded: true,
+                note: Some("Link your account first.".to_owned()),
+            });
             return;
         };
         self.panel_approvals_empty.set_text("No pending approvals.");
@@ -1376,8 +1384,15 @@ impl Chat {
                     Ok(id) => chat.paint_identity(Some(&id)),
                     Err(_) => chat.paint_identity(None),
                 }
-                if let Ok(list) = approvals {
-                    Self::paint_approvals(chat, &list);
+                match approvals {
+                    Ok(list) => Self::paint_approvals(chat, &list),
+                    // A failed read keeps the cards already held, and the page
+                    // follows this store -- so the failure is named there too
+                    // instead of reading as "nothing is waiting".
+                    Err(_) => crate::pages::approvals_cache(crate::pages::ApprovalsView {
+                        note: Some("The approvals read failed; check again.".to_owned()),
+                        ..crate::pages::approvals_view()
+                    }),
                 }
                 if let Ok(log) = history {
                     Self::paint_decisions(chat, &log);
@@ -1499,6 +1514,13 @@ impl Chat {
     }
 
     fn paint_approvals(chat: &Rc<Self>, list: &muse_account::PendingApprovals) {
+        // The page shows the same requests, projected from the same list, so
+        // the two surfaces cannot offer different cards or outcome words.
+        crate::pages::approvals_cache(crate::pages::ApprovalsView {
+            cards: crate::pages::held_approvals_from(list),
+            loaded: true,
+            note: None,
+        });
         while let Some(child) = chat.panel_approvals.first_child() {
             chat.panel_approvals.remove(&child);
         }
@@ -1995,17 +2017,57 @@ impl Chat {
         };
         let title = self.thread_title();
         let thread = self.thread.borrow().clone();
-        let sending = self.composer.borrow().sending();
+        // The staged pictures travel as chips, never as bytes: the page can
+        // ask for a paste and drop one, but the bytes and the send stay here.
+        let (sending, staged) = {
+            let composer = self.composer.borrow();
+            (
+                composer.sending(),
+                composer
+                    .staged()
+                    .iter()
+                    .map(|image| crate::pages::StagedChip {
+                        name: image.name.clone(),
+                        width: image.width,
+                        height: image.height,
+                        bytes: image.bytes.len(),
+                    })
+                    .collect(),
+            )
+        };
+        let unread = self.thread_unread();
         crate::pages::chat_cache(crate::pages::HeldChat {
             thread,
             title,
             account: account.unwrap_or_else(|| "Sign in".to_owned()),
             status,
             sending,
+            staged,
+            unread,
             rows: crate::pages::held_chat_from(&rows),
             loaded,
             error: None,
+            ..crate::pages::HeldChat::default()
         });
+    }
+
+    /// The open thread's unread count from the service listing: the number
+    /// the native sidebar badges the row with. Zero when the thread is new or
+    /// the listing has not read it -- never an invented count.
+    fn thread_unread(&self) -> u64 {
+        let thread = self.thread.borrow().clone();
+        thread
+            .as_deref()
+            .and_then(|id| {
+                self.session.borrow().account.as_ref().and_then(|account| {
+                    account
+                        .threads
+                        .iter()
+                        .find(|row| row.session_id == id)
+                        .map(|row| row.unread_count)
+                })
+            })
+            .unwrap_or(0)
     }
 
     /// The older button names its own state: loading, exhausted, or
@@ -2319,6 +2381,10 @@ impl Chat {
         }
         self.paint_chips();
         self.composer_row.refresh(&self.composer.borrow());
+        // A paste lands asynchronously, after the render that opened the
+        // window: publish the chip now, or the page would not see it until
+        // the next unrelated render.
+        self.cache_web_chat();
     }
 
     /// Repaint the staged picture chips from the composer state.
@@ -2524,16 +2590,33 @@ impl Chat {
         quote: Option<crate::webui::WebQuote>,
     ) -> Result<(), String> {
         let text = text.trim();
-        if text.is_empty() {
-            return Err("Type a message before sending.".to_owned());
-        }
         let reply = quote
             .map(|quote| super::composer::staged_quote(quote.id, quote.excerpt))
             .transpose()
             .map_err(|_| "That message cannot be quoted.".to_owned())?;
+        // The page's words, the app's staged pictures, or both: a picture
+        // alone sends here exactly as it does from the card. The press is
+        // armed on the app's own composer, so Stop shows for it too, and the
+        // entry's own draft is left where the reader typed it.
+        let (armed, sending) = {
+            let mut composer = self.composer.borrow_mut();
+            let armed = composer.begin_remote(text);
+            (armed, composer.sending())
+        };
+        let Some(dispatch) = armed else {
+            if sending {
+                return Err(
+                    "Still working — your message is kept; send again in a moment.".to_owned(),
+                );
+            }
+            return Err("Type a message before sending.".to_owned());
+        };
         // Same as a press here: yesterday's note belongs to the last send.
         *self.send_note.borrow_mut() = None;
-        match self.send_text(text.to_owned(), Vec::new(), reply) {
+        self.paint_chips();
+        self.paint_reply();
+        self.composer_row.refresh(&self.composer.borrow());
+        match self.send_text(dispatch.text, dispatch.images, reply) {
             SendStart::Dispatched => Ok(()),
             SendStart::Refused(sentence) => {
                 self.refresh_notice();
@@ -2542,12 +2625,61 @@ impl Chat {
         }
     }
 
-    /// The Chat window's ways back into this controller: two closures, one for
-    /// each of its controls, so the page cannot reach the session slot or the
-    /// cancel route by any other path.
+    /// Stage the clipboard's picture at the page's request: the app's own `+`
+    /// press. The page cannot read the clipboard and never carries bytes; it
+    /// asks here, then reads the chip back from `chat.snapshot`.
+    pub(crate) fn web_attach(self: &Rc<Self>) -> Result<(), String> {
+        if self.paste_from_clipboard() {
+            Ok(())
+        } else {
+            Err("The clipboard holds no picture to stage.".to_owned())
+        }
+    }
+
+    /// Drop one staged picture by name: the chip's × on the page, through the
+    /// app's own staging state so a press in either window sees the same chips.
+    pub(crate) fn web_unstage(self: &Rc<Self>, name: &str) -> Result<(), String> {
+        self.composer.borrow_mut().unstage(name);
+        self.paint_chips();
+        self.composer_row.refresh(&self.composer.borrow());
+        self.cache_web_chat();
+        Ok(())
+    }
+
+    /// Re-read the pending approvals, the panel's own "Check approvals" path.
+    /// One dispatch, one repaint; the page follows the rows that read painted.
+    pub(crate) fn web_approvals_refresh(self: &Rc<Self>) -> Result<(), String> {
+        self.refresh_identity_and_approvals();
+        Ok(())
+    }
+
+    /// Decide one pending approval from the page's card. The word is checked
+    /// against the service's own five before any request, and the press goes
+    /// through `run_decision` -- one decide path, one refill that proves it.
+    pub(crate) fn web_decide(self: &Rc<Self>, approval_id: &str, word: &str) -> Result<(), String> {
+        if approval_id.is_empty() {
+            return Err("That approval has no id.".to_owned());
+        }
+        let Some(decision) = muse_account::Decision::all()
+            .into_iter()
+            .find(|decision| decision.as_str() == word)
+        else {
+            return Err("Unknown decision.".to_owned());
+        };
+        run_decision(self, approval_id, decision);
+        Ok(())
+    }
+
+    /// The Chat window's ways back into this controller: one closure per
+    /// control, so the page cannot reach the session slot, the composer or the
+    /// service by any other path.
     pub(crate) fn web_routes(self: &Rc<Self>) -> crate::webui::WebRoutes {
         let weak = Rc::downgrade(self);
         let send_weak = weak.clone();
+        let attach_weak = weak.clone();
+        let unstage_weak = weak.clone();
+        let approvals_weak = weak.clone();
+        let decide_weak = weak.clone();
         crate::webui::WebRoutes {
             send: std::rc::Rc::new(move |text: &str, quote| match send_weak.upgrade() {
                 Some(chat) => chat.web_send(text, quote),
@@ -2555,6 +2687,22 @@ impl Chat {
             }),
             stop: std::rc::Rc::new(move || match weak.upgrade() {
                 Some(chat) => chat.stop_pressed(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            attach: std::rc::Rc::new(move || match attach_weak.upgrade() {
+                Some(chat) => chat.web_attach(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            unstage: std::rc::Rc::new(move |name: &str| match unstage_weak.upgrade() {
+                Some(chat) => chat.web_unstage(name),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            approvals: std::rc::Rc::new(move || match approvals_weak.upgrade() {
+                Some(chat) => chat.web_approvals_refresh(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            decide: std::rc::Rc::new(move |id: &str, word: &str| match decide_weak.upgrade() {
+                Some(chat) => chat.web_decide(id, word),
                 None => Err("The app window is gone.".to_owned()),
             }),
         }

@@ -776,3 +776,104 @@ html, body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The open thread's unread count: the badge the native thread rows carry,
+   shown beside the title because this page has no list to hang it on. */
+.chat-unread {
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background-image: var(--accent-gradient);
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* Pictures staged in the app's composer, above the bar like the native
+   chips: name, pixel size and byte count, each removable before it sends. */
+.chat-staged { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chat-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 22em;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.chat-chip-meta { min-width: 0; overflow-wrap: anywhere; }
+.chat-chip-name, .chat-chip-facts { display: block; }
+
+.chat-chip-remove,
+.chat-attach,
+.chat-check,
+.chat-approval-actions button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-chip-remove { padding: 0 2px; color: var(--text-faint); }
+
+.chat-attach {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* The panel's approvals: the same cards the native panel paints, with the
+   service's own outcome words and nothing invented. */
+.chat-approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline);
+}
+
+.chat-panel-head { display: flex; align-items: baseline; gap: 8px; }
+.chat-panel-title { margin: 0; font-size: 12.5px; font-weight: 700; }
+.chat-check { padding: 0; color: var(--accent); font-size: 11.5px; }
+
+.chat-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+.chat-approval-headline { font-size: 12.5px; font-weight: 600; }
+
+.chat-approval-summary,
+.chat-approval-detail {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.chat-approval-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chat-approval-actions button {
+  padding: 3px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  font-size: 11.5px;
+}
+
+.chat-approval-actions button:disabled { opacity: 0.45; cursor: default; }
+.chat-approval-deny { color: var(--warn); }

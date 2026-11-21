@@ -132,6 +132,39 @@ export type TasksSnapshot = {
   error?: string | null;
 };
 
+// One picture staged in the app's composer, as its chip reads it: the name,
+// the pixel size and the byte count. The bytes never cross the channel -- the
+// page asks the app to paste, and the app's own send carries the picture.
+export type StagedChip = {
+  name: string;
+  width: number;
+  height: number;
+  bytes: number;
+};
+
+// One outcome word a pending approval offers: the service's own word and the
+// native label, so the page cannot invent a sixth or reword one of the five.
+export type ApprovalChoice = { word: string; label: string };
+
+// One pending approval, projected from the same list the native panel paints:
+// the native headline, the service's summary and detail rows verbatim.
+export type ApprovalCard = {
+  id: string;
+  headline: string;
+  summary: string;
+  details: string[];
+  choices: ApprovalChoice[];
+};
+
+// The approvals the panel last painted. `loaded` separates "the service
+// reports none waiting" from "nothing has been read yet", and `note` carries
+// the panel's own link-first sentence.
+export type ApprovalsView = {
+  cards: ApprovalCard[];
+  loaded: boolean;
+  note?: string | null;
+};
+
 // One transcript row, in the three shapes the native list builds: a day
 // divider, a message, or a service notice. `id` is the service's own message
 // id, which is what lets a reply that grows keep its element.
@@ -161,6 +194,11 @@ export type ChatSnapshot = {
   // Whether the app has a send in flight: the flag the native card swaps
   // Send for Stop on, so the page swaps the same circle.
   sending?: boolean;
+  // Pictures staged in the app's composer, the open thread's unread count
+  // from the service listing, and the pending approvals the panel painted.
+  staged?: StagedChip[];
+  unread?: number;
+  approvals?: ApprovalsView;
   rows: ChatRow[];
   loaded: boolean;
   error?: string | null;

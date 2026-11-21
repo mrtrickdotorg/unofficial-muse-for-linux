@@ -7,7 +7,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { call, channelAvailable } from "./api";
-import type { ChatRow as Row, ChatSnapshot } from "./types";
+import type { ApprovalCard, ApprovalChoice, ChatRow as Row, ChatSnapshot } from "./types";
 
 // How often the page re-asks for the transcript. The app owns the reads --
 // its own polling and its streaming rewrite -- so this window costs no wire
@@ -124,7 +124,16 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [note, setNote] = useState<string | null>(null);
-  const sendable = draft.trim().length > 0 && !pending;
+  // One decision at a time: the app takes the page slot per press, and every
+  // card is disabled while one is in flight so a second press cannot race it.
+  const [deciding, setDeciding] = useState<string | null>(null);
+  const sentence = (failure: unknown) =>
+    failure instanceof Error ? failure.message : String(failure);
+  // The pictures staged in the app's own composer. This page can ask for a
+  // paste and drop one, but the bytes and the send stay with the app.
+  const staged = data?.staged ?? [];
+  const approvals = data?.approvals ?? { cards: [], loaded: false };
+  const sendable = (draft.trim().length > 0 || staged.length > 0) && !pending;
   // A send is in flight for about a second, so the two-second poll would
   // usually miss it -- and Stop is only shown while the app says a send is in
   // flight. Watch fast for a beat after a dispatch, the way the app's own send
@@ -139,7 +148,8 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
     const text = draft.trim();
-    if (!text || pending) return;
+    // A picture alone sends, exactly as it does from the app's own card.
+    if (pending || (text.length === 0 && staged.length === 0)) return;
     setPending(true);
     setNote(null);
     try {
@@ -157,9 +167,60 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     } catch (failure) {
       // The app's own sentence (a held slot, a signed-out window), and the
       // draft stays: nothing typed is lost to a refusal.
-      setNote(failure instanceof Error ? failure.message : String(failure));
+      setNote(sentence(failure));
     } finally {
       setPending(false);
+    }
+  };
+
+  // The `+` press: the app's clipboard read, the same one its own button
+  // makes. The chip it stages comes back in the next snapshot.
+  const attach = async () => {
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.attach", 30_000);
+      void loadSnapshot();
+    } catch (failure) {
+      setNote(sentence(failure));
+    }
+  };
+
+  const unstage = async (name: string) => {
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.unstage", 30_000, { name });
+      void loadSnapshot();
+    } catch (failure) {
+      setNote(sentence(failure));
+    }
+  };
+
+  // The panel's "Check approvals", on the app's own read.
+  const refreshApprovals = async () => {
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.approvals.refresh", 30_000);
+      void loadSnapshot();
+    } catch (failure) {
+      setNote(sentence(failure));
+    }
+  };
+
+  // One press, one decision, and the card leaves only when the app's re-read
+  // no longer carries it -- never on this page's say-so.
+  const decide = async (card: ApprovalCard, choice: ApprovalChoice) => {
+    setDeciding(card.id);
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.decide", 30_000, {
+        id: card.id,
+        decision: choice.word,
+      });
+      void loadSnapshot();
+    } catch (failure) {
+      setNote(sentence(failure));
+    } finally {
+      setDeciding(null);
     }
   };
 
@@ -210,6 +271,11 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     <div className="page chat-page">
       <div className="top">
         <h1 className="title">{data?.title || "Chat"}</h1>
+        {data?.unread ? (
+          <span className="chat-unread" aria-label={`${data.unread} unread`}>
+            {data.unread}
+          </span>
+        ) : null}
         <span className="count">{data?.account ?? ""}</span>
         <span className="chat-live">following the app</span>
       </div>
@@ -259,7 +325,37 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               </button>
             </div>
           )}
+          {staged.length > 0 && (
+            <div className="chat-staged" aria-label="Pictures staged for the next message">
+              {staged.map((chip) => (
+                <span className="chat-chip" key={chip.name}>
+                  <span className="chat-chip-meta">
+                    <span className="chat-chip-name">{chip.name}</span>
+                    <span className="chat-chip-facts">
+                      {chip.width} × {chip.height} · {chip.bytes} bytes
+                    </span>
+                  </span>
+                  <button
+                    className="chat-chip-remove"
+                    type="button"
+                    onClick={() => void unstage(chip.name)}
+                    aria-label={`Drop ${chip.name}`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
           <form className="chat-composer" onSubmit={send}>
+            <button
+              className="chat-attach"
+              type="button"
+              onClick={() => void attach()}
+              aria-label="Attach a picture from the clipboard"
+            >
+              +
+            </button>
             <textarea
               className="chat-draft"
               aria-label="Message"
@@ -303,10 +399,62 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
           <div className="chat-panel-meta">
             {data?.thread ? `Thread ${data.thread.slice(0, 8)}…` : "New chat"}
           </div>
+
+          <section className="chat-approvals" aria-label="Approvals">
+            <div className="chat-panel-head">
+              <h2 className="chat-panel-title">Approvals</h2>
+              <button
+                className="chat-check"
+                type="button"
+                onClick={() => void refreshApprovals()}
+              >
+                Check approvals
+              </button>
+            </div>
+            {approvals.note ? (
+              <p className="chat-panel-meta">{approvals.note}</p>
+            ) : !approvals.loaded ? (
+              <p className="chat-panel-meta">No approvals read yet.</p>
+            ) : approvals.cards.length === 0 ? (
+              <p className="chat-panel-meta">No pending approvals.</p>
+            ) : (
+              approvals.cards.map((card) => (
+                <article className="chat-approval" key={card.id}>
+                  <div className="chat-approval-headline">{card.headline}</div>
+                  {card.summary && (
+                    <p className="chat-approval-summary">{card.summary}</p>
+                  )}
+                  {card.details.map((line) => (
+                    <div className="chat-approval-detail" key={line}>
+                      {line}
+                    </div>
+                  ))}
+                  <div className="chat-approval-actions">
+                    {card.choices.map((choice) => (
+                      <button
+                        key={choice.word}
+                        type="button"
+                        className={
+                          choice.word === "deny"
+                            ? "chat-approval-deny"
+                            : "chat-approval-allow"
+                        }
+                        disabled={deciding !== null}
+                        onClick={() => void decide(card, choice)}
+                      >
+                        {choice.label}
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              ))
+            )}
+          </section>
+
           <div className="chat-panel-note">
-            Sends and Stop go through the app's own: the same sender, the same
-            cancel path, the same history read. Pictures, approvals and
-            dictation still live in the app window.
+            Sends, Stop, pictures and decisions go through the app's own: the
+            same sender, the same clipboard, the same one decide path, the same
+            history read. Dictation still lives in the app window.
           </div>
         </aside>
       </div>

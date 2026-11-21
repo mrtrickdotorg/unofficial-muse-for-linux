@@ -26,6 +26,9 @@ const snapshot = (rows: ChatRow[], over: Partial<ChatSnapshot> = {}): ChatSnapsh
   account: "Muse",
   status: null,
   sending: false,
+  staged: [],
+  unread: 0,
+  approvals: { cards: [], loaded: true, note: null },
   rows,
   loaded: true,
   error: null,
@@ -275,6 +278,129 @@ describe("the Chat web page", () => {
     expect(screen.queryByText(/Replying to:/)).toBeNull();
     // Cancel is local: no command, no send.
     expect(commands).not.toContain("chat.send");
+  });
+
+  it("stages a clipboard picture through the app and drops it by name", async () => {
+    const boot = snapshot([message({ id: "m-1", text: "hi" })], {
+      staged: [{ name: "pasted-1.png", width: 10, height: 20, bytes: 33 }],
+    });
+    window.__MUSE_BOOT__ = boot;
+    let dropped: string | undefined;
+    const commands = installChannel(
+      // The chip stays staged across the paste, as the app's would.
+      (cmd) => (cmd === "chat.unstage" ? { ok: true } : { ok: true, ...boot }),
+      (request) => {
+        if (request.cmd === "chat.unstage") dropped = request.name as string;
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+
+    // The chip names the app's own staged picture, in the native chip's words.
+    expect(screen.getByText(/pasted-1\.png/)).toBeInTheDocument();
+    expect(screen.getByText("10 × 20 · 33 bytes")).toBeInTheDocument();
+
+    // The `+` is the app's clipboard read, not a page-side paste.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Attach a picture from the clipboard" }),
+    );
+    await waitFor(() => expect(commands).toContain("chat.attach"));
+
+    // The chip's × drops that one picture, by name.
+    fireEvent.click(screen.getByRole("button", { name: "Drop pasted-1.png" }));
+    await waitFor(() => expect(dropped).toBe("pasted-1.png"));
+  });
+
+  it("arms Send for a staged picture alone and sends with no words", async () => {
+    window.__MUSE_BOOT__ = snapshot([], {
+      staged: [{ name: "pasted-2.png", width: 4, height: 5, bytes: 7 }],
+    });
+    let sent: { text?: string } | null = null;
+    installChannel(
+      (cmd) => (cmd === "chat.send" ? { ok: true } : { ok: true, ...snapshot([]) }),
+      (request) => {
+        if (request.cmd === "chat.send") sent = request as { text?: string };
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+
+    // A picture alone sends, exactly as the app's own card allows.
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeEnabled();
+    fireEvent.click(send);
+    await waitFor(() => {
+      expect(sent).not.toBeNull();
+      expect(sent?.text).toBe("");
+    });
+  });
+
+  it("shows the pending approvals and decides one through the app", async () => {
+    window.__MUSE_BOOT__ = snapshot([], {
+      approvals: {
+        loaded: true,
+        note: null,
+        cards: [
+          {
+            id: "a-1",
+            headline: "Reach example.com",
+            summary: "The agent wants to fetch a page.",
+            details: ["Host: example.com"],
+            choices: [
+              { word: "allow_once", label: "Allow once" },
+              { word: "deny", label: "Deny" },
+            ],
+          },
+        ],
+      },
+    });
+    let decided: { id?: string; decision?: string } | null = null;
+    const commands = installChannel(
+      (cmd) =>
+        cmd === "chat.decide" || cmd === "chat.approvals.refresh"
+          ? { ok: true }
+          : { ok: true, ...snapshot([]) },
+      (request) => {
+        if (request.cmd === "chat.decide") {
+          decided = request as { id?: string; decision?: string };
+        }
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+
+    expect(screen.getByText("Reach example.com")).toBeInTheDocument();
+    expect(screen.getByText("Host: example.com")).toBeInTheDocument();
+
+    // One press, one decision, with the service's own word and the card's id.
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(decided).toMatchObject({ id: "a-1", decision: "deny" }));
+
+    // "Check approvals" is the panel's own read.
+    fireEvent.click(screen.getByRole("button", { name: "Check approvals" }));
+    await waitFor(() => expect(commands).toContain("chat.approvals.refresh"));
+  });
+
+  it("says the panel's unlinked sentence instead of an empty list", async () => {
+    window.__MUSE_BOOT__ = snapshot([], {
+      approvals: { cards: [], loaded: true, note: "Link your account first." },
+    });
+    installChannel(() => ({ ok: true, ...snapshot([]) }));
+
+    render(<Chat pollMs={10_000} />);
+
+    expect(screen.getByText("Link your account first.")).toBeInTheDocument();
+    expect(screen.queryByText("No pending approvals.")).toBeNull();
+    expect(screen.queryByText("No approvals read yet.")).toBeNull();
+  });
+
+  it("badges the open thread with the listing's unread count", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], { unread: 3 });
+    installChannel(() => ({ ok: true, ...snapshot([]) }));
+
+    render(<Chat pollMs={10_000} />);
+
+    expect(screen.getByLabelText("3 unread")).toHaveTextContent("3");
   });
 
   it("reports a failed snapshot and keeps the rows already on screen", async () => {

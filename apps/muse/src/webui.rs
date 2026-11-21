@@ -247,6 +247,12 @@ fn chat_payload(held: &HeldChat) -> serde_json::Value {
         "account": held.account,
         "status": held.status,
         "sending": held.sending,
+        // The pictures staged in the app's own composer, the open thread's
+        // unread count from the listing, and the pending approvals the panel
+        // last painted: three things the page cannot read on its own.
+        "staged": held.staged,
+        "unread": held.unread,
+        "approvals": held.approvals,
         "rows": held.rows,
         "loaded": held.loaded,
         "error": held.error,
@@ -472,7 +478,8 @@ pub(crate) fn should_log_command(
     let wire = command.ends_with(".refresh")
         || command.ends_with(".run")
         || command.ends_with(".send")
-        || command.ends_with(".stop");
+        || command.ends_with(".stop")
+        || command.ends_with(".decide");
     wire || named.insert(command.to_owned())
 }
 
@@ -487,14 +494,28 @@ pub(crate) struct WebQuote {
 
 pub(crate) type WebSend = std::rc::Rc<dyn Fn(&str, Option<WebQuote>) -> Result<(), String>>;
 pub(crate) type WebStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+pub(crate) type WebAttach = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+pub(crate) type WebUnstage = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+pub(crate) type WebApprovals = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+pub(crate) type WebDecide = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
 
-/// The routes a page has back into the app for its two mutating controls.
-/// Neither is a dispatcher of its own: a send goes through the app's single
-/// sender, and Stop takes no session ticket at all -- which is the point of
-/// stop, since it has to fire while a send holds the `Send` slot.
+/// The routes a page has back into the app for its controls. None is a
+/// dispatcher of its own: a send goes through the app's single sender, Stop
+/// takes no session ticket at all (which is the point of stop, since it has
+/// to fire while a send holds the `Send` slot), a paste is the app's own
+/// clipboard read, and a decision is the app's one `decide` path. The page
+/// gains no route to the session slot, the composer or the service.
 pub(crate) struct WebRoutes {
     pub send: WebSend,
     pub stop: WebStop,
+    /// Stage the clipboard's picture, the app's `+` press.
+    pub attach: WebAttach,
+    /// Drop one staged picture by name, the chip's ×.
+    pub unstage: WebUnstage,
+    /// Re-read the pending approvals, the panel's own read.
+    pub approvals: WebApprovals,
+    /// Decide one pending approval: the service's own outcome word.
+    pub decide: WebDecide,
 }
 
 /// One command from the page. Reads only, and by name: an unknown command is
@@ -598,6 +619,76 @@ fn handle_command_with(
                 Err(sentence) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
             },
         },
+        // A picture for the next send. The page cannot read the clipboard and
+        // must not carry bytes: it asks for the app's own paste, and the chip
+        // it then shows comes back from `chat.snapshot` with the send.
+        "chat.attach" => match routes {
+            None => Answer::Now(serde_json::json!({
+                "ok": false,
+                "error": "this window cannot attach a picture"
+            })),
+            Some(routes) => match (routes.attach)() {
+                Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
+                Err(sentence) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
+            },
+        },
+        // The chip's ×: one staged picture dropped by name, before any send.
+        "chat.unstage" => {
+            let name = request
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            match routes {
+                None => Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "this window cannot drop a picture"
+                })),
+                Some(routes) => match (routes.unstage)(name) {
+                    Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
+                    Err(sentence) => {
+                        Answer::Now(serde_json::json!({ "ok": false, "error": sentence }))
+                    }
+                },
+            }
+        }
+        // The pending list, read fresh: the panel's own "Check approvals"
+        // dispatch. The rows arrive in the next `chat.snapshot`, so the page
+        // never holds a second copy of the service's answer.
+        "chat.approvals.refresh" => match routes {
+            None => Answer::Now(serde_json::json!({
+                "ok": false,
+                "error": "this window cannot read approvals"
+            })),
+            Some(routes) => match (routes.approvals)() {
+                Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
+                Err(sentence) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
+            },
+        },
+        // One decision, by the service's own outcome word. The app's `decide`
+        // path re-reads the list afterwards; the page's cards follow that
+        // read, so a request leaves the page only once the service says so.
+        "chat.decide" => {
+            let approval_id = request
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let word = request
+                .get("decision")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            match routes {
+                None => Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "this window cannot decide approvals"
+                })),
+                Some(routes) => match (routes.decide)(approval_id, word) {
+                    Ok(()) => Answer::Now(serde_json::json!({ "ok": true })),
+                    Err(sentence) => {
+                        Answer::Now(serde_json::json!({ "ok": false, "error": sentence }))
+                    }
+                },
+            }
+        }
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -1749,6 +1840,20 @@ mod tests {
 
     /// Chat boot: one page-tagged payload with the native transcript's own
     /// rows -- day dividers, bubbles and notices -- and its thread title.
+    /// Every route the Chat window has, stubbed: a test binds only the ones
+    /// it is about, so a new control cannot quietly break the others' tests.
+    fn stub_routes() -> WebRoutes {
+        use std::rc::Rc;
+        WebRoutes {
+            send: Rc::new(|_: &str, _: Option<WebQuote>| Ok(())),
+            stop: Rc::new(|| Ok(())),
+            attach: Rc::new(|| Ok(())),
+            unstage: Rc::new(|_: &str| Ok(())),
+            approvals: Rc::new(|| Ok(())),
+            decide: Rc::new(|_: &str, _: &str| Ok(())),
+        }
+    }
+
     #[test]
     fn the_chat_document_names_its_page_and_carries_the_rows() {
         let held = HeldChat {
@@ -1778,6 +1883,7 @@ mod tests {
             ],
             loaded: true,
             error: None,
+            ..HeldChat::default()
         };
         let doc = chat_document(&held);
         assert!(doc.contains("\"page\":\"chat\""), "page named in boot");
@@ -1812,6 +1918,12 @@ mod tests {
         assert!(should_log_command("chat.send", &mut named));
         assert!(should_log_command("chat.send", &mut named));
         assert!(should_log_command("chat.stop", &mut named));
+        // A decision is a wire write: every press is named, even a repeat.
+        assert!(should_log_command("chat.decide", &mut named));
+        assert!(should_log_command("chat.decide", &mut named));
+        // The approvals re-read is a read that leaves the loop.
+        assert!(should_log_command("chat.approvals.refresh", &mut named));
+        assert!(should_log_command("chat.approvals.refresh", &mut named));
         assert!(should_log_command("chat.stop", &mut named));
         // A cache read asked twice is named once, but a different one is
         // still new to the log.
@@ -1839,6 +1951,7 @@ mod tests {
         let routes = WebRoutes {
             send,
             stop: Rc::new(|| Ok(())),
+            ..stub_routes()
         };
         let (id, answer, command) = handle_command_with(
             r#"{"id":61,"cmd":"chat.send","text":"hello there"}"#,
@@ -1878,6 +1991,7 @@ mod tests {
                 Err("Still working — your message is kept; send again in a moment.".to_owned())
             }),
             stop: Rc::new(|| Ok(())),
+            ..stub_routes()
         };
         let (_, answer, _) = handle_command_with(
             r#"{"id":62,"cmd":"chat.send","text":"again"}"#,
@@ -1923,6 +2037,7 @@ mod tests {
                 counted.set(counted.get() + 1);
                 Ok(())
             }),
+            ..stub_routes()
         };
         let (id, answer, command) =
             handle_command_with(r#"{"id":71,"cmd":"chat.stop"}"#, None, Some(&refusing));
@@ -1974,6 +2089,7 @@ mod tests {
             }],
             loaded: true,
             error: None,
+            ..HeldChat::default()
         });
         let (id, answer, command) =
             handle_command_with(r#"{"id":51,"cmd":"chat.snapshot"}"#, None, None);
@@ -1995,6 +2111,131 @@ mod tests {
         };
         assert_eq!(reply["rows"][0]["text"], "Hello there, arriving in pieces.");
         assert_eq!(reply["rows"][0]["id"], "m-9", "the same turn, grown");
+    }
+
+    /// The three things the page cannot read for itself arrive in the same
+    /// snapshot as the transcript: the picture staged in the app's composer,
+    /// the open thread's unread count, and the pending approvals.
+    #[test]
+    fn the_chat_page_gets_the_staged_chip_the_badge_and_the_cards() {
+        crate::pages::approvals_cache(crate::pages::ApprovalsView {
+            cards: vec![crate::pages::ApprovalCard {
+                id: "a-1".into(),
+                headline: "Reach example.com".into(),
+                summary: "Fetch a page".into(),
+                details: vec!["Host: example.com".into()],
+                choices: vec![crate::pages::ApprovalChoice {
+                    word: "deny".into(),
+                    label: "Deny".into(),
+                }],
+            }],
+            loaded: true,
+            note: None,
+        });
+        crate::pages::chat_cache(HeldChat {
+            unread: 3,
+            staged: vec![crate::pages::StagedChip {
+                name: "pasted-1.png".into(),
+                width: 10,
+                height: 20,
+                bytes: 33,
+            }],
+            ..HeldChat::default()
+        });
+        let (_, answer, _) = handle_command_with(r#"{"id":81,"cmd":"chat.snapshot"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read answers at once")
+        };
+        assert_eq!(reply["unread"], serde_json::json!(3));
+        assert_eq!(reply["staged"][0]["name"], "pasted-1.png");
+        assert_eq!(reply["staged"][0]["width"], serde_json::json!(10));
+        assert_eq!(reply["staged"][0]["bytes"], serde_json::json!(33));
+        assert_eq!(reply["approvals"]["loaded"], serde_json::json!(true));
+        assert_eq!(
+            reply["approvals"]["cards"][0]["headline"],
+            "Reach example.com"
+        );
+        assert_eq!(reply["approvals"]["cards"][0]["choices"][0]["word"], "deny");
+        crate::pages::approvals_cache(crate::pages::ApprovalsView::default());
+    }
+
+    /// A paste, a drop, a re-read and a decision each reach their own route
+    /// once, and a window without the routes can do none of them -- there is
+    /// no second path into the composer, the clipboard or the service.
+    #[test]
+    fn chat_attach_unstage_approvals_and_decide_take_their_own_routes() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let (attach_seen, unstage_seen) = (seen.clone(), seen.clone());
+        let (approvals_seen, decide_seen) = (seen.clone(), seen.clone());
+        let routes = WebRoutes {
+            attach: Rc::new(move || {
+                attach_seen.borrow_mut().push("attach".to_owned());
+                Ok(())
+            }),
+            unstage: Rc::new(move |name: &str| {
+                unstage_seen.borrow_mut().push(format!("unstage {name}"));
+                Ok(())
+            }),
+            approvals: Rc::new(move || {
+                approvals_seen.borrow_mut().push("approvals".to_owned());
+                Ok(())
+            }),
+            decide: Rc::new(move |id: &str, word: &str| {
+                decide_seen.borrow_mut().push(format!("decide {id} {word}"));
+                Ok(())
+            }),
+            ..stub_routes()
+        };
+        for request in [
+            r#"{"id":91,"cmd":"chat.attach"}"#,
+            r#"{"id":92,"cmd":"chat.unstage","name":"pasted-1.png"}"#,
+            r#"{"id":93,"cmd":"chat.approvals.refresh"}"#,
+            r#"{"id":94,"cmd":"chat.decide","id":"a-1","decision":"allow_once"}"#,
+        ] {
+            let (_, answer, _) = handle_command_with(request, None, Some(&routes));
+            let Answer::Now(reply) = answer else {
+                panic!("a page control answers at once")
+            };
+            assert_eq!(reply["ok"], serde_json::json!(true), "{request}");
+        }
+        assert_eq!(
+            seen.borrow().as_slice(),
+            [
+                "attach",
+                "unstage pasted-1.png",
+                "approvals",
+                "decide a-1 allow_once"
+            ]
+        );
+
+        // A window opened without the routes cannot reach any of them.
+        for (request, refused) in [
+            (
+                r#"{"id":95,"cmd":"chat.attach"}"#,
+                "this window cannot attach a picture",
+            ),
+            (
+                r#"{"id":96,"cmd":"chat.unstage","name":"x"}"#,
+                "this window cannot drop a picture",
+            ),
+            (
+                r#"{"id":97,"cmd":"chat.approvals.refresh"}"#,
+                "this window cannot read approvals",
+            ),
+            (
+                r#"{"id":98,"cmd":"chat.decide","id":"a-1","decision":"deny"}"#,
+                "this window cannot decide approvals",
+            ),
+        ] {
+            let (_, answer, _) = handle_command_with(request, None, None);
+            let Answer::Now(reply) = answer else {
+                panic!("a closed route answers at once")
+            };
+            assert_eq!(reply["ok"], serde_json::json!(false));
+            assert_eq!(reply["error"], serde_json::json!(refused));
+        }
     }
 
     /// Threads boot: one page-tagged payload with the native page's grouping,

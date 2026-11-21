@@ -1,6 +1,7 @@
 # Porting the client to Rust + Tauri + React: analysis and staging plan
 
-**Status: S0 shipped, S1 gate met, S2 seven pages, S3 started (Nov 20, 2026).** The decision was made to continue
+**Status: S0 shipped, S1 gate met, S2 seven pages, S3 slices landed (Nov 21, 2026; its paste and
+  decide presses await a live check).** The decision was made to continue
 toward the Tauri/React end state. Stage S0 (the palette lift) is in the tree; S1's reference page —
 Library, read-only, in the existing WebKitGTK view with real rows — is implemented and verified on
 this seat; S2 has its first page, Goals, on the same contract. Everything below the stage list is
@@ -323,6 +324,41 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   excerpt never travels. A live quoted send from the page (Nov 21, 2026) landed a row whose
   `payload.reply_to_message_id` was the quoted turn's id, with the service's own `reply_to_target`
   beside it, so the target is recorded, not inferred.
+
+  Pictures, approvals and unread badges closed S3's gate (Nov 21, 2026), each by the same rule: the
+  page gets no second copy of anything. **Attachments** came in as three commands over the app's own
+  staging state. `chat.attach` is the `+` press -- it calls `paste_from_clipboard`, the app's own
+  clipboard read, so the page never asks for bytes and the app never lends its clipboard to a
+  document; `chat.unstage` drops one chip by name; and the chips themselves ride `chat.snapshot` as
+  `staged` (name, pixels, bytes -- the numbers the native chip prints), published the moment the
+  paste lands, because an async paste arrives after the render that opened the window. The send
+  needed one honest change rather than a second path: `web_send` refused an empty draft, so a
+  picture alone could not be sent from the page even though the native card allows it. The press is
+  now armed on the app's own composer (`Composer::begin_remote`) -- same in-flight flag, same
+  cleared quote, same taken chips, the app's typed draft left alone -- and the verified-send receipt
+  needed no new surface at all: `stored_mismatch` already writes a send note, and the note is the
+  `status` line the page already follows, so a picture the service stored differently is named in
+  the page instead of claimed as sent. **Approvals** are projected from the list the native panel
+  paints (`held_approvals_from`, reusing `approval_headline` and `decision_label`), carried in the
+  same snapshot as an `approvals` view with `loaded` separating "none waiting" from "not read" and
+  `note` carrying the panel's link-first sentence; `chat.approvals.refresh` is the panel's own read,
+  and `chat.decide` checks the word against the service's five before `run_decision` -- one decide
+  path, and a card leaves only when the app's refill no longer carries it. **The unread badge** is
+  the listing's own count for the open thread, the number the native sidebar badges the row with,
+  shown beside the page title because this page has no list to hang it on; zero means no badge,
+  never an invented count. Five DOM tests (`Chat.test.tsx`, 17 in all) cover the chip and its drop,
+  a picture-only send, a card's decision and the panel's re-read, the unlinked sentence, and the
+  badge; the Rust side covers the projection (native headline, verbatim details, five words), the
+  snapshot's approvals merge, every new route once through and refused when closed, and the remote
+  send's own flag behaviour (145 app tests). Seen live (Nov 21, 2026): the Chat page opened on the
+  same 32 rows the native transcript held (boot 32, rows 32, no script error), and a press of
+  `Check approvals` in the page's panel reached the app (`chat.approvals.refresh` in the launch log)
+  and repainted from "No approvals read yet." to "No pending approvals." once the app's own read
+  landed -- the service reports none waiting on this account, and the page says exactly that rather
+  than an unread section. Still not seen live: a paste staged from the page's `+` and an approval
+  decided from a page card, which need a clipboard picture and a pending request at the same
+  moment; the code paths are the app's own, and the transcript, send, stop and quote paths already
+  have their live proofs above.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).

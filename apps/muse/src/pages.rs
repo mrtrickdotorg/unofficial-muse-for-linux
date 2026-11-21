@@ -2581,6 +2581,49 @@ pub(crate) struct ChatRow {
     pub reply_to: Option<String>,
 }
 
+/// One staged picture as the page's chip reads it: the name, the pixel size
+/// and the byte count. The bytes never cross -- a page stages a paste by
+/// asking the app, which owns the clipboard, the chips and the dispatch, so
+/// there is no second copy of a picture anywhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct StagedChip {
+    pub name: String,
+    pub width: i32,
+    pub height: i32,
+    pub bytes: usize,
+}
+
+/// One outcome word a pending approval offers, as its button reads it: the
+/// service's own word plus the native label, so the page cannot invent a
+/// sixth outcome or word one of the five differently.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ApprovalChoice {
+    pub word: String,
+    pub label: String,
+}
+
+/// One pending approval as the page's card shows it: the native headline,
+/// the service's summary, every detail row verbatim, and the outcomes the
+/// app's own card offers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ApprovalCard {
+    pub id: String,
+    pub headline: String,
+    pub summary: String,
+    pub details: Vec<String>,
+    pub choices: Vec<ApprovalChoice>,
+}
+
+/// The approvals the native panel last painted, as the page reads them.
+/// `loaded` separates "the service reports none waiting" from "nothing has
+/// been read yet", and `note` carries the panel's own link-first sentence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ApprovalsView {
+    pub cards: Vec<ApprovalCard>,
+    pub loaded: bool,
+    pub note: Option<String>,
+}
+
 /// The Chat surface as the web view opens it: the open thread, the rows the
 /// native transcript last built, and the status line the composer is showing.
 /// `loaded` separates a thread nobody has read yet from an empty one.
@@ -2593,6 +2636,15 @@ pub(crate) struct HeldChat {
     /// Whether the app has a send in flight: the same flag the native card
     /// swaps Send for Stop on.
     pub sending: bool,
+    /// Pictures staged in the app's own composer. A page can add one through
+    /// `chat.attach` and drop one through `chat.unstage`; the bytes and the
+    /// send stay with the app.
+    pub staged: Vec<StagedChip>,
+    /// The open thread's unread count from the service listing: the number
+    /// the native sidebar badges the row with.
+    pub unread: u64,
+    /// The pending approvals the native panel last painted.
+    pub approvals: ApprovalsView,
     pub rows: Vec<ChatRow>,
     pub loaded: bool,
     pub error: Option<String>,
@@ -2603,11 +2655,60 @@ thread_local! {
         std::cell::RefCell::new(HeldChat::default());
 }
 
+thread_local! {
+    static APPROVAL_STORE: std::cell::RefCell<ApprovalsView> =
+        std::cell::RefCell::new(ApprovalsView::default());
+}
+
+/// The pending approvals the native panel last painted. A cache read like the
+/// transcript: the page follows the app's own read, so the two surfaces can
+/// never offer different requests.
+pub(crate) fn approvals_view() -> ApprovalsView {
+    APPROVAL_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the pending list the page shows. Called from the native paint --
+/// and from its unlinked state -- so the page and the panel read one list. A
+/// failed read calls nothing, which keeps the rows already held.
+pub(crate) fn approvals_cache(view: ApprovalsView) {
+    APPROVAL_STORE.with(|store| *store.borrow_mut() = view);
+}
+
+/// Project one pending list into the page's cards, reusing the native
+/// headline and the native labels for the five outcome words.
+pub(crate) fn held_approvals_from(list: &muse_account::PendingApprovals) -> Vec<ApprovalCard> {
+    list.pending
+        .iter()
+        .map(|approval| ApprovalCard {
+            id: approval.approval_id.clone(),
+            headline: super::app::approval_headline(approval),
+            summary: approval.summary.clone(),
+            details: approval
+                .details
+                .iter()
+                .map(|detail| format!("{}: {}", detail.label, detail.value))
+                .collect(),
+            choices: muse_account::Decision::all()
+                .into_iter()
+                .map(|decision| ApprovalChoice {
+                    word: decision.as_str().to_owned(),
+                    label: super::app::decision_label(decision).to_owned(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 /// The transcript the native list last painted. A cache read by construction:
 /// the page follows the app's own reads, so the two can never show different
-/// conversations.
+/// conversations. The approvals are merged in from their own store, which the
+/// panel paints, so a render never has to know about them.
 pub(crate) fn chat_snapshot() -> HeldChat {
-    CHAT_STORE.with(|store| store.borrow().clone())
+    let held = CHAT_STORE.with(|store| store.borrow().clone());
+    HeldChat {
+        approvals: approvals_view(),
+        ..held
+    }
 }
 
 /// Replace the held transcript. Called on every native render, including the
@@ -6890,6 +6991,76 @@ mod tests {
     fn page_labels_name_state_never_raw_ids() {
         assert_eq!(schedule_label(&schedule("Nightly", true)), "Nightly (on)");
         assert_eq!(schedule_label(&schedule("Nightly", false)), "Nightly (off)");
+    }
+
+    /// The page's cards are the panel's cards: the native headline, the
+    /// service's detail rows verbatim, and the same five outcome words with
+    /// the same labels. A sixth outcome, or a reworded one, cannot reach it.
+    #[test]
+    fn approval_cards_keep_the_native_headline_and_the_five_words() {
+        let list = muse_account::PendingApprovals {
+            pending: vec![muse_account::Approval {
+                approval_id: "a-1".to_owned(),
+                kind: Some("network".to_owned()),
+                decision: Some("ask".to_owned()),
+                always_scope: Some("destination_domain".to_owned()),
+                attention_mode: None,
+                title: "Reach example.com".to_owned(),
+                summary: "The agent wants to fetch a page.".to_owned(),
+                details: vec![muse_account::ApprovalDetail {
+                    label: "Host".to_owned(),
+                    value: "example.com".to_owned(),
+                }],
+            }],
+        };
+        let cards = held_approvals_from(&list);
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert_eq!(card.id, "a-1");
+        assert_eq!(
+            card.headline,
+            crate::app::approval_headline(&list.pending[0])
+        );
+        assert!(card.headline.contains("Reach example.com"));
+        assert_eq!(card.summary, "The agent wants to fetch a page.");
+        assert_eq!(card.details, vec!["Host: example.com".to_owned()]);
+        assert_eq!(
+            card.choices
+                .iter()
+                .map(|choice| choice.word.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "allow_once",
+                "allow_task",
+                "allow_site",
+                "allow_always",
+                "deny"
+            ]
+        );
+        assert_eq!(card.choices[0].label, "Allow once");
+        assert_eq!(card.choices[4].label, "Deny");
+    }
+
+    /// The snapshot the page polls carries the approvals the panel painted,
+    /// merged from their own store: a render never has to know about them, and
+    /// a page reading the transcript still gets the pending list beside it.
+    #[test]
+    fn the_chat_snapshot_carries_the_approvals_the_panel_painted() {
+        chat_cache(HeldChat::default());
+        approvals_cache(ApprovalsView {
+            cards: vec![ApprovalCard {
+                id: "a-7".to_owned(),
+                ..ApprovalCard::default()
+            }],
+            loaded: true,
+            note: None,
+        });
+        let held = chat_snapshot();
+        assert_eq!(held.approvals.cards.len(), 1);
+        assert_eq!(held.approvals.cards[0].id, "a-7");
+        assert!(held.approvals.loaded);
+        assert!(held.approvals.note.is_none());
+        approvals_cache(ApprovalsView::default());
     }
 
     #[test]
