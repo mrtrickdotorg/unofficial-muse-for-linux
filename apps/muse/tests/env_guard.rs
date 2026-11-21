@@ -188,6 +188,33 @@ fn code_only(source: &str) -> String {
     out
 }
 
+fn is_allowed(relative: &str) -> bool {
+    ALLOWED.contains(&relative)
+}
+
+/// The 1-based lines of `source` that call a forbidden function, with
+/// comments and literals ignored.
+fn forbidden_lines(source: &str) -> Vec<usize> {
+    code_only(source)
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| FORBIDDEN.iter().any(|needle| line.contains(needle)))
+        .map(|(index, _)| index + 1)
+        .collect()
+}
+
+/// `path:line` for every offending call in one file, empty when the file is
+/// the allowed startup file.
+fn offenders(relative: &str, source: &str) -> Vec<String> {
+    if is_allowed(relative) {
+        return Vec::new();
+    }
+    forbidden_lines(source)
+        .into_iter()
+        .map(|line| format!("{relative}:{line}"))
+        .collect()
+}
+
 #[test]
 fn no_source_mutates_the_process_environment() {
     let root = workspace_root();
@@ -203,31 +230,132 @@ fn no_source_mutates_the_process_environment() {
         root.display()
     );
 
-    let mut offenders = Vec::new();
+    let mut found = Vec::new();
     for path in &files {
         let relative = path
             .strip_prefix(&root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
-        if ALLOWED.contains(&relative.as_str()) {
-            continue;
-        }
         let Ok(source) = fs::read_to_string(path) else {
             continue;
         };
-        let code = code_only(&source);
-        for (index, line) in code.lines().enumerate() {
-            if FORBIDDEN.iter().any(|needle| line.contains(needle)) {
-                offenders.push(format!("{relative}:{}", index + 1));
-            }
-        }
+        found.extend(offenders(&relative, &source));
     }
     assert!(
-        offenders.is_empty(),
+        found.is_empty(),
         "process environment mutated outside {}:\n  {}\nInject a root/path explicitly, or pin the value on the type under test, \
          instead of writing shared process state.",
         ALLOWED.join(", "),
-        offenders.join("\n  ")
+        found.join("\n  ")
     );
+}
+
+/// The scanner decides what the whole guard reports, so it is exercised on
+/// synthetic sources rather than trusted: a regression here (a lifetime read
+/// as a char literal, say) would let the guard pass silently.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(source: &str) -> Vec<usize> {
+        forbidden_lines(source)
+    }
+
+    #[test]
+    fn a_call_in_code_is_reported_with_its_line() {
+        let source = "fn main() {\n    std::env::set_var(\"A\", \"B\");\n    std::env::remove_var(\"C\");\n}\n";
+        assert_eq!(lines(source), vec![2, 3]);
+    }
+
+    #[test]
+    fn calls_named_only_in_comments_are_ignored() {
+        let source = "\
+// std::env::set_var(\"A\", \"B\");\n\
+/* std::env::remove_var(\"C\"); */\n\
+/* outer std::env::set_var(\"D\", \"E\"); /* nested remove_var(\"F\") */ still prose */\n\
+fn main() {}\n";
+        assert_eq!(lines(source), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_line_comment_ends_at_the_newline() {
+        let source = "// set_var( in prose\nstd::env::remove_var(\"X\");\n";
+        assert_eq!(lines(source), vec![2]);
+    }
+
+    #[test]
+    fn a_call_after_a_block_comment_is_still_seen() {
+        let source = "/* set_var( prose) */ std::env::set_var(\"A\", \"B\");\n";
+        assert_eq!(lines(source), vec![1]);
+    }
+
+    #[test]
+    fn calls_named_only_in_strings_are_ignored() {
+        let source = "\
+fn main() {\n\
+    let a = \"std::env::set_var(\\\"A\\\", \\\"B\\\")\";\n\
+    let b = \"set_var( and remove_var( in one string\";\n\
+    let c = '\"';\n\
+    let d = '\\'';\n\
+}\n";
+        assert_eq!(lines(source), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_call_after_a_string_on_the_same_line_is_still_seen() {
+        let source = "let s = \"set_var(\"; std::env::remove_var(\"X\");\n";
+        assert_eq!(lines(source), vec![1]);
+    }
+
+    #[test]
+    fn calls_named_only_in_raw_strings_are_ignored() {
+        let source = "\
+fn main() {\n\
+    let a = r\"std::env::set_var(\\\"A\\\")\";\n\
+    let b = r#\"std::env::remove_var(\\\"C\\\") \\\"quoted #\\\" text\"#;\n\
+    let c = br#\"set_var(\"#;\n\
+}\n";
+        assert_eq!(lines(source), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_call_after_a_raw_string_is_still_seen() {
+        let source = "let s = r#\"set_var( prose\"#; std::env::set_var(\"A\", \"B\");\n";
+        assert_eq!(lines(source), vec![1]);
+    }
+
+    #[test]
+    fn a_lifetime_never_swallows_the_code_after_it() {
+        // The regression this forbids: reading `'a` as a char literal treats
+        // what follows as literal text and reports nothing. The call sits on
+        // the same line as the lifetime, so the scanner's end-of-line recovery
+        // cannot mask the mistake.
+        let source = "\
+fn first<'a>(text: &'a str) -> &'a str {\n\
+    std::env::set_var(\"A\", \"B\");\n\
+    text\n\
+}\n\
+fn same_line<'a>(text: &'a str) { std::env::remove_var(\"C\"); }\n";
+        assert_eq!(lines(source), vec![2, 5]);
+    }
+
+    #[test]
+    fn a_call_after_a_char_literal_is_still_seen() {
+        let source = "let quote = '\"'; std::env::remove_var(\"X\");\n";
+        assert_eq!(lines(source), vec![1]);
+    }
+
+    #[test]
+    fn only_the_app_startup_file_is_allowed() {
+        let call = "std::env::set_var(\"GTK_THEME\", \"Adwaita\");\n";
+        assert!(offenders("apps/muse/src/main.rs", call).is_empty());
+        for path in [
+            "apps/muse/src/session.rs",
+            "apps/muse/src/main.rs.bak",
+            "crates/muse-local-tools/tests/mutation.rs",
+        ] {
+            assert_eq!(offenders(path, call), vec![format!("{path}:1")]);
+        }
+    }
 }
