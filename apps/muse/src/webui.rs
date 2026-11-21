@@ -668,8 +668,11 @@ fn handle_command_with(
         // path re-reads the list afterwards; the page's cards follow that
         // read, so a request leaves the page only once the service says so.
         "chat.decide" => {
+            // `approval_id`, never `id`: the envelope's own `id` is the reply
+            // ticket, and a request that overwrote it would never be answered
+            // on the page.
             let approval_id = request
-                .get("id")
+                .get("approval_id")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
             let word = request
@@ -2192,7 +2195,7 @@ mod tests {
             r#"{"id":91,"cmd":"chat.attach"}"#,
             r#"{"id":92,"cmd":"chat.unstage","name":"pasted-1.png"}"#,
             r#"{"id":93,"cmd":"chat.approvals.refresh"}"#,
-            r#"{"id":94,"cmd":"chat.decide","id":"a-1","decision":"allow_once"}"#,
+            r#"{"id":94,"cmd":"chat.decide","approval_id":"a-1","decision":"allow_once"}"#,
         ] {
             let (_, answer, _) = handle_command_with(request, None, Some(&routes));
             let Answer::Now(reply) = answer else {
@@ -2210,6 +2213,36 @@ mod tests {
             ]
         );
 
+        // A press the app could not take comes back as its own sentence, not
+        // as an acceptance: a held panel slot is a dropped press, and the page
+        // must show that instead of a card that looks decided.
+        let busy = WebRoutes {
+            decide: Rc::new(|_: &str, _: &str| {
+                Err("The approvals panel is still finishing the last press; \
+                     try again in a moment."
+                    .to_owned())
+            }),
+            ..stub_routes()
+        };
+        let (id, answer, _) = handle_command_with(
+            r#"{"id":99,"cmd":"chat.decide","approval_id":"a-1","decision":"deny"}"#,
+            None,
+            Some(&busy),
+        );
+        // The envelope's id is the reply ticket: the approval's own id must
+        // ride beside it, or the page never hears back.
+        assert_eq!(id, serde_json::json!(99));
+        let Answer::Now(reply) = answer else {
+            panic!("a refused decision answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("still finishing")
+        );
+
         // A window opened without the routes cannot reach any of them.
         for (request, refused) in [
             (
@@ -2225,7 +2258,7 @@ mod tests {
                 "this window cannot read approvals",
             ),
             (
-                r#"{"id":98,"cmd":"chat.decide","id":"a-1","decision":"deny"}"#,
+                r#"{"id":98,"cmd":"chat.decide","approval_id":"a-1","decision":"deny"}"#,
                 "this window cannot decide approvals",
             ),
         ] {

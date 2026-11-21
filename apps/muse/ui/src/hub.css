@@ -844,6 +844,7 @@ html, body {
 }
 
 .chat-panel-head { display: flex; align-items: baseline; gap: 8px; }
+
 .chat-panel-title { margin: 0; font-size: 12.5px; font-weight: 700; }
 .chat-check { padding: 0; color: var(--accent); font-size: 11.5px; }
 
@@ -863,6 +864,12 @@ html, body {
 .chat-approval-detail {
   margin: 0;
   color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.chat-approval-error {
+  margin: 0;
+  color: var(--warn);
   font-size: 11.5px;
 }
 

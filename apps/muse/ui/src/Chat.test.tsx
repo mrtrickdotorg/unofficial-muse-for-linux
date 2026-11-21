@@ -1,7 +1,7 @@
 // The Chat page's DOM tests: the transcript the native list built, the states
 // that keep an unread thread from reading as an empty one, and -- the reason
 // this page exists -- a reply that grows keeping its element.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Chat } from "./Chat";
 import { installChannel } from "./testChannel";
@@ -354,7 +354,7 @@ describe("the Chat web page", () => {
         ],
       },
     });
-    let decided: { id?: string; decision?: string } | null = null;
+    let decided: { approval_id?: string; decision?: string } | null = null;
     const commands = installChannel(
       (cmd) =>
         cmd === "chat.decide" || cmd === "chat.approvals.refresh"
@@ -362,7 +362,7 @@ describe("the Chat web page", () => {
           : { ok: true, ...snapshot([]) },
       (request) => {
         if (request.cmd === "chat.decide") {
-          decided = request as { id?: string; decision?: string };
+          decided = request as { approval_id?: string; decision?: string };
         }
       },
     );
@@ -372,13 +372,56 @@ describe("the Chat web page", () => {
     expect(screen.getByText("Reach example.com")).toBeInTheDocument();
     expect(screen.getByText("Host: example.com")).toBeInTheDocument();
 
-    // One press, one decision, with the service's own word and the card's id.
+    // One press, one decision, with the service's own word and the card's id --
+    // and the channel's own `id` left alone, or the reply would never match.
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
-    await waitFor(() => expect(decided).toMatchObject({ id: "a-1", decision: "deny" }));
+    await waitFor(() =>
+      expect(decided).toMatchObject({ approval_id: "a-1", decision: "deny" }),
+    );
 
     // "Check approvals" is the panel's own read.
     fireEvent.click(screen.getByRole("button", { name: "Check approvals" }));
     await waitFor(() => expect(commands).toContain("chat.approvals.refresh"));
+  });
+
+  it("keeps the card and says why when the app drops a decision press", async () => {
+    const boot = snapshot([], {
+      approvals: {
+        loaded: true,
+        note: null,
+        cards: [
+          {
+            id: "a-1",
+            headline: "Reach example.com",
+            summary: "The agent wants to fetch a page.",
+            details: ["Host: example.com"],
+            choices: [{ word: "deny", label: "Deny" }],
+          },
+        ],
+      },
+    });
+    window.__MUSE_BOOT__ = boot;
+    installChannel((cmd) =>
+      cmd === "chat.decide"
+        ? {
+            ok: false,
+            error:
+              "The approvals panel is still finishing the last press; try again in a moment.",
+          }
+        : { ok: true, ...boot },
+    );
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+
+    // The app's own sentence, beside the card that is still waiting on the
+    // reader -- not an assumption that the press decided anything.
+    const panel = screen.getByLabelText("Approvals");
+    expect(
+      await within(panel).findByText(/still finishing the last press/),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText("Reach example.com")).toBeInTheDocument();
+    expect(screen.queryByText(/^Decided/)).toBeNull();
   });
 
   it("says the panel's unlinked sentence instead of an empty list", async () => {

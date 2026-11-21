@@ -343,7 +343,15 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   same snapshot as an `approvals` view with `loaded` separating "none waiting" from "not read" and
   `note` carrying the panel's link-first sentence; `chat.approvals.refresh` is the panel's own read,
   and `chat.decide` checks the word against the service's five before `run_decision` -- one decide
-  path, and a card leaves only when the app's refill no longer carries it. **The unread badge** is
+  path, and a card leaves only when the app's refill no longer carries it. A press the app cannot
+  take at all now answers with that reason (the panel slot is still finishing the last press, or the
+  window is signed out) instead of an acceptance: `run_decision` reports it, the page prints it
+  beside the card that is still waiting, and the card stays -- a dropped press used to answer ok and
+  leave the card looking decided. The press names the approval as `approval_id`, never `id`: the
+  envelope's `id` is the reply ticket, and a first cut that reused the name for the approval sent its
+  answer to a ticket the page never had, leaving the card disabled until the request timed out. The
+  page's channel now refuses any payload carrying `id` or `cmd` for that reason, and a DOM test pins
+  a card that stays put with the app's sentence beside it after a refused press. **The unread badge** is
   the listing's own count for the open thread, the number the native sidebar badges the row with,
   shown beside the page title because this page has no list to hang it on; zero means no badge,
   never an invented count. Five DOM tests (`Chat.test.tsx`, 17 in all) cover the chip and its drop,

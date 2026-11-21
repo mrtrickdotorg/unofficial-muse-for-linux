@@ -35,6 +35,14 @@ export function call<T>(
 ): Promise<T> {
   const handler = window.webkit?.messageHandlers?.muse;
   if (!handler) return Promise.reject(new Error("no channel"));
+  // `id` is the reply ticket and `cmd` names the command: a payload field
+  // called either would overwrite the envelope, and the page would wait for an
+  // answer addressed to a ticket it never had. Refuse it here, by name.
+  if (extra && ("id" in extra || "cmd" in extra)) {
+    return Promise.reject(
+      new Error(`${cmd} may not send id or cmd: they are the channel's own`),
+    );
+  }
   const id = nextId++;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {

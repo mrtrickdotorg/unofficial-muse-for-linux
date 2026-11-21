@@ -1560,7 +1560,9 @@ impl Chat {
                 let approval_id = approval.approval_id.clone();
                 press.connect_clicked(move |_| {
                     let Some(chat) = weak.upgrade() else { return };
-                    run_decision(&chat, &approval_id, decision);
+                    // The panel has no line for this: a dropped press is
+                    // repeatable, and the card stays until a refill says so.
+                    let _ = run_decision(&chat, &approval_id, decision);
                 });
                 buttons.append(&press);
             }
@@ -2666,8 +2668,9 @@ impl Chat {
         else {
             return Err("Unknown decision.".to_owned());
         };
-        run_decision(self, approval_id, decision);
-        Ok(())
+        // A held panel slot is the page's to report: the press did not go
+        // out, so answering ok would make the card look decided.
+        run_decision(self, approval_id, decision)
     }
 
     /// The Chat window's ways back into this controller: one closure per
@@ -2917,15 +2920,24 @@ impl Chat {
 
 /// Decide exactly one approval: the Page ticket makes a double press
 /// wait, and the approvals refill proves what the press did instead
-/// of the answer alone.
-fn run_decision(chat: &Rc<Chat>, approval_id: &str, decision: muse_account::Decision) {
-    let ticket = match chat.page_begin(Op::Panel) {
-        Some(ticket) => ticket,
-        None => return,
+/// of the answer alone. The error is the press that never left this
+/// process -- a held panel slot, or no account to decide on -- so a
+/// second surface can say that instead of reporting a decision it did
+/// not make.
+fn run_decision(
+    chat: &Rc<Chat>,
+    approval_id: &str,
+    decision: muse_account::Decision,
+) -> Result<(), String> {
+    let Some(ticket) = chat.page_begin(Op::Panel) else {
+        return Err(
+            "The approvals panel is still finishing the last press; try again in a moment."
+                .to_owned(),
+        );
     };
     let Some(client) = chat.client_handle() else {
         chat.page_accept(&ticket);
-        return;
+        return Err("Sign in before deciding approvals.".to_owned());
     };
     let approval_id = approval_id.to_owned();
     dispatch(
@@ -2939,6 +2951,7 @@ fn run_decision(chat: &Rc<Chat>, approval_id: &str, decision: muse_account::Deci
             chat.refresh_identity_and_approvals();
         },
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3013,6 +3026,25 @@ pub(super) fn verify_chat_scroll_navigation() {
         adjustment.value(),
         adjustment.page_size(),
         adjustment.upper(),
+    );
+
+    // A decision press the panel cannot take says so instead of reporting a
+    // decision: the page's card must never look decided on a dropped press.
+    let held = chat.page_begin(Op::Panel).expect("panel slot is free");
+    let refused = run_decision(&chat, "a-1", muse_account::Decision::Deny);
+    match refused {
+        Err(sentence) => assert!(
+            sentence.contains("still finishing"),
+            "the busy sentence is the app's own: {sentence}"
+        ),
+        Ok(()) => panic!("a held panel slot reported a decision"),
+    }
+    chat.page_accept(&held);
+    // The slot is free again, but this window has no account: that press is
+    // refused too, rather than sent to a service nobody is signed in to.
+    assert_eq!(
+        run_decision(&chat, "a-1", muse_account::Decision::Deny),
+        Err("Sign in before deciding approvals.".to_owned())
     );
     window.close();
 }

@@ -127,6 +127,10 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // One decision at a time: the app takes the page slot per press, and every
   // card is disabled while one is in flight so a second press cannot race it.
   const [deciding, setDeciding] = useState<string | null>(null);
+  // A press the app could not take -- a held panel slot, a signed-out window --
+  // says so beside the cards, because the card is still there and still means
+  // "waiting on you".
+  const [approvalNote, setApprovalNote] = useState<string | null>(null);
   const sentence = (failure: unknown) =>
     failure instanceof Error ? failure.message : String(failure);
   // The pictures staged in the app's own composer. This page can ask for a
@@ -197,12 +201,12 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
 
   // The panel's "Check approvals", on the app's own read.
   const refreshApprovals = async () => {
-    setNote(null);
+    setApprovalNote(null);
     try {
       await call<{ ok: boolean }>("chat.approvals.refresh", 30_000);
       void loadSnapshot();
     } catch (failure) {
-      setNote(sentence(failure));
+      setApprovalNote(sentence(failure));
     }
   };
 
@@ -210,15 +214,20 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // no longer carries it -- never on this page's say-so.
   const decide = async (card: ApprovalCard, choice: ApprovalChoice) => {
     setDeciding(card.id);
-    setNote(null);
+    setApprovalNote(null);
     try {
+      // `approval_id`, not `id`: `id` is the channel's own reply ticket, and
+      // overwriting it would leave this press waiting for an answer nobody
+      // sends.
       await call<{ ok: boolean }>("chat.decide", 30_000, {
-        id: card.id,
+        approval_id: card.id,
         decision: choice.word,
       });
       void loadSnapshot();
     } catch (failure) {
-      setNote(sentence(failure));
+      // The app's own sentence (a held panel slot, a signed-out window). The
+      // card stays: nothing was decided, so nothing may leave the panel.
+      setApprovalNote(sentence(failure));
     } finally {
       setDeciding(null);
     }
@@ -411,6 +420,9 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
                 Check approvals
               </button>
             </div>
+            {approvalNote && (
+              <p className="chat-approval-error">{approvalNote}</p>
+            )}
             {approvals.note ? (
               <p className="chat-panel-meta">{approvals.note}</p>
             ) : !approvals.loaded ? (
