@@ -513,6 +513,20 @@ def history_rows(rows, config_dir=None):
             "timestamp": optional_text(row.get("timestamp")),
             "status": optional_text(row.get("status") or payload.get("status") or raw.get("status")),
         }
+        # The turn this message answers, when the service recorded one. The
+        # live shape (Nov 21, 2026) carries the id at the payload's top level
+        # and on the raw event, with the quoted text either as
+        # `reply_to_text` or inside `reply_to_target`; older rows may carry
+        # only the text. Both are display context, capped like any text.
+        reply_id = payload.get("reply_to_message_id") or raw.get("reply_to_message_id")
+        if isinstance(reply_id, str) and reply_id:
+            message["reply_to_message_id"] = reply_id[:4096]
+        reply_text = payload.get("reply_to_text")
+        if not isinstance(reply_text, str) or not reply_text:
+            target = payload.get("reply_to_target")
+            reply_text = target.get("text") if isinstance(target, dict) else None
+        if isinstance(reply_text, str) and reply_text:
+            message["reply_to_text"] = reply_text[:4096]
         widget = _widget_options(payload)
         if widget:
             message["options"] = widget["options"]

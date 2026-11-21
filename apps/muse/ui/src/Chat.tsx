@@ -40,6 +40,11 @@ function Turn({ row, onReply }: { row: Row; onReply: (row: Row) => void }) {
           {row.sent_at && <span className="chat-time">{row.sent_at}</span>}
         </div>
       )}
+      {row.reply_to && (
+        <div className="chat-reply-to" title={row.reply_to}>
+          Replying to: {row.reply_to}
+        </div>
+      )}
       <div className={`chat-bubble ${mine ? "user" : "assistant"}`}>
         {row.text.split(/\n{2,}/).map((paragraph, index) => (
           <p key={index}>{paragraph}</p>

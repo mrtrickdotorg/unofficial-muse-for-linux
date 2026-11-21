@@ -2014,6 +2014,32 @@ class AttachmentProjectionTests(unittest.TestCase):
         projected = bridge.history_rows(rows)
         self.assertNotIn("attachments", projected[0])
 
+    def test_a_reply_projects_its_target_id_and_text(self):
+        # The live shape (Nov 21, 2026) carries the id on the payload and the
+        # raw event, and the quoted text in reply_to_target; older rows carry
+        # only reply_to_text. A plain message gains no reply keys at all.
+        bridge = load_bridge()
+        rows = bridge.history_rows([
+            {"message_id": "m1", "seq": 1, "role": "assistant",
+             "text": "quoted turn"},
+            {"message_id": "m2", "seq": 2, "role": "user", "text": "answer",
+             "raw": {"reply_to_message_id": "m1", "payload": {
+                 "reply_to_message_id": "m1",
+                 "reply_to_target": {"message_id": "m1",
+                                     "text": "quoted turn", "type": "message"}}}},
+            {"message_id": "m3", "seq": 3, "role": "user", "text": "older",
+             "raw": {"reply_to_message_id": "m2",
+                     "payload": {"reply_to_text": "answer"}}},
+            {"message_id": "m4", "seq": 4, "role": "assistant", "text": "plain"},
+        ])
+        by_id = {row["message_id"]: row for row in rows}
+        self.assertEqual(by_id["m2"]["reply_to_message_id"], "m1")
+        self.assertEqual(by_id["m2"]["reply_to_text"], "quoted turn")
+        self.assertEqual(by_id["m3"]["reply_to_message_id"], "m2")
+        self.assertEqual(by_id["m3"]["reply_to_text"], "answer")
+        self.assertNotIn("reply_to_message_id", by_id["m4"])
+        self.assertNotIn("reply_to_text", by_id["m4"])
+
 
 class SubagentsProbeTests(unittest.TestCase):
     """The probe learns the subagents.list shape from key paths only."""

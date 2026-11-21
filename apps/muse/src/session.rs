@@ -812,6 +812,8 @@ mod tests {
             options: Vec::new(),
             selected_option: None,
             attachments: Vec::new(),
+            reply_to_message_id: None,
+            reply_to_text: None,
         }
     }
 

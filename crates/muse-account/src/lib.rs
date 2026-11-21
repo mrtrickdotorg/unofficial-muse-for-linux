@@ -236,6 +236,16 @@ pub struct HistoryMessage {
     /// cross into the client.
     #[serde(default)]
     pub attachments: Vec<MessageAttachment>,
+    /// The turn this message answers, when the service recorded one
+    /// (`reply_to_message_id`, verified live Nov 21, 2026). The
+    /// transcript names that target above the message.
+    #[serde(default)]
+    pub reply_to_message_id: Option<String>,
+    /// The quoted turn's text, when the service projected it
+    /// (`reply_to_text`, or `reply_to_target.text`). Display context;
+    /// the id above is the authoritative reference.
+    #[serde(default)]
+    pub reply_to_text: Option<String>,
 }
 
 /// One attached file as the transcript shows it: a card with the

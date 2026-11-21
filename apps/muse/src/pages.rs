@@ -2576,6 +2576,9 @@ pub(crate) struct ChatRow {
     pub attachments: Vec<String>,
     pub options: Vec<String>,
     pub selected: Option<String>,
+    /// The turn this message answers, named the way the transcript shows
+    /// it: the quoted text capped to a line, never a bare id.
+    pub reply_to: Option<String>,
 }
 
 /// The Chat surface as the web view opens it: the open thread, the rows the
@@ -2638,6 +2641,7 @@ pub(crate) fn held_chat_from(rows: &[super::chat::TranscriptRow]) -> Vec<ChatRow
                 options,
                 selected_option,
                 sent_at,
+                reply_to,
             } => ChatRow {
                 kind: "message",
                 id: id.clone(),
@@ -2659,6 +2663,7 @@ pub(crate) fn held_chat_from(rows: &[super::chat::TranscriptRow]) -> Vec<ChatRow
                     .collect(),
                 options: options.clone(),
                 selected: selected_option.clone(),
+                reply_to: reply_to.clone(),
                 day: String::new(),
             },
         })

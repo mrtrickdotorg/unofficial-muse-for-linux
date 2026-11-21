@@ -27,6 +27,7 @@ pub struct Thread {
 pub struct HistoryMessage {
     pub message_id: String, pub seq: u64, pub role: String, pub text: String,
     pub timestamp: Option<String>, pub status: Option<String>,
+    pub reply_to_message_id: Option<String>, pub reply_to_text: Option<String>,
 }
 pub struct TasksSnapshot { pub schedules: Vec<Schedule>, pub runs: Vec<TaskRun> }
 pub struct Schedule {
@@ -45,6 +46,8 @@ pub struct AccountError { pub code: ErrorCode, pub uncertain: bool }
 // ErrorCode: AuthRequired, VmUnavailable, Timeout, InvalidRequest,
 // InsecureConfig, BridgeUnavailable, BridgeFailure, ProtocolError, ResponseTooLarge.
 ```
+
+History rows also carry the turn each message answers: the bridge projects `reply_to_message_id` (payload, else the raw event; verified live Nov 21, 2026) and the quoted `reply_to_text` (payload, else `reply_to_target.text`), both optional and display-capped, so the transcript can name a reply's target instead of showing it only in the composer's outgoing quote bar.
 
 Public records derive Clone/Debug/PartialEq/Eq and serde Deserialize/Serialize. `BridgeConfig` and `AccountClient` derive Clone/Debug. AccountError implements safe fixed Display/Error (never subprocess output). Dropping the client only drops a local handle, never revokes the upstream account.
 

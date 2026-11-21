@@ -33,6 +33,10 @@ pub enum TranscriptRow {
     DayDivider { label: String },
     /// A chat bubble with its attachments and option buttons. `sent_at`
     /// carries the service timestamp for the assistant header row.
+    /// `reply_to` names the turn this message answers, when the service
+    /// recorded one: the quoted text capped to a line, taken from the
+    /// service or resolved among the loaded rows. Nothing when neither
+    /// can name it, so a bare id never reaches the transcript.
     Message {
         id: String,
         role: Role,
@@ -41,6 +45,7 @@ pub enum TranscriptRow {
         options: Vec<String>,
         selected_option: Option<String>,
         sent_at: Option<String>,
+        reply_to: Option<String>,
     },
     /// A service notice (usage limit, errors): styled as a notice line,
     /// never as a chat bubble, so it cannot read as a reply.
@@ -344,9 +349,32 @@ fn day_key(timestamp: Option<&str>) -> Option<String> {
     Some(stamp.to_owned())
 }
 
+/// Name the turn a message answers the way the composer's quote bar
+/// names one: the quoted text capped to a line. The service's own
+/// `reply_to_text` wins; without it the target is looked up among the
+/// loaded rows. An id alone names nothing a reader can use, so a target
+/// outside the window (and with no text) shows no line at all.
+fn reply_target(
+    message: &HistoryMessage,
+    texts: &std::collections::HashMap<&str, &str>,
+) -> Option<String> {
+    let quoted = message.reply_to_text.as_deref().or_else(|| {
+        message
+            .reply_to_message_id
+            .as_deref()
+            .and_then(|id| texts.get(id).copied())
+    })?;
+    let excerpt = super::composer::quote_excerpt(quoted);
+    (!excerpt.is_empty()).then_some(excerpt)
+}
+
 /// Turn service history into render rows: day dividers on date changes,
 /// quota-shaped service text as notices, everything else as bubbles.
 pub fn build_rows(history: &[HistoryMessage]) -> Vec<TranscriptRow> {
+    let texts: std::collections::HashMap<&str, &str> = history
+        .iter()
+        .map(|message| (message.message_id.as_str(), message.text.as_str()))
+        .collect();
     let mut rows = Vec::new();
     let mut current_day: Option<String> = None;
     for message in history {
@@ -371,6 +399,7 @@ pub fn build_rows(history: &[HistoryMessage]) -> Vec<TranscriptRow> {
             options: message.options.clone(),
             selected_option: message.selected_option.clone(),
             sent_at: message.timestamp.clone(),
+            reply_to: reply_target(message, &texts),
         });
     }
     rows
@@ -467,6 +496,8 @@ mod tests {
             options: Vec::new(),
             selected_option: None,
             attachments: Vec::new(),
+            reply_to_message_id: None,
+            reply_to_text: None,
         }
     }
 
@@ -494,6 +525,48 @@ mod tests {
             TranscriptRow::DayDivider { label } if label == "2026-11-11"
         ));
         assert!(matches!(&rows[4], TranscriptRow::Message { id, .. } if id == "c"));
+    }
+
+    #[test]
+    fn a_reply_names_the_turn_it_answers() {
+        let mut resolved = message("m2", "user", "answer", None);
+        resolved.reply_to_message_id = Some("m1".to_owned());
+        let mut quoted = message("m3", "assistant", "reply", None);
+        quoted.reply_to_message_id = Some("m1".to_owned());
+        quoted.reply_to_text = Some("All that's left: record her reading\nit through".to_owned());
+        let mut outside = message("m4", "user", "later", None);
+        outside.reply_to_message_id = Some("not-loaded".to_owned());
+        let rows = build_rows(&[
+            message(
+                "m1",
+                "assistant",
+                "All that's left: record her reading\nit through",
+                None,
+            ),
+            resolved,
+            quoted,
+            outside,
+            message("m5", "user", "plain", None),
+        ]);
+        let target = |index: usize| match &rows[index] {
+            TranscriptRow::Message { reply_to, .. } => reply_to.clone(),
+            other => panic!("expected a message row, got {other:?}"),
+        };
+        // No service text: the id resolves against the loaded window.
+        assert_eq!(
+            target(1).as_deref(),
+            Some("All that's left: record her reading")
+        );
+        // The service's own quoted text wins, capped to one line.
+        assert_eq!(
+            target(2).as_deref(),
+            Some("All that's left: record her reading")
+        );
+        // A target outside the window names nothing a reader can use, so
+        // the row shows no line rather than a bare UUID.
+        assert_eq!(target(3), None);
+        // An ordinary message names nothing.
+        assert_eq!(target(4), None);
     }
 
     #[test]

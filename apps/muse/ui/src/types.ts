@@ -145,6 +145,9 @@ export type ChatRow = {
   attachments: string[];
   options: string[];
   selected?: string | null;
+  // The turn this message answers, named the way the transcript shows it:
+  // the quoted text capped to a line, never a bare id.
+  reply_to?: string | null;
 };
 
 // The Chat surface as this window opens it: the open thread, the rows the

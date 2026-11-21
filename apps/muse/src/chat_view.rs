@@ -47,6 +47,7 @@ pub fn row_widget(
             attachments,
             sent_at,
             id,
+            reply_to,
             ..
         } => {
             let parts = MessageParts {
@@ -59,6 +60,7 @@ pub fn row_widget(
                 newest,
                 attachments,
                 id,
+                reply_to: reply_to.as_deref(),
             };
             message_widget(&parts, on_option, on_react, on_reply, previews)
         }
@@ -90,6 +92,8 @@ struct MessageParts<'a> {
     newest: bool,
     attachments: &'a [MessageAttachment],
     id: &'a str,
+    /// The turn this message answers, already named for display.
+    reply_to: Option<&'a str>,
 }
 
 fn message_widget(
@@ -112,6 +116,7 @@ fn message_widget(
         newest,
         attachments,
         id,
+        reply_to,
     } = parts;
     let column = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
     match role {
@@ -132,6 +137,18 @@ fn message_widget(
         head.append(&avatar);
         head.append(&name);
         column.append(&head);
+    }
+
+    // The turn this message answers, named above the bubble the way the
+    // composer's quote bar names one. Plain text, one line: the target's
+    // own markup is never re-rendered here.
+    if let Some(reply) = reply_to {
+        let quoted = gtk4::Label::new(Some(&format!("Replying to: {reply}")));
+        quoted.set_xalign(0.0);
+        quoted.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        quoted.set_max_width_chars(64);
+        quoted.add_css_class("muse-reply-to");
+        column.append(&quoted);
     }
 
     let bubble = gtk4::Label::new(None);
@@ -446,6 +463,8 @@ mod tests {
                 options: Vec::new(),
                 selected_option: None,
                 attachments: Vec::new(),
+                reply_to_message_id: None,
+                reply_to_text: None,
             },
             muse_account::HistoryMessage {
                 message_id: "b".to_owned(),
@@ -457,6 +476,8 @@ mod tests {
                 options: Vec::new(),
                 selected_option: None,
                 attachments: Vec::new(),
+                reply_to_message_id: None,
+                reply_to_text: None,
             },
         ]
     }
@@ -542,6 +563,8 @@ mod tests {
                     caption: None,
                     transcription: None,
                 }],
+                reply_to_message_id: None,
+                reply_to_text: None,
             },
             muse_account::HistoryMessage {
                 message_id: "wide-b".to_owned(),
@@ -554,6 +577,8 @@ mod tests {
                 options: Vec::new(),
                 selected_option: None,
                 attachments: Vec::new(),
+                reply_to_message_id: None,
+                reply_to_text: None,
             },
         ];
         let wide_rows = build_rows(&wide);

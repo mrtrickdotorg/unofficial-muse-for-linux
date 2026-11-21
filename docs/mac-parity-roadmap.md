@@ -111,6 +111,15 @@ as `chat.stream`'s `in_reply_to` — the bridge validates it as one
 message id and adds it to the stream body, the image send's body
 included, and a send with no quote stays byte for byte what
 shipped before — while the excerpt never travels.
+The inbound half shipped too: history rows project
+`reply_to_message_id` and the quoted `reply_to_text` (payload,
+else `reply_to_target.text`), and every surface names a reply's
+target above its bubble — the quoted text capped to one line,
+resolved among the loaded rows when the service sent none, and
+no line at all when the target is outside the window. A bare id
+never reaches the transcript. Seen in the running app: the probe
+row reads "Replying to: All that's left: record her reading it
+through (~7.5 min), upload …".
 Message ⋯ / View details / View scheduled task (Gap 2, investigated
 Nov 19, 2026): the web puts React and Reply inline on every row and
 keeps the rest behind a separate ⋯ button (the AX tree shows

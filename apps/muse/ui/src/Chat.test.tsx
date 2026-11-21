@@ -242,6 +242,25 @@ describe("the Chat web page", () => {
     );
   });
 
+  it("names the turn a message answers in the transcript", async () => {
+    window.__MUSE_BOOT__ = snapshot([
+      message({ id: "m-1", text: "the quoted turn" }),
+      message({
+        id: "m-2",
+        role: "user",
+        text: "the answer",
+        reply_to: "the quoted turn",
+      }),
+    ]);
+    installChannel(() => ({ ok: true, ...snapshot([]) }));
+
+    render(<Chat pollMs={10_000} />);
+
+    expect(screen.getByText("Replying to: the quoted turn")).toBeInTheDocument();
+    // An ordinary turn names nothing.
+    expect(screen.getAllByText(/Replying to:/)).toHaveLength(1);
+  });
+
   it("cancels a staged quote without sending anything", async () => {
     window.__MUSE_BOOT__ = snapshot([message({ id: "m-2", text: "quoted line" })]);
     const commands = installChannel(() => ({ ok: true, ...snapshot([]) }));
