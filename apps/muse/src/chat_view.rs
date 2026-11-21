@@ -506,6 +506,10 @@ mod tests {
         assert_eq!(copies[0].tooltip_text().as_deref(), Some("Copy response"));
         let replies = find_buttons(list.upcast_ref(), "Reply");
         assert_eq!(replies.len(), 2);
+
+        // A reply that grows keeps its widgets: the newest turn is
+        // rewritten where it stands, never rebuilt.
+        newest_row_is_rewritten_in_place();
         assert_eq!(
             replies[0].tooltip_text().as_deref(),
             Some("Reply to this message")
@@ -657,5 +661,73 @@ mod tests {
         reply_chat.stage_reply("".to_owned(), "no id, no quote".to_owned());
         super::super::app::verify_chat_scroll_navigation();
         let _frame = super::super::widget::widget_frame("<b>hi</b>", Some("fallback"));
+    }
+
+    /// The newest turn is rewritten where it stands, never rebuilt: a
+    /// reply that arrives in pieces keeps its row, its bubble and the
+    /// status role a reader is listening to, and only the words change.
+    /// The live app decides this from the history fingerprint; the
+    /// rewrite itself is `set_newest_text`, so that is what this pins.
+    ///
+    /// Not its own `#[test]`: GTK may be initialized from one thread
+    /// only, libtest gives every test its own thread, and a second
+    /// initializing test panics before it asserts anything. It runs
+    /// from the suite's one GTK test, beside the other widget checks.
+    fn newest_row_is_rewritten_in_place() {
+        let mut messages = history();
+        messages[1].text = "hel".to_owned();
+        let rows = build_rows(&messages);
+        let list = gtk4::ListBox::new();
+        let on_option: std::rc::Rc<dyn Fn(String)> = std::rc::Rc::new(|_| {});
+        let on_react: std::rc::Rc<dyn Fn(String, String)> = std::rc::Rc::new(|_, _| {});
+        let on_reply: std::rc::Rc<dyn Fn(String, String)> = std::rc::Rc::new(|_, _| {});
+        let previews = std::collections::HashMap::new();
+        populate(&list, &rows, &on_option, &on_react, &on_reply, &previews);
+
+        fn row_count(list: &gtk4::ListBox) -> usize {
+            let mut count = 0;
+            let mut child = list.first_child();
+            while child.is_some() {
+                count += 1;
+                child = child.and_then(|row| row.next_sibling());
+            }
+            count
+        }
+
+        let first_row = list.first_child().expect("first row");
+        let newest = list.last_child().expect("newest row");
+        let bubble = bubble_in(&newest).expect("newest bubble");
+        let rows_before = row_count(&list);
+        assert_eq!(bubble.text().as_str(), "hel");
+        assert_eq!(bubble.accessible_role(), gtk4::AccessibleRole::Status);
+
+        // The same id, more words: what a reply streaming in looks
+        // like to the view.
+        assert!(set_newest_text(&list, "hello back, and then some"));
+
+        let newest_after = list.last_child().expect("newest row");
+        assert_eq!(
+            newest_after.as_ptr(),
+            newest.as_ptr(),
+            "the newest row was rebuilt instead of rewritten"
+        );
+        assert_eq!(
+            list.first_child().expect("first row").as_ptr(),
+            first_row.as_ptr(),
+            "a row above the newest turn was rebuilt"
+        );
+        assert_eq!(row_count(&list), rows_before, "the list was rebuilt");
+        let bubble_after = bubble_in(&newest_after).expect("newest bubble");
+        assert_eq!(
+            bubble_after.as_ptr(),
+            bubble.as_ptr(),
+            "the bubble was replaced instead of rewritten"
+        );
+        assert_eq!(bubble_after.text().as_str(), "hello back, and then some");
+        assert_eq!(
+            bubble_after.accessible_role(),
+            gtk4::AccessibleRole::Status,
+            "the live region lost its role when the words changed"
+        );
     }
 }
