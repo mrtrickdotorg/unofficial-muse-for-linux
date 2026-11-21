@@ -310,8 +310,16 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   this window and stopped a second later ended at `status: "Stopped."` -- the service's own
   `cancelled: true`, not an assumption -- and the transcript's last row stayed the reader's turn
   with no reply behind it. **Remaining for S3's gate:** attachments and their verified-send
-  receipts, approvals, quote staging and unread badges; the native composer is still where
-  pictures and dictation live.
+  receipts, approvals and unread badges; the native composer is still where pictures and
+  dictation live.
+
+  Quote staging came last and cost almost nothing, because the pieces already existed: the page's
+  Reply takes the turn's first line through the same cap the app applies, the bar above the composer
+  is the app's own reply bar in page form, and the quote rides `chat.send` as data that the app
+  guards with `staged_quote` -- one definition, shared with the composer's Reply -- before handing
+  it to `send_text` as the native quote. No new command, no second dispatch route, and the quote
+  clears on the same two events that clear the app's: the send goes, or the reader cancels. It stays
+  reader-side context, as it always was: the send on the wire is a plain send.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).

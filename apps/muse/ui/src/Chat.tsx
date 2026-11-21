@@ -14,9 +14,20 @@ import type { ChatRow as Row, ChatSnapshot } from "./types";
 // trips of its own: it follows the rows the native list last built.
 const POLL_MS = 2000;
 
+/// The quote the page stages with Reply: the row's first line, trimmed, 200
+/// characters at most. The app applies the same cap again to whatever it is
+/// sent, so the two cannot disagree about how long a quote may be.
+export function quoteExcerpt(text: string): string {
+  return text
+    .split("\n")[0]
+    .trim()
+    .slice(0, 200)
+    .trim();
+}
+
 /// A message turn: the reader's words in the blue pill, Muse's in the grey
 /// bubble, with the attachments and option pills the native row carries.
-function Turn({ row }: { row: Row }) {
+function Turn({ row, onReply }: { row: Row; onReply: (row: Row) => void }) {
   const mine = row.role === "user";
   return (
     <div
@@ -47,6 +58,16 @@ function Turn({ row }: { row: Row }) {
           ))}
         </div>
       )}
+      <div className="chat-row-actions">
+        <button
+          className="chat-reply"
+          type="button"
+          onClick={() => onReply(row)}
+          aria-label={`Reply to ${mine ? "your" : "Muse's"} message`}
+        >
+          Reply
+        </button>
+      </div>
       {row.options.length > 0 && (
         <div className="chat-options">
           {row.options.map((option) => (
@@ -108,6 +129,11 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // flight. Watch fast for a beat after a dispatch, the way the app's own send
   // does, so a reader can actually reach Stop.
   const [watching, setWatching] = useState(false);
+  // The page's Reply: which turn the next send answers. Reader-side context
+  // only -- the app's send is a plain send -- but it rides the same command and
+  // is cleared by the same two things that clear the app's own quote: a send
+  // that goes, and a cancel.
+  const [quote, setQuote] = useState<{ id: string; excerpt: string } | null>(null);
 
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -116,10 +142,15 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     setPending(true);
     setNote(null);
     try {
-      await call<{ ok: boolean }>("chat.send", 30_000, { text });
+      await call<{ ok: boolean }>("chat.send", 30_000, {
+        text,
+        ...(quote ? { quote } : {}),
+      });
       // The app took it: the entry clears, exactly as a press in that window
-      // clears it. The transcript and the status line carry the outcome.
+      // clears it, and so does the quote -- one Reply answers one send. The
+      // transcript and the status line carry the outcome.
       setDraft("");
+      setQuote(null);
       void loadSnapshot();
       setWatching(true);
     } catch (failure) {
@@ -154,6 +185,12 @@ useEffect(() => {
       clearTimeout(done);
     };
   }, [watching, loadSnapshot]);
+
+  const stageQuote = (row: Row) => {
+    const excerpt = quoteExcerpt(row.text);
+    if (!excerpt) return;
+    setQuote({ id: row.id, excerpt });
+  };
 
   const draftKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
@@ -203,11 +240,24 @@ useEffect(() => {
                 // Keyed by the service's own id: a reply that grows stays
                 // the same element, so its words change under the reader
                 // instead of a second turn replacing the first.
-                <Turn key={row.id} row={row} />
+                <Turn key={row.id} row={row} onReply={stageQuote} />
               ),
             )
           )}
 
+          {quote && (
+            <div className="chat-quote">
+              <span className="chat-quote-text">Replying to: {quote.excerpt}</span>
+              <button
+                className="chat-quote-cancel"
+                type="button"
+                onClick={() => setQuote(null)}
+                aria-label="Cancel reply"
+              >
+                ×
+              </button>
+            </div>
+          )}
           <form className="chat-composer" onSubmit={send}>
             <textarea
               className="chat-draft"

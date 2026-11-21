@@ -199,6 +199,65 @@ describe("the Chat web page", () => {
     expect(await screen.findByText("Sign in before stopping.")).toBeInTheDocument();
   });
 
+  it("stages a quoted turn, sends it with the draft, and clears it", async () => {
+    window.__MUSE_BOOT__ = snapshot([
+      message({ id: "m-1", role: "user", text: "hi" }),
+      message({
+        id: "m-2",
+        text: "A teapot beats a kettle\nfor reasons we will not go into.",
+      }),
+    ]);
+    let sent: { text?: string; quote?: unknown } | null = null;
+    installChannel(
+      (cmd) => (cmd === "chat.send" ? { ok: true } : { ok: true, ...snapshot([]) }),
+      (request) => {
+        if (request.cmd === "chat.send") sent = request as { text?: string; quote?: unknown };
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+
+    // Reply stages the row's first line, capped and trimmed, and does not arm
+    // a send by itself.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reply to Muse's message" }),
+    );
+    expect(screen.getByText(/Replying to: A teapot beats a kettle/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+
+    fireEvent.change(screen.getByPlaceholderText("Message"), {
+      target: { value: "because it does not scream" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() =>
+      expect(sent).toMatchObject({
+        text: "because it does not scream",
+        quote: { id: "m-2", excerpt: "A teapot beats a kettle" },
+      }),
+    );
+    // A send that goes takes its quote with it.
+    await waitFor(() =>
+      expect(screen.queryByText(/Replying to:/)).toBeNull(),
+    );
+  });
+
+  it("cancels a staged quote without sending anything", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-2", text: "quoted line" })]);
+    const commands = installChannel(() => ({ ok: true, ...snapshot([]) }));
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reply to Muse's message" }),
+    );
+    expect(screen.getByText(/Replying to: quoted line/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel reply" }));
+    expect(screen.queryByText(/Replying to:/)).toBeNull();
+    // Cancel is local: no command, no send.
+    expect(commands).not.toContain("chat.send");
+  });
+
   it("reports a failed snapshot and keeps the rows already on screen", async () => {
     window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "held" })]);
     installChannel(() => ({ ok: false, error: "no account link in this app" }));
