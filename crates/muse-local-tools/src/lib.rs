@@ -109,6 +109,9 @@ type Pause = Arc<(std::sync::Barrier, std::sync::Barrier)>;
 #[derive(Clone)]
 pub struct ToolBroker {
     state: Arc<Mutex<State>>,
+    /// A pinned data home for trash moves, unset in the app, which always
+    /// derives it from the process environment. See `with_data_home`.
+    trash_data_home: Option<PathBuf>,
     #[cfg(test)]
     pause: Arc<Mutex<Option<Pause>>>,
 }
@@ -209,8 +212,23 @@ impl ToolBroker {
                 nonce: fresh_nonce(),
                 ..State::default()
             })),
+            trash_data_home: None,
             #[cfg(test)]
             pause: Arc::default(),
+        }
+    }
+    /// Pin the data home that trash moves resolve under, instead of reading
+    /// `XDG_DATA_HOME` from the process. Hidden, and used only by tests: a
+    /// tool invocation can never name a trash location, and the app always
+    /// uses the environment. Only an absolute path is accepted, like the
+    /// environment it replaces.
+    #[doc(hidden)]
+    pub fn with_data_home(&self, data_home: PathBuf) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+            trash_data_home: Some(data_home),
+            #[cfg(test)]
+            pause: Arc::clone(&self.pause),
         }
     }
     /// Grant a folder read-write: reads and search run immediately, and
@@ -770,7 +788,7 @@ impl ToolBroker {
                 commit_rename(&pending)
             }
             Prepared::Direct if pending.request.operation == "files.delete" => {
-                commit_trash(&pending)
+                commit_trash(&pending, self.trash_data_home.as_deref())
             }
             Prepared::Direct => Err(ToolError("unknown_command")),
         };
@@ -1054,14 +1072,14 @@ fn commit_rename(pending: &Pending) -> Result<Value, ToolError> {
     }
     Ok(json!({"path":path,"new_path":target}))
 }
-fn commit_trash(pending: &Pending) -> Result<Value, ToolError> {
+fn commit_trash(pending: &Pending, data_home: Option<&Path>) -> Result<Value, ToolError> {
     let path = pending.request.path.as_str();
     let source = open_beneath(&pending.root, path, false)?;
     let meta = source.metadata().map_err(|_| ToolError("io_denied"))?;
     let (dev, ino) = (meta.dev(), meta.ino());
     let parent = parent_of(&pending.root, path)?;
     let name = cstr(split_path(path).1)?;
-    let (files, info) = trash_directories()?;
+    let (files, info) = trash_directories(data_home)?;
     let base = split_path(path).1.to_string();
     let mut candidate = None;
     for attempt in 0..1000 {
@@ -1172,15 +1190,21 @@ fn commit_trash(pending: &Pending) -> Result<Value, ToolError> {
     Ok(json!({"path":path,"trashed_as":candidate_name}))
 }
 /// The desktop Trash beside the user's data, created owner-only on first use.
-/// Honours `XDG_DATA_HOME`, so a test can point it at a scratch directory.
-fn trash_directories() -> Result<(File, File), ToolError> {
-    let data_home = match std::env::var("XDG_DATA_HOME") {
-        Ok(value) if value.starts_with('/') => PathBuf::from(value.trim_end_matches('/')),
-        _ => match std::env::var("HOME") {
-            Ok(home) if home.starts_with('/') => {
-                Path::new(home.trim_end_matches('/')).join(".local/share")
-            }
-            _ => return Err(ToolError("trash_unavailable")),
+/// Honours `XDG_DATA_HOME`, so a test can point it at a scratch directory --
+/// through the broker's hidden pinned data home, never by writing the process
+/// environment, which every other test thread shares.
+fn trash_directories(pinned: Option<&Path>) -> Result<(File, File), ToolError> {
+    let data_home = match pinned {
+        Some(dir) if dir.is_absolute() => dir.to_path_buf(),
+        Some(_) => return Err(ToolError("trash_unavailable")),
+        None => match std::env::var("XDG_DATA_HOME") {
+            Ok(value) if value.starts_with('/') => PathBuf::from(value.trim_end_matches('/')),
+            _ => match std::env::var("HOME") {
+                Ok(home) if home.starts_with('/') => {
+                    Path::new(home.trim_end_matches('/')).join(".local/share")
+                }
+                _ => return Err(ToolError("trash_unavailable")),
+            },
         },
     };
     let trash = data_home.join("Trash");

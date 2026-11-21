@@ -188,9 +188,12 @@ fn delete_moves_to_trash_with_a_readable_record_and_never_unlinks() {
     let data = tempfile::tempdir().unwrap();
     fs::write(d.path().join("note.txt"), "recoverable").unwrap();
     // The Trash location is discovered through XDG_DATA_HOME; the crate never
-    // accepts a caller-supplied trash path.
-    std::env::set_var("XDG_DATA_HOME", data.path());
-    let b = ToolBroker::new();
+    // accepts a caller-supplied trash path from an invocation. The harness
+    // pins the data home on the broker rather than writing the process
+    // environment: `set_var` races every other test thread in this binary
+    // (each one copies the environment when it spawns a child), which is how
+    // a parallel run of the host suite failed once.
+    let b = ToolBroker::new().with_data_home(data.path().to_path_buf());
     let g = b.grant(d.path()).unwrap();
     let p = propose(
         &b,
