@@ -586,6 +586,12 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   and the feed's asset removed -- and require both cards to carry the app's failure sentence
   (`Update check failed: …`, `Update feed returned invalid data.`, `Update download failed: …`) and
   a press afterwards to work again, since the seam otherwise only ever serves a healthy release.
+  One round is opt-in (`--restart`), because it replaces the copy it runs under: the same harness
+  release is staged into a throwaway copy of the binary, the Restart press is taken for real, and
+  the staged build has to take over -- it records the path it was started from and stays up, the
+  old process and its window must be gone, and the file a launcher would open must now hold the
+  staged bytes. That is the only place the relaunch itself is driven; the two-window rounds still
+  refuse it so they can never move the binary under them.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would

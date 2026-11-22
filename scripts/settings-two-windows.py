@@ -26,7 +26,11 @@ turn, and requires that
     the page: the second is refused by the app's own busy flag, both cards show
     its sentence ("An update check is already running."), the first check still
     lands and neither card is left on "Working…", rather than the harness
-    retrying the press until it slips through.
+    retrying the press until it slips through,
+  * with `--restart`, the one step nothing else drives: the update is staged
+    into a throwaway copy, Restart is pressed for real, and the staged build has
+    to take over -- it records where it was started from, it is still up when
+    the old process is gone, and the launcher copy now holds its bytes.
 
 The feed is a file, not the network: the app reads `MUSE_UPDATE_FEED` (a
 release JSON on disk) instead of the release API, stages the asset from the
@@ -46,6 +50,14 @@ is still running and needs it to boot on the busy snapshot.
 through its own channel: both cards must say exactly that and offer neither
 Check nor Download -- a press nobody can act on is not an offer.
 
+`--restart` is the opt-in half, and the two-window rounds never take it: they
+refuse Restart so they cannot replace the copy under them, so this round runs a
+throwaway copy of the binary in the temp dir and asks the app to relaunch for
+real. The feed's asset is then a stand-in build that records the path it was
+started from and stays up, so the round can require that the new process is the
+staged file, that the old process and its window are gone, and that the copy a
+launcher would open now holds the staged bytes.
+
 Both cards are read from their accessibility trees, never from pixels: the
 native label's text is its accessible name, and the page's status paragraph is
 read through Atspi.Text. Nothing here needs the window manager to place or
@@ -53,6 +65,7 @@ raise a window, so it works wherever the app can open two windows.
 
     scripts/settings-two-windows.py
     scripts/settings-two-windows.py --feed real --keep
+    scripts/settings-two-windows.py --restart
 
 Needs PyGObject with Atspi (Fedora: python3-gobject, Debian: python3-gi),
 a logged-in desktop session, and the binary already built:
@@ -76,6 +89,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -576,10 +590,24 @@ def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
     )
 
 
-def write_feed(root):
-    """A newer release whose asset is a local file: the feed and the asset."""
+def write_feed(root, marker=None):
+    """A newer release whose asset is a local file: the feed and the asset.
+
+    With `marker`, the asset is a stand-in build for the restart round: it
+    records the path it was started from and stays up, so the round can see the
+    staged copy run and stop it again afterwards.
+    """
     asset = root / "muse-harness.AppImage"
-    body = (b"#!/bin/sh\n# harness asset: never executed, only staged\nexit 0\n" * 2048)
+    if marker is None:
+        body = b"#!/bin/sh\n# harness asset: never executed, only staged\nexit 0\n" * 2048
+    else:
+        head = (
+            "#!/bin/sh\n"
+            "# the staged build the restart round relaunches: say where it ran\n"
+            f'printf "%s %s\\n" "$0" "$$" >> {shlex.quote(str(marker))}\n'
+            "sleep 30\n"
+        ).encode()
+        body = head + b"# padding: the download round stages a file of some size\n" * 512
     asset.write_bytes(body)
     sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4"
     feed = {
@@ -597,7 +625,66 @@ def write_feed(root):
     return feed_path, asset
 
 
-def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_appimage):
+def restart_round(proc, root, copy, timeout, busy_window):
+    """Stage a harness release, press Restart, require the copy to take over.
+
+    The staged file must be what runs, it must still be up when the old process
+    and its window are gone, and the file a launcher would open must now hold
+    the staged bytes -- the update is in place, not merely announced.
+    """
+    print(f"restart: staging into the throwaway copy at {copy}")
+    exercise("native check", MAIN_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window)
+    _, _, status, action = exercise(
+        "native download",
+        MAIN_FRAME,
+        ("Download update",),
+        DOWNLOAD_STATUS,
+        timeout,
+        busy_window,
+    )
+    if not status.startswith(DOWNLOADED_PREFIX) or not status.endswith(DOWNLOADED_SUFFIX):
+        raise Failure(f"the download staged nothing to restart into: {status!r}")
+    if action != "Restart to update":
+        raise Failure(f"the staged card should offer Restart, got {action!r}")
+    staged = Path(status[len(DOWNLOADED_PREFIX) : -len(DOWNLOADED_SUFFIX)])
+    if not staged.is_file():
+        raise Failure(f"the staged copy is not a file: {staged}")
+
+    if not press(MAIN_FRAME, ("Restart to update",)):
+        raise Failure("the native Restart press could not be made")
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Failure(f"the app was still running {timeout:.0f}s after the Restart press")
+    if code != 0:
+        raise Failure(f"the app exited {code} on the Restart press, not cleanly")
+    wait_until(lambda: first_frame(MAIN_FRAME) is None, timeout, "the old Settings window to go")
+    print("restart: the old app exited cleanly and its window is gone")
+
+    marker = root / "relaunched"
+    wait_until(marker.exists, timeout, "the staged copy to run")
+    ran, pid = marker.read_text().split()[-2:]
+    if Path(ran) != staged:
+        raise Failure(f"the relaunched copy ran from {ran!r}, not the staged {staged!r}")
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        raise Failure(f"the relaunched copy (pid {pid}) did not stay up")
+    wait_until(
+        lambda: copy.read_bytes() == staged.read_bytes(),
+        timeout,
+        f"{copy} to hold the staged build",
+    )
+    print(
+        f"restart: the staged copy runs as pid {pid} from {ran}, and {copy} "
+        "now holds its bytes"
+    )
+    os.kill(int(pid), signal.SIGTERM)
+    print("PASS: the Restart press relaunched the staged copy and left no old process")
+    return True
+
+
+def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_appimage, restart=False):
     if not os.access(binary, os.X_OK):
         raise Failure(f"{binary} is not executable; build it with `cargo build -p muse`")
     running = subprocess.run(
@@ -647,9 +734,22 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
         # A non-empty APPDIR is what makes this copy update itself, so the
         # card offers a real Check. The dir itself is never used.
         env["APPDIR"] = str(root)
+    copy = None
+    if restart:
+        # The copy the Restart press replaces: a throwaway, so this round can
+        # never move the binary the two-window rounds press. It keeps the name
+        # `muse`: a copy under another name registers with the accessibility
+        # bus as that other name, and the rounds look for this app by name.
+        copy = root / "copy" / "muse"
+        copy.parent.mkdir()
+        shutil.copy2(binary, copy)
+        copy.chmod(0o755)
+        env["APPIMAGE"] = str(copy)
+        env["MUSE_UPDATE_RESTART"] = "1"
+        binary = str(copy)
     feed_path = asset = None
     if feed_mode == "newer" and not no_appimage:
-        feed_path, asset = write_feed(root)
+        feed_path, asset = write_feed(root, root / "relaunched" if restart else None)
         env["MUSE_UPDATE_FEED"] = str(feed_path)
         env["MUSE_UPDATE_DELAY_MS"] = str(delay_ms)
 
@@ -657,6 +757,10 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
     ok = False
     try:
         proc = open_settings(launch_command(binary, env_script), env, log_path)
+
+        if restart:
+            ok = restart_round(proc, root, copy, timeout, busy_window)
+            return ok
 
         if no_appimage:
             wait_until(
@@ -1041,6 +1145,12 @@ def main():
         help="run as a copy that does not update itself: both cards must say so and "
         "offer no Check or Download press",
     )
+    parser.add_argument(
+        "--restart",
+        action="store_true",
+        help="run only the restart round: stage a harness release into a throwaway "
+        "copy, press Restart, and require the staged copy to take over",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the temp config and log")
     parser.add_argument(
         "--env-script",
@@ -1048,6 +1158,11 @@ def main():
         help="sourced before the app starts, as muse-gui.sh does (default: %(default)s)",
     )
     args = parser.parse_args()
+    if args.restart and (args.feed != "newer" or args.no_appimage):
+        parser.error(
+            "--restart stages the harness's own release into a throwaway copy, so it "
+            "needs the default feed and an AppImage copy"
+        )
 
     def interrupted(signum, frame):
         raise Failure("interrupted")
@@ -1065,6 +1180,7 @@ def main():
                 args.feed,
                 args.delay_ms,
                 args.no_appimage,
+                args.restart,
             )
             else 1
         )

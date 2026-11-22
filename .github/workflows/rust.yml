@@ -88,6 +88,11 @@ jobs:
           --delay-ms 4000 --timeout 40
         dbus-run-session -- xvfb-run -a ./scripts/settings-two-windows.py \
           --no-appimage --timeout 40
+        # The one step none of the rounds above can drive: they refuse Restart
+        # so they cannot replace the binary under them. This invocation stages
+        # the same release into a throwaway copy and presses it for real.
+        dbus-run-session -- xvfb-run -a ./scripts/settings-two-windows.py \
+          --restart --delay-ms 4000 --timeout 40
 
   window-spike:
     # `apps/muse-window` is excluded from the workspace: it is GTK 3 + WebKitGTK
