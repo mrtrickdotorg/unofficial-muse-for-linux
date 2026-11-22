@@ -575,7 +575,9 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   all, which is what that round caught. `--no-appimage` drops `APPDIR` instead: the app is then a
   copy that updates through its own channel, so both cards must read that sentence and show neither
   a Check nor a Download press -- which is why neither surface draws the check button for such a
-  copy, a greyed button being a press nobody can act on.
+  copy, a greyed button being a press nobody can act on. The eligibility is the app's, not the
+  views': `do_check` asks `running_as_appimage()` before anything else and refuses with that same
+  sentence, so a press reaching it from another caller cannot start a check either.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would

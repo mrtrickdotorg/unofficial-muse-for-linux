@@ -5017,7 +5017,21 @@ fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
 /// Ask the feed whether a newer build exists. One worker, one answer; whichever
 /// card is up repaints whatever it says, including failures. The refusal is the
 /// same sentence on both surfaces.
+/// Whether this copy may start a check at all. Only the AppImage release
+/// updates itself, and a press that arrives on the page's command channel is
+/// no exception: the views hide the press, but they are not what decides.
+/// The sentence is the card's own, so a refused press shows nothing new -- the
+/// card already says where its updates come from.
+fn check_eligible(appimage: bool) -> Result<(), String> {
+    if appimage {
+        Ok(())
+    } else {
+        Err(UPDATE_NOT_APPIMAGE.to_owned())
+    }
+}
+
 fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
+    check_eligible(super::update::running_as_appimage())?;
     {
         let mut state = ctx.updates.borrow_mut();
         if state.busy {
@@ -7347,6 +7361,17 @@ fn go_chat(ctx: &Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A copy that updates through its own channel refuses a check wherever the
+    /// press comes from, in the words its card already shows.
+    #[test]
+    fn a_copy_that_updates_elsewhere_cannot_start_a_check() {
+        assert_eq!(
+            super::check_eligible(false),
+            Err(UPDATE_NOT_APPIMAGE.to_owned())
+        );
+        assert_eq!(super::check_eligible(true), Ok(()));
+    }
 
     /// The action's label is one rule for both cards: the panel's button and the
     /// page's card cannot offer different presses for the same state, because

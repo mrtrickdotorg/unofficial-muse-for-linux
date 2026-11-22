@@ -602,9 +602,22 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                 raise Failure(
                     f"a copy that does not update itself still offered {offered!r}"
                 )
+            # Nothing is drawn to press, and the app refuses one anyway: an
+            # attempted press on either card leaves both on its own sentence,
+            # never on a busy step and never with a press offered.
+            if press(WEB_FRAME, CHECK_LABELS) or press(MAIN_FRAME, CHECK_LABELS):
+                raise Failure("a copy that updates elsewhere still took a check press")
+            time.sleep(1.0)
+            for frame_name in (WEB_FRAME, MAIN_FRAME):
+                status, check, action, _ = card(frame_name)
+                if status != NOT_APPIMAGE or check or action:
+                    raise Failure(
+                        f"the {frame_name} card moved off the refusal after a press: "
+                        f"{status!r} with press {check!r} and action {action!r}"
+                    )
             print(
-                f"PASS: both cards read {NOT_APPIMAGE!r} and offered none of "
-                f"{CARD_BUTTONS}"
+                f"PASS: both cards read {NOT_APPIMAGE!r}, offered none of "
+                f"{CARD_BUTTONS}, and stayed on it after an attempted press"
             )
             return True
 
