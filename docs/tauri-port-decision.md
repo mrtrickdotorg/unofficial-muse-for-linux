@@ -586,6 +586,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   and the feed's asset removed -- and require both cards to carry the app's failure sentence
   (`Update check failed: …`, `Update feed returned invalid data.`, `Update download failed: …`) and
   a press afterwards to work again, since the seam otherwise only ever serves a healthy release.
+  The download round does not stop at the staged sentence: it reads the path out of
+  `Update downloaded to …`, then checks the file itself -- the feed's asset name, the asset's own
+  bytes, and an executable mode -- so a staged state that is announced but not installable fails
+  the round instead of passing on the words alone.
   One round is opt-in (`--restart`), because it replaces the copy it runs under: the same harness
   release is staged into a throwaway copy of the binary, the Restart press is taken for real, and
   the staged build has to take over -- it records the path it was started from and stays up, the

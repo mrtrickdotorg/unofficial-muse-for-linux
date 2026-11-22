@@ -129,6 +129,8 @@ INVALID_FEED = "Update feed returned invalid data."
 DOWNLOAD_FAILED = "Update download failed: "
 DOWNLOADED_PREFIX = "Update downloaded to "
 DOWNLOADED_SUFFIX = ". Restart to switch to it."
+# The asset the harness feed names, and so the name a staged copy must carry.
+STAGED_ASSET = "unofficial-muse-for-linux-x86_64.AppImage"
 RESTART_REFUSAL = "Restart is disabled in this harness copy."
 WORKING = "Working…"
 
@@ -613,6 +615,29 @@ def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
     )
 
 
+def staged_copy(status, asset):
+    """The staged file the app named in `status`, checked against `asset`.
+
+    A staged state is a sentence and a file: the file has to be there, carry the
+    feed's asset name, hold the asset's bytes, and be executable -- otherwise
+    the update is announced but not installable, which is exactly what a status
+    line alone cannot tell.
+    """
+    if not status.startswith(DOWNLOADED_PREFIX) or not status.endswith(DOWNLOADED_SUFFIX):
+        raise Failure(f"the download did not report a staged copy: {status!r}")
+    path = Path(status[len(DOWNLOADED_PREFIX) : -len(DOWNLOADED_SUFFIX)])
+    if not path.is_file():
+        raise Failure(f"the app named a staged copy that is not there: {path}")
+    if path.name != STAGED_ASSET:
+        raise Failure(f"the staged copy is named {path.name!r}, not {STAGED_ASSET!r}")
+    if path.read_bytes() != asset.read_bytes():
+        raise Failure(f"the staged copy is not the feed's asset: {path}")
+    mode = path.stat().st_mode & 0o777
+    if not mode & 0o111:
+        raise Failure(f"the staged copy is not executable (mode {mode:o}): {path}")
+    return path
+
+
 def write_feed(root, marker=None):
     """A newer release whose asset is a local file: the feed and the asset.
 
@@ -637,7 +662,7 @@ def write_feed(root, marker=None):
         "body": f"Rolling x86_64 AppImage built from {sha} by the AppImage workflow.",
         "assets": [
             {
-                "name": "unofficial-muse-for-linux-x86_64.AppImage",
+                "name": STAGED_ASSET,
                 "browser_download_url": asset.as_uri(),
                 "size": len(body),
             }
@@ -648,7 +673,7 @@ def write_feed(root, marker=None):
     return feed_path, asset
 
 
-def restart_round(proc, root, copy, timeout):
+def restart_round(proc, root, copy, asset, timeout):
     """Stage a harness release, press Restart, require the copy to take over.
 
     The native card drives it: the page window is the two-window rounds'
@@ -669,12 +694,7 @@ def restart_round(proc, root, copy, timeout):
     wait_until(
         lambda: card(MAIN_FRAME)[2] == "Restart to update", timeout, "the staged card"
     )
-    status = card(MAIN_FRAME)[0] or ""
-    if not status.startswith(DOWNLOADED_PREFIX) or not status.endswith(DOWNLOADED_SUFFIX):
-        raise Failure(f"the download staged nothing to restart into: {status!r}")
-    staged = Path(status[len(DOWNLOADED_PREFIX) : -len(DOWNLOADED_SUFFIX)])
-    if not staged.is_file():
-        raise Failure(f"the staged copy is not a file: {staged}")
+    staged = staged_copy(card(MAIN_FRAME)[0] or "", asset)
 
     if not press(MAIN_FRAME, ("Restart to update",)):
         raise Failure("the native Restart press could not be made")
@@ -787,7 +807,7 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
         )
 
         if restart:
-            ok = restart_round(proc, root, copy, timeout)
+            ok = restart_round(proc, root, copy, asset, timeout)
             return ok
 
         if no_appimage:
@@ -1066,16 +1086,17 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                 timeout,
                 busy_window,
             )
-            if not status.startswith(DOWNLOADED_PREFIX) or not status.endswith(
-                DOWNLOADED_SUFFIX
-            ):
-                raise Failure(f"the download did not report a staged copy: {status!r}")
+            staged = staged_copy(status, asset)
             if action != "Restart to update":
                 raise Failure(f"the staged card should offer Restart, got {action!r}")
             views = wait_web_windows(status, action, timeout, "download")
             print(
                 f"press page download: both mid-download on {mid!r}; "
                 f"all {views} Settings web views staged {status!r} with {action!r}"
+            )
+            print(
+                f"staged copy: {staged.name} holds the feed's {staged.stat().st_size} "
+                f"bytes and is executable (mode {staged.stat().st_mode & 0o777:o})"
             )
 
             # The press the harness must not let through: a relaunch would
