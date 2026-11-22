@@ -489,13 +489,21 @@ def open_settings(command, env, log_path):
         if not press(MAIN_FRAME, (SETTINGS_BUTTON,)):
             raise Failure("the native Settings button could not be pressed")
         wait_until(lambda: card(MAIN_FRAME)[0], 20, "the native card's status")
-        wait_until(
-            lambda: find_button(MAIN_FRAME, (WEB_VIEW_BUTTON,)) is not None,
-            20,
-            f"the {WEB_VIEW_BUTTON} button",
-        )
-        if not press(MAIN_FRAME, (WEB_VIEW_BUTTON,)):
-            raise Failure("the Settings page's Web view button could not be pressed")
+
+        # The page's own Web view button. A button that is there but not yet
+        # pressable -- insensitive while the page settles -- is waited for
+        # rather than pressed once and given up on; the window it opens ends
+        # the wait even if the press did not report itself.
+        def web_view_opened():
+            if first_frame(WEB_FRAME) is not None:
+                return True
+            return press(MAIN_FRAME, (WEB_VIEW_BUTTON,), window=0.25)
+
+        try:
+            wait_until(web_view_opened, 20, f"the {WEB_VIEW_BUTTON} press to land")
+        except Failure:
+            dump_tree(MAIN_FRAME)
+            raise
         wait_until(lambda: first_frame(WEB_FRAME), 25, f"the {WEB_FRAME} window")
         wait_until(lambda: card(WEB_FRAME)[0], 20, "the web card's status")
         return proc
