@@ -310,11 +310,20 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   pins the projection's borrowed wording and the log order. The page was rendered in the preview
   browser with a stand-in channel answering its own read from the boot payload, which caught one
   fault: the controller's ordinary status line was drawn in the error banner, and it is now a
-  neutral line beside the phase, with the pink banner kept for a refused read. The native path
-  (the page's Web view button opening the WebKit window) is unverified on this seat: synthetic
-  input stopped reaching the app here mid-check -- under Xwayland `XTestFakeMotionEvent` and key
-  events are ignored and a warped pointer's presses land at the compositor's pointer -- so the
-  button, like every other native press in this slice, needs a run on a seat that accepts input.
+  neutral line beside the phase, with the pink banner kept for a refused read. The live check on
+  this seat then opened the real window: a startup hook (a throwaway patch, reverted before the
+  commit) showed the native Local host page and opened its Web view, and "Local host · web view"
+  (1040x760) painted from the host's held state -- the phase badge "not running", the controller's
+  own "Disconnected. No folders shared with Muse." line, and the three empty sections -- with the
+  probe reading the page's DOM back as
+  `{"grants":0,"cards":0,"log":0,"phase":"not running","device":""}` after one
+  `localhost.snapshot` over the channel. The native page beside it carried the same notice and the
+  same empty lists, so the two agree on what an idle host looks like. The press itself is the one
+  thing this seat would not give: injected input has stopped arriving here (under Xwayland
+  `XTestFakeMotionEvent` and key events are ignored, and `XWarpPointer` moves only Xwayland's own
+  pointer, so presses land wherever the compositor's pointer sits -- confirmed by a KWin script
+  that activated the window and reported it active), so the hook made the two calls the button
+  makes rather than a click making them.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the
