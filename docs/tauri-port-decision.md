@@ -545,6 +545,13 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   host page's per-write Allow/Deny, saved write permission and Clear log ride `localhost.decide`,
   `localhost.policy` and `localhost.clear_log` into the controller's own methods.
 
+  The two-window update check is a repeatable script now, not a one-off on a seat:
+  `scripts/settings-two-windows.py` starts the app under a throwaway config that copies the saved
+  link, opens the native Settings page and its web view, and presses Check on each card through the
+  accessibility trees -- no pointer injection and no window stacking to get wrong. It fails if
+  either card stays on the busy step (the page's button on `Working…`, a status still reading
+  `Checking for updates…`) or if the two cards read different words once settled.
+
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
   invent); the update's relaunch, which replaces this copy with the verified download and exits it
