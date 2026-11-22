@@ -9,6 +9,7 @@ own last line.
 The rule covers published history too, not only new commits: every message here is
 free of the trailer, and putting one back costs a force-push that rewrites hashes
 to take it out again. `scripts/check-commit-messages.sh` fails a build whose range
-carries one; the same script works as a local hook
-(`ln -s ../../scripts/check-commit-messages.sh .git/hooks/commit-msg`), which is
-how a commit gets refused before it exists.
+carries one, and `.githooks/commit-msg` refuses the commit before it exists. git
+does not clone hooks, so run `scripts/setup-hooks.sh` once per checkout to point
+`core.hooksPath` at `.githooks`; `scripts/setup-hooks.sh --check` says whether it
+is still active.

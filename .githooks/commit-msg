@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Reject a commit whose message carries the Codebuff attribution (AGENTS.md).
+#
+# git does not clone hooks, so this file does nothing until a clone points
+# core.hooksPath at .githooks -- run scripts/setup-hooks.sh once per checkout.
+# The check itself lives in scripts/check-commit-messages.sh so the same rules
+# run here, in CI, and by hand over a range.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel) || {
+    printf 'commit-msg: not inside a git work tree\n' >&2
+    exit 1
+}
+exec "$root/scripts/check-commit-messages.sh" "$1"
