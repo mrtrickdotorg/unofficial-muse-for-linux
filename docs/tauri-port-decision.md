@@ -281,11 +281,22 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   `loaded: false` with the panel's own note ("Link your account first."), so an empty section is
   never mistaken for an empty service. A Settings visit asks the chat controller for the policy
   read when the cache is still empty -- otherwise the page would sit on "not read yet" until
-  someone opened Chat, which the live check found on a fresh launch -- and the page re-asks its
-  snapshot while the policy is unread, so the rows fill in when that read lands instead of staying
-  blank for the life of the window. Nine DOM tests (`Settings.test.tsx`) cover the held link and
-  rows, the unread-then-filled policy, a policy read's failure note, the staged-update sentence,
-  the updater's own status, the unlinked clone, and a refused snapshot. The live check on this
+  someone opened Chat, which the live check found on a fresh launch. That answer is pushed rather
+  than polled for: `settings_policy_cache` reports whether the projection actually changed,
+  `paint_policy` calls `webui::settings_policy_changed()` when it did, and that evaluates
+  `window.musePolicyReady && window.musePolicyReady();` in the Settings window, whose page re-asks
+  `settings.snapshot`. The window registry holds one weak reference per page, so a closed window
+  needs no cleanup and a page without an open window is simply not nudged; a repaint that paints
+  the same policy nudges nobody. The page's four-retry timer is gone: an unread policy is a state
+  to show, not a reason to guess how long a read will take, and a policy that changes while the
+  window is open now reaches it the same way. Ten DOM tests (`Settings.test.tsx`) cover the held
+  link and rows, the app's nudge filling an unread policy (with exactly one read on open, so a
+  poll would fail the test), the hook being removed when the window closes, a policy read's
+  failure note, the staged-update sentence, the updater's own status, the unlinked clone, and a
+  refused snapshot. The push was seen live on this seat: a throwaway startup hook opened the page
+  while the chat panel's read was still in flight (`policy.loaded=false`), and the Policy section
+  then filled with the service's 14 rows -- two flippable, the protocol table, the heading entry --
+  with no timer in the page to do it. The live check on this
   seat rendered the service's 14 policy rows (two flippable, the protocol table, the heading entry
   it publishes as a row), both link paths and the checkout update line, with no WebKit console
   errors and no window-level faults.
