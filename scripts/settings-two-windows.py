@@ -383,11 +383,24 @@ def open_settings(command, env, log_path):
     )
     try:
         wait_until(lambda: first_frame(MAIN_FRAME), 25, f"the {MAIN_FRAME} window")
+        # The rail and its buttons reach the accessibility tree a moment after
+        # the window does, and a loaded runner can take seconds to paint them:
+        # wait for the press to exist instead of racing the first frame.
+        wait_until(
+            lambda: find_button(MAIN_FRAME, (SETTINGS_BUTTON,)) is not None,
+            20,
+            f"the {SETTINGS_BUTTON} button",
+        )
         # The rail's Settings button, then the page's own Web view button once
         # the page is the visible stack child (its card paints by then).
         if not press(MAIN_FRAME, (SETTINGS_BUTTON,)):
             raise Failure("the native Settings button could not be pressed")
         wait_until(lambda: card(MAIN_FRAME)[0], 20, "the native card's status")
+        wait_until(
+            lambda: find_button(MAIN_FRAME, (WEB_VIEW_BUTTON,)) is not None,
+            20,
+            f"the {WEB_VIEW_BUTTON} button",
+        )
         if not press(MAIN_FRAME, (WEB_VIEW_BUTTON,)):
             raise Failure("the Settings page's Web view button could not be pressed")
         wait_until(lambda: first_frame(WEB_FRAME), 25, f"the {WEB_FRAME} window")
