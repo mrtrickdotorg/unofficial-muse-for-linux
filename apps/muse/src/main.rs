@@ -461,13 +461,6 @@ fn step_pane(
 /// on first visit and refills on every visit.
 fn show_main(split: &adw::OverlaySplitView) {
     split.set_show_sidebar(true);
-    // The sign-in page hides the window while it stands; the shell is what
-    // brings it back, so linking does not leave a hidden app behind.
-    if let Some(root) = split.root()
-        && let Ok(window) = root.downcast::<gtk4::Window>()
-    {
-        window.present();
-    }
     // The Mac idiom: icon tools on top, the page list, the History
     // section with the thread listing, and the profile row at the
     // bottom. The page list keeps its index order, so the select/show
@@ -884,12 +877,21 @@ fn show_main(split: &adw::OverlaySplitView) {
     if let Some(first) = sidebar.row_at_index(0) {
         sidebar.select_row(Some(&first));
     }
+    // The sign-in page hides the window while it stands, and this is the
+    // surface that brings it back -- now that its sidebar and its page are in
+    // place, so nothing is presented half-built. At startup the split is not in
+    // the window yet, so this is a no-op and startup's own present stands.
+    if let Some(root) = split.root()
+        && let Ok(window) = root.downcast::<gtk4::Window>()
+    {
+        window.present();
+    }
 }
 
-/// The sign-in screen, shown with no usable saved link and after an
-/// explicit sign-out. A linked form swaps back to the main surface.
-/// Show the sign-in surface. True when a page took it: the page is its own
-/// window, so the app window steps aside instead of standing black behind it.
+/// The sign-in surface, shown with no usable saved link and after an explicit
+/// sign-out. True when a page took it: the page is its own window, so the app
+/// window steps aside instead of standing black behind it, and a saved link
+/// brings it back through [`show_main`].
 fn show_signin(split: &adw::OverlaySplitView) -> bool {
     split.set_show_sidebar(false);
     // No page drawer on this surface: an Escape belongs to the sign-in
@@ -904,10 +906,18 @@ fn show_signin(split: &adw::OverlaySplitView) -> bool {
         // window's leftovers: the same defaults the native form detects.
         crate::pages::signin_cache(crate::pages::HeldSignin::opening());
         let split_for_link = split.clone();
-        // The press runs on the main thread already (the channel handler is
-        // this loop's own), so the next surface is built there, not posted to
-        // a loop that would only hand it back.
-        let press = web_signin::routes(move || show_main(&split_for_link));
+        // A saved link finishes the surface, it does not add one: the page
+        // window closes and the app window takes over. Both happen on the next
+        // idle -- the press arrives inside the WebView's own message handler,
+        // and closing the window that owns it from there would destroy the
+        // view mid-callback.
+        let press = web_signin::routes(move || {
+            let split = split_for_link.clone();
+            gtk4::glib::idle_add_local_once(move || {
+                crate::webui::close_page_window("signin");
+                show_main(&split);
+            });
+        });
         let routes = crate::webui::signin_surface(press);
         if crate::webui::open_signin_window(Some(routes)) {
             // One surface at a time: the page is the sign-in, so the window
