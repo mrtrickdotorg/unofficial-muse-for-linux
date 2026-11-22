@@ -17,6 +17,8 @@ mod login;
 mod pages;
 mod session;
 mod signin;
+#[cfg(feature = "spike-cmd")]
+mod spike_cmd;
 mod update;
 mod voice;
 mod webui;
@@ -582,6 +584,12 @@ fn show_main(split: &adw::OverlaySplitView) {
     let chat_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     stack.add_named(&chat_box, Some("chat"));
     let chat = app::Chat::install(&chat_box);
+    // The throwaway Tauri spike's channel asks this window for the page's own
+    // answers; see `spike_cmd`. Only with the feature, only when asked.
+    #[cfg(feature = "spike-cmd")]
+    if let Ok(path) = std::env::var("MUSE_SPIKE_CMD") {
+        spike_cmd::install(&path, &chat);
+    }
     // App-lifetime singletons: the signal handlers and idle sources
     // hold only weak references, so the strong references live here,
     // leaked for the life of the process.

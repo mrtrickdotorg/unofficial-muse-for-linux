@@ -272,7 +272,7 @@ fn chat_reply(held: &HeldChat) -> serde_json::Value {
 }
 
 /// What a fresh wire read produced off the main loop.
-enum Fetched {
+pub(crate) enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
     Goals(HeldGoals),
     Tasks(HeldTasks),
@@ -287,7 +287,7 @@ enum Fetched {
 
 /// A command's answer. Cache reads answer at once; a wire read answers when
 /// its thread lands, so the window keeps painting during a slow listing.
-enum Answer {
+pub(crate) enum Answer {
     Now(serde_json::Value),
     Later(Receiver<Fetched>),
 }
@@ -522,7 +522,7 @@ pub(crate) struct WebRoutes {
 /// refused instead of guessed at, so a typo in the UI is visible in the page
 /// and in the log. `routes` is the Chat window's way back into the app; every
 /// other page passes `None` and cannot mutate at all.
-fn handle_command_with(
+pub(crate) fn handle_command_with(
     raw: &str,
     client: Option<AccountClient>,
     routes: Option<&WebRoutes>,
@@ -728,7 +728,7 @@ fn handle_command_with(
 /// The reply a worker's answer becomes, and the cache it leaves behind: the
 /// native page, the boot payload and this reply tell the same story
 /// afterwards. Pure over the answer, so a test can read it without a window.
-fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::Value {
+pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::Value {
     match fetched {
         Fetched::Rows(artifacts, total) => {
             crate::pages::library_cache(artifacts.clone(), total);
