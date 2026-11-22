@@ -742,6 +742,12 @@ impl Controller {
             }
         }
     }
+    /// Record a refusal in the read model's own notice line. A chooser's
+    /// answer has no reply ticket to travel on, so the page that asked for the
+    /// press reads the outcome from its next snapshot.
+    pub(crate) fn note(&mut self, text: &str) {
+        self.notice = text.to_owned();
+    }
     pub(crate) fn stop(&mut self) {
         // Cancellation boundary: stop transport BEFORE revoking file capabilities.
         if let Some(session) = self.session.take() {

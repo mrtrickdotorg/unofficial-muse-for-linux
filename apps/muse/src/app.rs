@@ -1437,14 +1437,15 @@ impl Chat {
         connector_default: Option<String>,
         network_default: Option<String>,
         protocols: Vec<(String, String)>,
-    ) {
-        let ticket = match chat.page_begin(Op::Panel) {
-            Some(ticket) => ticket,
-            None => return,
+    ) -> Result<(), String> {
+        // One settings change at a time, the panel's own slot: a page press
+        // that arrives while another is in flight is refused, not queued.
+        let Some(ticket) = chat.page_begin(Op::Panel) else {
+            return Err("Another settings change is already in flight.".to_owned());
         };
         let Some(client) = chat.client_handle() else {
             chat.page_accept(&ticket);
-            return;
+            return Err("Link your account first.".to_owned());
         };
         let modes: std::collections::HashMap<String, String> = protocols.into_iter().collect();
         let change = if modes.is_empty() { None } else { Some(modes) };
@@ -1465,19 +1466,19 @@ impl Chat {
                 chat.refresh_policy();
             },
         );
+        Ok(())
     }
 
     /// One connector reset: the first press arms the row, the
     /// second press on the same row dispatches; the re-read proves
     /// the reset. A repaint disarms, which is the safe default.
-    fn run_connector_reset(chat: &Rc<Self>, connector: &str) {
-        let ticket = match chat.page_begin(Op::Panel) {
-            Some(ticket) => ticket,
-            None => return,
+    fn run_connector_reset(chat: &Rc<Self>, connector: &str) -> Result<(), String> {
+        let Some(ticket) = chat.page_begin(Op::Panel) else {
+            return Err("Another settings change is already in flight.".to_owned());
         };
         let Some(client) = chat.client_handle() else {
             chat.page_accept(&ticket);
-            return;
+            return Err("Link your account first.".to_owned());
         };
         let connector = connector.to_owned();
         dispatch(
@@ -1491,6 +1492,7 @@ impl Chat {
                 chat.refresh_policy();
             },
         );
+        Ok(())
     }
 
     fn paint_identity(&self, identity: Option<&muse_account::AccountIdentity>) {
@@ -1675,23 +1677,17 @@ impl Chat {
                 let (label, value) = (entry.label.clone(), flip.next.clone());
                 press.connect_clicked(move |_| {
                     let Some(chat) = weak.upgrade() else { return };
-                    let (connector_default, network_default, protocols) = match label.as_str() {
-                        "connector_default" => (Some(value.clone()), None, Vec::new()),
-                        "network_default" => (None, Some(value.clone()), Vec::new()),
-                        _ => (None, None, vec![(label.clone(), value.clone())]),
-                    };
-                    // Protocol rows arrive labelled "protocol.<key>";
-                    // the update takes the bare key.
-                    let protocols = protocols
-                        .into_iter()
-                        .map(|(name, mode)| {
-                            (
-                                name.strip_prefix("protocol.").unwrap_or(&name).to_owned(),
-                                mode,
-                            )
-                        })
-                        .collect();
-                    Self::run_settings_update(&chat, connector_default, network_default, protocols);
+                    // The page's own flip press builds the same call from the
+                    // same table; a refusal there is shown, and here the panel
+                    // has no notice line to put it in.
+                    let (connector_default, network_default, protocols) =
+                        crate::pages::policy_update_args(&label, &value);
+                    let _ = Self::run_settings_update(
+                        &chat,
+                        connector_default,
+                        network_default,
+                        protocols,
+                    );
                 });
                 column.append(&press);
             }
@@ -1722,7 +1718,9 @@ impl Chat {
                     return;
                 }
                 armed.set_label("Reset");
-                Self::run_connector_reset(&chat, &name);
+                // The panel has no notice line: a refusal here is silence,
+                // and the re-read that follows a landed reset is the proof.
+                let _ = Self::run_connector_reset(&chat, &name);
             });
             column.append(&press);
             row.set_child(Some(&column));
@@ -1730,21 +1728,11 @@ impl Chat {
         }
     }
 
-    /// The flip a policy row offers, if any: the service's own
-    /// alternating words, never an invented third. Defaults swap
-    /// ask-for-some with always-ask; protocol rows swap ask with
-    /// deny. Anything else is display only.
+    /// The flip a policy row offers, if any. The table is `pages::policy_next`,
+    /// which the Settings page reads too: the panel and the page cannot offer
+    /// different flips.
     fn policy_flip(label: &str, value: &str) -> Option<PolicyFlip> {
-        let next = match (label, value) {
-            ("connector_default", "auto_allow") => "always_ask",
-            ("connector_default", "always_ask") => "auto_allow",
-            ("network_default", "auto_allow") => "always_ask",
-            ("network_default", "always_ask") => "auto_allow",
-            (name, "ask") if name.starts_with("protocol.") => "deny",
-            (name, "deny") if name.starts_with("protocol.") => "ask",
-            _ => return None,
-        };
-        Some(PolicyFlip {
+        crate::pages::policy_next(label, value).map(|next| PolicyFlip {
             next: next.to_owned(),
         })
     }
@@ -2704,6 +2692,11 @@ impl Chat {
         let unstage_weak = weak.clone();
         let approvals_weak = weak.clone();
         let decide_weak = weak.clone();
+        let policy_weak = weak.clone();
+        let reset_weak = weak.clone();
+        let grant_weak = weak.clone();
+        let start_weak = weak.clone();
+        let host_stop_weak = weak.clone();
         crate::webui::WebRoutes {
             send: std::rc::Rc::new(move |text: &str, quote| match send_weak.upgrade() {
                 Some(chat) => chat.web_send(text, quote),
@@ -2729,7 +2722,119 @@ impl Chat {
                 Some(chat) => chat.web_decide(id, word),
                 None => Err("The app window is gone.".to_owned()),
             }),
+            set_policy: std::rc::Rc::new(move |label: &str, value: &str| {
+                match policy_weak.upgrade() {
+                    Some(chat) => chat.web_policy_set(label, value),
+                    None => Err("The app window is gone.".to_owned()),
+                }
+            }),
+            reset_connector: std::rc::Rc::new(move |connector: &str| match reset_weak.upgrade() {
+                Some(chat) => chat.web_connector_reset(connector),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_grant: std::rc::Rc::new(move |consent: bool, writable: bool| {
+                match grant_weak.upgrade() {
+                    Some(chat) => chat.web_host_grant(consent, writable),
+                    None => Err("The app window is gone.".to_owned()),
+                }
+            }),
+            host_start: std::rc::Rc::new(move |consent: bool| match start_weak.upgrade() {
+                Some(chat) => chat.web_host_start(consent),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_stop: std::rc::Rc::new(move || match host_stop_weak.upgrade() {
+                Some(chat) => chat.web_host_stop(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
         }
+    }
+
+    /// The Settings page's flip press: the shared table decides what the row
+    /// may become, and the app's own update call carries it, so the page gains
+    /// no route to the service that the panel does not already have.
+    fn web_policy_set(self: &Rc<Self>, label: &str, value: &str) -> Result<(), String> {
+        let Some(next) = crate::pages::policy_next(label, value) else {
+            return Err(format!("{label} at {value} has no other setting."));
+        };
+        let (connector_default, network_default, protocols) =
+            crate::pages::policy_update_args(label, next);
+        Self::run_settings_update(self, connector_default, network_default, protocols)
+    }
+
+    /// The Settings page's reset press. The page holds the arming; the write
+    /// is the panel's own.
+    fn web_connector_reset(self: &Rc<Self>, connector: &str) -> Result<(), String> {
+        if connector.trim().is_empty() {
+            return Err("Name the connector to reset.".to_owned());
+        }
+        Self::run_connector_reset(self, connector)
+    }
+
+    /// The Local host page's grant press. The chooser stays the app's own
+    /// native dialog -- a page cannot browse the disk, and the folder is the
+    /// person's choice -- so this answers as soon as the dialog is up; the
+    /// grant lands in the page's next snapshot.
+    fn web_host_grant(self: &Rc<Self>, consent: bool, writable: bool) -> Result<(), String> {
+        let parent = gtk4::prelude::WidgetExt::root(self.panel_policy.upcast_ref::<gtk4::Widget>())
+            .and_then(|root| root.downcast::<gtk4::Window>().ok());
+        let dialog = gtk4::FileChooserNative::new(
+            Some("Grant a folder to Muse"),
+            parent.as_ref(),
+            gtk4::FileChooserAction::SelectFolder,
+            Some("Grant"),
+            Some("Cancel"),
+        );
+        dialog.set_select_multiple(false);
+        dialog.set_modal(true);
+        let weak = Rc::downgrade(self);
+        dialog.connect_response(move |dialog, response| {
+            if response != gtk4::ResponseType::Accept {
+                return;
+            }
+            let Some(path) = dialog
+                .files()
+                .item(0)
+                .and_then(|file| file.downcast::<gtk4::gio::File>().ok())
+                .and_then(|file| file.path())
+            else {
+                return;
+            };
+            let Some(chat) = weak.upgrade() else {
+                return;
+            };
+            let granted = chat.host().borrow_mut().grant(path, consent, writable);
+            if let Err(refusal) = granted {
+                // A dialog's answer has no reply ticket: the refusal goes into
+                // the host's own notice line, where every page reads it.
+                chat.host().borrow_mut().note(refusal);
+            }
+            chat.host().borrow_mut().poll();
+        });
+        dialog.show();
+        Ok(())
+    }
+
+    /// Start the host from a page. The consent it carries is the page's own
+    /// checked box; the host refuses without one, exactly as it does for the
+    /// native press.
+    fn web_host_start(self: &Rc<Self>, consent: bool) -> Result<(), String> {
+        let Some(client) = self.client_handle() else {
+            return Err("Link your account first.".to_owned());
+        };
+        let config = client.bridge_config();
+        self.host()
+            .borrow_mut()
+            .start(Some(config), consent)
+            .map_err(str::to_owned)?;
+        self.host().borrow_mut().poll();
+        Ok(())
+    }
+
+    /// Stop the host and revoke its grants, the native stop's own call.
+    fn web_host_stop(self: &Rc<Self>) -> Result<(), String> {
+        self.host().borrow_mut().stop();
+        self.host().borrow_mut().poll();
+        Ok(())
     }
 
     /// Armed two-press turn delete. The first press arms the latest

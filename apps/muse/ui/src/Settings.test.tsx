@@ -1,6 +1,6 @@
 // S2's gate for the Settings page: the page's behaviour against the same
 // channel the app speaks, with no window and no account.
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Settings } from "./Settings";
 import { installChannel } from "./testChannel";
@@ -54,7 +54,10 @@ describe("the Settings web page", () => {
       screen.getByText("connector_default"),
     ).toBeInTheDocument();
     expect(screen.getByText("always_ask")).toBeInTheDocument();
-    expect(screen.getByText("· set to auto_allow in the app")).toBeInTheDocument();
+    // A flippable row carries its own press, offering the word the app's own
+    // table would accept -- never a word the page chose.
+    expect(screen.getByRole("button", { name: "Set to auto_allow" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Set to always_ask" })).toBeInTheDocument();
     expect(screen.getByText("2 setting(s) the service withheld.")).toBeInTheDocument();
     // Two settings rows plus the connector row the panel names.
     expect(policyRows()).toBe(3);
@@ -176,6 +179,80 @@ describe("the Settings web page", () => {
     unmount();
     // A closed page leaves nothing for a later paint to call.
     expect(window.musePolicyReady).toBeUndefined();
+  });
+
+  it("flips a row through the app's route, one write per press", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    const commands = installChannel(
+      () => ({ ok: true, ...held }),
+      (request) => seen.push(request),
+      40,
+    );
+
+    render(<Settings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set to auto_allow" }));
+    // While the app has not answered, the press has become a wait: the whole
+    // policy section is one settings change at a time, as the panel's ticket is.
+    expect(screen.getByRole("button", { name: "Setting…" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Setting…" }));
+    expect(screen.getByRole("button", { name: "Set to always_ask" })).toBeDisabled();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Set to auto_allow" })).toBeEnabled(),
+    );
+    expect(commands.filter((command) => command === "settings.policy.set")).toHaveLength(1);
+    // The row's own label and value travel, not the word the page offered.
+    expect(seen.find((request) => request.cmd === "settings.policy.set")).toMatchObject({
+      label: "connector_default",
+      value: "always_ask",
+    });
+  });
+
+  it("prints the app's own sentence when a flip is refused", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) =>
+      command === "settings.policy.set"
+        ? { ok: false, error: "Another settings change is already in flight." }
+        : { ok: true, ...held },
+    );
+
+    render(<Settings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Set to auto_allow" }));
+    expect(
+      await screen.findByText("Another settings change is already in flight."),
+    ).toBeInTheDocument();
+    // The row is unchanged: the page never predicts the service's answer.
+    expect(screen.getByRole("button", { name: "Set to auto_allow" })).toBeEnabled();
+  });
+
+  it("resets a connector on the second press and sends the one name", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    const commands = installChannel(
+      (command) =>
+        command === "settings.connector.reset" ? { ok: true } : { ok: true, ...held },
+      (request) => seen.push(request),
+    );
+
+    render(<Settings />);
+
+    // The first press arms the row, the native panel's own rule; nothing is
+    // written yet.
+    fireEvent.click(await screen.findByRole("button", { name: "Reset" }));
+    expect(screen.getByRole("button", { name: "Confirm reset" })).toBeInTheDocument();
+    expect(commands).not.toContain("settings.connector.reset");
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reset" }));
+    await waitFor(() => expect(commands).toContain("settings.connector.reset"));
+    expect(seen.find((request) => request.cmd === "settings.connector.reset")).toMatchObject({
+      connector: "calendar",
+    });
   });
 
   it("reports the policy read's own failure rather than an empty panel", async () => {

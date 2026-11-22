@@ -545,7 +545,11 @@ pub(crate) fn should_log_command(
         || command.ends_with(".run")
         || command.ends_with(".send")
         || command.ends_with(".stop")
-        || command.ends_with(".decide");
+        || command.ends_with(".decide")
+        || command.ends_with(".set")
+        || command.ends_with(".reset")
+        || command.ends_with(".grant")
+        || command.ends_with(".start");
     wire || named.insert(command.to_owned())
 }
 
@@ -564,6 +568,11 @@ pub(crate) type WebAttach = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebUnstage = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 pub(crate) type WebApprovals = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebDecide = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
+pub(crate) type WebSetPolicy = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
+pub(crate) type WebResetConnector = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+pub(crate) type WebHostGrant = std::rc::Rc<dyn Fn(bool, bool) -> Result<(), String>>;
+pub(crate) type WebHostStart = std::rc::Rc<dyn Fn(bool) -> Result<(), String>>;
+pub(crate) type WebHostStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 
 /// The routes a page has back into the app for its controls. None is a
 /// dispatcher of its own: a send goes through the app's single sender, Stop
@@ -582,6 +591,33 @@ pub(crate) struct WebRoutes {
     pub approvals: WebApprovals,
     /// Decide one pending approval: the service's own outcome word.
     pub decide: WebDecide,
+    /// Flip one policy row: the same table and the same update call as the
+    /// chat panel's own press.
+    pub set_policy: WebSetPolicy,
+    /// Reset one connector's grants: the chat panel's own armed press, minus
+    /// the arming, which the page holds.
+    pub reset_connector: WebResetConnector,
+    /// Ask for a folder grant. The chooser is the app's own native dialog;
+    /// the page gets the outcome from its next snapshot.
+    pub host_grant: WebHostGrant,
+    /// Start the local host, carrying the page's consent.
+    pub host_start: WebHostStart,
+    /// Stop the host and revoke its grants.
+    pub host_stop: WebHostStop,
+}
+
+/// The answer a mutating command gets: `ok` when the app took the press, and
+/// the route's own sentence when it refused. A window opened without routes
+/// cannot mutate at all, and says so in the page instead of doing nothing.
+fn route_answer(result: Option<Result<(), String>>) -> Answer {
+    match result {
+        None => Answer::Now(serde_json::json!({
+            "ok": false,
+            "error": "this window cannot make that change"
+        })),
+        Some(Ok(())) => Answer::Now(serde_json::json!({ "ok": true })),
+        Some(Err(sentence)) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
+    }
 }
 
 /// One command from the page. Reads only, and by name: an unknown command is
@@ -767,6 +803,50 @@ pub(crate) fn handle_command_with(
                 },
             }
         }
+        // The Settings page's flips and resets: the same table, the same
+        // update call and the same ticket the chat panel's presses take, so a
+        // page press and a panel press cannot disagree or run two at once.
+        "settings.policy.set" => {
+            let label = request
+                .get("label")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let value = request
+                .get("value")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            route_answer(routes.map(|routes| (routes.set_policy)(label, value)))
+        }
+        "settings.connector.reset" => {
+            let connector = request
+                .get("connector")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            route_answer(routes.map(|routes| (routes.reset_connector)(connector)))
+        }
+        // The Local host page's three writes. Granting still opens the app's
+        // own folder chooser -- the page cannot browse the disk, and the
+        // choice is the person's -- but the grant itself is the same call the
+        // native page makes, and its outcome arrives in the next snapshot.
+        "localhost.grant" => {
+            let consent = request
+                .get("consent")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let writable = request
+                .get("writable")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            route_answer(routes.map(|routes| (routes.host_grant)(consent, writable)))
+        }
+        "localhost.start" => {
+            let consent = request
+                .get("consent")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            route_answer(routes.map(|routes| (routes.host_start)(consent)))
+        }
+        "localhost.stop" => route_answer(routes.map(|routes| (routes.host_stop)())),
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -1302,35 +1382,38 @@ pub(crate) fn open_search_window(held: HeldSearch, client: Option<AccountClient>
 /// Open the web shell: the rail, the page list and every page in one window.
 /// Each page asks its own snapshot there, so the shell's own payload is only
 /// the list.
-pub(crate) fn open_shell_window() -> bool {
-    open_window(
+pub(crate) fn open_shell_window(routes: Option<WebRoutes>) -> bool {
+    open_window_with(
         None,
         "Muse · web shell",
         shell_document(),
         None,
         SHELL_PROBE,
+        routes,
     )
 }
 
-pub(crate) fn open_settings_window(held: HeldSettings) -> bool {
-    open_window(
+pub(crate) fn open_settings_window(held: HeldSettings, routes: Option<WebRoutes>) -> bool {
+    open_window_with(
         Some("settings"),
         "Settings · web view",
         settings_document(&held),
         None,
         SETTINGS_PROBE,
+        routes,
     )
 }
 
 /// Open the Local host page in its own window. No client: the host's state is
 /// held natively and the page reads none of it over the wire.
-pub(crate) fn open_localhost_window(held: HeldLocalHost) -> bool {
-    open_window(
+pub(crate) fn open_localhost_window(held: HeldLocalHost, routes: Option<WebRoutes>) -> bool {
+    open_window_with(
         None,
         "Local host · web view",
         localhost_document(&held),
         None,
         LOCALHOST_PROBE,
+        routes,
     )
 }
 
@@ -2038,6 +2121,11 @@ mod tests {
             unstage: Rc::new(|_: &str| Ok(())),
             approvals: Rc::new(|| Ok(())),
             decide: Rc::new(|_: &str, _: &str| Ok(())),
+            set_policy: Rc::new(|_: &str, _: &str| Ok(())),
+            reset_connector: Rc::new(|_: &str| Ok(())),
+            host_grant: Rc::new(|_: bool, _: bool| Ok(())),
+            host_start: Rc::new(|_: bool| Ok(())),
+            host_stop: Rc::new(|| Ok(())),
         }
     }
 
@@ -3081,6 +3169,108 @@ mod tests {
 
     /// The shell's document carries the app's own page list, so the rail and
     /// drawer cannot offer a page the app does not have.
+    /// The Settings page's flip reaches the app's own update route with the
+    /// row's label and the word the page sent: the page picks nothing itself.
+    #[test]
+    fn the_settings_flip_reaches_the_app_with_its_row() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        let slot = seen.clone();
+        let routes = WebRoutes {
+            set_policy: Rc::new(move |label: &str, value: &str| {
+                slot.borrow_mut().push((label.to_owned(), value.to_owned()));
+                Ok(())
+            }),
+            ..stub_routes()
+        };
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":7,"cmd":"settings.policy.set","label":"protocol.files","value":"deny"}"#,
+            None,
+            Some(&routes),
+        );
+        assert_eq!(command, "settings.policy.set");
+        assert_eq!(
+            *seen.borrow(),
+            vec![("protocol.files".to_owned(), "deny".to_owned())]
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a flip is answered now");
+        };
+        assert_eq!(reply["ok"], true);
+    }
+
+    /// A refusal keeps the app's own sentence, so the page can print the reason
+    /// the press did nothing rather than guessing at one.
+    #[test]
+    fn a_refused_flip_shows_the_apps_sentence() {
+        use std::rc::Rc;
+        let routes = WebRoutes {
+            set_policy: Rc::new(|_: &str, _: &str| {
+                Err("Another settings change is already in flight.".to_owned())
+            }),
+            ..stub_routes()
+        };
+        let (_, Answer::Now(reply), _) = handle_command_with(
+            r#"{"id":8,"cmd":"settings.policy.set","label":"connector_default","value":"always_ask"}"#,
+            None,
+            Some(&routes),
+        ) else {
+            panic!("a refusal is answered now");
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(
+            reply["error"],
+            "Another settings change is already in flight."
+        );
+    }
+
+    /// The Local host page's consent is data, not a claim: the page sends what
+    /// its box says, and the host decides.
+    #[test]
+    fn the_host_start_carries_the_pages_consent() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen: Rc<RefCell<Vec<bool>>> = Rc::new(RefCell::new(Vec::new()));
+        let slot = seen.clone();
+        let routes = WebRoutes {
+            host_start: Rc::new(move |consent: bool| {
+                slot.borrow_mut().push(consent);
+                Ok(())
+            }),
+            ..stub_routes()
+        };
+        let (_, Answer::Now(reply), command) = handle_command_with(
+            r#"{"id":9,"cmd":"localhost.start","consent":true}"#,
+            None,
+            Some(&routes),
+        ) else {
+            panic!("a start is answered now");
+        };
+        assert_eq!(command, "localhost.start");
+        assert_eq!(reply["ok"], true);
+        assert_eq!(*seen.borrow(), vec![true]);
+    }
+
+    /// Reads stay reads: a window without routes cannot flip, reset, grant,
+    /// start or stop, and says so instead of doing nothing.
+    #[test]
+    fn a_window_without_routes_cannot_write() {
+        for raw in [
+            r#"{"id":1,"cmd":"settings.policy.set","label":"connector_default","value":"auto_allow"}"#,
+            r#"{"id":2,"cmd":"settings.connector.reset","connector":"notes"}"#,
+            r#"{"id":3,"cmd":"localhost.grant","consent":true,"writable":false}"#,
+            r#"{"id":4,"cmd":"localhost.start","consent":true}"#,
+            r#"{"id":5,"cmd":"localhost.stop"}"#,
+        ] {
+            let (_, Answer::Now(reply), command) = handle_command_with(raw, None, None) else {
+                panic!("{raw} is answered now");
+            };
+            assert_eq!(reply["ok"], false, "{command} is refused");
+            assert_eq!(reply["error"], "this window cannot make that change");
+        }
+    }
+
     #[test]
     fn the_shell_lists_every_page_it_opens() {
         let doc = shell_document();

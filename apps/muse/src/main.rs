@@ -443,13 +443,9 @@ fn show_main(split: &adw::OverlaySplitView) {
     // in one window of their own. This button is the part of this window that
     // the port retires last.
     let shell_button = gtk4::Button::with_label("Shell");
+    shell_button.set_widget_name("shell");
     shell_button.add_css_class("flat");
     widget::describe(&shell_button, "Open the web shell");
-    shell_button.connect_clicked(move |_| {
-        if !crate::webui::open_shell_window() {
-            eprintln!("muse: the web shell is unavailable in this build");
-        }
-    });
     tools.append(&shell_button);
     side.append(&tools);
     let sidebar = gtk4::ListBox::new();
@@ -622,6 +618,19 @@ fn show_main(split: &adw::OverlaySplitView) {
         },
     };
     let ctx = Rc::new(ctx);
+    // The shell mounts every page, so it carries the same routes the pages'
+    // own windows do: wired here, where the app's chat panel is reachable.
+    {
+        let chat = ctx.chat.clone();
+        if let Some(shell) = pages::named_button(&side, "shell") {
+            shell.connect_clicked(move |_| {
+                let routes = chat.upgrade().map(|chat| chat.web_routes());
+                if !crate::webui::open_shell_window(routes) {
+                    eprintln!("muse: the web shell is unavailable in this build");
+                }
+            });
+        }
+    }
     let nav_ctx = ctx.clone();
     // A page opens on activation — Return, Space or a press — not on
     // selection: browsing the list with the arrow keys would otherwise

@@ -9,16 +9,34 @@ const PHASE_WORDS: Record<string, string> = {
   registered: "registered with your account",
 };
 
-/// The Local host page: the host's read model, read-only. Every press that
-/// changes the boundary -- granting a folder, starting, stopping, allowing or
-/// denying a write -- stays on the native page, and this page says so instead
-/// of drawing controls that cannot act.
+/// The native page's consent sentence, word for word: the page must not
+/// describe the boundary in softer terms than the window that enforces it.
+const CONSENT =
+  "I explicitly enable this local host and allow granted filenames and text to reach Muse.";
+const READ_ONLY =
+  "Grant read-only: folders granted while this is on can be read and searched, but Muse can never propose a write in them.";
+
+function sentence(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
+}
+
+/// The Local host page: the host's read model, plus the three presses that
+/// open and close the boundary -- grant a folder, start, stop. Each press is
+/// the app's own call, keeps the page's one-press-one-write rule, and its
+/// outcome arrives in the next snapshot. Per-write Allow/Deny, the saved write
+/// permission and Clear log stay on the native page, and this one says so.
 export function LocalHost() {
   const boot = window.__MUSE_BOOT__;
   const [data, setData] = useState<LocalHostSnapshot | null>(
     boot && "grants" in boot ? boot : null,
   );
   const [error, setError] = useState<string | null>(null);
+  const [consent, setConsent] = useState(false);
+  const [readOnly, setReadOnly] = useState(true);
+  // One write at a time: the host is one boundary, so a start cannot race a
+  // grant. A second press on any control is ignored until the first answers.
+  const [writing, setWriting] = useState<"grant" | "start" | "stop" | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   const loadSnapshot = useCallback(async () => {
     if (!channelAvailable()) {
@@ -30,7 +48,7 @@ export function LocalHost() {
       setData(held);
       setError(null);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(sentence(failure));
     }
   }, []);
 
@@ -49,6 +67,27 @@ export function LocalHost() {
     return () => clearInterval(timer);
   }, [loadSnapshot]);
 
+  const write = async (
+    kind: "grant" | "start" | "stop",
+    command: string,
+    extra: Record<string, unknown>,
+  ) => {
+    if (writing) return;
+    setWriting(kind);
+    setRefusal(null);
+    try {
+      await call(command, 15_000, extra);
+      // The grant dialog answers on its own; a start or stop has landed by the
+      // time the app replies, so re-read now instead of waiting for the pump.
+      if (kind !== "grant") await loadSnapshot();
+      if (kind === "stop") setConsent(false);
+    } catch (failure) {
+      setRefusal(sentence(failure));
+    } finally {
+      setWriting(null);
+    }
+  };
+
   const phase = data?.phase ?? "";
   const grants = data?.grants ?? [];
   const cards = data?.pending ?? [];
@@ -64,9 +103,60 @@ export function LocalHost() {
       {data?.identity && <p className="note">{data.identity}</p>}
       {data?.device && <p className="note host-device">Device {data.device}</p>}
       {/* The controller's notice is its ordinary status line, not a failure:
-          the pink banner is kept for a refused read. */}
+          the pink banner is kept for a refused read or write. */}
       {data?.notice && <p className="host-notice">{data.notice}</p>}
       {error && <div className="banner">Command failed: {error}</div>}
+      {refusal && <div className="banner">Command failed: {refusal}</div>}
+
+      <div className="host-boundary">
+        <label className="host-check">
+          <input
+            type="checkbox"
+            checked={consent}
+            onChange={(event) => setConsent(event.target.checked)}
+          />
+          <span>{CONSENT}</span>
+        </label>
+        <label className="host-check">
+          <input
+            type="checkbox"
+            checked={readOnly}
+            onChange={(event) => setReadOnly(event.target.checked)}
+          />
+          <span>{READ_ONLY}</span>
+        </label>
+        <div className="host-actions">
+          <button
+            type="button"
+            className="inline-button"
+            disabled={writing !== null}
+            onClick={() =>
+              void write("grant", "localhost.grant", {
+                consent,
+                writable: !readOnly,
+              })
+            }
+          >
+            {writing === "grant" ? "Choosing a folder…" : "Grant a folder to Muse…"}
+          </button>
+          <button
+            type="button"
+            className="inline-button"
+            disabled={writing !== null}
+            onClick={() => void write("start", "localhost.start", { consent })}
+          >
+            {writing === "start" ? "Starting…" : "Start local host"}
+          </button>
+          <button
+            type="button"
+            className="inline-button danger"
+            disabled={writing !== null}
+            onClick={() => void write("stop", "localhost.stop", {})}
+          >
+            {writing === "stop" ? "Stopping…" : "Stop & revoke all"}
+          </button>
+        </div>
+      </div>
 
       <h2 className="section">Granted folders</h2>
       {grants.length === 0 ? (
@@ -116,9 +206,10 @@ export function LocalHost() {
       )}
 
       <div className="foot">
-        Web UI slice of the port: read-only, rendered from the host's own read
-        model — the same grants, cards and log the native page paints. Granting,
-        starting, stopping, allowing and denying stay in the app.
+        Web UI slice of the port: rendered from the host's own read model — the
+        same grants, cards and log the native page paints. Granting a folder,
+        starting and stopping are here; per-write Allow/Deny, the saved write
+        permission and Clear log stay in the app.
       </div>
     </div>
   );

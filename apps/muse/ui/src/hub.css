@@ -1106,3 +1106,69 @@ html, body {
   min-width: 0;
   overflow-y: auto;
 }
+
+/* The writes the pages carry. An inline button is a row's own press -- it sits
+ * beside the value it would change, not in a toolbar of its own -- and a
+ * disabled one is a write already in flight: the page's one-press-one-write
+ * rule, made visible. */
+.inline-button {
+  margin-left: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inline-button:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.inline-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.inline-button.danger:not(:disabled) {
+  border-color: rgba(245, 158, 11, 0.45);
+  color: var(--warn);
+}
+
+.write-refusal {
+  color: var(--warn);
+}
+
+/* The host's boundary: the consent sentence, the read-only choice and the
+ * three presses that open or close the session. */
+.host-boundary {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0 6px;
+}
+
+.host-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.host-check input {
+  margin-top: 2px;
+}
+
+.host-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.host-actions .inline-button {
+  margin-left: 0;
+}

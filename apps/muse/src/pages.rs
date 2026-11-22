@@ -82,6 +82,43 @@ pub fn title(name: &str) -> &str {
     }
 }
 
+/// The flip a policy row offers, if any: the service's own alternating words,
+/// never an invented third. The chat panel's press and the Settings page's
+/// press both read this table, so the two surfaces cannot offer different
+/// flips or ask the service for different settings.
+pub(crate) fn policy_next(label: &str, value: &str) -> Option<&'static str> {
+    match (label, value) {
+        ("connector_default", "auto_allow") => Some("always_ask"),
+        ("connector_default", "always_ask") => Some("auto_allow"),
+        ("network_default", "auto_allow") => Some("always_ask"),
+        ("network_default", "always_ask") => Some("auto_allow"),
+        (name, "ask") if name.starts_with("protocol.") => Some("deny"),
+        (name, "deny") if name.starts_with("protocol.") => Some("ask"),
+        _ => None,
+    }
+}
+
+/// The service call a policy row's flip becomes: the defaults carry their own
+/// word, and a protocol row's `protocol.<key>` label becomes the bare key the
+/// update takes.
+pub(crate) fn policy_update_args(
+    label: &str,
+    next: &str,
+) -> (Option<String>, Option<String>, Vec<(String, String)>) {
+    match label {
+        "connector_default" => (Some(next.to_owned()), None, Vec::new()),
+        "network_default" => (None, Some(next.to_owned()), Vec::new()),
+        _ => (
+            None,
+            None,
+            vec![(
+                label.strip_prefix("protocol.").unwrap_or(label).to_owned(),
+                next.to_owned(),
+            )],
+        ),
+    }
+}
+
 /// One rail page as the web shell renders it: the name the stack uses and the
 /// title the drawer prints.
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
@@ -752,9 +789,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             web_view.set_widget_name("settings-web");
             web_view.set_valign(gtk4::Align::Center);
             web_view.set_sensitive(crate::webui::available());
-            web_view.set_tooltip_text(Some(
-                "Open Settings in the web UI slice of the port (read-only)",
-            ));
+            web_view.set_tooltip_text(Some("Open Settings in the web UI slice of the port"));
             if !crate::webui::available() {
                 web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
             }
@@ -762,8 +797,13 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             {
                 // Resolved per press: the window opens on what the app holds
                 // now, including the policy the chat panel last read.
+                let chat = ctx.chat.clone();
                 web_view.connect_clicked(move |_| {
-                    if !crate::webui::open_settings_window(settings_snapshot()) {
+                    // Resolved per press, so the window opens with whatever the
+                    // app holds now and its flips reach the app's own update
+                    // path. A window opened without them is read-only.
+                    let routes = chat.upgrade().map(|chat| chat.web_routes());
+                    if !crate::webui::open_settings_window(settings_snapshot(), routes) {
                         eprintln!("muse: web view unavailable in this build");
                     }
                 });
@@ -830,9 +870,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             web_view.set_widget_name("localhost-web");
             web_view.set_valign(gtk4::Align::Center);
             web_view.set_sensitive(crate::webui::available());
-            web_view.set_tooltip_text(Some(
-                "Open Local host in the web UI slice of the port (read-only)",
-            ));
+            web_view.set_tooltip_text(Some("Open Local host in the web UI slice of the port"));
             if !crate::webui::available() {
                 web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
             }
@@ -840,8 +878,10 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             {
                 // Resolved per press: the window opens on what the controller
                 // holds now, including any card waiting for a decision.
+                let chat = ctx.chat.clone();
                 web_view.connect_clicked(move |_| {
-                    if !crate::webui::open_localhost_window(localhost_snapshot()) {
+                    let routes = chat.upgrade().map(|chat| chat.web_routes());
+                    if !crate::webui::open_localhost_window(localhost_snapshot(), routes) {
                         eprintln!("muse: web view unavailable in this build");
                     }
                 });
@@ -1419,7 +1459,7 @@ fn named_label(page: &gtk4::Box, name: &str) -> Option<gtk4::Label> {
         .ok()
 }
 
-fn named_button(page: &gtk4::Box, name: &str) -> Option<gtk4::Button> {
+pub(crate) fn named_button(page: &gtk4::Box, name: &str) -> Option<gtk4::Button> {
     find_widget(page.upcast_ref(), name)?
         .downcast::<gtk4::Button>()
         .ok()
@@ -7047,6 +7087,42 @@ mod tests {
         // never an accident.
         assert!(!PAGES.contains(&"memory"));
         assert!(!PAGES.contains(&"policy"));
+    }
+
+    /// The table the panel and the Settings page both read: only the pairs the
+    /// service accepts have a flip, and each flip becomes exactly one update
+    /// argument -- a default's own word, or a protocol's bare key.
+    #[test]
+    fn every_policy_flip_carries_the_update_it_becomes() {
+        assert_eq!(
+            policy_next("connector_default", "auto_allow"),
+            Some("always_ask")
+        );
+        assert_eq!(
+            policy_next("connector_default", "always_ask"),
+            Some("auto_allow")
+        );
+        assert_eq!(
+            policy_next("network_default", "auto_allow"),
+            Some("always_ask")
+        );
+        assert_eq!(policy_next("protocol.files", "ask"), Some("deny"));
+        assert_eq!(policy_next("protocol.files", "deny"), Some("ask"));
+        assert_eq!(policy_next("protocol.files", "auto_allow"), None);
+        assert_eq!(policy_next("note", "ask"), None);
+        assert_eq!(policy_next("connector_default", ""), None);
+
+        let (connector, network, protocols) = policy_update_args("connector_default", "always_ask");
+        assert_eq!(connector.as_deref(), Some("always_ask"));
+        assert!(network.is_none() && protocols.is_empty());
+
+        let (connector, network, protocols) = policy_update_args("network_default", "auto_allow");
+        assert_eq!(network.as_deref(), Some("auto_allow"));
+        assert!(connector.is_none() && protocols.is_empty());
+
+        // The row is labelled "protocol.<key>"; the update takes the key.
+        let (_, _, protocols) = policy_update_args("protocol.files", "deny");
+        assert_eq!(protocols, vec![("files".to_owned(), "deny".to_owned())]);
     }
 
     #[test]

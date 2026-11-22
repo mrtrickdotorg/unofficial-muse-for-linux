@@ -1,6 +1,6 @@
 // S2's gate for the Local host page: the page's behaviour against the same
 // channel the app speaks, with no window, no host and no account.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { LocalHost } from "./LocalHost";
 import { installChannel } from "./testChannel";
@@ -151,6 +151,128 @@ describe("the Local host web page", () => {
       screen.getByText("files.edit_text Scratch/notes.txt → awaiting your Allow"),
     ).toBeInTheDocument();
     expect(approvalCards()).toBe(1);
+  });
+
+  it("starts the host with the consent box's own word", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (command) => (command === "localhost.start" ? { ok: true } : { ok: true, ...held }),
+      (request) => seen.push(request),
+    );
+
+    render(<LocalHost />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start local host" }));
+    await waitFor(() =>
+      expect(seen.find((request) => request.cmd === "localhost.start")).toMatchObject({
+        consent: false,
+      }),
+    );
+
+    // With the box checked the same press carries the consent; the page never
+    // claims a permission the person did not give.
+    const start = await screen.findByRole("button", { name: "Start local host" });
+    fireEvent.click(screen.getByRole("checkbox", { name: /I explicitly enable/ }));
+    fireEvent.click(start);
+    await waitFor(() =>
+      expect(
+        seen.filter((request) => request.cmd === "localhost.start").map((r) => r.consent),
+      ).toEqual([false, true]),
+    );
+  });
+
+  it("keeps one press one write while a start is in flight", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const commands = installChannel(
+      (command) => (command === "localhost.start" ? { ok: true } : { ok: true, ...held }),
+      undefined,
+      40,
+    );
+
+    render(<LocalHost />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start local host" }));
+    expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Starting…" }));
+    // The other boundary presses wait with it: the host is one boundary.
+    expect(screen.getByRole("button", { name: "Stop & revoke all" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Grant a folder to Muse…" })).toBeDisabled();
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Start local host" })).toBeEnabled(),
+    );
+    expect(commands.filter((command) => command === "localhost.start")).toHaveLength(1);
+  });
+
+  it("stops and revokes, and drops the consent with the session", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const commands = installChannel(
+      (command) => (command === "localhost.stop" ? { ok: true } : { ok: true, ...held }),
+    );
+
+    render(<LocalHost />);
+    const consent = screen.getByRole("checkbox", { name: /I explicitly enable/ });
+    fireEvent.click(consent);
+    expect(consent).toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop & revoke all" }));
+    await waitFor(() => expect(commands).toContain("localhost.stop"));
+    // The next start has to be consented to again, as the native page's own
+    // stop unchecks the box.
+    await waitFor(() => expect(consent).not.toBeChecked());
+  });
+
+  it("grants with the read-only choice made on the page", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (command) => (command === "localhost.grant" ? { ok: true } : { ok: true, ...held }),
+      (request) => seen.push(request),
+    );
+
+    render(<LocalHost />);
+
+    // Read-only is the page's default, as the native check starts on.
+    fireEvent.click(screen.getByRole("button", { name: "Grant a folder to Muse…" }));
+    await waitFor(() =>
+      expect(seen.find((request) => request.cmd === "localhost.grant")).toMatchObject({
+        consent: false,
+        writable: false,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /I explicitly enable/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Grant read-only/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Grant a folder to Muse…" }));
+    await waitFor(() =>
+      expect(
+        seen.filter((request) => request.cmd === "localhost.grant").map((r) => r.writable),
+      ).toEqual([false, true]),
+    );
+  });
+
+  it("prints the app's sentence when the host refuses a start", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) =>
+      command === "localhost.start"
+        ? { ok: false, error: "Stop the host and explicitly consent before granting a folder." }
+        : { ok: true, ...held },
+    );
+
+    render(<LocalHost />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start local host" }));
+    expect(
+      await screen.findByText(
+        /Command failed: Stop the host and explicitly consent before granting a folder\./,
+      ),
+    ).toBeInTheDocument();
   });
 
   it("reports a refused snapshot instead of painting a stale host", async () => {

@@ -45,12 +45,25 @@ function Row({
   );
 }
 
+function sentence(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
+}
+
 export function Settings() {
   const boot = window.__MUSE_BOOT__;
   const [data, setData] = useState<SettingsSnapshot | null>(
     boot && "link" in boot ? boot : null,
   );
   const [error, setError] = useState<string | null>(null);
+  // One settings change at a time: the app holds a single ticket for the
+  // panel's presses, so every flip control waits while one is in flight --
+  // the native panel's own rule, since a second press there is refused.
+  const [flipping, setFlipping] = useState<string | null>(null);
+  // A connector reset is two presses on the same row: the first arms it and
+  // a repaint disarms, which is the native panel's safe default.
+  const [armed, setArmed] = useState<string | null>(null);
+  const [resetting, setResetting] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
 
   // Opening the page costs nothing: the native side answers with the state its
   // own paints left behind.
@@ -64,7 +77,7 @@ export function Settings() {
       setData(held);
       setError(null);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(sentence(failure));
     }
   }, []);
 
@@ -87,9 +100,48 @@ export function Settings() {
     };
   }, [loadSnapshot]);
 
+  const policy = data?.policy;
+  const connectors = policy?.connectors.join("|") ?? "";
+  // A repaint disarms the reset row: the connectors list changing is the paint.
+  useEffect(() => {
+    setArmed(null);
+  }, [connectors]);
+
+  const flip = async (label: string, value: string) => {
+    if (flipping || resetting) return;
+    setFlipping(label);
+    setRefusal(null);
+    try {
+      // The app's own table decides what the row becomes; the page sends the
+      // row it shows, not a word it made up.
+      await call("settings.policy.set", 15_000, { label, value });
+    } catch (failure) {
+      setRefusal(sentence(failure));
+    } finally {
+      setFlipping(null);
+    }
+  };
+
+  const reset = async (connector: string) => {
+    if (resetting || flipping) return;
+    if (armed !== connector) {
+      setArmed(connector);
+      return;
+    }
+    setArmed(null);
+    setResetting(connector);
+    setRefusal(null);
+    try {
+      await call("settings.connector.reset", 15_000, { connector });
+    } catch (failure) {
+      setRefusal(sentence(failure));
+    } finally {
+      setResetting(null);
+    }
+  };
+
   const link = data?.link;
   const updates = data?.updates;
-  const policy = data?.policy;
 
   return (
     <div className="page settings-page">
@@ -125,24 +177,47 @@ export function Settings() {
       <h2 className="section">Policy</h2>
       {policy?.loaded ? (
         <div className="policy-loaded">
-          {policy.rows.map((row) => (
-            <Row
-              key={row.label}
-              label={row.label}
-              value={row.value}
-              className="policy-row"
-              hint={row.flip ? `set to ${row.flip} in the app` : undefined}
-            />
-          ))}
+          {policy.rows.map((row) =>
+            row.flip ? (
+              <div className="settings-row policy-row" key={row.label}>
+                <span className="settings-label">{row.label}</span>
+                <span className="settings-value">
+                  {row.value}
+                  <button
+                    type="button"
+                    className="inline-button"
+                    disabled={flipping !== null || resetting !== null}
+                    onClick={() => void flip(row.label, row.value)}
+                  >
+                    {flipping === row.label ? "Setting…" : `Set to ${row.flip}`}
+                  </button>
+                </span>
+              </div>
+            ) : (
+              <Row key={row.label} label={row.label} value={row.value} className="policy-row" />
+            ),
+          )}
           {policy.connectors.map((name) => (
-            <Row
-              key={`connector-${name}`}
-              label={name}
-              value="connector grants"
-              className="policy-row"
-              hint="resettable in the app"
-            />
+            <div className="settings-row policy-row" key={`connector-${name}`}>
+              <span className="settings-label">{name}</span>
+              <span className="settings-value">
+                connector grants
+                <button
+                  type="button"
+                  className="inline-button danger"
+                  disabled={flipping !== null || resetting !== null}
+                  onClick={() => void reset(name)}
+                >
+                  {resetting === name
+                    ? "Resetting…"
+                    : armed === name
+                      ? "Confirm reset"
+                      : "Reset"}
+                </button>
+              </span>
+            </div>
           ))}
+          {refusal && <p className="note write-refusal">{refusal}</p>}
           {policy.withheld > 0 && (
             <p className="note">
               {policy.withheld} setting(s) the service withheld.
@@ -160,9 +235,10 @@ export function Settings() {
       )}
 
       <div className="foot">
-        Web UI slice of the port: read-only, rendered from the same link, update
-        state and policy the native pages hold. Check, download, restart and
-        sign out stay in the app.
+        Web UI slice of the port: rendered from the same link, update state and
+        policy the native pages hold. A policy flip and a connector reset go
+        through the app's own update path; check, download, restart and sign out
+        stay in the app.
       </div>
     </div>
   );
