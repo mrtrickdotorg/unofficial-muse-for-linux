@@ -193,11 +193,9 @@ export function Settings() {
           : "The native page has not painted its updates section yet."}
       </p>
       <div className="host-actions">
-        {/* A copy that updates through its own channel has no check to offer,
-            so the button is not drawn -- the same rule as the native card. A
-            press during a check stays possible otherwise, as it is there: the
-            app refuses it with its own sentence and the page shows that,
-            rather than the press disappearing into a disabled button. */}
+        {/* No check to offer, so no press drawn -- the native card's rule. A
+            press during a check stays possible otherwise: the app refuses it
+            with its own sentence and the page shows that. */}
         {updates?.appimage && (
           <button
             type="button"
@@ -205,9 +203,7 @@ export function Settings() {
             disabled={updating !== null}
             onClick={() => void updatePress("update.check")}
           >
-            {updating === "update.check" || updates?.busy
-              ? "Working…"
-              : (updates?.check_label ?? "Check for updates")}
+            {updating === "update.check" || updates.busy ? "Working…" : updates.check_label}
           </button>
         )}
         {updates?.action_label && (

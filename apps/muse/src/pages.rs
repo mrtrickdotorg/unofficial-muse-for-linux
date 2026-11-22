@@ -3062,6 +3062,11 @@ pub(crate) const UPDATE_RESTART_LABEL: &str = "Restart to update";
 pub(crate) const UPDATE_NOT_APPIMAGE: &str =
     "This copy updates through its own channel (store or checkout), not here.";
 pub(crate) const UPDATE_ROLLING: &str = "Updates come from the rolling AppImage release.";
+/// The check's running status and the sentence a second press gets instead.
+/// One copy each, so the paint that decides what the card offers and the
+/// refusal it may show cannot drift apart.
+const CHECKING_STATUS: &str = "Checking for updates…";
+const CHECK_REFUSAL: &str = "An update check is already running.";
 pub(crate) const SIGNIN_TITLE: &str = "Sign in to Muse";
 pub(crate) const SIGNIN_HINT: &str = "The app finds your Python automatically; pick a private session folder. The app's own folder already qualifies.";
 pub(crate) const SIGNIN_CONSENT: &str =
@@ -4989,11 +4994,11 @@ fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
         // than a button that quietly stops responding. An install or a
         // restart keeps the button out of reach, since a check's refusal would
         // name the wrong work.
-        let checking = state.busy && state.status == "Checking for updates…";
+        let checking = state.busy && state.status == CHECKING_STATUS;
         // A copy that updates through its own channel has no check to offer,
-        // so the press is not shown at all rather than shown and greyed.
+        // so the press is not drawn at all rather than drawn and greyed.
         button.set_visible(appimage);
-        button.set_sensitive(appimage && (!state.busy || checking));
+        button.set_sensitive(!state.busy || checking);
     }
     if let Some(widget) = find("updates-action")
         && let Ok(button) = widget.downcast::<gtk4::Button>()
@@ -5019,13 +5024,13 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
             // A second press while one runs is refused, and the sentence is
             // painted: both cards say why nothing happened rather than leaving
             // the reader with a button that seemed to do nothing.
-            state.status = "An update check is already running.".to_owned();
+            state.status = CHECK_REFUSAL.to_owned();
             drop(state);
             paint_updates(ctx, page);
-            return Err("An update check is already running.".to_owned());
+            return Err(CHECK_REFUSAL.to_owned());
         }
         state.busy = true;
-        state.status = "Checking for updates…".to_owned();
+        state.status = CHECKING_STATUS.to_owned();
     }
     paint_updates(ctx, page);
     let (done_tx, done_rx) =

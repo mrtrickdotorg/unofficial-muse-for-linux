@@ -606,8 +606,7 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                 f"PASS: both cards read {NOT_APPIMAGE!r} and offered none of "
                 f"{CARD_BUTTONS}"
             )
-            ok = True
-            return ok
+            return True
 
         wait_until(idle, timeout, "both cards to show a settled status")
         page_status, _, page_action, native_status, native_action, _ = cards()
