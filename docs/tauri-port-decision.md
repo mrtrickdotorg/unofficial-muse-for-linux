@@ -581,10 +581,11 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   copy, a greyed button being a press nobody can act on. The eligibility is the app's, not the
   views': both updater entries -- `do_check` and `do_update_action` -- ask `running_as_appimage()`
   before anything else and refuse with that same sentence, so a press reaching either from another
-  caller cannot start a check or a download. Two last rounds
-  put the seam's own files out of reach -- a directory where the feed was, then the feed's asset
-  removed -- and require both cards to carry the app's failure sentence and a press afterwards to
-  work again, since the seam otherwise only ever serves a healthy release.
+  caller cannot start a check or a download. Three last rounds break the
+  seam's own files -- a directory where the feed was, a feed that reads but is not release JSON,
+  and the feed's asset removed -- and require both cards to carry the app's failure sentence
+  (`Update check failed: …`, `Update feed returned invalid data.`, `Update download failed: …`) and
+  a press afterwards to work again, since the seam otherwise only ever serves a healthy release.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would

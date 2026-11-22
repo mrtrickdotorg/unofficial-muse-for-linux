@@ -18,9 +18,10 @@ turn, and requires that
   * a Settings web view opened while a check is running boots on the busy
     snapshot ("Checking for updates…" and "Working…") and then settles on the
     same answer as the native card, like a window that was already up,
-  * the two failure paths: a feed that cannot be read and an asset whose
-    `file://` path is gone. Both cards carry the same failure sentence, and a
-    press after the feed or the asset is put back still works,
+  * the failure paths: a feed that cannot be read, a feed that reads but is
+    not a release, and an asset whose `file://` path is gone. Both cards carry
+    the same failure sentence, and a press after the feed or the asset is put
+    back still works,
   * two Check presses a double-click apart, on the native card and again on
     the page: the second is refused by the app's own busy flag, both cards show
     its sentence ("An update check is already running."), the first check still
@@ -109,6 +110,7 @@ CHECK_REFUSAL = "An update check is already running."
 NOT_APPIMAGE = "This copy updates through its own channel (store or checkout), not here."
 # The app's failure prefixes; the rest of each sentence comes from the OS.
 CHECK_FAILED = "Update check failed: "
+INVALID_FEED = "Update feed returned invalid data."
 DOWNLOAD_FAILED = "Update download failed: "
 DOWNLOADED_PREFIX = "Update downloaded to "
 DOWNLOADED_SUFFIX = ". Restart to switch to it."
@@ -492,36 +494,36 @@ def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
         )
 
     # The press has started; it must finish, and both cards must leave the
-    # busy step together with the same words and the same press offered.
+    # busy step together with the same words and the same press offered. A
+    # window's accessibility tree can trail its own DOM by a frame, so a pair
+    # counts only when two reads a moment apart both carry it: one lucky read
+    # in the middle of a repaint is not agreement.
     deadline = time.monotonic() + timeout
+    seen = None
+    agreed = None
     while time.monotonic() < deadline:
         pair = quiet()
-        if pair is not None:
-            page_status, page_action, native_status, native_action = pair
-            if page_status != native_status:
-                raise Failure(
-                    f"the cards disagree after the {label} press: "
-                    f"page {page_status!r} vs native {native_status!r}"
-                )
-            if page_action != native_action:
-                raise Failure(
-                    f"the cards offer different presses after the {label} press: "
-                    f"page {page_action!r} vs native {native_action!r}"
-                )
-            return presses, mid_text, page_status, page_action
-        time.sleep(POLL)
+        if pair is not None and pair == seen:
+            agreed = pair
+            break
+        seen = pair
+        time.sleep(0.05)
 
-    page_status, page_check, page_action, native_status, native_action, _ = cards()
-    if page_check == WORKING:
+    if agreed is None:
+        page_status, page_check, page_action, native_status, native_action, _ = cards()
+        if page_check == WORKING:
+            raise Failure(
+                f"the page was left on {WORKING!r} after the {label} press "
+                f"(status {page_status!r}, native {native_status!r})"
+            )
         raise Failure(
-            f"the page was left on {WORKING!r} after the {label} press "
-            f"(status {page_status!r}, native {native_status!r})"
+            f"the cards did not settle after the {label} press "
+            f"(page {page_status!r}/{page_action!r}, "
+            f"native {native_status!r}/{native_action!r})"
         )
-    raise Failure(
-        f"the cards did not settle after the {label} press "
-        f"(page {page_status!r}/{page_action!r}, "
-        f"native {native_status!r}/{native_action!r})"
-    )
+
+    page_status, page_action, native_status, native_action = agreed
+    return presses, mid_text, page_status, page_action
 
 
 def write_feed(root):
@@ -807,29 +809,40 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
             # feed should be is a read that cannot succeed; taking the feed's
             # own asset away is a copy that cannot be made.
             feed_text = feed_path.read_text()
-            feed_path.unlink()
-            feed_path.mkdir()
-            try:
+            # Two ways the feed itself fails: a read that cannot happen at all,
+            # and a file that reads fine but is not a release. Each must land on
+            # both cards as the app's own sentence, and leave the next press
+            # working once the feed is whole again.
+            for label, broken, expected in (
+                ("unreadable feed", None, CHECK_FAILED),
+                ("invalid feed", "this is not a release", INVALID_FEED),
+            ):
+                if broken is None:
+                    feed_path.unlink()
+                    feed_path.mkdir()
+                else:
+                    feed_path.write_text(broken)
+                try:
+                    presses, mid, status, action = exercise(
+                        "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
+                    )
+                    if not status.startswith(expected) or action is not None:
+                        raise Failure(f"the {label} round settled on {status!r} with {action!r}")
+                    wait_web_windows(status, None, timeout, label)
+                    print(f"{label}: both cards read {status!r}, no press offered")
+                finally:
+                    if broken is None:
+                        feed_path.rmdir()
+                    feed_path.write_text(feed_text)
+
                 presses, mid, status, action = exercise(
                     "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
                 )
-                if not status.startswith(CHECK_FAILED) or action is not None:
-                    raise Failure(f"an unreadable feed settled on {status!r} with {action!r}")
-                wait_web_windows(status, None, timeout, "unreadable feed")
-                print(f"unreadable feed: both cards read {status!r}, no press offered")
-            finally:
-                feed_path.rmdir()
-                feed_path.write_text(feed_text)
-
-            presses, mid, status, action = exercise(
-                "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
-            )
-            if status != OFFERED_STATUS or action != "Download update":
-                raise Failure(
-                    f"the press after an unreadable feed settled on {status!r} "
-                    f"with {action!r}"
-                )
-            print(f"after an unreadable feed: a press still works, both read {status!r}")
+                if status != OFFERED_STATUS or action != "Download update":
+                    raise Failure(
+                        f"the press after the {label} settled on {status!r} with {action!r}"
+                    )
+                print(f"after the {label}: a press still works, both read {status!r}")
 
             asset_bytes = asset.read_bytes()
             asset.unlink()
