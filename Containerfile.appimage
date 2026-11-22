@@ -9,25 +9,11 @@ FROM docker.io/library/ubuntu:24.04
 # binaries built here need a host glibc >= 2.39.
 
 ENV DEBIAN_FRONTEND=noninteractive
-# GitHub-hosted runners have intermittent Azure/Canonical apt mirror failures.
-# Use kernel.org's Ubuntu mirror for both archive and security pocket.
-RUN set -eu; \
-    ready=0; \
-    for mirror in \
-        http://mirrors.edge.kernel.org/ubuntu \
-        http://archive.ubuntu.com/ubuntu; do \
-        cp /etc/apt/sources.list.d/ubuntu.sources /tmp/ubuntu.sources.stock; \
-        sed -i -E \
-            -e "s#mirror\+file:/etc/apt/apt-mirrors\.txt#${mirror}#g" \
-            -e "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#${mirror}#g" \
-            -e "s#http://mirrors\.edge\.kernel\.org/ubuntu#${mirror}#g" \
-            /etc/apt/sources.list.d/ubuntu.sources; \
-        if apt-get update -o Acquire::Retries=2; then ready=1; break; fi; \
-        echo "${mirror} did not answer; trying the next mirror" >&2; \
-        cp /tmp/ubuntu.sources.stock /etc/apt/sources.list.d/ubuntu.sources; \
-    done; \
-    test "$ready" = 1; \
-    apt-get install -y --no-install-recommends \
+# The image keeps the base's own apt sources: rewriting them to one mirror
+# makes every build depend on that mirror answering, which has cost whole
+# afternoons of red runs.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
         curl \

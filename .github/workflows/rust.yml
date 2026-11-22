@@ -31,33 +31,7 @@ jobs:
       run: ./scripts/check-commit-messages.sh
     - name: Install native GTK dependencies
       run: |
-        # GitHub's apt mirrorlist has pointed at an unreliable Azure node, and
-        # kernel.org's mirror has been unreachable for whole afternoons, so
-        # neither is trusted on its own: walk them until one answers an update,
-        # then install from wherever that left the sources. A runner that
-        # reaches neither mirror fails here, not three steps later.
-        deploy=/etc/apt/sources.list.d/ubuntu.sources
-        ready=0
-        for mirror in \
-          http://mirrors.edge.kernel.org/ubuntu \
-          http://archive.ubuntu.com/ubuntu; do
-          sudo cp "$deploy" /tmp/ubuntu.sources.stock
-          sudo sed -i -E \
-            -e "s#mirror\+file:/etc/apt/apt-mirrors\.txt#${mirror}#g" \
-            -e "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#${mirror}#g" \
-            -e "s#http://mirrors\.edge\.kernel\.org/ubuntu#${mirror}#g" \
-            "$deploy"
-          if sudo apt-get update -o Acquire::Retries=2; then
-            ready=1
-            break
-          fi
-          echo "::warning::${mirror} did not answer; trying the next mirror"
-          sudo cp /tmp/ubuntu.sources.stock "$deploy"
-        done
-        if [[ $ready != 1 ]]; then
-          echo "no Ubuntu mirror answered" >&2
-          exit 1
-        fi
+        sudo apt-get update
         sudo apt-get install --yes libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config python3 python3-venv xauth xvfb \
           python3-gi gir1.2-atspi-2.0 at-spi2-core dbus-x11
     - name: Install formatting and lint tools
