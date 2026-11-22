@@ -537,8 +537,9 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   cannot inject input into a WebKit view, so the presses are covered by the suites.
 
   What still needs the native window, in the order it has to happen: the Local host page's
-  per-write Allow/Deny, the saved write permission and Clear log have no channel route (their
-  controls are the cards' own countdown boundary and the host's saved policy file); the dialogs
+  per-write Allow/Deny, the saved write permission and Clear log now ride `localhost.decide`,
+  `localhost.policy` and `localhost.clear_log` into the same controller methods the native presses
+  call; the dialogs
   (updates, sign-in, first run) are still GTK windows with no page, and the folder chooser a grant
   opens is one of them; the window's own chrome -- its menu, focus and a11y pane -- is GTK's, and
   the shell's key map is a page's map, not a window's until the window is not GTK's. Removing GTK

@@ -2699,6 +2699,9 @@ impl Chat {
         let grant_weak = weak.clone();
         let start_weak = weak.clone();
         let host_stop_weak = weak.clone();
+        let host_decide_weak = weak.clone();
+        let host_policy_weak = weak.clone();
+        let host_clear_weak = weak.clone();
         crate::webui::WebRoutes {
             send: std::rc::Rc::new(move |text: &str, quote| match send_weak.upgrade() {
                 Some(chat) => chat.web_send(text, quote),
@@ -2756,6 +2759,20 @@ impl Chat {
             }),
             host_stop: std::rc::Rc::new(move || match host_stop_weak.upgrade() {
                 Some(chat) => chat.web_host_stop(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_decide: std::rc::Rc::new(move |id: &str, allow: bool| {
+                match host_decide_weak.upgrade() {
+                    Some(chat) => chat.web_host_decide(id, allow),
+                    None => Err("The app window is gone.".to_owned()),
+                }
+            }),
+            host_policy: std::rc::Rc::new(move |allow: bool| match host_policy_weak.upgrade() {
+                Some(chat) => chat.web_host_policy(allow),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_clear_log: std::rc::Rc::new(move || match host_clear_weak.upgrade() {
+                Some(chat) => chat.web_host_clear_log(),
                 None => Err("The app window is gone.".to_owned()),
             }),
         }
@@ -2872,6 +2889,36 @@ impl Chat {
     /// Stop the host and revoke its grants, the native stop's own call.
     fn web_host_stop(self: &Rc<Self>) -> Result<(), String> {
         self.host().borrow_mut().stop();
+        self.host().borrow_mut().poll();
+        Ok(())
+    }
+
+    /// Allow once or Deny one pending write, from the page. The controller's
+    /// own decision path: it refuses a card that expires between the paint the
+    /// page read and this press, and logs the outcome for the next snapshot.
+    fn web_host_decide(self: &Rc<Self>, id: &str, allow: bool) -> Result<(), String> {
+        self.host()
+            .borrow_mut()
+            .decide(id, allow)
+            .map_err(str::to_owned)?;
+        self.host().borrow_mut().poll();
+        Ok(())
+    }
+
+    /// The saved write permission, from the page's switch: durable first, then
+    /// enforced on the broker's grants.
+    fn web_host_policy(self: &Rc<Self>, allow: bool) -> Result<(), String> {
+        self.host()
+            .borrow_mut()
+            .set_write_policy(allow)
+            .map_err(str::to_owned)?;
+        self.host().borrow_mut().poll();
+        Ok(())
+    }
+
+    /// Clear the session log from the page: display only, like the native press.
+    fn web_host_clear_log(self: &Rc<Self>) -> Result<(), String> {
+        self.host().borrow_mut().clear_log();
         self.host().borrow_mut().poll();
         Ok(())
     }

@@ -260,6 +260,8 @@ export type LocalHostGrant = {
 // One pending approval: the exact operation, path and proposed content the
 // native card holds, and the countdown it recomputes on every repaint.
 export type LocalHostCard = {
+  // The broker's approval id: what Allow once and Deny name, never the path.
+  id: string;
   operation: string;
   path: string;
   target?: string | null;
@@ -277,6 +279,12 @@ export type LocalHostSnapshot = {
   grants: LocalHostGrant[];
   pending: LocalHostCard[];
   log: string[];
+  // The saved write permission and the words for it, as the native page has
+  // them: the switch's state and sentence travel as data.
+  policy_on: boolean;
+  policy_sentence: string;
+  approvals_head: string;
+  activity_head: string;
 };
 
 // One rail page as the shell lists it: the name the page components answer to

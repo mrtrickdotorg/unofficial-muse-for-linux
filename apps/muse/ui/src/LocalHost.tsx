@@ -16,15 +16,19 @@ const CONSENT =
 const READ_ONLY =
   "Grant read-only: folders granted while this is on can be read and searched, but Muse can never propose a write in them.";
 
+/// The presses this page can have in flight: one at a time, because the host is
+/// one boundary and a second press must not race the first.
+type Press = "grant" | "start" | "stop" | "decide" | "policy" | "clear";
+
 function sentence(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
-/// The Local host page: the host's read model, plus the three presses that
-/// open and close the boundary -- grant a folder, start, stop. Each press is
-/// the app's own call, keeps the page's one-press-one-write rule, and its
-/// outcome arrives in the next snapshot. Per-write Allow/Deny, the saved write
-/// permission and Clear log stay on the native page, and this one says so.
+/// The Local host page: the host's read model, plus every press the native page
+/// offers -- grant a folder, start, stop, Allow once/Deny on one pending write,
+/// the saved write permission, and Clear log. Each press is the app's own call,
+/// keeps the page's one-press-one-write rule, and its outcome arrives in the
+/// next snapshot.
 export function LocalHost() {
   const boot = window.__MUSE_BOOT__;
   const [data, setData] = useState<LocalHostSnapshot | null>(
@@ -35,7 +39,7 @@ export function LocalHost() {
   const [readOnly, setReadOnly] = useState(true);
   // One write at a time: the host is one boundary, so a start cannot race a
   // grant. A second press on any control is ignored until the first answers.
-  const [writing, setWriting] = useState<"grant" | "start" | "stop" | null>(null);
+  const [writing, setWriting] = useState<Press | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
 
   const loadSnapshot = useCallback(async () => {
@@ -68,7 +72,7 @@ export function LocalHost() {
   }, [loadSnapshot]);
 
   const write = async (
-    kind: "grant" | "start" | "stop",
+    kind: Press,
     command: string,
     extra: Record<string, unknown>,
   ) => {
@@ -171,7 +175,21 @@ export function LocalHost() {
         </div>
       )}
 
-      <h2 className="section">Pending file approvals</h2>
+      <label className="host-check">
+        <input
+          type="checkbox"
+          checked={data?.policy_on ?? false}
+          disabled={writing !== null}
+          onChange={(event) =>
+            void write("policy", "localhost.policy", { allow: event.target.checked })
+          }
+        />
+        <span>{data?.policy_sentence ?? ""}</span>
+      </label>
+
+      <h2 className="section">
+        {data?.approvals_head ?? "Pending file approvals"}
+      </h2>
       {cards.length === 0 ? (
         <p className="note">No pending approvals.</p>
       ) : (
@@ -184,15 +202,54 @@ export function LocalHost() {
               {card.target && <p className="note">→ {card.target}</p>}
               {card.preview && <pre className="preview">{card.preview}</pre>}
               <p className="note">
-                {card.deciding ? "Deciding in the app…" : card.countdown} · Allow once
-                and Deny stay in the app.
+                {card.deciding ? "Deciding in the app…" : card.countdown}
               </p>
+              <div className="host-actions">
+                <button
+                  type="button"
+                  className="inline-button"
+                  disabled={writing !== null || card.deciding}
+                  onClick={() =>
+                    void write("decide", "localhost.decide", {
+                      approval_id: card.id,
+                      allow: true,
+                    })
+                  }
+                >
+                  Allow once
+                </button>
+                <button
+                  type="button"
+                  className="inline-button danger"
+                  disabled={writing !== null || card.deciding}
+                  onClick={() =>
+                    void write("decide", "localhost.decide", {
+                      approval_id: card.id,
+                      allow: false,
+                    })
+                  }
+                >
+                  Deny
+                </button>
+              </div>
             </div>
           ))}
         </div>
       )}
 
-      <h2 className="section">Session activity</h2>
+      <div className="host-actions">
+        <h2 className="section">
+          {data?.activity_head ?? "Session activity"}
+        </h2>
+        <button
+          type="button"
+          className="inline-button"
+          disabled={writing !== null}
+          onClick={() => void write("clear", "localhost.clear_log", {})}
+        >
+          {writing === "clear" ? "Clearing…" : "Clear log"}
+        </button>
+      </div>
       {log.length === 0 ? (
         <p className="note">Nothing yet.</p>
       ) : (
@@ -207,9 +264,10 @@ export function LocalHost() {
 
       <div className="foot">
         Web UI slice of the port: rendered from the host's own read model — the
-        same grants, cards and log the native page paints. Granting a folder,
-        starting and stopping are here; per-write Allow/Deny, the saved write
-        permission and Clear log stay in the app.
+        same grants, cards and log the native page paints. Every boundary press
+        is here, and each one is the app's own call: granting, starting,
+        stopping, Allow once/Deny on a card, the saved write permission and
+        Clear log.
       </div>
     </div>
   );

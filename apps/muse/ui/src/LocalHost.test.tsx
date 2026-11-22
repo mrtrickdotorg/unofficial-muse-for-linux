@@ -25,6 +25,7 @@ const bootPayload = (
   ],
   pending: [
     {
+      id: "a-1",
       operation: "create_text",
       path: "Scratch/notes.txt",
       target: null,
@@ -34,6 +35,11 @@ const bootPayload = (
     },
   ],
   log: ["files.read_text Scratch/notes.txt → allowed", "node registered"],
+  policy_on: false,
+  policy_sentence:
+    "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.",
+  approvals_head: "Pending file approvals · review the exact path and content before allowing",
+  activity_head: "Session activity · commands and outcomes only",
   ...overrides,
 });
 
@@ -77,26 +83,74 @@ describe("the Local host web page", () => {
     expect(grantRows()).toBe(0);
   });
 
-  it("shows a card's exact path and content and leaves the decision to the app", async () => {
+  it("decides a card by the broker's id, never by its path", async () => {
     const held = bootPayload();
     window.__MUSE_BOOT__ = held;
-    installChannel(() => ({ ok: true, ...held }));
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (command) => (command === "localhost.decide" ? { ok: true } : { ok: true, ...held }),
+      (request) => seen.push(request),
+    );
 
     render(<LocalHost />);
 
     expect(screen.getByText("create_text · Scratch/notes.txt")).toBeInTheDocument();
     expect(screen.getByText("hello from the agent")).toBeInTheDocument();
-    expect(screen.getByText(/Expires in 42s · Allow once and Deny stay in the app\./)).toBeInTheDocument();
-    // No press is offered: deciding here would bypass the native card's own
-    // one-time approval, which is the whole boundary.
-    expect(screen.queryByRole("button", { name: /allow once/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /deny/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Expires in 42s")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Allow once" }));
+    await waitFor(() =>
+      expect(seen.find((request) => request.cmd === "localhost.decide")).toMatchObject({
+        approval_id: "a-1",
+        allow: true,
+      }),
+    );
+    // One press at a time: the card's buttons come back when the first write
+    // has landed, and the second answer is the same command with allow false.
+    const deny = screen.getByRole("button", { name: "Deny" });
+    await waitFor(() => expect(deny).toBeEnabled());
+    fireEvent.click(deny);
+    await waitFor(() =>
+      expect(
+        seen.filter((request) => request.cmd === "localhost.decide").map((r) => r.allow),
+      ).toEqual([true, false]),
+    );
+    expect(seen.every((request) => request.cmd !== "localhost.decide" || !("path" in request))).toBe(
+      true,
+    );
+  });
+
+  it("saves the write permission and clears the log", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel((command) => ({ ok: true, ...held }), (request) => seen.push(request));
+
+    render(<LocalHost />);
+
+    const policy = screen.getByRole("checkbox", {
+      name: /Allow writes in the folders I grant/,
+    });
+    expect(policy).not.toBeChecked();
+    fireEvent.click(policy);
+    await waitFor(() =>
+      expect(seen.find((request) => request.cmd === "localhost.policy")).toMatchObject({
+        allow: true,
+      }),
+    );
+
+    const clear = screen.getByRole("button", { name: "Clear log" });
+    await waitFor(() => expect(clear).toBeEnabled());
+    fireEvent.click(clear);
+    await waitFor(() =>
+      expect(seen.some((request) => request.cmd === "localhost.clear_log")).toBe(true),
+    );
   });
 
   it("names a move's destination when the card carries one", async () => {
     const held = bootPayload({
       pending: [
         {
+          id: "a-2",
           operation: "rename",
           path: "Scratch/notes.txt",
           target: "Archive/notes.txt",
@@ -121,6 +175,7 @@ describe("the Local host web page", () => {
     const second = bootPayload({
       pending: [
         {
+          id: "a-3",
           operation: "edit_text",
           path: "Scratch/notes.txt",
           target: null,

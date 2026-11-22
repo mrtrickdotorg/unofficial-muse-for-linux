@@ -977,15 +977,11 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             grants.set_widget_name("localhost-grants");
             grants.set_selection_mode(gtk4::SelectionMode::None);
             inner.append(&grants);
-            let allow_writes = gtk4::CheckButton::with_label(
-                "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.",
-            );
+            let allow_writes = gtk4::CheckButton::with_label(HOST_POLICY_SENTENCE);
             allow_writes.set_widget_name("localhost-allow-writes");
             wrap_check(&allow_writes);
             inner.append(&allow_writes);
-            let cards_head = gtk4::Label::new(Some(
-                "Pending file approvals · review the exact path and content before allowing",
-            ));
+            let cards_head = gtk4::Label::new(Some(HOST_APPROVALS_HEAD));
             cards_head.set_halign(gtk4::Align::Start);
             cards_head.add_css_class("muse-section");
             inner.append(&cards_head);
@@ -994,8 +990,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             cards.set_selection_mode(gtk4::SelectionMode::None);
             inner.append(&cards);
             let activity_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-            let activity_head =
-                gtk4::Label::new(Some("Session activity · commands and outcomes only"));
+            let activity_head = gtk4::Label::new(Some(HOST_ACTIVITY_HEAD));
             activity_head.set_hexpand(true);
             activity_head.set_halign(gtk4::Align::Start);
             activity_head.add_css_class("muse-section");
@@ -3039,6 +3034,8 @@ pub(crate) struct LocalHostGrantRow {
 /// the countdown the native card recomputes on every repaint.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct LocalHostCardRow {
+    /// The broker's approval id: what Allow once and Deny name, never the path.
+    pub id: String,
     pub operation: String,
     pub path: String,
     pub target: Option<String>,
@@ -3046,6 +3043,13 @@ pub(crate) struct LocalHostCardRow {
     pub deciding: bool,
     pub countdown: String,
 }
+
+/// The Local host page's own control words, shared with the web page so the two
+/// surfaces cannot describe the same boundary differently.
+pub(crate) const HOST_POLICY_SENTENCE: &str = "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.";
+pub(crate) const HOST_APPROVALS_HEAD: &str =
+    "Pending file approvals · review the exact path and content before allowing";
+pub(crate) const HOST_ACTIVITY_HEAD: &str = "Session activity · commands and outcomes only";
 
 /// The Local host page as the web view opens it: the host's own read model,
 /// projected once. Nothing here is a second source of truth -- the native
@@ -3059,6 +3063,12 @@ pub(crate) struct HeldLocalHost {
     pub grants: Vec<LocalHostGrantRow>,
     pub pending: Vec<LocalHostCardRow>,
     pub log: Vec<String>,
+    /// Whether the saved write permission is on, and its own sentence: the
+    /// switch's state and words travel as data, like everything else here.
+    pub policy_on: bool,
+    pub policy_sentence: String,
+    pub approvals_head: String,
+    pub activity_head: String,
 }
 
 thread_local! {
@@ -3110,6 +3120,7 @@ pub(crate) fn held_localhost_from(snapshot: &super::local_host::HostSnapshot) ->
             .cards
             .iter()
             .map(|card| LocalHostCardRow {
+                id: card.request.approval_id.clone(),
                 operation: card.request.operation.clone(),
                 path: card.request.path.clone(),
                 target: card.request.target_path.clone(),
@@ -3120,6 +3131,10 @@ pub(crate) fn held_localhost_from(snapshot: &super::local_host::HostSnapshot) ->
             })
             .collect(),
         log: snapshot.log.iter().rev().take(20).cloned().collect(),
+        policy_on: !snapshot.policies.is_empty(),
+        policy_sentence: HOST_POLICY_SENTENCE.to_owned(),
+        approvals_head: HOST_APPROVALS_HEAD.to_owned(),
+        activity_head: HOST_ACTIVITY_HEAD.to_owned(),
     }
 }
 

@@ -602,6 +602,13 @@ pub(crate) type WebResetConnector = std::rc::Rc<dyn Fn(&str) -> Result<(), Strin
 pub(crate) type WebHostGrant = std::rc::Rc<dyn Fn(bool, bool) -> Result<(), String>>;
 pub(crate) type WebHostStart = std::rc::Rc<dyn Fn(bool) -> Result<(), String>>;
 pub(crate) type WebHostStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+/// Allow once / Deny on one pending write: the card's own id, never a path.
+pub(crate) type WebHostDecide = std::rc::Rc<dyn Fn(&str, bool) -> Result<(), String>>;
+/// The saved write permission: writes in granted read-write folders without a
+/// per-write card, saved durably first and enforced after.
+pub(crate) type WebHostPolicy = std::rc::Rc<dyn Fn(bool) -> Result<(), String>>;
+/// Clear the session log. Display only: cards and grants are untouched.
+pub(crate) type WebHostClearLog = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 
 /// The routes a page has back into the app for its controls. None is a
 /// dispatcher of its own: a send goes through the app's single sender, Stop
@@ -638,6 +645,9 @@ pub(crate) struct WebRoutes {
     pub host_start: WebHostStart,
     /// Stop the host and revoke its grants.
     pub host_stop: WebHostStop,
+    pub host_decide: WebHostDecide,
+    pub host_policy: WebHostPolicy,
+    pub host_clear_log: WebHostClearLog,
 }
 
 /// The answer a mutating command gets: `ok` when the app took the press, and
@@ -900,6 +910,29 @@ pub(crate) fn handle_command_with(
             route_answer(routes.map(|routes| (routes.host_start)(consent)))
         }
         "localhost.stop" => route_answer(routes.map(|routes| (routes.host_stop)())),
+        // The card's own decision, the saved permission and the log: the same
+        // controller methods the native page's presses call, so a card approved
+        // in the page and one approved in the app are one decision, and an
+        // expired card is refused here by the same check as there.
+        "localhost.decide" => {
+            let id = request
+                .get("approval_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let allow = request
+                .get("allow")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            route_answer(routes.map(|routes| (routes.host_decide)(id, allow)))
+        }
+        "localhost.policy" => {
+            let allow = request
+                .get("allow")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            route_answer(routes.map(|routes| (routes.host_policy)(allow)))
+        }
+        "localhost.clear_log" => route_answer(routes.map(|routes| (routes.host_clear_log)())),
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -2210,6 +2243,9 @@ mod tests {
             host_grant: Rc::new(|_: bool, _: bool| Ok(())),
             host_start: Rc::new(|_: bool| Ok(())),
             host_stop: Rc::new(|| Ok(())),
+            host_decide: Rc::new(|_: &str, _: bool| Ok(())),
+            host_policy: Rc::new(|_: bool| Ok(())),
+            host_clear_log: Rc::new(|| Ok(())),
         }
     }
 
@@ -3203,6 +3239,7 @@ mod tests {
                 text: "Scratch · /var/home/phendrick/Scratch · read-write".into(),
             }],
             pending: vec![crate::pages::LocalHostCardRow {
+                id: "a-1".into(),
                 operation: "create_text".into(),
                 path: "Scratch/notes.txt".into(),
                 target: None,
@@ -3211,6 +3248,7 @@ mod tests {
                 countdown: "Expires in 42s".into(),
             }],
             log: vec!["files.read_text Scratch/notes.txt → allowed".into()],
+            ..Default::default()
         });
 
         let held = crate::pages::localhost_snapshot();
@@ -3234,6 +3272,7 @@ mod tests {
             grants: Vec::new(),
             pending: Vec::new(),
             log: Vec::new(),
+            ..Default::default()
         });
 
         let (id, answer, command) =
