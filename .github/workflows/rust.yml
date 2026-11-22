@@ -16,6 +16,19 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+      with:
+        # The commit-message check walks the pushed history, so the default
+        # single-commit fetch is not enough.
+        fetch-depth: 0
+    - name: Check commit messages for attribution
+      # Its own step, pinned like the environment mutation guard: a message that
+      # carries the Codebuff trailer fails the build even if later steps are
+      # narrowed or excluded. AGENTS.md records the rule.
+      env:
+        BEFORE: ${{ github.event.before }}
+        AFTER: ${{ github.sha }}
+        BASE_REF: ${{ github.base_ref }}
+      run: ./scripts/check-commit-messages.sh
     - name: Install native GTK dependencies
       run: |
         # GitHub's apt mirrorlist currently points at an unreliable Azure node.
