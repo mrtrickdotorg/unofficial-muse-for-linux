@@ -401,7 +401,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   a card that stays put with the app's sentence beside it after a refused press. **The unread badge** is
   the listing's own count for the open thread, the number the native sidebar badges the row with,
   shown beside the page title because this page has no list to hang it on; zero means no badge,
-  never an invented count. Five DOM tests (`Chat.test.tsx`, 17 in all) cover the chip and its drop,
+  never an invented count. Five DOM tests (`Chat.test.tsx`, 24 in all) cover the chip and its drop,
   a picture-only send, a card's decision and the panel's re-read, the unlinked sentence, and the
   badge; the Rust side covers the projection (native headline, verbatim details, five words), the
   snapshot's approvals merge, every new route once through and refused when closed, and the remote
@@ -422,6 +422,24 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the page, so the card's disappearance is evidence, not a printed claim. The page printed no
   refusal line, so the busy and signed-out sentences remain covered by their tests rather than by
   this pass.
+  The composer's five writes got their one-press-one-write rule on the page (Nov 21, 2026), the
+  rule the native card already keeps. Each control claims itself for the length of its write and
+  ignores a second press while the first is unanswered: the `+` is not offered at all during a send
+  (the app refuses a paste then, because the send already took its pictures), a chip's `×` holds
+  every chip while a drop is in flight, Stop is one cancel per press and comes back for a later
+  press once the app answers -- the native card allows a second stop, so the page does too --
+  Check approvals is one read per press, and a decision holds every card until it lands, which is
+  the native panel's own slot rule. The presses still reach nothing but the existing `WebRoutes`
+  closures: `chat.send`, `chat.stop`, `chat.attach`, `chat.unstage`, `chat.approvals.refresh` and
+  `chat.decide` land in `web_send`, `stop_pressed`, `web_attach`, `web_unstage`,
+  `refresh_identity_and_approvals` and `run_decision` -- one sender, one clipboard read, one decide
+  path, no route to the session slot or the composer. One sentence was corrected beside the
+  guards: `web_attach` answered "The clipboard holds no picture to stage." when the real reason was
+  a send in flight, and it now names that reason (the page asks before the wire anyway). Six DOM
+  tests (`Chat.test.tsx`, 24 in all) pin a second press on `+`, on a chip's `×`, on Stop (twice: one
+  write, then a second write after the answer), on Check approvals and on a second card while a
+  decision is unanswered, plus that `+` is not offered mid-send; `installChannel` gained an answer
+  delay so a suite can watch a control while its write is still in flight.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).
