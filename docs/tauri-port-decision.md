@@ -617,14 +617,24 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   split multiplies a read by 15-20x, from tens of microseconds to about 1.5 ms -- still under a
   60 Hz frame, and invisible inside a 2 s poll.
 
-  a11y, counted over AT-SPI on the same seat (nodes walked through
-  `org.a11y.atspi.Accessible.GetChildren` and `GetRoleName`, applications named as AT-SPI names
-  them): a WebKitGTK 6.0 page -- the GTK shell -- exposes 440 nodes, every one with a role
-  (`label` 149, `generic` 115, `button` 106, `list item` 32); the native GTK 4 window exposes 563.
-  The Tauri window's WebKitGTK 4.1 tree exposes **129, and 124 of those return no role name at all**
-  (`filler` 3). Same DOM, same bundle, same data: that is the 4.1 bridge, not the page. A reader in
-  the Tauri shell would also cross a process boundary to reach the app's own tree, which the GTK
-  shell does not -- and the app stays a second AT-SPI application while the window is foreign.
+  a11y, walked twice with each window focused and settled (children through
+  `org.a11y.atspi.Accessible.GetChildren`, roles through both `GetRole` and `GetRoleName`, the walk
+  repeated four seconds apart with `org.a11y.Status IsEnabled` on, application and window names as
+  AT-SPI reports them). The two engines expose **the same tree for the same document: 128 nodes
+  each, 73 of them named, and the same numeric roles** -- `GetRole` 43 x62 (push button), 73 x39,
+  110 x7, 85 x7-8, 83 x3, 79 x2. The wrapper differs as the windows do: the GTK window adds
+  `application`, `generic` and `text box` nodes, the Tauri one a `frame` and three `filler`s. What
+  does not compare on this seat is `GetRoleName`: it answers an empty string for 123 of the GTK
+  window's 128 nodes and 124 of the Tauri window's, so a name-only walk reads as "no roles" under
+  either engine. The numeric roles are what a client maps, and those match.
+
+  That corrects this note's first count. Its 440- and 563-node trees were the app's **native GTK 4
+  window** -- 149 labels, 106 buttons, 32 list items -- not the web page: `muse`'s 568 nodes are
+  that window (about 439) plus the shell window's 128, and a second Muse instance on the seat
+  showed the same 440. WebKitGTK 4.1's page tree is therefore not poorer than 6.0's for this
+  document. What a Tauri shell really takes away is the native window's widget tree from the
+  process -- those ~439 GTK nodes -- and it leaves a reader a second application, across a process
+  boundary, to reach the app's own tree.
 
   Nothing native was deleted for this: the GTK window, the pages and the shell are untouched, and
   `apps/muse-window` is a window with the app's answers on a socket.
@@ -637,7 +647,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   |---|---|---|---|
   | **Cost** | No shell work. S2/S3's page work is the shared cost; S5 packaging and the parity-bug tail remain. | The doc's ~9-11 weeks, of which 5-7 (read-only 3-4, chat 2-3) staying also needs; the Tauri-only delta is ~4-4.5 (shell 1-1.5, integrations 1, tests/a11y/packaging/Wayland 2). | Nil until it ships, then the same ~4-4.5 delta and a second S4; a draft, breaking milestone with no date. |
   | **Engine split** | One engine: the bundled WebKitGTK 6.0 the Feed frames and Library previews already use. | Two generations while migrating, and they cannot share a process -- measured: GTK aborts on the mixed symbols, so the shell is a second process over a socket; at the end either a second WebKit in the bundle or the Feed frames forced down to 4.1 (the doc's risk 3). | One engine, GTK4 + 6.0, in one process -- the only option that removes the split and keeps GTK4. |
-  | **a11y** | AT-SPI on real widgets; the 98 GTK assertions stay authoritative until each page's DOM test replaces them, and P9 is unchanged. | ARIA on 4.1's tree -- measured 129 nodes against 440 in 6.0 for the same document, 124 of the 129 with no role name -- chrome a11y from GTK 3; the doc's risk "(4) the P9 accessibility gate getting harder". | ARIA on the 6.0 tree with no second engine; the DOM cost matches Tauri 2, the chrome is no worse than today. |
+  | **a11y** | AT-SPI on real widgets; the 98 GTK assertions stay authoritative until each page's DOM test replaces them, and P9 is unchanged. | ARIA on 4.1's tree -- measured the same 128-node page tree with the same numeric roles as 6.0 for the same document, so the page is not the loss; the native GTK widget tree (~439 nodes) is what a Tauri window does not have -- chrome a11y from GTK 3; the doc's risk "(4) the P9 accessibility gate getting harder". | ARIA on the 6.0 tree with no second engine; the DOM cost matches Tauri 2, the chrome is no worse than today. |
   | **Wayland risk** | Works on this seat today; S5 still owes the "native Wayland, not XWayland" gate either way. | The doc's blank window / `AcceleratedSurfaceDMABuf` / Wayland `Error 71` hit NVIDIA and Wayland first. Spike: window built 94-115 ms, 1164 ms to first command against 688-735 ms on Xwayland, layout proven and **presentation verified** by a portal capture (KWin's own `ScreenShot2` refuses with `Error.NoAuthorized`; no `grim`/`spectacle`), and wry has no `HardwareAccelerationPolicy` guard. | Same class as Tauri 2 minus the 4.1 gap; nothing measured on it yet. |
 
   Reading the table: staying is the only option whose cost is already being paid and the only one
