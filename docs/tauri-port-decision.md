@@ -173,7 +173,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the not-loaded state, the wire refresh, a refused refresh, tab+search filtering, and an empty
   filter result. The `Web UI` CI job runs them and fails if the committed `built/app.html`
   differs from a fresh build.
-- **S2 — Page migration (2–3 weeks). IN PROGRESS: Search is the seventh page (Nov 20, 2026).**
+- **S2 — Page migration (2–3 weeks). IN PROGRESS: Settings is the eighth page (Nov 21, 2026).**
   Remaining read-only and settings pages, one at a time, behind the same GTK shell. Goals copies
   S1's contract: `open_goals_window` renders a boot payload of the roster and the Tracking section
   the native fill last held; `goals.snapshot` answers from those held rows, `goals.refresh` reads
@@ -268,6 +268,20 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   gap is in `muse_account::search`'s mapping, not the page: the native list swallows the same rows. The live check also
   needed a way to type: `scripts/x11-type.py` joins the other host-side helpers (XTEST keys,
   `--clear` for select-all first), since this host has no xdotool.
+  Settings is the eighth page, and the first whose native side is held state rather than a listing.
+  `settings.snapshot` answers the saved link's interpreter and session folder (read fresh -- one
+  small file), the updater's last answer (cached by `paint_updates`, so the page and the Updates
+  section cannot tell different stories), and the policy the chat panel last painted, cached by
+  `paint_policy` through the panel's own flip table -- so the only rows the page names a flip for
+  are the rows a press there would flip. It adds no wire read and no write: the three presses that
+  change anything (check, download, restart) and Sign out stay on the native page, and the page
+  says so in words rather than offering a control that does nothing, the same rule the Feed card's
+  action follows. `link` carries paths only; the session jar never reaches a page. An unlinked
+  clone reads as "no saved link" rather than a failure, and an unread policy travels as
+  `loaded: false` with the panel's own note ("Link your account first."), so an empty section is
+  never mistaken for an empty service. Eight DOM tests (`Settings.test.tsx`) cover the held link
+  and rows, the unread policy, a policy read's failure note, the staged-update sentence, the
+  updater's own status, the unlinked clone, and a refused snapshot.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the
