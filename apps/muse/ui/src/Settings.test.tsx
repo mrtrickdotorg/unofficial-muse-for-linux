@@ -225,8 +225,13 @@ describe("the Settings web page", () => {
     render(<Settings />);
 
     // A press answers before the worker does: the page opens on the app's
-    // "busy" answer and would otherwise sit on it.
-    expect(await screen.findByText(/Checking for updates…/)).toBeInTheDocument();
+    // "busy" answer and would otherwise sit on it. The line is the app's own
+    // status, word for word -- the page adds no "checking now" clause the
+    // native card does not have.
+    expect(
+      await screen.findByText("Checking for updates…"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Checking now/)).not.toBeInTheDocument();
     await waitFor(() => expect(typeof window.museUpdatesReady).toBe("function"));
 
     act(() => window.museUpdatesReady?.());

@@ -14,12 +14,10 @@ function updatesSentence(updates: SettingsUpdates): string {
   if (updates.staged) {
     return `${status} An update is downloaded; restart to take it.`;
   }
-  if (updates.busy) {
-    return `${status} Checking now…`;
-  }
-  if (updates.checked) {
-    return status;
-  }
+  // While the check runs, the app's own status says so ("Checking for
+  // updates…") and the button says "Working…". The page adds no second
+  // clause the native card does not have, so the two cards read alike at
+  // every step, not only once the answer lands.
   return status;
 }
 
