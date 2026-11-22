@@ -166,12 +166,13 @@ fn build_ui(app: &adw::Application) {
     );
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
     let linked = session::load_saved_link().filter(|link| link.consent);
+    let mut page_signin = false;
     if linked.is_some() {
         eprintln!("muse: saved link found, opening chat");
         show_main(&split);
     } else {
         eprintln!("muse: no saved link, showing sign-in");
-        show_signin(&split);
+        page_signin = show_signin(&split);
     }
     window.set_child(Some(&split));
     {
@@ -202,7 +203,11 @@ fn build_ui(app: &adw::Application) {
         });
         window.add_controller(keys);
     }
-    window.present();
+    // A page surface is its own window; presenting an empty app window behind
+    // it would be a black rectangle with no sign-in in it.
+    if !page_signin {
+        window.present();
+    }
     // A fresh install pays one-time setup (config folders, helper
     // staging, interpreter probe): a spinner and the reader's sentence
     // cover it, once, instead of a silent stall. Returning installs
@@ -239,6 +244,10 @@ fn show_first_run(parent: &gtk4::ApplicationWindow) {
             match done_rx.try_recv() {
                 Ok(()) => {
                     crate::pages::first_run_cache(crate::pages::held_first_run(true));
+                    // The step is over and the page is the whole of its
+                    // window: it closes here, as the modal did, and the
+                    // surface that named the step takes the screen.
+                    crate::webui::close_page_window("firstrun");
                     gtk4::glib::ControlFlow::Break
                 }
                 Err(TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
@@ -452,6 +461,13 @@ fn step_pane(
 /// on first visit and refills on every visit.
 fn show_main(split: &adw::OverlaySplitView) {
     split.set_show_sidebar(true);
+    // The sign-in page hides the window while it stands; the shell is what
+    // brings it back, so linking does not leave a hidden app behind.
+    if let Some(root) = split.root()
+        && let Ok(window) = root.downcast::<gtk4::Window>()
+    {
+        window.present();
+    }
     // The Mac idiom: icon tools on top, the page list, the History
     // section with the thread listing, and the profile row at the
     // bottom. The page list keeps its index order, so the select/show
@@ -647,7 +663,9 @@ fn show_main(split: &adw::OverlaySplitView) {
         updates: std::rc::Rc::new(std::cell::RefCell::new(update::UpdateCheck::default())),
         show_signin: {
             let split = split.clone();
-            Rc::new(move || show_signin(&split))
+            Rc::new(move || {
+                show_signin(&split);
+            })
         },
     };
     let ctx = Rc::new(ctx);
@@ -870,7 +888,9 @@ fn show_main(split: &adw::OverlaySplitView) {
 
 /// The sign-in screen, shown with no usable saved link and after an
 /// explicit sign-out. A linked form swaps back to the main surface.
-fn show_signin(split: &adw::OverlaySplitView) {
+/// Show the sign-in surface. True when a page took it: the page is its own
+/// window, so the app window steps aside instead of standing black behind it.
+fn show_signin(split: &adw::OverlaySplitView) -> bool {
     split.set_show_sidebar(false);
     // No page drawer on this surface: an Escape belongs to the sign-in
     // form, not to a drawer the main shell left behind.
@@ -890,12 +910,22 @@ fn show_signin(split: &adw::OverlaySplitView) {
         let press = web_signin::routes(move || show_main(&split_for_link));
         let routes = crate::webui::signin_surface(press);
         if crate::webui::open_signin_window(Some(routes)) {
-            return;
+            // One surface at a time: the page is the sign-in, so the window
+            // that would otherwise hold an empty split hides until linked.
+            if let Some(root) = split.root()
+                && let Ok(window) = root.downcast::<gtk4::Window>()
+            {
+                window.set_visible(false);
+            }
+            return true;
         }
     }
     let form = signin::SignIn::build({
         let split = split.clone();
-        move |_| show_main(&split)
+        move |_| {
+            show_main(&split);
+        }
     });
     split.set_content(Some(form.widget()));
+    false
 }

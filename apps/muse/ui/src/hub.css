@@ -1159,6 +1159,24 @@ html, body {
   line-height: 1.45;
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 12px 0 0;
+}
+
+.field input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+
 .host-check input {
   margin-top: 2px;
 }
@@ -1167,6 +1185,13 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* The sign-in page's consent and its presses sit under the two fields, not
+ * flush against the second one. */
+.signin-page .host-check,
+.signin-page .host-actions {
+  margin-top: 14px;
 }
 
 .host-actions .inline-button {

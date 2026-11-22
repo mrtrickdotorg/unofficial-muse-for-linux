@@ -1247,6 +1247,22 @@ pub(crate) fn nudge_page(page: &'static str, hook: &str) {
     });
 }
 
+/// Close the open window for `page`, if one is up. The first-run step is one
+/// window's whole life: when the app's setup returns, the window that showed
+/// it goes, the way the modal did.
+pub(crate) fn close_page_window(page: &'static str) {
+    let open =
+        OPEN_WINDOWS.with(|windows| windows.borrow().get(page).and_then(|weak| weak.upgrade()));
+    let Some(view) = open else {
+        return;
+    };
+    if let Some(root) = gtk4::prelude::WidgetExt::root(&view)
+        && let Ok(window) = gtk4::prelude::Cast::downcast::<gtk4::Window>(root)
+    {
+        gtk4::prelude::GtkWindowExt::close(&window);
+    }
+}
+
 /// The policy projection changed: an open Settings window should re-ask, since
 /// the chat panel's read lands after that window opened.
 pub(crate) fn settings_policy_changed() {
