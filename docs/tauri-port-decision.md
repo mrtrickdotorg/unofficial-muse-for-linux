@@ -378,6 +378,37 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).
+
+  **Tauri 2 spike (Nov 21, 2026, throwaway, outside the tree).** Three source files on tauri 2.12.7 /
+  wry 0.57 / tao 0.37 loaded the unmodified `apps/muse/ui/built/app.html` with the same
+  `/*__BOOT__*/` substitution `document()` does, served over `tauri://localhost`, and it rendered:
+  the app's own `CHAT_PROBE` came back through the channel as
+  `{"rows":2,"boot":2,"channel":true,"dpr":1,"err":"","ua":"... AppleWebKit/605.1.15 ..."}` with no
+  script error, under `libwebkit2gtk-4.1.so.0.21.10` (WebKitGTK 2.52.6, GTK 3.24.41, libsoup 3.4.4)
+  with its own `WebKitWebProcess`/`WebKitNetworkProcess`; the Xwayland window was also captured as a
+  picture of that page -- rows, composer, approvals panel, and the two status lines only a reply can
+  paint. Timings: window built at 94-115 ms and the first page command at 688-735 ms on Xwayland,
+  94 ms and 1164 ms on Wayland. **Two channel mappings worked.** Page to native: an
+  `initialization_script` rebuilds `window.webkit.messageHandlers.muse` on
+  `__TAURI_INTERNALS__.invoke("muse_command", { request })`, and because it runs before the page's
+  module the page's own 2 s `chat.snapshot` poll arrives through it. Native to page: both resolving
+  the invoke's return in the shim and the app's own `window.museReply(id, reply)` through
+  `WebviewWindow::eval` with `postMessage` fire-and-forget, which the spike's second build used
+  alone -- so the page's ticket protocol survives unchanged. That matters because `Answer::Later`
+  polls the GTK main loop over `Rc<Chat>` state that is not `Send`: an async command is not a
+  drop-in, an eval from the main thread is. Boot would need the substitution moved into a custom URI
+  handler (Tauri bakes assets at compile time) or the page reading a global instead of assigning
+  one; the navigation lock maps to `on_navigation`. Risks: wry 0.57 has no
+  `HardwareAccelerationPolicy` equivalent -- the setting the GTK view uses to stay capturable on a
+  GL-less seat -- leaving only the `WEBKIT_DISABLE_*` environment variables (this seat captured fine
+  without it); a Tauri shell would run GTK3/WebKitGTK 4.1 beside the GTK4/6.0 app, two renderers for
+  one page; and the page gains an origin (`tauri://localhost`) plus `__TAURI_INTERNALS__`, while
+  app-defined commands are not gated by Tauri's capabilities, so one command named `muse` routed
+  into `handle_command_with` stays the only gate. **Wayland presentation is still unverified.** The
+  page ran and laid out under `GDK_BACKEND=wayland` (one Wayland fd, identical probe, 1164 ms to
+  first command), but KWin's `ScreenShot2` refused a capture (`Error.NoAuthorized`, a portal prompt)
+  and neither `grim` nor `spectacle` is installed here, so nothing in this note claims the surface
+  is drawn on that seat.
 - **S5 — Packaging and gates.** AppImage recipe, Flatpak manifest, CI, native-Wayland and
   screen-reader checks re-run against the new build.
 
