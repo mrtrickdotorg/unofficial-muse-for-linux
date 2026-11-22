@@ -509,90 +509,71 @@ def quiet():
 
 
 def idle():
+    """Both cards off the busy step and agreeing word for word."""
     pair = quiet()
-    if pair is None:
-        return False
-    page_status, page_action, native_status, native_action = pair
-    return page_status == native_status and page_action == native_action
+    return pair is not None and pair[0] == pair[2] and pair[1] == pair[3]
+
+
+def settled(timeout, label):
+    """The (status, action) both cards agree on, once neither is mid-press.
+
+    A window's accessibility tree can trail its own DOM by a frame, so a pair
+    counts only when two reads a moment apart both carry it, with the same
+    press on both: one lucky read in the middle of a repaint is not agreement,
+    and a page whose button has not landed yet reads as no press at all rather
+    than as a card that offers something else.
+    """
+    deadline = time.monotonic() + timeout
+    seen = None
+    while time.monotonic() < deadline:
+        pair = quiet()
+        if pair is not None and pair == seen and pair[1] == pair[3]:
+            return pair[0], pair[1]
+        seen = pair
+        time.sleep(0.05)
+    page_status, page_check, page_action, native_status, native_action, _ = cards()
+    raise Failure(
+        f"the cards never agreed after the {label} press: "
+        f"page {(page_status, page_check, page_action)!r}, "
+        f"native {(native_status, native_action)!r}"
+    )
 
 
 def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
     """Press one card's button, watch both cards during it, settle.
 
-    Returns (presses, mid_text, status, action). The check must be seen on both
-    cards at the same moment and the page's line must be the native card's,
-    word for word -- a decoration the page added would fail here.
+    Returns (presses, mid_text, status, action). The busy step must be seen on
+    both cards at the same moment, with the page's line the native card's word
+    for word -- a decoration the page added would fail here -- and both cards
+    must leave it agreeing.
     """
     wait_until(idle, timeout, f"the cards to be idle before the {label} press")
 
-    presses = 0
-    mid_text = None
-    page_seen = native_seen = False
-    while presses < 3 and mid_text is None:
-        presses += 1
+    for presses in range(1, 4):
         if not press(frame_name, buttons):
             raise Failure(f"the {label} press could not be made")
         started = time.monotonic()
         while time.monotonic() - started < busy_window:
-            page_status, page_check, _, native_status, _, refusal = cards()
+            page_status, _, _, native_status, _, refusal = cards()
             page_status = page_status or ""
             native_status = native_status or ""
-            page_seen = page_seen or page_check == WORKING or page_status in BUSY_STATUSES
-            native_seen = native_seen or native_status in BUSY_STATUSES
             if busy_text in page_status and native_status == busy_text:
                 if page_status != native_status:
                     raise Failure(
                         f"mid-press the cards disagree: page {page_status!r} "
                         f"vs native {native_status!r}"
                     )
-                mid_text = page_status
-                break
+                status, action = settled(timeout, label)
+                return presses, page_status, status, action
             if refusal:
                 break
             time.sleep(POLL)
-        if mid_text is None:
-            wait_until(idle, timeout, f"the cards to be idle after the {label} press")
-    if mid_text is None:
-        raise Failure(
-            f"the two cards were never read mid-press at the same moment after the "
-            f"{label} press (page {'busy' if page_seen else 'quiet'}, "
-            f"native {'busy' if native_seen else 'quiet'}): the work finished too "
-            "fast or one surface never took the busy state"
-        )
+        wait_until(idle, timeout, f"the cards to be idle after the {label} press")
 
-    # The press has started; it must finish, and both cards must leave the
-    # busy step together with the same words and the same press offered. A
-    # window's accessibility tree can trail its own DOM by a frame, so a pair
-    # counts only when two reads a moment apart both carry it, with the same
-    # press on both: one lucky read in the middle of a repaint is not
-    # agreement, and a page whose button has not landed yet reads as no press
-    # at all rather than as a card that offers something else.
-    deadline = time.monotonic() + timeout
-    seen = None
-    agreed = None
-    while time.monotonic() < deadline:
-        pair = quiet()
-        if pair is not None and pair == seen and pair[1] == pair[3]:
-            agreed = pair
-            break
-        seen = pair
-        time.sleep(0.05)
-
-    if agreed is None:
-        page_status, page_check, page_action, native_status, native_action, _ = cards()
-        if page_check == WORKING:
-            raise Failure(
-                f"the page was left on {WORKING!r} after the {label} press "
-                f"(status {page_status!r}, native {native_status!r})"
-            )
-        raise Failure(
-            f"the cards did not settle after the {label} press "
-            f"(page {page_status!r}/{page_action!r}, "
-            f"native {native_status!r}/{native_action!r})"
-        )
-
-    page_status, page_action, native_status, native_action = agreed
-    return presses, mid_text, page_status, page_action
+    raise Failure(
+        f"the {label} press never showed {busy_text!r} on both cards "
+        f"within {busy_window:.1f}s"
+    )
 
 
 def write_feed(root):
@@ -721,20 +702,18 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
             presses, mid, status, action = exercise(
                 f"{label} check", frame_name, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
             )
-            note = "" if presses == 1 else f" after {presses} presses"
             print(
-                f"press {label} check: both mid-check on {mid!r}; "
-                f"both read {status!r} with {action!r}{note}"
+                f"press {label} check: both mid-check on {mid!r}; both read "
+                f"{status!r} with {action!r} in {presses} "
+                f"{'press' if presses == 1 else 'presses'}"
             )
-            if feed_mode == "newer":
-                if status != OFFERED_STATUS:
-                    dump_tree(MAIN_FRAME)
-                    dump_tree(WEB_FRAME)
-                    raise Failure(f"the {label} press should offer an update, got {status!r}")
-                if action != "Download update":
-                    dump_tree(MAIN_FRAME)
-                    dump_tree(WEB_FRAME)
-                    raise Failure(f"the {label} press should offer Download, got {action!r}")
+            if feed_mode == "newer" and (status, action) != (OFFERED_STATUS, "Download update"):
+                dump_tree(MAIN_FRAME)
+                dump_tree(WEB_FRAME)
+                raise Failure(
+                    f"the {label} press should offer {OFFERED_STATUS!r} with "
+                    f"'Download update', got {status!r} with {action!r}"
+                )
 
         if feed_mode == "newer":
             # Two presses in quick succession on each card: the second lands
@@ -877,61 +856,73 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                 )
             print(f"opened {len(frames_named(WEB_FRAME))} Settings web views")
 
-            # The seam only ever served a healthy release, so the updater's two
-            # failure sentences had never been seen live. A directory where the
-            # feed should be is a read that cannot succeed; taking the feed's
-            # own asset away is a copy that cannot be made.
-            feed_text = feed_path.read_text()
-            # Two ways the feed itself fails: a read that cannot happen at all,
-            # and a file that reads fine but is not a release. Each must land on
-            # both cards as the app's own sentence, and leave the next press
-            # working once the feed is whole again.
-            for label, broken, expected in (
-                ("unreadable feed", None, CHECK_FAILED),
-                ("invalid feed", "this is not a release", INVALID_FEED),
-            ):
-                if broken is None:
-                    feed_path.unlink()
-                    feed_path.mkdir()
-                else:
-                    feed_path.write_text(broken)
-                try:
-                    presses, mid, status, action = exercise(
-                        "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
-                    )
-                    if not status.startswith(expected) or action is not None:
-                        raise Failure(f"the {label} round settled on {status!r} with {action!r}")
-                    wait_web_windows(status, None, timeout, label)
-                    print(f"{label}: both cards read {status!r}, no press offered")
-                finally:
-                    if broken is None:
-                        feed_path.rmdir()
-                    feed_path.write_text(feed_text)
+            # The seam only ever served a healthy release, so the updater's
+            # failure sentences had never been seen live: a feed that cannot be
+            # read, a feed that reads but is not a release, and a release whose
+            # asset is gone. Each must land on every card as the app's own
+            # sentence, with the press its kind of failure leaves still there,
+            # and each must leave a press working once the seam is whole again.
+            def round_failure(label, buttons, busy_text, expected, offered):
+                """One broken-seam press: its sentence on every card."""
+                _, _, status, action = exercise(
+                    label, WEB_FRAME, buttons, busy_text, timeout, busy_window
+                )
+                if not status.startswith(expected) or action != offered:
+                    raise Failure(f"the {label} settled on {status!r} with {action!r}")
+                views = wait_web_windows(status, offered, timeout, label)
+                print(
+                    f"{label}: all {views} Settings views read {status!r}, "
+                    f"offering {action!r}"
+                )
 
-                presses, mid, status, action = exercise(
-                    "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
+            feed_text = feed_path.read_text()
+            asset_bytes = asset.read_bytes()
+
+            def whole_feed():
+                if feed_path.is_dir():
+                    feed_path.rmdir()
+                feed_path.write_text(feed_text)
+
+            def unreadable_feed():
+                feed_path.unlink()
+                feed_path.mkdir()
+
+            def junk_feed():
+                feed_path.write_text("this is not a release")
+
+            for label, break_it, expected in (
+                ("unreadable feed", unreadable_feed, CHECK_FAILED),
+                ("invalid feed", junk_feed, INVALID_FEED),
+            ):
+                break_it()
+                try:
+                    round_failure(label, CHECK_LABELS, CHECK_STATUS, expected, None)
+                finally:
+                    whole_feed()
+
+                _, _, status, action = exercise(
+                    f"{label} with the feed whole again",
+                    WEB_FRAME,
+                    CHECK_LABELS,
+                    CHECK_STATUS,
+                    timeout,
+                    busy_window,
                 )
                 if status != OFFERED_STATUS or action != "Download update":
                     raise Failure(
                         f"the press after the {label} settled on {status!r} with {action!r}"
                     )
-                print(f"after the {label}: a press still works, both read {status!r}")
+                print(f"after the {label}: a press still works, reading {status!r}")
 
-            asset_bytes = asset.read_bytes()
             asset.unlink()
             try:
-                presses, mid, status, action = exercise(
-                    "page download",
-                    WEB_FRAME,
+                round_failure(
+                    "missing asset",
                     ("Download update",),
                     DOWNLOAD_STATUS,
-                    timeout,
-                    busy_window,
+                    DOWNLOAD_FAILED,
+                    "Download update",
                 )
-                if not status.startswith(DOWNLOAD_FAILED) or action != "Download update":
-                    raise Failure(f"a missing asset settled on {status!r} with {action!r}")
-                wait_web_windows(status, "Download update", timeout, "missing asset")
-                print(f"missing asset: both cards read {status!r}, Download still offered")
             finally:
                 asset.write_bytes(asset_bytes)
 
