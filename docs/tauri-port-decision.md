@@ -460,9 +460,37 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   write, then a second write after the answer), on Check approvals and on a second card while a
   decision is unanswered, plus that `+` is not offered mid-send; `installChannel` gained an answer
   delay so a suite can watch a control while its write is still in flight.
-- **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
-  replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
-  Tauri 3 later).
+- **S4 — Shell decision. STARTED Nov 22, 2026: the shell is a web page.** Either keep the GTK
+  chrome (rail, menus, dialogs, a11y) permanently, or replace it with a Tauri window. This is the
+  only stage that forces a WebKit decision (4.1 now, or Tauri 3 later).
+
+  **The shell, ported (Nov 22, 2026).** `Shell.tsx` is the native window's three columns with no
+  native window around them: the rail, the page list and one page's content, in a document of its
+  own. It is opened from the native drawer's `Shell` button and asks nothing new of the pages, each
+  of which already asks its own `*.snapshot` over the same channel, so the shell cannot show a page
+  anything but the state the app holds -- there is no shell-side copy to go stale. The two lists it
+  draws come from Rust: `pages::shell_pages()` is built from `pages::PAGES` and `pages::title()`, so
+  a page cannot appear in the rail and go missing from the page list; the drawer also prints the
+  account and the build stamp the native drawer carries. The rail's icons are the app's own SVGs
+  (`apps/muse/assets/icons`, read with Vite's `?raw`), not a second icon set: while both rails
+  exist they look the same. A page with no web component is still listed and named as such ("This
+  page has no web view yet") rather than hidden, which is the honest state for anything the port
+  has not reached. Four DOM tests pin the rail and drawer counts to the app's list, the first page
+  opening, a press mounting the ported component and asking *its* snapshot (and unmounting the
+  page it replaced), the mark moving in both lists, and the missing-page wording. Live on this
+  seat: the shell window opened from the running app, `{"rail":10,"drawer":10,"current":"Chat",
+  "title":"Chat"}` from its own probe, the chat page drawn from the app's held state
+  (`/tmp/muse-shell.png`, `/tmp/muse-shell2.png`).
+
+  What the shell still lacks to *replace* the native window, in the order it has to happen: the
+  native-only writes (Settings policy flips, Local host grants and start/stop) have no channel
+  route, so those pages are read-only here and say so; the drawer's History rows, the search and
+  new-chat entry points, the dialogs (updates, sign-in, first run) and the keyboard map are still
+  GTK widgets with no page; and the window itself (menu, focus, a11y pane) is GTK's. Removing GTK
+  is the last step of that list, not the first: deleting `pages.rs`'s builders today would delete
+  the reference the port is checked against on live data, and the 153 Rust tests that assert the
+  native rows are still the only assertion of most page behaviour. The Tauri spike below prices the
+  window swap that has to land before a single line of GTK can go.
 
   **Tauri 2 spike (Nov 21, 2026, throwaway, outside the tree).** Three source files on tauri 2.12.7 /
   wry 0.57 / tao 0.37 loaded the unmodified `apps/muse/ui/built/app.html` with the same
