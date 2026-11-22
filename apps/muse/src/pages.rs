@@ -5115,8 +5115,9 @@ fn do_update_action(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
     if let Some(staged) = staged {
         // The harness can drive the card to Restart; a relaunch there would
         // replace the copy under test, so the press is refused before any
-        // worker starts.
-        if super::update::harness_feed().is_some() {
+        // worker starts. Its `--restart` round runs a throwaway copy and asks
+        // for the real thing, which is the only place the relaunch is driven.
+        if super::update::harness_feed().is_some() && !super::update::restart_allowed() {
             const REFUSAL: &str = "Restart is disabled in this harness copy.";
             ctx.updates.borrow_mut().status = REFUSAL.to_owned();
             paint_updates(ctx, page);

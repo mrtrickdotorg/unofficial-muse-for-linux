@@ -138,6 +138,14 @@ pub fn harness_feed() -> Option<PathBuf> {
         .filter(|path| !path.as_os_str().is_empty())
 }
 
+/// Whether a harness copy may take its Restart press for real. The two-window
+/// rounds refuse it by default, so they cannot replace the build under them;
+/// the script's `--restart` round instead runs a throwaway copy and says so
+/// here, which is the only way the relaunch itself is ever driven.
+pub fn restart_allowed() -> bool {
+    std::env::var_os("MUSE_UPDATE_RESTART").as_deref() == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Pace the harness's own work so the busy step lasts long enough for the
 /// script to read both cards inside it. Zero (and no sleep) unless a feed is
 /// set, so a shipping copy never pays for it.
