@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 use muse_account::{AccountClient, ArtifactSummary};
 
 use crate::pages::{
-    HeldChat, HeldFeed, HeldGoals, HeldIdeas, HeldSearch, HeldSettings, HeldTasks, HeldThreads,
+    HeldChat, HeldFeed, HeldGoals, HeldIdeas, HeldLocalHost, HeldSearch, HeldSettings, HeldTasks,
+    HeldThreads,
 };
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
@@ -235,6 +236,24 @@ fn search_document(held: &HeldSearch) -> String {
 
 fn search_reply(held: &HeldSearch) -> serde_json::Value {
     let mut reply = search_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
+/// The Local host page as both the boot payload and a reply carry it. The
+/// host's read model is projected natively; nothing is read here.
+fn localhost_payload(held: &HeldLocalHost) -> serde_json::Value {
+    serde_json::to_value(held).expect("muse webui: the local host payload always serializes")
+}
+
+fn localhost_document(held: &HeldLocalHost) -> String {
+    let mut boot = localhost_payload(held);
+    boot["page"] = serde_json::json!("localhost");
+    document(&boot)
+}
+
+fn localhost_reply(held: &HeldLocalHost) -> serde_json::Value {
+    let mut reply = localhost_payload(held);
     reply["ok"] = serde_json::json!(true);
     reply
 }
@@ -596,6 +615,10 @@ pub(crate) fn handle_command_with(
         // presses that write, and the policy is whatever the chat panel last
         // read rather than a second trip here.
         "settings.snapshot" => Answer::Now(settings_reply(&crate::pages::settings_snapshot())),
+        // The host polls its own controller every 250 ms and the native paint
+        // re-projects each time, so this answer follows that pump: the page
+        // re-asks and sees new cards and log lines without holding a lock.
+        "localhost.snapshot" => Answer::Now(localhost_reply(&crate::pages::localhost_snapshot())),
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
         // Send dispatches nothing itself: the draft goes back to the
         // controller that owns the `Send` slot, which is the path the app's
@@ -1136,6 +1159,12 @@ pub(crate) fn open_feed_window(held: HeldFeed, client: Option<AccountClient>) ->
     open_window("Feed · web view", feed_document(&held), client, FEED_PROBE)
 }
 
+const LOCALHOST_PROBE: &str = "JSON.stringify({grants: document.querySelectorAll('.grant-row').length, \
+                                    cards: document.querySelectorAll('.approval-card').length, \
+                                    log: document.querySelectorAll('.log-line').length, \
+                                    phase: ((document.querySelector('.host-phase') || {}).textContent || '').trim(), \
+                                    device: ((document.querySelector('.host-device') || {}).textContent || '').trim().slice(0, 20)})";
+
 const SETTINGS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.policy-row').length, \
                                  linked: (document.querySelector('.linked') ? true : false), \
                                  policy: (document.querySelector('.policy-loaded') ? true : false), \
@@ -1189,6 +1218,17 @@ pub(crate) fn open_settings_window(held: HeldSettings) -> bool {
         settings_document(&held),
         None,
         SETTINGS_PROBE,
+    )
+}
+
+/// Open the Local host page in its own window. No client: the host's state is
+/// held natively and the page reads none of it over the wire.
+pub(crate) fn open_localhost_window(held: HeldLocalHost) -> bool {
+    open_window(
+        "Local host · web view",
+        localhost_document(&held),
+        None,
+        LOCALHOST_PROBE,
     )
 }
 
@@ -2869,6 +2909,72 @@ mod tests {
         assert_eq!(reply["updates"]["staged"], true);
         assert_eq!(reply["policy"]["rows"][0]["label"], "network_default");
         assert!(reply["policy"]["rows"][0]["flip"].is_null());
+    }
+
+    /// The Local host page opens on the host's read model, named for the
+    /// bundle, so a fresh window paints the same grants, cards and log the
+    /// native section already shows.
+    #[test]
+    fn the_localhost_document_names_its_page_and_carries_the_held_state() {
+        crate::pages::localhost_cache(crate::pages::HeldLocalHost {
+            identity: "This machine registers as its own device.".into(),
+            phase: "registered".into(),
+            notice: "Listening for the account's own node commands.".into(),
+            device: Some("linux-0123456789abcdef".into()),
+            grants: vec![crate::pages::LocalHostGrantRow {
+                label: "Scratch".into(),
+                root: "/var/home/phendrick/Scratch".into(),
+                writable: true,
+                policy: false,
+                text: "Scratch · /var/home/phendrick/Scratch · read-write".into(),
+            }],
+            pending: vec![crate::pages::LocalHostCardRow {
+                operation: "create_text".into(),
+                path: "Scratch/notes.txt".into(),
+                target: None,
+                preview: Some("hello from the agent".into()),
+                deciding: false,
+                countdown: "Expires in 42s".into(),
+            }],
+            log: vec!["files.read_text Scratch/notes.txt → allowed".into()],
+        });
+
+        let held = crate::pages::localhost_snapshot();
+        let doc = localhost_document(&held);
+        assert!(doc.contains("\"page\":\"localhost\""), "page named in boot");
+        assert!(doc.contains("Listening for the account's own node commands."));
+        assert!(doc.contains("create_text"));
+        assert!(doc.contains("hello from the agent"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    /// The channel answers the page's one read from the same held state: the
+    /// host polls its controller natively, so the page never touches the wire.
+    #[test]
+    fn localhost_snapshot_answers_from_the_held_state() {
+        crate::pages::localhost_cache(crate::pages::HeldLocalHost {
+            identity: "identity".into(),
+            phase: "disconnected".into(),
+            notice: "Start the local host to grant a folder.".into(),
+            device: None,
+            grants: Vec::new(),
+            pending: Vec::new(),
+            log: Vec::new(),
+        });
+
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":81,"cmd":"localhost.snapshot"}"#, None, None);
+        assert_eq!(id, serde_json::json!(81));
+        assert_eq!(command, "localhost.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a held-state read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["phase"], "disconnected");
+        assert_eq!(reply["grants"], serde_json::json!([]));
+        assert_eq!(reply["pending"], serde_json::json!([]));
+        assert_eq!(reply["notice"], "Start the local host to grant a folder.");
+        assert!(reply["device"].is_null());
     }
 
     /// Search runs the account read for the page's own query, and the answer

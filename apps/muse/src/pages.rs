@@ -795,10 +795,37 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             });
         }
         "localhost" => {
+            // The ninth page of the web UI port and S2's last. The host already
+            // owns a read model, so the page carries it as held state: grants,
+            // pending cards and the activity log as the controller painted
+            // them. Every press (grant, start, stop, allow, deny) stays here.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
             let heading = gtk4::Label::new(Some("Local host"));
             heading.add_css_class("muse-page-title");
             heading.set_halign(gtk4::Align::Start);
-            inner.append(&heading);
+            heading.set_hexpand(true);
+            head_row.append(&heading);
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("localhost-web");
+            web_view.set_valign(gtk4::Align::Center);
+            web_view.set_sensitive(crate::webui::available());
+            web_view.set_tooltip_text(Some(
+                "Open Local host in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            {
+                // Resolved per press: the window opens on what the controller
+                // holds now, including any card waiting for a decision.
+                web_view.connect_clicked(move |_| {
+                    if !crate::webui::open_localhost_window(localhost_snapshot()) {
+                        eprintln!("muse: web view unavailable in this build");
+                    }
+                });
+            }
+            inner.append(&head_row);
             // The consent copy is the boundary: filenames and
             // content reach Muse only in granted folders, writes
             // only with a local Allow. Nothing here runs until the
@@ -1121,6 +1148,9 @@ fn paint_localhost(ctx: &Ctx, page: &gtk4::Box) {
         return;
     };
     let snap = chat.host().borrow().snapshot();
+    // The web view reads this, so every paint keeps the projection current --
+    // and the page follows the same 250 ms pump the native section does.
+    localhost_cache(held_localhost_from(&snap));
     if let Some(notice) = named_label(page, "localhost-notice") {
         notice.set_text(&snap.notice);
     }
@@ -2899,6 +2929,106 @@ pub(crate) fn search_snapshot() -> HeldSearch {
 /// Replace the held search with what a paint just produced.
 pub(crate) fn search_cache(held: HeldSearch) {
     SEARCH_STORE.with(|store| *store.borrow_mut() = held);
+}
+
+/// One granted folder on the local host page, worded by the native row's own
+/// helper so the two lists cannot describe a grant differently.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct LocalHostGrantRow {
+    pub label: String,
+    pub root: String,
+    pub writable: bool,
+    pub policy: bool,
+    pub text: String,
+}
+
+/// One pending approval as the page reviews it: the exact operation and path,
+/// the move's destination when there is one, the content an edit proposes, and
+/// the countdown the native card recomputes on every repaint.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct LocalHostCardRow {
+    pub operation: String,
+    pub path: String,
+    pub target: Option<String>,
+    pub preview: Option<String>,
+    pub deciding: bool,
+    pub countdown: String,
+}
+
+/// The Local host page as the web view opens it: the host's own read model,
+/// projected once. Nothing here is a second source of truth -- the native
+/// controller paints the same snapshot, and every press stays with it.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct HeldLocalHost {
+    pub identity: String,
+    pub phase: String,
+    pub notice: String,
+    pub device: Option<String>,
+    pub grants: Vec<LocalHostGrantRow>,
+    pub pending: Vec<LocalHostCardRow>,
+    pub log: Vec<String>,
+}
+
+thread_local! {
+    static LOCALHOST_STORE: std::cell::RefCell<HeldLocalHost> =
+        std::cell::RefCell::new(HeldLocalHost::default());
+}
+
+/// The host's projection, as the native paint last built it.
+pub(crate) fn localhost_snapshot() -> HeldLocalHost {
+    LOCALHOST_STORE.with(|store| store.borrow().clone())
+}
+
+/// Replace the projection with what a paint just produced.
+pub(crate) fn localhost_cache(view: HeldLocalHost) {
+    LOCALHOST_STORE.with(|store| *store.borrow_mut() = view);
+}
+
+/// Project the host's read model into the page's own shapes. Pure, so the
+/// wording (a grant's line, a card's preview, the countdown) is unit-tested
+/// beside the native helpers it borrows.
+pub(crate) fn held_localhost_from(snapshot: &super::local_host::HostSnapshot) -> HeldLocalHost {
+    HeldLocalHost {
+        identity: super::local_host::identity_copy().to_owned(),
+        phase: match snapshot.phase {
+            super::local_host::Phase::Disconnected => "disconnected",
+            super::local_host::Phase::Connecting => "connecting",
+            super::local_host::Phase::Registered => "registered",
+        }
+        .to_owned(),
+        notice: snapshot.notice.clone(),
+        device: snapshot.node_id.clone(),
+        grants: snapshot
+            .grants
+            .iter()
+            .map(|grant| LocalHostGrantRow {
+                label: grant.label.clone(),
+                root: grant.root.display().to_string(),
+                writable: grant.writable,
+                policy: snapshot.policies.iter().any(|root| root == &grant.root),
+                text: grant_row_text(
+                    &grant.label,
+                    &grant.root,
+                    grant.writable,
+                    snapshot.policies.iter().any(|root| root == &grant.root),
+                ),
+            })
+            .collect(),
+        pending: snapshot
+            .cards
+            .iter()
+            .map(|card| LocalHostCardRow {
+                operation: card.request.operation.clone(),
+                path: card.request.path.clone(),
+                target: card.request.target_path.clone(),
+                preview: (!card.request.content.is_empty())
+                    .then(|| preview_content(&card.request.content)),
+                deciding: card.deciding,
+                countdown: approval_countdown(card.deadline),
+            })
+            .collect(),
+        log: snapshot.log.iter().rev().take(20).cloned().collect(),
+    }
 }
 
 /// One policy row on the settings page: the service's own label and value,
@@ -6887,6 +7017,60 @@ mod tests {
         // never an accident.
         assert!(!PAGES.contains(&"memory"));
         assert!(!PAGES.contains(&"policy"));
+    }
+
+    #[test]
+    fn the_localhost_projection_keeps_the_native_wording() {
+        // The page must not invent a second description of a grant, a card or
+        // the countdown: it borrows the helpers the native rows use, so a
+        // change to either list's wording lands in both.
+        let root = std::path::PathBuf::from("/var/home/phendrick/Scratch");
+        let held = held_localhost_from(&super::super::local_host::HostSnapshot {
+            phase: super::super::local_host::Phase::Registered,
+            notice: "Listening for the account's own node commands.".to_owned(),
+            grants: vec![super::super::local_host::GrantedFolder {
+                label: "Scratch".to_owned(),
+                root: root.clone(),
+                writable: true,
+            }],
+            cards: vec![super::super::local_host::Card {
+                request: muse_local_tools::ApprovalRequest {
+                    approval_id: "approval-1".to_owned(),
+                    invocation_id: "invocation-1".to_owned(),
+                    operation: "create_text".to_owned(),
+                    title: "Write a file".to_owned(),
+                    path: "Scratch/notes.txt".to_owned(),
+                    target_path: None,
+                    content: "hello from the agent".to_owned(),
+                    expires_in_seconds: 90,
+                },
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(42),
+                deciding: false,
+            }],
+            log: vec![
+                "node registered".to_owned(),
+                "files.read_text → allowed".to_owned(),
+            ],
+            policies: vec![root.clone()],
+            node_id: Some("linux-0123456789abcdef".to_owned()),
+        });
+
+        assert_eq!(held.phase, "registered");
+        assert_eq!(held.device.as_deref(), Some("linux-0123456789abcdef"));
+        assert_eq!(
+            held.grants[0].text,
+            "Scratch · /var/home/phendrick/Scratch · read-write · writes without a card"
+        );
+        assert!(held.grants[0].policy);
+        assert_eq!(held.pending[0].operation, "create_text");
+        assert_eq!(held.pending[0].path, "Scratch/notes.txt");
+        assert_eq!(
+            held.pending[0].preview.as_deref(),
+            Some("hello from the agent")
+        );
+        assert!(held.pending[0].countdown.starts_with("Expires in "));
+        // Newest first, so the page reads like the native log.
+        assert_eq!(held.log[0], "files.read_text → allowed");
     }
 
     #[test]

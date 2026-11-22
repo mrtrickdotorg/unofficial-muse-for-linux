@@ -247,6 +247,38 @@ export type SettingsSnapshot = {
   policy: SettingsPolicy;
 };
 
+// One granted folder as the Local host page shows it: the native row's own
+// wording, plus the flags behind it.
+export type LocalHostGrant = {
+  label: string;
+  root: string;
+  writable: boolean;
+  policy: boolean;
+  text: string;
+};
+
+// One pending approval: the exact operation, path and proposed content the
+// native card holds, and the countdown it recomputes on every repaint.
+export type LocalHostCard = {
+  operation: string;
+  path: string;
+  target?: string | null;
+  preview?: string | null;
+  deciding: boolean;
+  countdown: string;
+};
+
+// The Local host page as this window opens it: the controller's read model.
+export type LocalHostSnapshot = {
+  identity: string;
+  phase: string;
+  notice: string;
+  device?: string | null;
+  grants: LocalHostGrant[];
+  pending: LocalHostCard[];
+  log: string[];
+};
+
 // One bundle serves every window: the boot payload names the page it opens.
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
@@ -257,4 +289,5 @@ export type Boot =
   | (FeedSnapshot & { page?: "feed" })
   | (SearchSnapshot & { page?: "search" })
   | (SettingsSnapshot & { page?: "settings" })
+  | (LocalHostSnapshot & { page?: "localhost" })
   | (ChatSnapshot & { page?: "chat" });

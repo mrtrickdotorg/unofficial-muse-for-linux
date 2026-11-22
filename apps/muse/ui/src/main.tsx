@@ -17,6 +17,7 @@ import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
 import { Settings } from "./Settings";
+import { LocalHost } from "./LocalHost";
 import { Threads } from "./Threads";
 import { Chat } from "./Chat";
 import "./hub.css";
@@ -40,7 +41,9 @@ const page =
               ? "search"
               : boot && "link" in boot
                 ? "settings"
-                : boot && "title" in boot
+                : boot && "grants" in boot
+                  ? "localhost"
+                  : boot && "title" in boot
                   ? "chat"
                   : "library");
 
@@ -63,6 +66,8 @@ if (mount) {
       <Search />
     ) : page === "settings" ? (
       <Settings />
+    ) : page === "localhost" ? (
+      <LocalHost />
     ) : (
       <Library />
     ),
