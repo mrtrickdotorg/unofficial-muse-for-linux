@@ -4990,6 +4990,9 @@ fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
         // restart keeps the button out of reach, since a check's refusal would
         // name the wrong work.
         let checking = state.busy && state.status == "Checking for updates…";
+        // A copy that updates through its own channel has no check to offer,
+        // so the press is not shown at all rather than shown and greyed.
+        button.set_visible(appimage);
         button.set_sensitive(appimage && (!state.busy || checking));
     }
     if let Some(widget) = find("updates-action")

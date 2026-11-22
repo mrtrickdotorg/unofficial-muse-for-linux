@@ -38,6 +38,10 @@ mid-press, the way a network answer would on a slow day. The delay also has to
 outlast a window opening, since one round opens a Settings view while a check
 is still running and needs it to boot on the busy snapshot.
 
+`--no-appimage` runs with no `APPDIR`, so the app is a copy that updates
+through its own channel: both cards must say exactly that and offer neither
+Check nor Download -- a press nobody can act on is not an offer.
+
 Both cards are read from their accessibility trees, never from pixels: the
 native label's text is its accessible name, and the page's status paragraph is
 read through Atspi.Text. Nothing here needs the window manager to place or
@@ -99,6 +103,7 @@ DOWNLOAD_STATUS = "Downloading the update…"
 RESTART_STATUS = "Restarting into the update…"
 OFFERED_STATUS = "A newer build is available."
 CHECK_REFUSAL = "An update check is already running."
+NOT_APPIMAGE = "This copy updates through its own channel (store or checkout), not here."
 DOWNLOADED_PREFIX = "Update downloaded to "
 DOWNLOADED_SUFFIX = ". Restart to switch to it."
 RESTART_REFUSAL = "Restart is disabled in this harness copy."
@@ -196,6 +201,18 @@ def find_button(frame_name, button_names):
         if role(node) in ("push button", "toggle button") and name(node) in button_names:
             return node
     return None
+
+
+def button_names(frame_name):
+    """The names of the buttons the `frame_name` window actually shows."""
+    frame = first_frame(frame_name)
+    if frame is None:
+        return []
+    return [
+        name(node)
+        for node in walk(frame)
+        if role(node) in ("push button", "toggle button")
+    ]
 
 
 def shows_text(frame_name, sentence, index=0):
@@ -368,7 +385,7 @@ def open_settings(command, env, log_path):
         if not press(MAIN_FRAME, (WEB_VIEW_BUTTON,)):
             raise Failure("the Settings page's Web view button could not be pressed")
         wait_until(lambda: first_frame(WEB_FRAME), 25, f"the {WEB_FRAME} window")
-        wait_until(lambda: card(WEB_FRAME)[1], 20, "the web card's button")
+        wait_until(lambda: card(WEB_FRAME)[0], 20, "the web card's status")
         return proc
     except Failure:
         stop(proc)
@@ -509,7 +526,7 @@ def write_feed(root):
     return feed_path
 
 
-def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
+def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_appimage):
     if not os.access(binary, os.X_OK):
         raise Failure(f"{binary} is not executable; build it with `cargo build -p muse`")
     running = subprocess.run(
@@ -548,13 +565,18 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
             # out of it.
             "XDG_CACHE_HOME": str(cache),
             "GDK_BACKEND": env.get("GDK_BACKEND", "x11"),
-            # A non-empty APPDIR is what makes this copy update itself, so the
-            # card offers a real Check. The dir itself is never used.
-            "APPDIR": str(root),
             "MUSE_PROBE": "1",
         }
     )
-    if feed_mode == "newer":
+    if no_appimage:
+        # No APPDIR: this copy does not update itself, so both cards must say
+        # so and offer no press at all.
+        env.pop("APPDIR", None)
+    else:
+        # A non-empty APPDIR is what makes this copy update itself, so the
+        # card offers a real Check. The dir itself is never used.
+        env["APPDIR"] = str(root)
+    if feed_mode == "newer" and not no_appimage:
         env["MUSE_UPDATE_FEED"] = str(write_feed(root))
         env["MUSE_UPDATE_DELAY_MS"] = str(delay_ms)
 
@@ -562,6 +584,30 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
     ok = False
     try:
         proc = open_settings(launch_command(binary, env_script), env, log_path)
+
+        if no_appimage:
+            wait_until(
+                lambda: card(MAIN_FRAME)[0] == NOT_APPIMAGE
+                and card(WEB_FRAME)[0] == NOT_APPIMAGE,
+                timeout,
+                "both cards to say this copy updates through its own channel",
+            )
+            offered = [
+                button
+                for frame_name in (WEB_FRAME, MAIN_FRAME)
+                for button in button_names(frame_name)
+                if button in CARD_BUTTONS
+            ]
+            if offered:
+                raise Failure(
+                    f"a copy that does not update itself still offered {offered!r}"
+                )
+            print(
+                f"PASS: both cards read {NOT_APPIMAGE!r} and offered none of "
+                f"{CARD_BUTTONS}"
+            )
+            ok = True
+            return ok
 
         wait_until(idle, timeout, "both cards to show a settled status")
         page_status, _, page_action, native_status, native_action, _ = cards()
@@ -825,6 +871,12 @@ def main():
         help="how long the harness feed takes to answer, so the busy step can be read "
         "(default: %(default)s)",
     )
+    parser.add_argument(
+        "--no-appimage",
+        action="store_true",
+        help="run as a copy that does not update itself: both cards must say so and "
+        "offer no Check or Download press",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the temp config and log")
     parser.add_argument(
         "--env-script",
@@ -848,6 +900,7 @@ def main():
                 args.env_script,
                 args.feed,
                 args.delay_ms,
+                args.no_appimage,
             )
             else 1
         )
