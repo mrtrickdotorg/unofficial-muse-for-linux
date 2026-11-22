@@ -202,13 +202,48 @@ def text(node):
 
 
 def find_button(frame_name, button_names):
+    """The node to press for one of `button_names`.
+
+    A button is preferred, but any other node carrying the name and an action
+    will do: GTK versions differ in which widget ends up as the actionable
+    accessible node (a rail press has been a plain button and a list row), and
+    the harness must not care which.
+    """
     frame = first_frame(frame_name)
     if frame is None:
         return None
+    loose = None
     for node in walk(frame):
-        if role(node) in ("push button", "toggle button") and name(node) in button_names:
+        if name(node) not in button_names:
+            continue
+        try:
+            actions = node.get_action_iface()
+        except Exception:
+            actions = None
+        if actions is None or actions.get_n_actions() == 0:
+            continue
+        if role(node) in ("push button", "toggle button"):
             return node
-    return None
+        if loose is None:
+            loose = node
+    return loose
+
+
+def dump_tree(frame_name, limit=120):
+    """Print what the accessibility tree holds: the only way to see a runner."""
+    frame = first_frame(frame_name)
+    if frame is None:
+        print(f"debug: no frame named {frame_name!r}")
+        return
+    nodes = walk(frame)
+    print(f"debug: frame {name(frame)!r} holds {len(nodes)} nodes")
+    for node in nodes[:limit]:
+        try:
+            actions = node.get_action_iface()
+            count = actions.get_n_actions() if actions is not None else 0
+        except Exception:
+            count = 0
+        print(f"debug: {role(node)!r} {name(node)!r} actions={count}")
 
 
 def button_names(frame_name):
@@ -388,11 +423,16 @@ def open_settings(command, env, log_path):
         # The rail and its buttons reach the accessibility tree a moment after
         # the window does, and a loaded runner can take seconds to paint them:
         # wait for the press to exist instead of racing the first frame.
-        wait_until(
-            lambda: find_button(MAIN_FRAME, (SETTINGS_BUTTON,)) is not None,
-            20,
-            f"the {SETTINGS_BUTTON} button",
-        )
+        try:
+            wait_until(
+                lambda: find_button(MAIN_FRAME, (SETTINGS_BUTTON,)) is not None,
+                20,
+                f"the {SETTINGS_BUTTON} button",
+            )
+        except Failure:
+            # A runner's tree is not this seat's tree: say what it held.
+            dump_tree(MAIN_FRAME)
+            raise
         # The rail's Settings button, then the page's own Web view button once
         # the page is the visible stack child (its card paints by then).
         if not press(MAIN_FRAME, (SETTINGS_BUTTON,)):
