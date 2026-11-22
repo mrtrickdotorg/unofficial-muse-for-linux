@@ -567,7 +567,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   first check still lands. For that refusal to be reachable at all the native check button stays
   pressable while a check runs -- an install or a restart still takes it out of reach -- instead of
   the press disappearing into an insensitive button, and the page shows the same sentence because
-  it is the app's status, not a message the page invented.
+  it is the app's status, not a message the page invented. With two windows already open, the
+  script then presses Check on the native card and requires every window to take `Working…` and
+  leave it for the same answer -- an older window that the registry stopped nudging never moves at
+  all, which is what that round caught.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would

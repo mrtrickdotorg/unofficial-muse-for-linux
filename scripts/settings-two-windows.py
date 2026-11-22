@@ -639,6 +639,35 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
             views = wait_web_windows(OFFERED_STATUS, "Download update", timeout, "mid-check boot")
             print(f"the running check's answer reached all {views} Settings web views")
 
+            # With both windows already up, a native press has to reach every
+            # one of them: each takes the busy step and each leaves it for the
+            # same answer. A registry that keeps only the newest window leaves
+            # the older one showing what it already had -- never busy, never
+            # told the answer.
+            if not press(MAIN_FRAME, CHECK_LABELS):
+                raise Failure("the native check could not be pressed with two windows up")
+
+            def every_window_working():
+                views = frames_named(WEB_FRAME)
+                if len(views) < 2:
+                    return False
+                return all(
+                    card_of(view)[1] == WORKING or card_of(view)[0] == CHECK_STATUS
+                    for view in views
+                )
+
+            wait_until(
+                every_window_working,
+                busy_window,
+                "every Settings window to take the busy step for a native press",
+            )
+            views = len(frames_named(WEB_FRAME))
+            print(f"pressed check on the native card: all {views} Settings windows took {WORKING!r}")
+            views = wait_web_windows(
+                OFFERED_STATUS, "Download update", timeout, "native check with two windows up"
+            )
+            print(f"all {views} Settings windows left {WORKING!r} for {OFFERED_STATUS!r}")
+
             # The press below has to reach both windows, so neither may be
             # left out of the registry: open one only if the round above did
             # not already leave two up.
