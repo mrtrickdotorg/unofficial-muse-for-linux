@@ -204,6 +204,49 @@ export type ChatSnapshot = {
   error?: string | null;
 };
 
+// The saved account link as the Settings page shows it: paths only, never the
+// session jar's contents.
+export type SettingsLink = {
+  linked: boolean;
+  interpreter: string;
+  session_folder: string;
+};
+
+// The updater's last answer. The presses that write stay on the native page.
+export type SettingsUpdates = {
+  appimage: boolean;
+  status: string;
+  busy: boolean;
+  checked: boolean;
+  staged: boolean;
+};
+
+// One policy row: the service's own label and value, plus the flip the chat
+// panel offers when it offers one at all.
+export type PolicyRow = {
+  label: string;
+  value: string;
+  flip?: string | null;
+};
+
+// The policy the chat panel last read. `loaded` separates a panel that has not
+// read yet from a service that published nothing.
+export type SettingsPolicy = {
+  loaded: boolean;
+  rows: PolicyRow[];
+  connectors: string[];
+  withheld: number;
+  note?: string | null;
+};
+
+// The Settings surface as this window opens it: three things the page cannot
+// read on its own.
+export type SettingsSnapshot = {
+  link: SettingsLink;
+  updates: SettingsUpdates;
+  policy: SettingsPolicy;
+};
+
 // One bundle serves every window: the boot payload names the page it opens.
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
@@ -213,4 +256,5 @@ export type Boot =
   | (ThreadsSnapshot & { page?: "threads" })
   | (FeedSnapshot & { page?: "feed" })
   | (SearchSnapshot & { page?: "search" })
+  | (SettingsSnapshot & { page?: "settings" })
   | (ChatSnapshot & { page?: "chat" });

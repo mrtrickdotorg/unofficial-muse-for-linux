@@ -716,6 +716,38 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             });
         }
         "settings" => {
+            // The eighth page of the web UI port. Settings is the first page
+            // whose native side is held state rather than a listing, so the
+            // web view carries the link, the updater's last answer and the
+            // policy the chat panel read; the three presses that change
+            // anything (check, download, sign out) stay on this page.
+            let head_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let heading = gtk4::Label::new(Some("Settings"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            heading.set_hexpand(true);
+            head_row.append(&heading);
+            let web_view = gtk4::Button::with_label("Web view");
+            web_view.set_widget_name("settings-web");
+            web_view.set_valign(gtk4::Align::Center);
+            web_view.set_sensitive(crate::webui::available());
+            web_view.set_tooltip_text(Some(
+                "Open Settings in the web UI slice of the port (read-only)",
+            ));
+            if !crate::webui::available() {
+                web_view.set_tooltip_text(Some("WebKit helpers are unavailable in this build"));
+            }
+            head_row.append(&web_view);
+            {
+                // Resolved per press: the window opens on what the app holds
+                // now, including the policy the chat panel last read.
+                web_view.connect_clicked(move |_| {
+                    if !crate::webui::open_settings_window(settings_snapshot()) {
+                        eprintln!("muse: web view unavailable in this build");
+                    }
+                });
+            }
+            inner.append(&head_row);
             let info = gtk4::Label::new(None);
             info.set_widget_name("settings-info");
             info.set_wrap(true);
@@ -2869,6 +2901,120 @@ pub(crate) fn search_cache(held: HeldSearch) {
     SEARCH_STORE.with(|store| *store.borrow_mut() = held);
 }
 
+/// One policy row on the settings page: the service's own label and value,
+/// plus the flip the chat panel offers for it. The page is read-only, so the
+/// flip is named and never offered -- the words travel as data.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct PolicyRowView {
+    pub label: String,
+    pub value: String,
+    pub flip: Option<String>,
+}
+
+/// The policy projection the settings page carries: what the chat panel last
+/// read, with the connector names whose grants can be reset there.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct PolicyView {
+    pub loaded: bool,
+    pub rows: Vec<PolicyRowView>,
+    pub connectors: Vec<String>,
+    pub withheld: u64,
+    pub note: Option<String>,
+}
+
+/// The saved account link as the settings page shows it. Paths only: the
+/// session jar's contents never reach a page.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct LinkView {
+    pub linked: bool,
+    pub interpreter: String,
+    pub session_folder: String,
+}
+
+/// The updater's last state as the settings page shows it. The controls that
+/// write (check, download, restart) stay on the native page, so the page says
+/// what the last check found instead of offering them again.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct UpdatesView {
+    pub appimage: bool,
+    pub status: String,
+    pub busy: bool,
+    pub checked: bool,
+    pub staged: bool,
+}
+
+/// The Settings page as the web view opens it: three things the page cannot
+/// read on its own, each already held by the native side.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct HeldSettings {
+    pub link: LinkView,
+    pub updates: UpdatesView,
+    pub policy: PolicyView,
+}
+
+thread_local! {
+    static SETTINGS_UPDATES: std::cell::RefCell<UpdatesView> =
+        std::cell::RefCell::new(UpdatesView::default());
+    static SETTINGS_POLICY: std::cell::RefCell<PolicyView> =
+        std::cell::RefCell::new(PolicyView::default());
+}
+
+/// The settings surface as the web view opens it: the link this clone saved,
+/// the updater's last answer, and the policy the chat panel last read. The
+/// link is read now (it is one small file); the other two come from their own
+/// paints, so the page never claims a read the app has not made.
+pub(crate) fn settings_snapshot() -> HeldSettings {
+    let link = match super::session::load_saved_link() {
+        Some(link) => LinkView {
+            linked: true,
+            interpreter: link.python.display().to_string(),
+            session_folder: link.config_dir.display().to_string(),
+        },
+        None => LinkView::default(),
+    };
+    HeldSettings {
+        link,
+        updates: SETTINGS_UPDATES.with(|store| store.borrow().clone()),
+        policy: SETTINGS_POLICY.with(|store| store.borrow().clone()),
+    }
+}
+
+/// Hold the updater's state beside the panel that paints it, so the page and
+/// the native section read the same answer.
+pub(crate) fn settings_updates_cache(view: UpdatesView) {
+    SETTINGS_UPDATES.with(|store| *store.borrow_mut() = view);
+}
+
+/// Hold the policy the chat panel just painted. `flip` is the panel's own
+/// table of accepted flips, so the page names exactly what a press there
+/// would offer.
+pub(crate) fn held_policy_from(
+    policy: &muse_account::PolicySettings,
+    flip: impl Fn(&str, &str) -> Option<String>,
+) -> PolicyView {
+    PolicyView {
+        loaded: true,
+        rows: policy
+            .entries
+            .iter()
+            .map(|entry| PolicyRowView {
+                label: entry.label.clone(),
+                value: entry.value.clone(),
+                flip: flip(&entry.label, &entry.value),
+            })
+            .collect(),
+        connectors: policy.connectors.clone(),
+        withheld: policy.withheld,
+        note: None,
+    }
+}
+
+/// Hold a policy projection, including the link-first and failed states the
+/// panel paints instead of a read.
+pub(crate) fn settings_policy_cache(view: PolicyView) {
+    SETTINGS_POLICY.with(|store| *store.borrow_mut() = view);
+}
+
 /// Project one search listing into the page's rows, with the native wording.
 pub(crate) fn held_search_from(query: &str, listing: &muse_account::ServiceListing) -> HeldSearch {
     let rows = listing
@@ -4348,6 +4494,15 @@ fn fill_settings(ctx: &Ctx, page: &gtk4::Box) -> bool {
 fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
     let find = |name: &str| find_widget(page.upcast_ref(), name);
     let state = ctx.updates.borrow();
+    // The eligibility and the last answer travel to the web view as data, so
+    // its page and this section cannot tell two different stories.
+    settings_updates_cache(UpdatesView {
+        appimage: super::update::running_as_appimage(),
+        status: state.status.clone(),
+        busy: state.busy,
+        checked: state.info.is_some(),
+        staged: state.staged.is_some(),
+    });
     if let Some(widget) = find("updates-status")
         && let Ok(label) = widget.downcast::<gtk4::Label>()
     {
@@ -7351,5 +7506,32 @@ mod tests {
         let snippet = idea_snippet(Some(&long));
         assert!(snippet.ends_with("…"));
         assert!(snippet.chars().count() <= 241);
+    }
+
+    #[test]
+    fn held_policy_names_the_panels_own_flips_and_nothing_else() {
+        let policy = muse_account::PolicySettings {
+            entries: vec![
+                muse_account::PolicyEntry {
+                    label: "connector_default".into(),
+                    value: "always_ask".into(),
+                },
+                muse_account::PolicyEntry {
+                    label: "unflippable".into(),
+                    value: "fixed".into(),
+                },
+            ],
+            connectors: vec!["calendar".into()],
+            withheld: 3,
+        };
+        let view = held_policy_from(&policy, |label, value| {
+            (label == "connector_default" && value == "always_ask").then(|| "auto_allow".to_owned())
+        });
+        assert!(view.loaded, "a read that answered is a read that carries");
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(view.rows[0].flip.as_deref(), Some("auto_allow"));
+        assert_eq!(view.rows[1].flip, None, "no flip the panel would not offer");
+        assert_eq!(view.connectors, vec!["calendar".to_owned()]);
+        assert_eq!(view.withheld, 3);
     }
 }

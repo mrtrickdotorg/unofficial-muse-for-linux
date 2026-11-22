@@ -884,3 +884,35 @@ html, body {
 
 .chat-approval-actions button:disabled { opacity: 0.45; cursor: default; }
 .chat-approval-deny { color: var(--warn); }
+
+/* Settings: the native page's own label/value lines, with the flips it offers
+ * named in words instead of repeated as presses. Read-only by design. */
+.settings-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 13px;
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-label {
+  color: var(--text-faint);
+}
+
+.settings-value {
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  margin: 6px 0 0;
+  color: var(--text-faint);
+  font-size: 12.5px;
+  line-height: 1.5;
+}

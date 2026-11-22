@@ -16,6 +16,7 @@ import { Search } from "./Search";
 import { Ideas } from "./Ideas";
 import { Library } from "./Library";
 import { Tasks } from "./Tasks";
+import { Settings } from "./Settings";
 import { Threads } from "./Threads";
 import { Chat } from "./Chat";
 import "./hub.css";
@@ -37,9 +38,11 @@ const page =
             ? "feed"
             : boot && "query" in boot
               ? "search"
-              : boot && "title" in boot
-                ? "chat"
-                : "library");
+              : boot && "link" in boot
+                ? "settings"
+                : boot && "title" in boot
+                  ? "chat"
+                  : "library");
 
 const mount = document.getElementById("root");
 if (mount) {
@@ -58,6 +61,8 @@ if (mount) {
       <Feed />
     ) : page === "search" ? (
       <Search />
+    ) : page === "settings" ? (
+      <Settings />
     ) : (
       <Library />
     ),

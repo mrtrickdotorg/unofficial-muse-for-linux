@@ -1638,6 +1638,13 @@ impl Chat {
     /// first: the bridge comment asks for one armed press, and a
     /// repaint disarms. A failed read keeps the last good policy.
     fn paint_policy(chat: &Rc<Self>, policy: &muse_account::PolicySettings) {
+        // The settings page reads the same projection: the panel's own flip
+        // table decides which rows the page can name as flippable, so a press
+        // here and the words there never disagree.
+        crate::pages::settings_policy_cache(crate::pages::held_policy_from(
+            policy,
+            |label, value| Self::policy_flip(label, value).map(|flip| flip.next),
+        ));
         while let Some(child) = chat.panel_policy.first_child() {
             chat.panel_policy.remove(&child);
         }

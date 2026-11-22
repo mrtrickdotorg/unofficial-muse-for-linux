@@ -25,7 +25,9 @@ use std::time::{Duration, Instant};
 
 use muse_account::{AccountClient, ArtifactSummary};
 
-use crate::pages::{HeldChat, HeldFeed, HeldGoals, HeldIdeas, HeldSearch, HeldTasks, HeldThreads};
+use crate::pages::{
+    HeldChat, HeldFeed, HeldGoals, HeldIdeas, HeldSearch, HeldSettings, HeldTasks, HeldThreads,
+};
 
 /// How long the main loop sleeps between looks at a worker's answer. A wire
 /// read takes hundreds of milliseconds at best and has taken 27 s against
@@ -233,6 +235,25 @@ fn search_document(held: &HeldSearch) -> String {
 
 fn search_reply(held: &HeldSearch) -> serde_json::Value {
     let mut reply = search_payload(held);
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
+/// The Settings page as both the boot payload and a reply carry it. Nothing
+/// here is read on this side: the link, the updater's answer and the policy
+/// are the native page's own held state, projected once.
+fn settings_payload(held: &HeldSettings) -> serde_json::Value {
+    serde_json::to_value(held).expect("muse webui: the settings payload always serializes")
+}
+
+fn settings_document(held: &HeldSettings) -> String {
+    let mut boot = settings_payload(held);
+    boot["page"] = serde_json::json!("settings");
+    document(&boot)
+}
+
+fn settings_reply(held: &HeldSettings) -> serde_json::Value {
+    let mut reply = settings_payload(held);
     reply["ok"] = serde_json::json!(true);
     reply
 }
@@ -571,6 +592,10 @@ pub(crate) fn handle_command_with(
         "threads.refresh" => Answer::Later(fresh_threads(client)),
         "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
         "feed.refresh" => Answer::Later(fresh_feed(client)),
+        // Settings answers from held state only: the native page owns the
+        // presses that write, and the policy is whatever the chat panel last
+        // read rather than a second trip here.
+        "settings.snapshot" => Answer::Now(settings_reply(&crate::pages::settings_snapshot())),
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
         // Send dispatches nothing itself: the draft goes back to the
         // controller that owns the `Send` slot, which is the path the app's
@@ -1111,6 +1136,11 @@ pub(crate) fn open_feed_window(held: HeldFeed, client: Option<AccountClient>) ->
     open_window("Feed · web view", feed_document(&held), client, FEED_PROBE)
 }
 
+const SETTINGS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.policy-row').length, \
+                                 linked: (document.querySelector('.linked') ? true : false), \
+                                 policy: (document.querySelector('.policy-loaded') ? true : false), \
+                                 status: ((document.querySelector('.updates-status') || {}).textContent || '').slice(0, 40)})";
+
 const SEARCH_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.search-row').length, \
      boot: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.rows || []).length, \
      query: (window.__MUSE_BOOT__ && window.__MUSE_BOOT__.query) || '', \
@@ -1147,6 +1177,18 @@ pub(crate) fn open_search_window(held: HeldSearch, client: Option<AccountClient>
         search_document(&held),
         client,
         SEARCH_PROBE,
+    )
+}
+
+/// Open the Settings page in its own window, on the link, updater answer and
+/// policy the native side holds. No client: this page reads nothing over the
+/// wire, and the presses that would stay in the app's own controllers.
+pub(crate) fn open_settings_window(held: HeldSettings) -> bool {
+    open_window(
+        "Settings · web view",
+        settings_document(&held),
+        None,
+        SETTINGS_PROBE,
     )
 }
 
@@ -2757,6 +2799,76 @@ mod tests {
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["query"], "held query");
         assert_eq!(reply["rows"][0]["title"], "Held result");
+    }
+
+    /// Settings opens on the app's own held state: the updater's last answer
+    /// and the policy the chat panel read, with the page named for the bundle.
+    #[test]
+    fn the_settings_document_names_its_page_and_carries_the_held_state() {
+        crate::pages::settings_updates_cache(crate::pages::UpdatesView {
+            appimage: true,
+            status: "Up to date (build 62ce6e3).".into(),
+            busy: false,
+            checked: true,
+            staged: false,
+        });
+        crate::pages::settings_policy_cache(crate::pages::PolicyView {
+            loaded: true,
+            rows: vec![crate::pages::PolicyRowView {
+                label: "connector_default".into(),
+                value: "always_ask".into(),
+                flip: Some("auto_allow".into()),
+            }],
+            connectors: vec!["calendar".into()],
+            withheld: 2,
+            note: None,
+        });
+
+        let held = crate::pages::settings_snapshot();
+        let doc = settings_document(&held);
+        assert!(doc.contains("\"page\":\"settings\""), "page named in boot");
+        assert!(doc.contains("Up to date (build 62ce6e3)."));
+        assert!(doc.contains("connector_default"));
+        assert!(doc.contains("auto_allow"));
+        assert!(doc.contains("calendar"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+    }
+
+    /// The channel answers the page's one read from the same held state, so a
+    /// reload never becomes a wire trip.
+    #[test]
+    fn settings_snapshot_answers_from_the_held_state() {
+        crate::pages::settings_updates_cache(crate::pages::UpdatesView {
+            appimage: false,
+            status: "Up to date.".into(),
+            busy: false,
+            checked: true,
+            staged: true,
+        });
+        crate::pages::settings_policy_cache(crate::pages::PolicyView {
+            loaded: true,
+            rows: vec![crate::pages::PolicyRowView {
+                label: "network_default".into(),
+                value: "auto_allow".into(),
+                flip: None,
+            }],
+            connectors: Vec::new(),
+            withheld: 0,
+            note: None,
+        });
+
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":71,"cmd":"settings.snapshot"}"#, None, None);
+        assert_eq!(id, serde_json::json!(71));
+        assert_eq!(command, "settings.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a held-state read must answer without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["updates"]["status"], "Up to date.");
+        assert_eq!(reply["updates"]["staged"], true);
+        assert_eq!(reply["policy"]["rows"][0]["label"], "network_default");
+        assert!(reply["policy"]["rows"][0]["flip"].is_null());
     }
 
     /// Search runs the account read for the page's own query, and the answer
