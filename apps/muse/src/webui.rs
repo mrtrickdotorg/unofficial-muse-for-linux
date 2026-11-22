@@ -282,7 +282,7 @@ fn shell_payload(routes: Option<&WebRoutes>) -> serde_json::Value {
     })
 }
 
-fn shell_document(routes: Option<&WebRoutes>) -> String {
+pub(crate) fn shell_document(routes: Option<&WebRoutes>) -> String {
     let mut boot = shell_payload(routes);
     boot["page"] = serde_json::json!("shell");
     document(&boot)
@@ -537,6 +537,21 @@ fn fresh_goals(client: Option<AccountClient>) -> Receiver<Fetched> {
         let _ = sender.send(fetched);
     });
     receiver
+}
+
+/// When this process started, for the probe's elapsed numbers. Set once from
+/// `main`, so every window logs the same clock.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+pub(crate) fn mark_start() {
+    let _ = PROCESS_START.set(Instant::now());
+}
+
+fn since_start_ms() -> u128 {
+    PROCESS_START
+        .get()
+        .map(|start| start.elapsed().as_millis())
+        .unwrap_or(0)
 }
 
 /// Whether a command earns a line in the launch log. The Chat page re-asks
@@ -1153,14 +1168,35 @@ fn open_window_with(
     // Only the wire read leaves the loop, and it comes back through the timed
     // poll below, so no lock or widget is touched off the main thread.
     let reply_view = view.clone();
+    // The probe's clock: how long the window took to render, and how long its
+    // first command waited. Same numbers the Tauri window logs, so the two are
+    // comparable rather than argued about.
+    let probing = std::env::var_os("MUSE_PROBE").is_some();
+    let first_command = std::rc::Rc::new(std::cell::Cell::new(true));
+    let log_title = title.to_owned();
     // Named commands so far, per window: see `should_log_command`.
     let named: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>> =
         std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
     manager.connect_script_message_received(None, move |_, value| {
         let raw = value.to_str().to_string();
+        let handling = Instant::now();
         let (id, answer, command) = handle_command_with(&raw, client.clone(), routes.as_ref());
+        if probing && first_command.replace(false) {
+            eprintln!(
+                "muse webui: {} first command {command} at {}ms",
+                log_title,
+                since_start_ms()
+            );
+        }
         if should_log_command(&command, &mut named.borrow_mut()) {
             eprintln!("muse webui: command {command}");
+        }
+        if probing && matches!(answer, Answer::Now(_)) {
+            eprintln!(
+                "muse webui: {} answered {command} in {}us",
+                log_title,
+                handling.elapsed().as_micros()
+            );
         }
         match answer {
             Answer::Now(reply) => send_reply(&reply_view, &id, &reply),
@@ -1216,9 +1252,17 @@ fn open_window_with(
     // reply -- evaluate in steps on separate `timeout_add_local_once` ticks
     // and keep each script synchronous. A probe written the async way cost a
     // debugging cycle while proving the composer's send.
+    let loaded_title = title.to_owned();
     view.connect_load_changed(move |view, event| {
         if event != webkit6::LoadEvent::Finished {
             return;
+        }
+        if probing {
+            eprintln!(
+                "muse webui: {} document loaded at {}ms",
+                loaded_title,
+                since_start_ms()
+            );
         }
         let probe_view = view.clone();
         gtk4::glib::timeout_add_local_once(Duration::from_millis(700), move || {

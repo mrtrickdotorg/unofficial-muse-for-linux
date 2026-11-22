@@ -19,3 +19,6 @@ flatpak/repo/
 # page are committed; dependencies and the multi-file Vite output are not.
 node_modules/
 apps/muse/ui/dist/
+
+# Tauri regenerates its ACL schemas on every build of the window spike.
+apps/muse-window/gen/

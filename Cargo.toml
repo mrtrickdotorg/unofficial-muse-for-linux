@@ -1,3 +1,6 @@
 [workspace]
 resolver = "2"
+# The S4 window spike is its own project: it is GTK 3 + WebKitGTK 4.1, and it
+# must not drag a second WebKit into the app's workspace lock, build or test run.
+exclude = ["apps/muse-window"]
 members = ["crates/muse-linux-core", "crates/muse-meta-api", "crates/muse-agent-runtime", "crates/muse-account", "crates/muse-local-tools", "crates/muse-local-link", "crates/muse-calendar", "crates/muse-mail", "crates/muse-desktop", "crates/muse-tasks", "crates/muse-browser", "crates/muse-reminder-runner", "apps/muse"]

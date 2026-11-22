@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "muse-window",
+  "version": "0.1.0",
+  "identifier": "org.kythos.MuseWindow",
+  "build": {},
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null,
+      "capabilities": []
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

@@ -1,0 +1,20 @@
+[package]
+name = "muse-window"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "S4 spike: Muse's shell document in a Tauri 2 window, on the app's own command surface"
+
+[[bin]]
+name = "muse-window"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# No GTK 4 here on purpose: this window is GTK 3 + WebKitGTK 4.1 (via wry/tao),
+# and GTK aborts when it meets GTK 4 in the same process.
+tauri = { version = "2.12", features = [] }
+http = "1"
+serde_json = "1"

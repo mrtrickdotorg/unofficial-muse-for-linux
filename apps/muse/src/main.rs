@@ -42,6 +42,7 @@ const DEFAULT_WINDOW_WIDTH: i32 = 1100;
 const DEFAULT_WINDOW_HEIGHT: i32 = 700;
 
 fn main() {
+    crate::webui::mark_start();
     // The AppImage's linuxdeploy Gtk hook exports GTK_THEME=Adwaita:
     // <variant>, a guess at the desktop's scheme. This app follows
     // the system theme -- on Patrick's seat that is Breeze, chosen by
