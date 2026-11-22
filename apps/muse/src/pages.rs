@@ -3335,7 +3335,7 @@ pub(crate) struct LinkView {
 /// The updater's last state as the settings page shows it. The controls that
 /// write carry the native card's own labels, so the page offers the press the
 /// window offers, word for word.
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct UpdatesView {
     pub appimage: bool,
     pub status: String,
@@ -3385,9 +3385,18 @@ pub(crate) fn settings_snapshot() -> HeldSettings {
 }
 
 /// Hold the updater's state beside the panel that paints it, so the page and
-/// the native section read the same answer.
-pub(crate) fn settings_updates_cache(view: UpdatesView) {
-    SETTINGS_UPDATES.with(|store| *store.borrow_mut() = view);
+/// the native section read the same answer. Say whether it changed: a repaint
+/// that carries the same answer, such as a visit to Settings, must not nudge a
+/// page that already shows it.
+pub(crate) fn settings_updates_cache(view: UpdatesView) -> bool {
+    SETTINGS_UPDATES.with(|store| {
+        let mut store = store.borrow_mut();
+        if *store == view {
+            return false;
+        }
+        *store = view;
+        true
+    })
 }
 
 /// Hold the policy the chat panel just painted. `flip` is the panel's own
@@ -4937,14 +4946,18 @@ fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
     // The eligibility and the last answer travel to the web view as data, so
     // its page and this section cannot tell two different stories. This cache
     // is the only thing the Settings page reads.
-    settings_updates_cache({
+    let projected = {
         let state = ctx.updates.borrow();
         updates_view_from(&state, appimage)
-    });
+    };
     // A press answers before the worker does, so the page's own read can land
-    // on "busy" and stay there. This tells an open page that the answer is in,
-    // whether the press came from its card or from this one.
-    crate::webui::settings_updates_changed();
+    // on "busy" and stay there. A changed answer tells an open page the answer
+    // is in, whether the press came from its card or from this one; a repaint
+    // that carries the same answer, such as a visit to Settings, tells it
+    // nothing it does not already show.
+    if settings_updates_cache(projected) {
+        crate::webui::settings_updates_changed();
+    }
     // A press can come from the page's card, which has no widget of its own:
     // the native card is found where the app keeps it, so one press leaves both
     // renderers showing the same state.
@@ -7336,6 +7349,44 @@ mod tests {
             updates_view_from(&state, true).action_label.as_deref(),
             Some(UPDATE_RESTART_LABEL)
         );
+    }
+
+    /// A paint only nags an open page when the updater's answer moved: the
+    /// same status, busy flag and stage repainted by a visit to Settings is
+    /// held again quietly, and the three states the card draws are each a
+    /// change.
+    #[test]
+    fn a_repaint_of_the_same_update_answer_does_not_nudge_the_page() {
+        let mut state = super::super::update::UpdateCheck {
+            status: "This build is up to date.".to_owned(),
+            ..Default::default()
+        };
+        let settled = updates_view_from(&state, true);
+        settings_updates_cache(settled.clone());
+        assert!(
+            !settings_updates_cache(settled),
+            "a repeated paint is quiet"
+        );
+
+        state.busy = true;
+        state.status = "Checking for updates…".to_owned();
+        assert!(
+            settings_updates_cache(updates_view_from(&state, true)),
+            "busy and its status are a change"
+        );
+
+        state.busy = false;
+        assert!(
+            settings_updates_cache(updates_view_from(&state, true)),
+            "a superseded status is a change"
+        );
+
+        state.staged = Some(std::path::PathBuf::from("/tmp/muse.AppImage"));
+        assert!(
+            settings_updates_cache(updates_view_from(&state, true)),
+            "a staged download is a change"
+        );
+        assert!(!settings_updates_cache(updates_view_from(&state, true)));
     }
 
     fn schedule(title: &str, enabled: bool) -> Schedule {
