@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { call, channelAvailable } from "./api";
 import type { SettingsSnapshot, SettingsUpdates } from "./types";
 
@@ -73,18 +73,19 @@ export function Settings() {
   }, [loadSnapshot]);
 
   // An unread policy is not an empty one: the read is the chat panel's, asked
-  // for when this page opens, and it can land after the first answer. Ask a
-  // few more times rather than leaving the section unread for the whole life
-  // of the window -- and stop the moment it arrives.
-  const polls = useRef(0);
+  // for when this page opens, and it lands after the first answer by an amount
+  // this page cannot know. The app's own paint says when the projection changed
+  // -- it calls this hook -- and only then does the page ask again. No timer,
+  // no guessing at how long a read takes, and a policy that changes while the
+  // window is open reaches it the same way.
   useEffect(() => {
-    if (!data || data.policy.loaded || polls.current >= 4) return;
-    const timer = setTimeout(() => {
-      polls.current += 1;
+    window.musePolicyReady = () => {
       void loadSnapshot();
-    }, 900);
-    return () => clearTimeout(timer);
-  }, [data, loadSnapshot]);
+    };
+    return () => {
+      delete window.musePolicyReady;
+    };
+  }, [loadSnapshot]);
 
   const link = data?.link;
   const updates = data?.updates;

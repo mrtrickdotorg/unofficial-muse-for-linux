@@ -12,6 +12,9 @@ declare global {
   interface Window {
     webkit?: { messageHandlers?: { muse?: { postMessage(body: string): void } } };
     museReply?: (id: number, reply: Reply) => void;
+    /// The app's nudge: a native paint just changed what this page shows, so
+    /// ask again. Defined by the page, called from WebKit.
+    musePolicyReady?: () => void;
     __MUSE_BOOT__?: Boot;
   }
 }

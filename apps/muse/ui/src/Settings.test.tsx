@@ -1,6 +1,6 @@
 // S2's gate for the Settings page: the page's behaviour against the same
 // channel the app speaks, with no window and no account.
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Settings } from "./Settings";
 import { installChannel } from "./testChannel";
@@ -138,7 +138,7 @@ describe("the Settings web page", () => {
     expect(policyRows()).toBe(0);
   });
 
-  it("asks again while the policy read is still landing, then stops asking", async () => {
+  it("re-asks when the app's paint says the policy landed", async () => {
     window.__MUSE_BOOT__ = undefined;
     const unread = bootPayload({
       policy: { loaded: false, rows: [], connectors: [], withheld: 0, note: null },
@@ -153,15 +153,29 @@ describe("the Settings web page", () => {
     render(<Settings />);
 
     expect(await screen.findByText(/has not read policy settings/)).toBeInTheDocument();
-    // The read lands after the page opened: the rows replace the note without
-    // a reload, and the polling stops once there is something to show.
-    expect(await screen.findByText("connector_default", {}, { timeout: 2500 })).toBeInTheDocument();
-    await waitFor(() =>
-      expect(screen.queryByText(/has not read policy settings/)).not.toBeInTheDocument(),
-    );
-    const asked = commands.filter((command) => command === "settings.snapshot").length;
-    expect(asked).toBeGreaterThanOrEqual(2);
-    expect(asked).toBeLessThanOrEqual(5);
+    // One read on open: an unread policy is a state to show, not a reason to
+    // poll, so the page registers the hook the app's paint calls instead.
+    await waitFor(() => expect(typeof window.musePolicyReady).toBe("function"));
+    expect(commands.filter((command) => command === "settings.snapshot")).toHaveLength(1);
+
+    // The chat panel's read lands; the native paint says so, and only now does
+    // the page ask again -- no timer decided this.
+    act(() => window.musePolicyReady?.());
+    expect(await screen.findByText("connector_default")).toBeInTheDocument();
+    expect(screen.queryByText(/has not read policy settings/)).not.toBeInTheDocument();
+    expect(commands.filter((command) => command === "settings.snapshot")).toHaveLength(2);
+  });
+
+  it("takes its nudge hook away when the window closes", async () => {
+    window.__MUSE_BOOT__ = undefined;
+    installChannel(() => ({ ok: true, ...bootPayload() }));
+
+    const { unmount } = render(<Settings />);
+    await waitFor(() => expect(typeof window.musePolicyReady).toBe("function"));
+
+    unmount();
+    // A closed page leaves nothing for a later paint to call.
+    expect(window.musePolicyReady).toBeUndefined();
   });
 
   it("reports the policy read's own failure rather than an empty panel", async () => {

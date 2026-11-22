@@ -3034,7 +3034,7 @@ pub(crate) fn held_localhost_from(snapshot: &super::local_host::HostSnapshot) ->
 /// One policy row on the settings page: the service's own label and value,
 /// plus the flip the chat panel offers for it. The page is read-only, so the
 /// flip is named and never offered -- the words travel as data.
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct PolicyRowView {
     pub label: String,
     pub value: String,
@@ -3043,7 +3043,7 @@ pub(crate) struct PolicyRowView {
 
 /// The policy projection the settings page carries: what the chat panel last
 /// read, with the connector names whose grants can be reset there.
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct PolicyView {
     pub loaded: bool,
     pub rows: Vec<PolicyRowView>,
@@ -3141,8 +3141,17 @@ pub(crate) fn held_policy_from(
 
 /// Hold a policy projection, including the link-first and failed states the
 /// panel paints instead of a read.
-pub(crate) fn settings_policy_cache(view: PolicyView) {
-    SETTINGS_POLICY.with(|store| *store.borrow_mut() = view);
+/// Replace the projection and say whether it changed: a repaint that paints
+/// the same policy again must not nudge a page that already shows it.
+pub(crate) fn settings_policy_cache(view: PolicyView) -> bool {
+    SETTINGS_POLICY.with(|store| {
+        let mut store = store.borrow_mut();
+        if *store == view {
+            return false;
+        }
+        *store = view;
+        true
+    })
 }
 
 /// Project one search listing into the page's rows, with the native wording.
@@ -7017,6 +7026,28 @@ mod tests {
         // never an accident.
         assert!(!PAGES.contains(&"memory"));
         assert!(!PAGES.contains(&"policy"));
+    }
+
+    #[test]
+    fn the_policy_cache_reports_only_changes() {
+        // A repaint that paints the same policy again must not nudge a page.
+        let loaded = PolicyView {
+            loaded: true,
+            rows: vec![PolicyRowView {
+                label: "connector_default".to_owned(),
+                value: "always_ask".to_owned(),
+                flip: None,
+            }],
+            connectors: Vec::new(),
+            withheld: 0,
+            note: None,
+        };
+        assert!(settings_policy_cache(loaded.clone()));
+        assert!(!settings_policy_cache(loaded.clone()));
+        assert!(settings_policy_cache(PolicyView {
+            withheld: 2,
+            ..loaded
+        }));
     }
 
     #[test]

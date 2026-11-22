@@ -916,20 +916,59 @@ fn await_answer(
     });
 }
 
+thread_local! {
+    /// The window a page has open, if any: a native paint can nudge it by name.
+    /// Weak, so a window the reader closed simply stops upgrading and needs no
+    /// cleanup here.
+    static OPEN_WINDOWS: std::cell::RefCell<
+        std::collections::HashMap<&'static str, gtk4::glib::WeakRef<webkit6::WebView>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn track_window(page: &'static str, view: &webkit6::WebView) {
+    use webkit6::prelude::*;
+    let weak = view.downgrade();
+    OPEN_WINDOWS.with(|windows| {
+        windows.borrow_mut().insert(page, weak);
+    });
+}
+
+/// Tell the open window for `page` that a native paint changed what it shows.
+/// The page re-asks its own snapshot; nothing is pushed as data, so the cache
+/// the paint wrote stays the only source of truth.
+pub(crate) fn nudge_page(page: &'static str, hook: &str) {
+    OPEN_WINDOWS.with(|windows| {
+        let Some(view) = windows.borrow().get(page).and_then(|weak| weak.upgrade()) else {
+            return;
+        };
+        use webkit6::prelude::*;
+        let script = format!("window.{hook} && window.{hook}();");
+        view.evaluate_javascript(&script, None, None, gtk4::gio::Cancellable::NONE, |_| {});
+    });
+}
+
+/// The policy projection changed: an open Settings window should re-ask, since
+/// the chat panel's read lands after that window opened.
+pub(crate) fn settings_policy_changed() {
+    nudge_page("settings", "musePolicyReady");
+}
+
 /// Open one page in its own window on the rows the native page last read.
 /// Returns false when this build cannot render a WebView.
 fn open_window(
+    page: Option<&'static str>,
     title: &str,
     document: String,
     client: Option<AccountClient>,
     probe: &'static str,
 ) -> bool {
-    open_window_with(title, document, client, probe, None)
+    open_window_with(page, title, document, client, probe, None)
 }
 
 /// The same window, with a page's route back into the app for its one
 /// mutating command. Only Chat passes one.
 fn open_window_with(
+    page: Option<&'static str>,
     title: &str,
     document: String,
     client: Option<AccountClient>,
@@ -952,6 +991,9 @@ fn open_window_with(
     let view = webkit6::WebView::builder()
         .user_content_manager(&manager)
         .build();
+    if let Some(page) = page {
+        track_window(page, &view);
+    }
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_enable_javascript(true);
         settings.set_enable_developer_extras(false);
@@ -1096,6 +1138,7 @@ pub(crate) fn open_library_window(
     client: Option<AccountClient>,
 ) -> bool {
     open_window(
+        None,
         "Library · web view",
         library_document(&artifacts, total),
         client,
@@ -1107,6 +1150,7 @@ pub(crate) fn open_library_window(
 /// native page last read.
 pub(crate) fn open_goals_window(held: HeldGoals, client: Option<AccountClient>) -> bool {
     open_window(
+        None,
         "Goals · web view",
         goals_document(&held),
         client,
@@ -1118,6 +1162,7 @@ pub(crate) fn open_goals_window(held: HeldGoals, client: Option<AccountClient>) 
 /// reminders the native page last read.
 pub(crate) fn open_tasks_window(held: HeldTasks, client: Option<AccountClient>) -> bool {
     open_window(
+        None,
         "Tasks · web view",
         tasks_document(&held),
         client,
@@ -1129,6 +1174,7 @@ pub(crate) fn open_tasks_window(held: HeldTasks, client: Option<AccountClient>) 
 /// read.
 pub(crate) fn open_ideas_window(held: HeldIdeas, client: Option<AccountClient>) -> bool {
     open_window(
+        None,
         "Ideas · web view",
         ideas_document(&held),
         client,
@@ -1140,6 +1186,7 @@ pub(crate) fn open_ideas_window(held: HeldIdeas, client: Option<AccountClient>) 
 /// painted.
 pub(crate) fn open_threads_window(held: HeldThreads, client: Option<AccountClient>) -> bool {
     open_window(
+        None,
         "Threads · web view",
         threads_document(&held),
         client,
@@ -1156,7 +1203,13 @@ const FEED_PROBE: &str = "JSON.stringify({cards: document.querySelectorAll('.fee
 /// Open the Feed page in its own window, on the cards the native page last
 /// painted.
 pub(crate) fn open_feed_window(held: HeldFeed, client: Option<AccountClient>) -> bool {
-    open_window("Feed · web view", feed_document(&held), client, FEED_PROBE)
+    open_window(
+        None,
+        "Feed · web view",
+        feed_document(&held),
+        client,
+        FEED_PROBE,
+    )
 }
 
 const LOCALHOST_PROBE: &str = "JSON.stringify({grants: document.querySelectorAll('.grant-row').length, \
@@ -1190,6 +1243,7 @@ pub(crate) fn open_chat_window(
     routes: WebRoutes,
 ) -> bool {
     open_window_with(
+        None,
         "Chat · web view",
         chat_document(&held),
         client,
@@ -1202,6 +1256,7 @@ pub(crate) fn open_chat_window(
 /// search last painted.
 pub(crate) fn open_search_window(held: HeldSearch, client: Option<AccountClient>) -> bool {
     open_window(
+        None,
         "Search · web view",
         search_document(&held),
         client,
@@ -1214,6 +1269,7 @@ pub(crate) fn open_search_window(held: HeldSearch, client: Option<AccountClient>
 /// wire, and the presses that would stay in the app's own controllers.
 pub(crate) fn open_settings_window(held: HeldSettings) -> bool {
     open_window(
+        Some("settings"),
         "Settings · web view",
         settings_document(&held),
         None,
@@ -1225,6 +1281,7 @@ pub(crate) fn open_settings_window(held: HeldSettings) -> bool {
 /// held natively and the page reads none of it over the wire.
 pub(crate) fn open_localhost_window(held: HeldLocalHost) -> bool {
     open_window(
+        None,
         "Local host · web view",
         localhost_document(&held),
         None,

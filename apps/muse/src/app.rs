@@ -1641,10 +1641,15 @@ impl Chat {
         // The settings page reads the same projection: the panel's own flip
         // table decides which rows the page can name as flippable, so a press
         // here and the words there never disagree.
-        crate::pages::settings_policy_cache(crate::pages::held_policy_from(
+        if crate::pages::settings_policy_cache(crate::pages::held_policy_from(
             policy,
             |label, value| Self::policy_flip(label, value).map(|flip| flip.next),
-        ));
+        )) {
+            // The page's reads are answered from this cache, so a Settings
+            // window that is already open is told the policy just landed; it
+            // re-asks its own snapshot instead of polling for the answer.
+            crate::webui::settings_policy_changed();
+        }
         while let Some(child) = chat.panel_policy.first_child() {
             chat.panel_policy.remove(&child);
         }
