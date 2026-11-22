@@ -21,6 +21,7 @@ mod signin;
 mod spike_cmd;
 mod update;
 mod voice;
+mod web_signin;
 mod webui;
 pub(crate) mod widget;
 
@@ -221,6 +222,31 @@ fn build_ui(app: &adw::Application) {
 /// setup returns, so an interrupted setup re-runs instead of
 /// pretending it finished.
 fn show_first_run(parent: &gtk4::ApplicationWindow) {
+    // The step as both surfaces show it: the page reads this cache, and the
+    // modal's two lines are the same words.
+    crate::pages::first_run_cache(crate::pages::held_first_run(false));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        session::first_run_setup();
+        session::note_first_run_done();
+        let _ = done_tx.send(());
+    });
+    if crate::webui::available() && crate::webui::open_first_run_window() {
+        // A page that is the only surface open reads the answer here, not from
+        // a paint it does not have.
+        gtk4::glib::idle_add_local(move || {
+            use std::sync::mpsc::TryRecvError;
+            match done_rx.try_recv() {
+                Ok(()) => {
+                    crate::pages::first_run_cache(crate::pages::held_first_run(true));
+                    gtk4::glib::ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => gtk4::glib::ControlFlow::Break,
+            }
+        });
+        return;
+    }
     let dialog = gtk4::Window::builder()
         .title("Muse")
         .modal(true)
@@ -252,9 +278,15 @@ fn show_first_run(parent: &gtk4::ApplicationWindow) {
     dialog.set_child(Some(&body));
     dialog.present();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    // The first-run page reads the step as the modal shows it.
+    crate::pages::first_run_cache(crate::pages::held_first_run(false));
     std::thread::spawn(move || {
         session::first_run_setup();
         session::note_first_run_done();
+        // The step is over: a page that is still open reads its own answer.
+        gtk4::glib::MainContext::default().invoke(|| {
+            crate::pages::first_run_cache(crate::pages::held_first_run(true));
+        });
         let _ = done_tx.send(());
     });
     let dialog_weak = dialog.downgrade();
@@ -844,6 +876,23 @@ fn show_signin(split: &adw::OverlaySplitView) {
     // form, not to a drawer the main shell left behind.
     FOLD_DRAWER.with(|slot| *slot.borrow_mut() = None);
     SHELL_KEYS.with(|slot| *slot.borrow_mut() = None);
+    // The sign-in surface in a page, on the app's own rules: the same
+    // validation, the same save, the same isolated browser flow. A build
+    // without a WebView keeps the GTK form below.
+    if crate::webui::available() {
+        // The page opens on the app's own starting state, not on the last
+        // window's leftovers: the same defaults the native form detects.
+        crate::pages::signin_cache(crate::pages::HeldSignin::opening());
+        let split_for_link = split.clone();
+        // The press runs on the main thread already (the channel handler is
+        // this loop's own), so the next surface is built there, not posted to
+        // a loop that would only hand it back.
+        let press = web_signin::routes(move || show_main(&split_for_link));
+        let routes = crate::webui::signin_surface(press);
+        if crate::webui::open_signin_window(Some(routes)) {
+            return;
+        }
+    }
     let form = signin::SignIn::build({
         let split = split.clone();
         move |_| show_main(&split)

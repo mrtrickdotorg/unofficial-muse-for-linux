@@ -61,6 +61,9 @@ const settings: SettingsSnapshot = {
     busy: false,
     checked: true,
     staged: false,
+    available: false,
+    check_label: "Check for updates",
+    action_label: null,
   },
   policy: { loaded: true, rows: [], connectors: [], withheld: 0, note: null },
 };

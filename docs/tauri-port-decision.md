@@ -536,17 +536,26 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   (`/tmp/muse-shell-chrome.png`). Not pressed live, for the same reason as the writes: this seat
   cannot inject input into a WebKit view, so the presses are covered by the suites.
 
-  What still needs the native window, in the order it has to happen: the Local host page's
-  per-write Allow/Deny, the saved write permission and Clear log now ride `localhost.decide`,
-  `localhost.policy` and `localhost.clear_log` into the same controller methods the native presses
-  call; the dialogs
-  (updates, sign-in, first run) are still GTK windows with no page, and the folder chooser a grant
-  opens is one of them; the window's own chrome -- its menu, focus and a11y pane -- is GTK's, and
-  the shell's key map is a page's map, not a window's until the window is not GTK's. Removing GTK
-  is the last step of that list, not the first: deleting `pages.rs`'s builders today would delete
-  the reference the port is checked against on live data, and the 161 Rust tests that assert the
-  native rows are still the only assertion of most page behaviour. The Tauri spike below prices the
-  window swap that has to land before a single line of GTK can go.
+  The dialogs are pages now, on the same one-press-one-write rule as every other surface: the
+  update card in Settings presses `update.check`/`update.install` into the app's own updater (the
+  page's labels are the native buttons' own), the sign-in surface presses
+  `signin.press` -- `connect`, `browser`, `cancel`, `choose` -- into `signin`'s own
+  `validate_link`/`save_saved_connection_in` and the same isolated browser worker with the same
+  `Cancellation`, and first run is `firstrun.snapshot`, two lines with nothing to press. The Local
+  host page's per-write Allow/Deny, saved write permission and Clear log ride `localhost.decide`,
+  `localhost.policy` and `localhost.clear_log` into the controller's own methods.
+
+  What still needs the native window, in the order it has to happen: the folder chooser a page
+  cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
+  invent); the update's relaunch, which replaces this copy with the verified download and exits it
+  -- the page asks for it over `update.install`, but the process that goes is the app's; the
+  window's own chrome -- its menu, focus and a11y pane -- is GTK's, and the shell's key map is a
+  page's map, not a window's until the window is not GTK's; and a page still cannot read the
+  disk, so every file the app opens starts from a native chooser. Removing GTK is the last step of
+  that list, not the first: deleting `pages.rs`'s builders today would delete the reference the
+  port is checked against on live data, and the 165 Rust tests that assert the native rows are
+  still the only assertion of most page behaviour. The Tauri spike below prices the window swap
+  that has to land before a single line of GTK can go.
 
   **Tauri 2 spike (Nov 21, 2026, throwaway, outside the tree).** Three source files on tauri 2.12.7 /
   wry 0.57 / tao 0.37 loaded the unmodified `apps/muse/ui/built/app.html` with the same

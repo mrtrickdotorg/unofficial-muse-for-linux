@@ -21,6 +21,8 @@ import { LocalHost } from "./LocalHost";
 import { Threads } from "./Threads";
 import { Chat } from "./Chat";
 import { Shell } from "./Shell";
+import { Signin } from "./Signin";
+import { FirstRun } from "./FirstRun";
 import "./hub.css";
 
 // One bundle, one window per page: the boot payload names which page this
@@ -42,6 +44,10 @@ const page =
               ? "search"
               : boot && "pages" in boot
                 ? "shell"
+                : boot && "consent_sentence" in boot
+                  ? "signin"
+                  : boot && "head" in boot
+                    ? "firstrun"
                 : boot && "link" in boot
                 ? "settings"
                 : boot && "grants" in boot
@@ -73,6 +79,10 @@ if (mount) {
       <Settings />
     ) : page === "localhost" ? (
       <LocalHost />
+    ) : page === "signin" ? (
+      <Signin />
+    ) : page === "firstrun" ? (
+      <FirstRun />
     ) : (
       <Library />
     ),

@@ -21,6 +21,9 @@ const bootPayload = (overrides: Partial<SettingsSnapshot> = {}): SettingsSnapsho
     busy: false,
     checked: false,
     staged: false,
+    available: false,
+    check_label: "Check for updates",
+    action_label: null,
   },
   policy: {
     loaded: true,
@@ -64,34 +67,49 @@ describe("the Settings web page", () => {
     expect(commands).toEqual(["settings.snapshot"]);
   });
 
-  it("says where updates come from and never offers the presses", async () => {
+  it("says where updates come from and offers the card's own press", async () => {
     const held = bootPayload();
     window.__MUSE_BOOT__ = held;
-    installChannel(() => ({ ok: true, ...held }));
+    const commands = installChannel(() => ({ ok: true, ...held }));
 
     render(<Settings />);
 
     expect(
       screen.getByText("Updates come from the rolling AppImage release."),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /check for updates/i })).not.toBeInTheDocument();
+    // The page offers the same press the native card does, in its own words,
+    // and nothing while there is nothing to take.
+    fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    await waitFor(() => expect(commands).toContain("update.check"));
+    expect(screen.queryByRole("button", { name: /download update|restart to update/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument();
   });
 
   it("names a staged update and the restart it is waiting for", async () => {
     const held = bootPayload({
-      updates: { appimage: true, status: "", busy: false, checked: true, staged: true },
+      updates: {
+        appimage: true,
+        status: "",
+        busy: false,
+        checked: true,
+        staged: true,
+        available: true,
+        check_label: "Check for updates",
+        action_label: "Restart to update",
+      },
     });
     window.__MUSE_BOOT__ = held;
-    installChannel(() => ({ ok: true, ...held }));
+    const commands = installChannel(() => ({ ok: true, ...held }));
 
     render(<Settings />);
 
     expect(
       screen.getByText(
-        "Updates come from the rolling AppImage release. An update is downloaded; restart from the native page to take it.",
+        "Updates come from the rolling AppImage release. An update is downloaded; restart to take it.",
       ),
     ).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Restart to update" }));
+    await waitFor(() => expect(commands).toContain("update.install"));
   });
 
   it("keeps the updater's own words when it has a status", async () => {
@@ -102,6 +120,9 @@ describe("the Settings web page", () => {
         busy: false,
         checked: true,
         staged: false,
+        available: false,
+        check_label: "Check for updates",
+        action_label: null,
       },
     });
     window.__MUSE_BOOT__ = held;

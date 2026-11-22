@@ -829,11 +829,20 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 // Resolved per press: the window opens on what the app holds
                 // now, including the policy the chat panel last read.
                 let chat = ctx.chat.clone();
+                let updates = ctx.updates.clone();
                 web_view.connect_clicked(move |_| {
                     // Resolved per press, so the window opens with whatever the
                     // app holds now and its flips reach the app's own update
                     // path. A window opened without them is read-only.
-                    let routes = chat.upgrade().map(|chat| chat.web_routes());
+                    let routes = chat.upgrade().map(|chat| {
+                        let mut routes = chat.web_routes();
+                        // The update state lives with this panel, so the card's
+                        // page presses are attached here, where it is reachable.
+                        let (check, install) = update_press_routes(updates.clone());
+                        routes.update_check = check;
+                        routes.update_install = install;
+                        routes
+                    });
                     if !crate::webui::open_settings_window(settings_snapshot(), routes) {
                         eprintln!("muse: web view unavailable in this build");
                     }
@@ -3044,6 +3053,351 @@ pub(crate) struct LocalHostCardRow {
     pub countdown: String,
 }
 
+/// The update, sign-in and first-run surfaces' own words, shared with their
+/// pages so a page cannot describe the same step differently from the window
+/// that still draws it.
+pub(crate) const UPDATE_CHECK_LABEL: &str = "Check for updates";
+pub(crate) const UPDATE_DOWNLOAD_LABEL: &str = "Download update";
+pub(crate) const UPDATE_RESTART_LABEL: &str = "Restart to update";
+pub(crate) const UPDATE_NOT_APPIMAGE: &str =
+    "This copy updates through its own channel (store or checkout), not here.";
+pub(crate) const UPDATE_ROLLING: &str = "Updates come from the rolling AppImage release.";
+pub(crate) const SIGNIN_TITLE: &str = "Sign in to Muse";
+pub(crate) const SIGNIN_HINT: &str = "The app finds your Python automatically; pick a private session folder. The app's own folder already qualifies.";
+pub(crate) const SIGNIN_CONSENT: &str =
+    "I approve this app using my Muse session from this folder.";
+pub(crate) const SIGNIN_CONNECT: &str = "Connect";
+pub(crate) const SIGNIN_BROWSER: &str = "Sign in with browser";
+pub(crate) const SIGNIN_CANCEL: &str = "Cancel sign-in";
+pub(crate) const SIGNIN_CHOOSE: &str = "Choose a session folder…";
+pub(crate) const FIRST_RUN_HEAD: &str = "Performing first-run setup";
+pub(crate) const FIRST_RUN_SUB: &str = "This may take a few moments.";
+
+/// The two update presses, backed by the app's own update state. The check and
+/// the download run on workers and come back to the main loop; each landing
+/// re-projects the page's cache, so a page with no native card open reads its
+/// own press.
+pub(crate) fn update_press_routes(
+    updates: std::rc::Rc<std::cell::RefCell<super::update::UpdateCheck>>,
+) -> (crate::webui::WebUpdateCheck, crate::webui::WebUpdateInstall) {
+    let check = {
+        let updates = updates.clone();
+        std::rc::Rc::new(move || {
+            {
+                let mut state = updates.borrow_mut();
+                if state.busy {
+                    return Err("An update check is already running.".to_owned());
+                }
+                state.busy = true;
+                state.status = "Checking for updates…".to_owned();
+            }
+            project_update(&updates);
+            // The fetch is a blocking HTTP read, so it runs on a worker and its
+            // answer comes back on the main loop, where the state lives.
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(super::update::fetch_latest());
+            });
+            let updates = updates.clone();
+            gtk4::glib::idle_add_local(move || {
+                let outcome = match rx.try_recv() {
+                    Ok(outcome) => outcome,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        return gtk4::glib::ControlFlow::Continue;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        let mut state = updates.borrow_mut();
+                        state.busy = false;
+                        state.status = "The update check stopped without an answer.".to_owned();
+                        drop(state);
+                        project_update(&updates);
+                        return gtk4::glib::ControlFlow::Break;
+                    }
+                };
+                {
+                    let mut state = updates.borrow_mut();
+                    state.busy = false;
+                    match outcome {
+                        Ok(info) => {
+                            let available =
+                                super::update::update_available(super::update::local_sha(), &info);
+                            state.status = if available {
+                                format!("A newer build is available: {}", info.sha)
+                            } else {
+                                "Up to date.".to_owned()
+                            };
+                            state.info = available.then_some(info);
+                        }
+                        Err(message) => {
+                            state.status = message;
+                            state.info = None;
+                        }
+                    }
+                }
+                project_update(&updates);
+                gtk4::glib::ControlFlow::Break
+            });
+            Ok(())
+        }) as crate::webui::WebUpdateCheck
+    };
+    let install = {
+        let updates = updates.clone();
+        std::rc::Rc::new(move || {
+            let (staged, info) = {
+                let state = updates.borrow();
+                if state.busy {
+                    return Err("The updater is already working.".to_owned());
+                }
+                (state.staged.clone(), state.info.clone())
+            };
+            // Restart once a verified download is waiting; download once one is
+            // offered; refuse when neither, in the native card's own words.
+            let (tx, rx) = std::sync::mpsc::channel();
+            let restarting = staged.is_some();
+            match (staged, info) {
+                (Some(staged), _) => {
+                    {
+                        let mut state = updates.borrow_mut();
+                        state.busy = true;
+                        state.status = "Restarting into the update…".to_owned();
+                    }
+                    std::thread::spawn(move || {
+                        let outcome = super::update::relaunch_verified(&staged).and_then(|()| {
+                            super::update::refresh_launcher_copy(&staged).map(|_| ())
+                        });
+                        let _ = tx.send(outcome);
+                    });
+                }
+                (None, Some(info)) => {
+                    {
+                        let mut state = updates.borrow_mut();
+                        state.busy = true;
+                        state.status = "Downloading the update…".to_owned();
+                    }
+                    std::thread::spawn(move || {
+                        let _ = tx.send(super::update::download_staged(&info).map(|_| ()));
+                    });
+                }
+                (None, None) => {
+                    return Err("Nothing to install yet: check for updates first.".to_owned());
+                }
+            }
+            project_update(&updates);
+            let updates = updates.clone();
+            gtk4::glib::idle_add_local(move || {
+                use std::sync::mpsc::TryRecvError;
+                // A download and a restart both answer with one outcome: done,
+                // or the sentence that says what stopped it.
+                let outcome = match rx.try_recv() {
+                    Ok(outcome) => outcome,
+                    Err(TryRecvError::Empty) => return gtk4::glib::ControlFlow::Continue,
+                    Err(TryRecvError::Disconnected) => {
+                        Err("The updater stopped without an answer.".to_owned())
+                    }
+                };
+                match outcome {
+                    // The new copy proved it stays up: this one goes.
+                    Ok(()) if restarting => std::process::exit(0),
+                    Ok(()) => {
+                        let mut state = updates.borrow_mut();
+                        state.busy = false;
+                        state.status = "Update downloaded. Restart to take it.".to_owned();
+                    }
+                    Err(message) => {
+                        let mut state = updates.borrow_mut();
+                        state.busy = false;
+                        state.status = message;
+                    }
+                }
+                project_update(&updates);
+                gtk4::glib::ControlFlow::Break
+            });
+            Ok(())
+        }) as crate::webui::WebUpdateInstall
+    };
+    (check, install)
+}
+
+/// Project the app's update state into the page's held cache.
+pub(crate) fn project_update(updates: &std::cell::RefCell<super::update::UpdateCheck>) {
+    let view = held_update_from(&updates.borrow());
+    update_cache(view);
+}
+
+/// The update surface as its page shows it: what the app's own check has read.
+/// Nothing here is a second source of truth -- the check runs in the app, and
+/// the page reads its outcome, like every other held page.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct HeldUpdate {
+    pub busy: bool,
+    pub status: String,
+    pub available: bool,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    /// Whether a verified download is waiting: the action becomes Restart.
+    pub staged: bool,
+    /// Whether this copy updates itself at all (an AppImage does).
+    pub appimage: bool,
+    pub check_label: String,
+    pub action_label: Option<String>,
+    pub build: String,
+}
+
+/// Project the app's update state into the page's shapes. The action's label is
+/// the native button's own rule: Restart once something is staged, Download
+/// once something is offered, nothing before either.
+pub(crate) fn held_update_from(state: &super::update::UpdateCheck) -> HeldUpdate {
+    let appimage = super::update::running_as_appimage();
+    let available = state
+        .info
+        .as_ref()
+        .map(|info| super::update::update_available(super::update::local_sha(), info))
+        .unwrap_or(false);
+    let staged = state.staged.is_some();
+    let action_label = if staged {
+        Some(UPDATE_RESTART_LABEL.to_owned())
+    } else if available {
+        Some(UPDATE_DOWNLOAD_LABEL.to_owned())
+    } else {
+        None
+    };
+    let build = match super::update::local_sha() {
+        Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
+        None => "dev build".to_owned(),
+    };
+    HeldUpdate {
+        busy: state.busy,
+        status: if state.status.is_empty() {
+            if appimage {
+                UPDATE_ROLLING
+            } else {
+                UPDATE_NOT_APPIMAGE
+            }
+            .to_owned()
+        } else {
+            state.status.clone()
+        },
+        available,
+        version: state.info.as_ref().map(|info| info.sha.clone()),
+        notes: None,
+        staged,
+        appimage,
+        check_label: UPDATE_CHECK_LABEL.to_owned(),
+        action_label,
+        build,
+    }
+}
+
+thread_local! {
+    static UPDATE_STORE: std::cell::RefCell<HeldUpdate> =
+        std::cell::RefCell::new(HeldUpdate::default());
+}
+
+pub(crate) fn update_snapshot() -> HeldUpdate {
+    UPDATE_STORE.with(|store| store.borrow().clone())
+}
+
+pub(crate) fn update_cache(view: HeldUpdate) {
+    UPDATE_STORE.with(|store| *store.borrow_mut() = view);
+}
+
+/// The sign-in page's state: the two paths, the consent, and the isolated
+/// browser flow's own status. The page types into it and presses; the app's
+/// sign-in module validates and saves, so the rules cannot fork.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct HeldSignin {
+    pub python: String,
+    pub folder: String,
+    pub consent: bool,
+    pub status: String,
+    pub error: String,
+    /// The browser flow is running: Cancel is offered while it is.
+    pub browser_open: bool,
+    pub title: String,
+    pub hint: String,
+    pub consent_sentence: String,
+    pub connect_label: String,
+    pub browser_label: String,
+    pub cancel_label: String,
+    pub choose_label: String,
+}
+
+impl HeldSignin {
+    /// The form's own starting state: what the app detects and where it would
+    /// save, so a page opens on the same defaults as the native form.
+    pub(crate) fn opening() -> Self {
+        Self {
+            python: super::session::detect_python()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            folder: super::session::account_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            consent: false,
+            status: String::new(),
+            error: String::new(),
+            browser_open: false,
+            title: SIGNIN_TITLE.to_owned(),
+            hint: SIGNIN_HINT.to_owned(),
+            consent_sentence: SIGNIN_CONSENT.to_owned(),
+            connect_label: SIGNIN_CONNECT.to_owned(),
+            browser_label: SIGNIN_BROWSER.to_owned(),
+            cancel_label: SIGNIN_CANCEL.to_owned(),
+            choose_label: SIGNIN_CHOOSE.to_owned(),
+        }
+    }
+}
+
+thread_local! {
+    static SIGNIN_STORE: std::cell::RefCell<HeldSignin> =
+        std::cell::RefCell::new(HeldSignin::opening());
+}
+
+pub(crate) fn signin_snapshot() -> HeldSignin {
+    SIGNIN_STORE.with(|store| store.borrow().clone())
+}
+
+pub(crate) fn signin_cache(view: HeldSignin) {
+    SIGNIN_STORE.with(|store| *store.borrow_mut() = view);
+}
+
+/// Read-modify-write the sign-in state on this thread: one press, one change.
+pub(crate) fn signin_update(edit: impl FnOnce(&mut HeldSignin)) {
+    SIGNIN_STORE.with(|store| edit(&mut store.borrow_mut()));
+}
+
+/// The first-run surface: a progress step with nothing to press. The page shows
+/// the same two lines the modal does, and says the file writes are the app's.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct HeldFirstRun {
+    pub head: String,
+    pub sub: String,
+    pub done: bool,
+}
+
+thread_local! {
+    static FIRST_RUN_STORE: std::cell::RefCell<HeldFirstRun> =
+        std::cell::RefCell::new(HeldFirstRun::default());
+}
+
+pub(crate) fn first_run_snapshot() -> HeldFirstRun {
+    FIRST_RUN_STORE.with(|store| store.borrow().clone())
+}
+
+pub(crate) fn first_run_cache(view: HeldFirstRun) {
+    FIRST_RUN_STORE.with(|store| *store.borrow_mut() = view);
+}
+
+/// The first-run step as the modal shows it: the same two sentences, and
+/// `done` once the setup returned.
+pub(crate) fn held_first_run(done: bool) -> HeldFirstRun {
+    HeldFirstRun {
+        head: FIRST_RUN_HEAD.to_owned(),
+        sub: FIRST_RUN_SUB.to_owned(),
+        done,
+    }
+}
+
 /// The Local host page's own control words, shared with the web page so the two
 /// surfaces cannot describe the same boundary differently.
 pub(crate) const HOST_POLICY_SENTENCE: &str = "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.";
@@ -3191,8 +3545,8 @@ pub(crate) struct LinkView {
 }
 
 /// The updater's last state as the settings page shows it. The controls that
-/// write (check, download, restart) stay on the native page, so the page says
-/// what the last check found instead of offering them again.
+/// write carry the native card's own labels, so the page offers the press the
+/// window offers, word for word.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct UpdatesView {
     pub appimage: bool,
@@ -3200,6 +3554,10 @@ pub(crate) struct UpdatesView {
     pub busy: bool,
     pub checked: bool,
     pub staged: bool,
+    /// Whether a newer build is offered: the action appears with it.
+    pub available: bool,
+    pub check_label: String,
+    pub action_label: Option<String>,
 }
 
 /// The Settings page as the web view opens it: three things the page cannot
@@ -4765,6 +5123,15 @@ fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
         busy: state.busy,
         checked: state.info.is_some(),
         staged: state.staged.is_some(),
+        available: state.info.is_some(),
+        check_label: UPDATE_CHECK_LABEL.to_owned(),
+        action_label: if state.staged.is_some() {
+            Some(UPDATE_RESTART_LABEL.to_owned())
+        } else if state.info.is_some() {
+            Some(UPDATE_DOWNLOAD_LABEL.to_owned())
+        } else {
+            None
+        },
     });
     if let Some(widget) = find("updates-status")
         && let Ok(label) = widget.downcast::<gtk4::Label>()

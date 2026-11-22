@@ -2775,6 +2775,19 @@ impl Chat {
                 Some(chat) => chat.web_host_clear_log(),
                 None => Err("The app window is gone.".to_owned()),
             }),
+            // The update state lives with the app's panel, not with a chat
+            // window, so the surface that owns it replaces these two when it
+            // opens a page. Until then the page says what is true instead of
+            // offering a press that goes nowhere.
+            update_check: std::rc::Rc::new(|| {
+                Err("This window is not attached to the app's update check.".to_owned())
+            }),
+            update_install: std::rc::Rc::new(|| {
+                Err("This window is not attached to the app's installer.".to_owned())
+            }),
+            signin_press: std::rc::Rc::new(|_: crate::webui::SigninPress| {
+                Err("This window is not a sign-in surface.".to_owned())
+            }),
         }
     }
 

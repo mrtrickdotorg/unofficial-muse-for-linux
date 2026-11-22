@@ -252,6 +252,51 @@ fn localhost_document(held: &HeldLocalHost) -> String {
     document(&boot)
 }
 
+fn update_payload() -> serde_json::Value {
+    serde_json::to_value(crate::pages::update_snapshot())
+        .expect("muse webui: the update payload always serializes")
+}
+
+fn update_reply() -> serde_json::Value {
+    let mut reply = update_payload();
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
+fn signin_payload() -> serde_json::Value {
+    serde_json::to_value(crate::pages::signin_snapshot())
+        .expect("muse webui: the sign-in payload always serializes")
+}
+
+fn signin_document() -> String {
+    let mut boot = signin_payload();
+    boot["page"] = serde_json::json!("signin");
+    document(&boot)
+}
+
+fn signin_reply() -> serde_json::Value {
+    let mut reply = signin_payload();
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
+fn first_run_payload() -> serde_json::Value {
+    serde_json::to_value(crate::pages::first_run_snapshot())
+        .expect("muse webui: the first-run payload always serializes")
+}
+
+fn first_run_document() -> String {
+    let mut boot = first_run_payload();
+    boot["page"] = serde_json::json!("firstrun");
+    document(&boot)
+}
+
+fn first_run_reply() -> serde_json::Value {
+    let mut reply = first_run_payload();
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
 fn localhost_reply(held: &HeldLocalHost) -> serde_json::Value {
     let mut reply = localhost_payload(held);
     reply["ok"] = serde_json::json!(true);
@@ -610,6 +655,24 @@ pub(crate) type WebHostPolicy = std::rc::Rc<dyn Fn(bool) -> Result<(), String>>;
 /// Clear the session log. Display only: cards and grants are untouched.
 pub(crate) type WebHostClearLog = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 
+/// One press on the sign-in page, with the values the page typed in. The press
+/// names which button; the app's sign-in module validates and saves, so the
+/// page cannot hold the rules.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SigninPress {
+    pub press: String,
+    pub python: String,
+    pub folder: String,
+    pub consent: bool,
+}
+
+pub(crate) type WebSigninPress = std::rc::Rc<dyn Fn(SigninPress) -> Result<(), String>>;
+/// Run the app's own update check.
+pub(crate) type WebUpdateCheck = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+/// The update's one action: download what was offered, or restart into what is
+/// already staged and verified.
+pub(crate) type WebUpdateInstall = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+
 /// The routes a page has back into the app for its controls. None is a
 /// dispatcher of its own: a send goes through the app's single sender, Stop
 /// takes no session ticket at all (which is the point of stop, since it has
@@ -648,6 +711,9 @@ pub(crate) struct WebRoutes {
     pub host_decide: WebHostDecide,
     pub host_policy: WebHostPolicy,
     pub host_clear_log: WebHostClearLog,
+    pub update_check: WebUpdateCheck,
+    pub update_install: WebUpdateInstall,
+    pub signin_press: WebSigninPress,
 }
 
 /// The answer a mutating command gets: `ok` when the app took the press, and
@@ -933,6 +999,47 @@ pub(crate) fn handle_command_with(
             route_answer(routes.map(|routes| (routes.host_policy)(allow)))
         }
         "localhost.clear_log" => route_answer(routes.map(|routes| (routes.host_clear_log)())),
+        // The update surface: one read of the app's own check, and the two
+        // presses the native card offers. The check and the download run in the
+        // app, on its own threads, and the page reads their outcome.
+        "update.snapshot" => Answer::Now(update_reply()),
+        "update.check" => route_answer(routes.map(|routes| (routes.update_check)())),
+        "update.install" => route_answer(routes.map(|routes| (routes.update_install)())),
+        // The sign-in surface: the page owns the typing, the app owns the
+        // rules. One press per message, carrying the values that press used.
+        "signin.snapshot" => Answer::Now(signin_reply()),
+        "signin.press" => {
+            let press = request
+                .get("press")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let python = request
+                .get("python")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let folder = request
+                .get("folder")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let consent = request
+                .get("consent")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            route_answer(routes.map(|routes| {
+                (routes.signin_press)(SigninPress {
+                    press,
+                    python,
+                    folder,
+                    consent,
+                })
+            }))
+        }
+        // The first-run step has nothing to press: it is a progress line, and
+        // the page reads it like every other held state.
+        "firstrun.snapshot" => Answer::Now(first_run_reply()),
         "search.snapshot" => Answer::Now(search_reply(&crate::pages::search_snapshot())),
         "search.run" => {
             let query = request
@@ -1445,6 +1552,12 @@ const SHELL_PROBE: &str = "JSON.stringify({rail: document.querySelectorAll('.she
      current: ((document.querySelector('.shell-drawer-page.current') || {}).textContent || '').trim(), \
      title: ((document.querySelector('.shell-main .title') || {}).textContent || '').trim()})";
 
+/// Probes for the three surfaces: each reads a plain synchronous expression, so
+/// the value is the page's own render and not a promise the view cannot await.
+const SIGNIN_PROBE: &str = "JSON.stringify({fields: document.querySelectorAll('.signin-page input').length, \
+     buttons: document.querySelectorAll('.signin-page .inline-button').length})";
+const FIRST_RUN_PROBE: &str =
+    "JSON.stringify({head: (document.querySelector('.firstrun-head') || {}).textContent || ''})";
 const SETTINGS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.policy-row').length, \
                                  linked: (document.querySelector('.linked') ? true : false), \
                                  policy: (document.querySelector('.policy-loaded') ? true : false), \
@@ -1505,6 +1618,61 @@ pub(crate) fn open_shell_window(routes: Option<WebRoutes>) -> bool {
         None,
         SHELL_PROBE,
         routes,
+    )
+}
+
+/// The sign-in surface in its own window: the same form the app builds, on the
+/// app's own defaults and rules.
+pub(crate) fn open_signin_window(routes: Option<WebRoutes>) -> bool {
+    open_window_with(
+        Some("signin"),
+        "Sign in · web view",
+        signin_document(),
+        None,
+        SIGNIN_PROBE,
+        routes,
+    )
+}
+
+/// The routes a non-chat surface gets: its own presses, and a refusal by name
+/// for every press the chat window owns. A window that is not the chat's says
+/// what it cannot do instead of silently doing nothing.
+pub(crate) fn signin_surface(press: WebSigninPress) -> WebRoutes {
+    fn no_send() -> Result<(), String> {
+        Err("This window is the sign-in surface; it cannot send.".to_owned())
+    }
+    WebRoutes {
+        send: std::rc::Rc::new(|_: &str, _: Option<WebQuote>| no_send()),
+        stop: std::rc::Rc::new(no_send),
+        attach: std::rc::Rc::new(no_send),
+        unstage: std::rc::Rc::new(|_: &str| no_send()),
+        approvals: std::rc::Rc::new(no_send),
+        decide: std::rc::Rc::new(|_: &str, _: &str| no_send()),
+        history: std::rc::Rc::new(|| Err("This window cannot read the drawer.".to_owned())),
+        open_thread: std::rc::Rc::new(|_: Option<&str>| no_send()),
+        set_policy: std::rc::Rc::new(|_: &str, _: &str| no_send()),
+        reset_connector: std::rc::Rc::new(|_: &str| no_send()),
+        host_grant: std::rc::Rc::new(|_: bool, _: bool| no_send()),
+        host_start: std::rc::Rc::new(|_: bool| no_send()),
+        host_stop: std::rc::Rc::new(no_send),
+        host_decide: std::rc::Rc::new(|_: &str, _: bool| no_send()),
+        host_policy: std::rc::Rc::new(|_: bool| no_send()),
+        host_clear_log: std::rc::Rc::new(no_send),
+        update_check: std::rc::Rc::new(no_send),
+        update_install: std::rc::Rc::new(no_send),
+        signin_press: press,
+    }
+}
+
+/// The first-run step in its own window: two lines and a spinner, nothing to
+/// press.
+pub(crate) fn open_first_run_window() -> bool {
+    open_window(
+        Some("firstrun"),
+        "Muse · first run",
+        first_run_document(),
+        None,
+        FIRST_RUN_PROBE,
     )
 }
 
@@ -2246,7 +2414,73 @@ mod tests {
             host_decide: Rc::new(|_: &str, _: bool| Ok(())),
             host_policy: Rc::new(|_: bool| Ok(())),
             host_clear_log: Rc::new(|| Ok(())),
+            update_check: Rc::new(|| Ok(())),
+            update_install: Rc::new(|| Ok(())),
+            signin_press: Rc::new(|_: SigninPress| Ok(())),
         }
+    }
+
+    /// A press on the sign-in page is the app's own validation, not a second
+    /// set of rules: an empty interpreter is refused in the native form's
+    /// words, and nothing is saved.
+    #[test]
+    fn a_signin_press_is_the_apps_own_validation() {
+        let routes = signin_surface(crate::web_signin::routes(|| {}));
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":31,"cmd":"signin.press","press":"connect","python":"","folder":"","consent":true}"#,
+            None,
+            Some(&routes),
+        );
+        assert_eq!(command, "signin.press");
+        let Answer::Now(reply) = answer else {
+            panic!("a press answers at once, with the route's own sentence");
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "Enter the Python interpreter path.");
+    }
+
+    /// The sign-in window is that surface and no other: a chat press in it is
+    /// refused by name instead of quietly doing nothing.
+    #[test]
+    fn the_signin_window_refuses_a_send_by_name() {
+        let routes = signin_surface(crate::web_signin::routes(|| {}));
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":32,"cmd":"chat.send","text":"hello"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a send's refusal answers at once");
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(
+            reply["error"],
+            "This window is the sign-in surface; it cannot send."
+        );
+    }
+
+    /// The first-run page reads the app's own step: the same two sentences the
+    /// native modal prints, and no presses at all.
+    #[test]
+    fn the_first_run_page_reads_the_apps_own_step() {
+        crate::pages::first_run_cache(crate::pages::held_first_run(false));
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":33,"cmd":"firstrun.snapshot"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read answers without a thread");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["head"], crate::pages::FIRST_RUN_HEAD);
+        assert_eq!(reply["sub"], crate::pages::FIRST_RUN_SUB);
+        assert_eq!(reply["done"], false);
+
+        crate::pages::first_run_cache(crate::pages::held_first_run(true));
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":34,"cmd":"firstrun.snapshot"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a cache read answers without a thread");
+        };
+        assert_eq!(reply["done"], true);
     }
 
     #[test]
@@ -3161,6 +3395,9 @@ mod tests {
             busy: false,
             checked: true,
             staged: false,
+            available: false,
+            check_label: crate::pages::UPDATE_CHECK_LABEL.into(),
+            action_label: None,
         });
         crate::pages::settings_policy_cache(crate::pages::PolicyView {
             loaded: true,
@@ -3194,6 +3431,9 @@ mod tests {
             busy: false,
             checked: true,
             staged: true,
+            available: true,
+            check_label: crate::pages::UPDATE_CHECK_LABEL.into(),
+            action_label: Some(crate::pages::UPDATE_RESTART_LABEL.into()),
         });
         crate::pages::settings_policy_cache(crate::pages::PolicyView {
             loaded: true,

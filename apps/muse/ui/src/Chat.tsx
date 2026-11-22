@@ -91,7 +91,7 @@ function Turn({ row, onReply }: { row: Row; onReply: (row: Row) => void }) {
 export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const boot = window.__MUSE_BOOT__;
   const [data, setData] = useState<ChatSnapshot | null>(
-    boot && "title" in boot ? boot : null,
+    boot && "account" in boot && "rows" in boot ? boot : null,
   );
   const [error, setError] = useState<string | null>(null);
 

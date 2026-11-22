@@ -12,7 +12,7 @@ function updatesSentence(updates: SettingsUpdates): string {
       ? "Updates come from the rolling AppImage release."
       : "This copy updates through its own channel (store or checkout), not here.");
   if (updates.staged) {
-    return `${status} An update is downloaded; restart from the native page to take it.`;
+    return `${status} An update is downloaded; restart to take it.`;
   }
   if (updates.busy) {
     return `${status} Checking now…`;
@@ -64,6 +64,10 @@ export function Settings() {
   const [armed, setArmed] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // The updater's own one press at a time: the app holds a single check and a
+  // single installer, and refuses a second press while one runs.
+  const [updating, setUpdating] = useState<string | null>(null);
+  const [updateRefusal, setUpdateRefusal] = useState<string | null>(null);
 
   // Opening the page costs nothing: the native side answers with the state its
   // own paints left behind.
@@ -140,6 +144,22 @@ export function Settings() {
     }
   };
 
+  const updatePress = async (command: string) => {
+    if (updating) return;
+    setUpdating(command);
+    setUpdateRefusal(null);
+    try {
+      // The check and the download run in the app, on its own threads; the
+      // answer is the state, so the page reads it back either way.
+      await call(command, 120_000);
+    } catch (failure) {
+      setUpdateRefusal(sentence(failure));
+    } finally {
+      setUpdating(null);
+      await loadSnapshot();
+    }
+  };
+
   const link = data?.link;
   const updates = data?.updates;
 
@@ -173,6 +193,29 @@ export function Settings() {
           ? updatesSentence(updates)
           : "The native page has not painted its updates section yet."}
       </p>
+      <div className="host-actions">
+        <button
+          type="button"
+          className="inline-button"
+          disabled={updating !== null || Boolean(updates?.busy)}
+          onClick={() => void updatePress("update.check")}
+        >
+          {updating === "update.check" || updates?.busy
+            ? "Working…"
+            : (updates?.check_label ?? "Check for updates")}
+        </button>
+        {updates?.action_label && (
+          <button
+            type="button"
+            className="inline-button"
+            disabled={updating !== null || updates.busy}
+            onClick={() => void updatePress("update.install")}
+          >
+            {updating === "update.install" ? "Working…" : updates.action_label}
+          </button>
+        )}
+      </div>
+      {updateRefusal && <p className="note write-refusal">{updateRefusal}</p>}
 
       <h2 className="section">Policy</h2>
       {policy?.loaded ? (

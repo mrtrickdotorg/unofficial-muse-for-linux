@@ -212,13 +212,17 @@ export type SettingsLink = {
   session_folder: string;
 };
 
-// The updater's last answer. The presses that write stay on the native page.
+// The updater's last answer, with the native card's own labels: the page
+// offers the press the window offers, in the same words.
 export type SettingsUpdates = {
   appimage: boolean;
   status: string;
   busy: boolean;
   checked: boolean;
   staged: boolean;
+  available: boolean;
+  check_label: string;
+  action_label?: string | null;
 };
 
 // One policy row: the service's own label and value, plus the flip the chat
@@ -306,6 +310,28 @@ export type ShellSnapshot = {
   history: HistoryRow[] | null;
 };
 
+// The sign-in surface as this window opens it: the app's detected interpreter,
+// where it would save, the consent the app requires, and its own labels.
+export type SigninSnapshot = {
+  python: string;
+  folder: string;
+  consent: boolean;
+  status: string;
+  error: string;
+  browser_open: boolean;
+  title: string;
+  hint: string;
+  consent_sentence: string;
+  connect_label: string;
+  browser_label: string;
+  cancel_label: string;
+  choose_label: string;
+};
+
+// The first-run step: two lines and whether the app's setup returned. Nothing
+// to press, so nothing to write.
+export type FirstRunSnapshot = { head: string; sub: string; done: boolean };
+
 // One bundle serves every window: the boot payload names the page it opens.
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
@@ -318,4 +344,6 @@ export type Boot =
   | (SettingsSnapshot & { page?: "settings" })
   | (LocalHostSnapshot & { page?: "localhost" })
   | (ShellSnapshot & { page?: "shell" })
+  | (SigninSnapshot & { page?: "signin" })
+  | (FirstRunSnapshot & { page?: "firstrun" })
   | (ChatSnapshot & { page?: "chat" });
