@@ -511,16 +511,41 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   live: this seat cannot inject input into a WebKit view, and a real flip would change the
   account's policy, so the writes are covered by the suites rather than by a press.
 
+  **The drawer's chrome and the key map moved (Nov 22, 2026).** The shell now draws what the native
+  drawer drew: a search entry, a new-chat press, the page list and the History rows. History is the
+  panel's own listing, read through `history.snapshot` (`WebRoutes::history`) and worded by
+  `pages::history_text`, which the native row reads too -- the untitled placeholder, the pin mark
+  and the unread count cannot fork. A press on a row is `history.open` and the new-chat press is
+  `chat.new`, both `WebRoutes::open_thread`: the native activation's own `switch_thread` without the
+  page stack the shell does not have, so the shell's row opens exactly the thread the native row
+  would, and the listing is re-read after the open and on every page visit, the native sidebar's
+  rule. A window without routes cannot read History and says so ("this window cannot read history")
+  instead of claiming an empty account, and an empty listing is worded as the listing's own
+  emptiness. The drawer's words reach the Search page through `Search`'s new `initialQuery`: they
+  are typed into the page's box and its own Run stays the one wire read, which is what the native
+  entry point does -- it opens the page, it does not search for the reader. The keyboard map is on
+  the window, so a press lands wherever focus is: Ctrl+K reaches the search entry, Ctrl+N a fresh
+  thread, Ctrl+, Settings, F6 and Shift+F6 walk this window's three panes (rail, drawer, page -- the
+  native map walks four), and Escape leaves the search box and nothing else, since the shell has no
+  drawer to fold. Six DOM tests (107 in all) pin the rows and their mark, the open and the fresh
+  thread, the search hand-off without a read, every key in the map including the pane walk, the
+  unread-History sentence, and the empty listing's wording; four Rust tests pin the History read
+  and opens through the routes, the refusal without routes, the shared row wording, and the rows
+  riding in the shell's boot. Live: the shell opened on this seat with real routes, its drawer
+  drawing the search entry, the new-chat press, the page list and the History section
+  (`/tmp/muse-shell-chrome.png`). Not pressed live, for the same reason as the writes: this seat
+  cannot inject input into a WebKit view, so the presses are covered by the suites.
+
   What still needs the native window, in the order it has to happen: the Local host page's
   per-write Allow/Deny, the saved write permission and Clear log have no channel route (their
-  controls are the cards' own countdown boundary and the host's saved policy file); the drawer's
-  History rows, the search and new-chat entry points, the dialogs (updates, sign-in, first run)
-  and the keyboard map are still GTK widgets with no page; and the window itself (menu, focus,
-  a11y pane) is GTK's. Removing GTK is the last step of that list, not the first: deleting
-  `pages.rs`'s builders today would delete the reference the port is checked against on live data,
-  and the 158 Rust tests that assert the native rows are still the only assertion of most page
-  behaviour. The Tauri spike below prices the window swap that has to land before a single line of
-  GTK can go.
+  controls are the cards' own countdown boundary and the host's saved policy file); the dialogs
+  (updates, sign-in, first run) are still GTK windows with no page, and the folder chooser a grant
+  opens is one of them; the window's own chrome -- its menu, focus and a11y pane -- is GTK's, and
+  the shell's key map is a page's map, not a window's until the window is not GTK's. Removing GTK
+  is the last step of that list, not the first: deleting `pages.rs`'s builders today would delete
+  the reference the port is checked against on live data, and the 161 Rust tests that assert the
+  native rows are still the only assertion of most page behaviour. The Tauri spike below prices the
+  window swap that has to land before a single line of GTK can go.
 
   **Tauri 2 spike (Nov 21, 2026, throwaway, outside the tree).** Three source files on tauri 2.12.7 /
   wry 0.57 / tao 0.37 loaded the unmodified `apps/muse/ui/built/app.html` with the same
