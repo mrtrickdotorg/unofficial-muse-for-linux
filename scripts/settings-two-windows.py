@@ -304,20 +304,30 @@ def press_twice(frame_name, button_names, gap=0.35):
         return False
 
 
-def press(frame_name, button_names):
-    button = find_button(frame_name, button_names)
-    if button is None:
-        return False
-    try:
-        actions = button.get_action_iface()
-        if actions is None:
+def press(frame_name, button_names, window=2.0):
+    """Press the named control, allowing the tree a moment to take it.
+
+    A node can be handed out while its widget is still being laid out or
+    repainted, and its action reports failure then, which is how a runner's
+    first press of a button it could already see came back unpressed. The press
+    is retried for `window` seconds -- far shorter than a reader's own reach for
+    the button -- and a control that really cannot be pressed still fails.
+    """
+    deadline = time.monotonic() + window
+    while True:
+        button = find_button(frame_name, button_names)
+        if button is not None:
+            try:
+                actions = button.get_action_iface()
+                if actions is not None:
+                    for index in range(actions.get_n_actions()):
+                        if actions.do_action(index):
+                            return True
+            except Exception:
+                pass
+        if time.monotonic() >= deadline:
             return False
-        for index in range(actions.get_n_actions()):
-            if actions.do_action(index):
-                return True
-    except Exception:
-        return False
-    return False
+        time.sleep(0.05)
 
 
 def card(frame_name, index=0):
