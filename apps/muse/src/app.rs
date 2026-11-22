@@ -2858,13 +2858,13 @@ impl Chat {
             let Some(chat) = weak.upgrade() else {
                 return;
             };
-            let granted = chat.host().borrow_mut().grant(path, consent, writable);
-            if let Err(refusal) = granted {
-                // A dialog's answer has no reply ticket: the refusal goes into
-                // the host's own notice line, where every page reads it.
-                chat.host().borrow_mut().note(refusal);
-            }
-            chat.host().borrow_mut().poll();
+            chat.web_host_press(|host| {
+                if let Err(refusal) = host.grant(path, consent, writable) {
+                    // A dialog's answer has no reply ticket: the refusal goes
+                    // into the host's own notice line, where every page reads it.
+                    host.note(refusal);
+                }
+            });
         });
         dialog.show();
         Ok(())
@@ -2878,48 +2878,43 @@ impl Chat {
             return Err("Link your account first.".to_owned());
         };
         let config = client.bridge_config();
-        self.host()
-            .borrow_mut()
-            .start(Some(config), consent)
-            .map_err(str::to_owned)?;
-        self.host().borrow_mut().poll();
-        Ok(())
+        self.web_host_press(|host| host.start(Some(config), consent).map_err(str::to_owned))
     }
 
     /// Stop the host and revoke its grants, the native stop's own call.
     fn web_host_stop(self: &Rc<Self>) -> Result<(), String> {
-        self.host().borrow_mut().stop();
-        self.host().borrow_mut().poll();
+        self.web_host_press(|host| host.stop());
         Ok(())
+    }
+
+    /// One Local host press from a page, with the page's own cache re-projected
+    /// from the controller the press changed. The native paint used to be the
+    /// only thing that wrote that cache, so a press made in a window whose Local
+    /// host page is the only surface open left the page showing the cards, log
+    /// and switch from before the press.
+    fn web_host_press<T>(
+        self: &Rc<Self>,
+        press: impl FnOnce(&mut super::local_host::Controller) -> T,
+    ) -> T {
+        crate::pages::press_localhost(&mut self.host().borrow_mut(), press)
     }
 
     /// Allow once or Deny one pending write, from the page. The controller's
     /// own decision path: it refuses a card that expires between the paint the
     /// page read and this press, and logs the outcome for the next snapshot.
     fn web_host_decide(self: &Rc<Self>, id: &str, allow: bool) -> Result<(), String> {
-        self.host()
-            .borrow_mut()
-            .decide(id, allow)
-            .map_err(str::to_owned)?;
-        self.host().borrow_mut().poll();
-        Ok(())
+        self.web_host_press(|host| host.decide(id, allow).map_err(str::to_owned))
     }
 
     /// The saved write permission, from the page's switch: durable first, then
     /// enforced on the broker's grants.
     fn web_host_policy(self: &Rc<Self>, allow: bool) -> Result<(), String> {
-        self.host()
-            .borrow_mut()
-            .set_write_policy(allow)
-            .map_err(str::to_owned)?;
-        self.host().borrow_mut().poll();
-        Ok(())
+        self.web_host_press(|host| host.set_write_policy(allow).map_err(str::to_owned))
     }
 
     /// Clear the session log from the page: display only, like the native press.
     fn web_host_clear_log(self: &Rc<Self>) -> Result<(), String> {
-        self.host().borrow_mut().clear_log();
-        self.host().borrow_mut().poll();
+        self.web_host_press(|host| host.clear_log());
         Ok(())
     }
 

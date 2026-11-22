@@ -3260,6 +3260,65 @@ mod tests {
         assert!(!doc.contains("/*__BOOT__*/"));
     }
 
+    /// A press made through a route must change what the page reads next. The
+    /// held cache is written by the native paint, and a window whose Local host
+    /// page is the only surface open has no paint of its own -- so a press that
+    /// only mutated the controller left the page showing the cards, log and
+    /// switch from before it.
+    #[test]
+    fn a_localhost_press_re_projects_the_snapshot_the_page_reads() {
+        use std::rc::Rc;
+        // What the last paint left in the cache.
+        crate::pages::localhost_cache(crate::pages::HeldLocalHost {
+            notice: "the paint's own notice".into(),
+            log: vec!["node registered".into()],
+            ..Default::default()
+        });
+        let controller = Rc::new(std::cell::RefCell::new(crate::local_host::Controller::new()));
+        let press = {
+            let controller = controller.clone();
+            Rc::new(move || {
+                crate::pages::press_localhost(&mut controller.borrow_mut(), |host| {
+                    host.clear_log()
+                });
+                Ok(())
+            })
+        };
+        let routes = WebRoutes {
+            host_clear_log: press,
+            ..stub_routes()
+        };
+
+        let (_, before, _) =
+            handle_command_with(r#"{"id":90,"cmd":"localhost.snapshot"}"#, None, None);
+        let Answer::Now(before) = before else {
+            panic!("a held-state read answers at once")
+        };
+        assert_eq!(before["log"], serde_json::json!(["node registered"]));
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":91,"cmd":"localhost.clear_log"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(answer) = answer else {
+            panic!("a route press answers at once")
+        };
+        assert_eq!(answer["ok"], serde_json::json!(true));
+
+        let (_, after, _) =
+            handle_command_with(r#"{"id":92,"cmd":"localhost.snapshot"}"#, None, None);
+        let Answer::Now(after) = after else {
+            panic!("a held-state read answers at once")
+        };
+        assert_eq!(after["log"], serde_json::json!([]));
+        // The page now reads the controller's projection, not the old paint's.
+        assert_eq!(
+            after["notice"],
+            serde_json::json!("Disconnected. No folders shared with Muse.")
+        );
+    }
+
     /// The channel answers the page's one read from the same held state: the
     /// host polls its controller natively, so the page never touches the wire.
     #[test]

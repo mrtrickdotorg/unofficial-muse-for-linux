@@ -1237,7 +1237,7 @@ fn paint_localhost(ctx: &Ctx, page: &gtk4::Box) {
     let snap = chat.host().borrow().snapshot();
     // The web view reads this, so every paint keeps the projection current --
     // and the page follows the same 250 ms pump the native section does.
-    localhost_cache(held_localhost_from(&snap));
+    project_localhost(&snap);
     if let Some(notice) = named_label(page, "localhost-notice") {
         notice.set_text(&snap.notice);
     }
@@ -3079,6 +3079,28 @@ thread_local! {
 /// The host's projection, as the native paint last built it.
 pub(crate) fn localhost_snapshot() -> HeldLocalHost {
     LOCALHOST_STORE.with(|store| store.borrow().clone())
+}
+
+/// Project the host's read model into the page's held cache. One path for both
+/// surfaces: the native paint calls it on every tick, and every route that
+/// changes the host calls it too -- a page that is the only surface open has no
+/// tick of its own, so a press must re-project before the next snapshot read.
+pub(crate) fn project_localhost(snapshot: &super::local_host::HostSnapshot) {
+    localhost_cache(held_localhost_from(snapshot));
+}
+
+/// Run one host press, drain what it set in motion, and re-project the page's
+/// held cache from the controller it changed. The press's own outcome comes
+/// back untouched, refusals included: a refused press still re-projects, so the
+/// page reads the controller's notice rather than the state it pressed against.
+pub(crate) fn press_localhost<T>(
+    controller: &mut super::local_host::Controller,
+    press: impl FnOnce(&mut super::local_host::Controller) -> T,
+) -> T {
+    let outcome = press(controller);
+    controller.poll();
+    project_localhost(&controller.snapshot());
+    outcome
 }
 
 /// Replace the projection with what a paint just produced.
