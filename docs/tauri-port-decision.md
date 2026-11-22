@@ -482,15 +482,45 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   "title":"Chat"}` from its own probe, the chat page drawn from the app's held state
   (`/tmp/muse-shell.png`, `/tmp/muse-shell2.png`).
 
-  What the shell still lacks to *replace* the native window, in the order it has to happen: the
-  native-only writes (Settings policy flips, Local host grants and start/stop) have no channel
-  route, so those pages are read-only here and say so; the drawer's History rows, the search and
-  new-chat entry points, the dialogs (updates, sign-in, first run) and the keyboard map are still
-  GTK widgets with no page; and the window itself (menu, focus, a11y pane) is GTK's. Removing GTK
-  is the last step of that list, not the first: deleting `pages.rs`'s builders today would delete
-  the reference the port is checked against on live data, and the 153 Rust tests that assert the
-  native rows are still the only assertion of most page behaviour. The Tauri spike below prices the
-  window swap that has to land before a single line of GTK can go.
+  **The pages' writes moved (Nov 22, 2026).** `WebRoutes` gained five routes -- `set_policy`,
+  `reset_connector`, `host_grant`, `host_start`, `host_stop` -- behind the seam the Chat window
+  already used, and `settings.policy.set`, `settings.connector.reset`, `localhost.grant`,
+  `localhost.start` and `localhost.stop` are the commands that reach them. The Settings window,
+  the Local host window and the shell open with those routes; the read-only pages still pass
+  `None`, and a write arriving there is refused by name ("this window cannot make that change"),
+  which is now a test. The flip table moved out of the chat panel into `pages::policy_next`, with
+  `pages::policy_update_args` beside it: the panel's press and the page's press read one table, and
+  the page sends the row it shows rather than a word it chose. `run_settings_update` and
+  `run_connector_reset` answer with the app's sentence now, so a page press that arrives while
+  another change holds the ticket prints "Another settings change is already in flight." instead
+  of doing nothing; the native press keeps its silence, because the panel has no notice line. The
+  page holds the connector reset's arming (first press arms, a repaint disarms) and the
+  one-press-one-write rule: the whole policy section waits while one change is in flight, since
+  the app holds one ticket. Granting still opens the app's own `FileChooserNative` -- a page cannot
+  browse the disk, and the folder is the person's choice -- so `localhost.grant` answers once the
+  dialog is up and the grant, or its refusal in the host's own notice line, lands in the next
+  snapshot. Start carries the page's consent box as data and the host refuses without it; stop is
+  the native stop's own call, and the page drops its consent with the session. Six new DOM tests
+  in the Settings and Local host suites (103 in all) pin one write per press, the row's own label
+  and value on the wire, the app's refusal sentence, the two-press reset, the consent and
+  read-only choices travelling with the press, and stop resetting consent; five Rust tests pin the
+  shared flip table, the command-to-route dispatch, the refusal sentence, and that a window
+  without routes cannot write. Live: both windows opened from the running app with real routes,
+  the host page drawing its consent box and its three presses (`/tmp/muse-host-writes.png`), the
+  Settings page in its honest unread-policy state (`/tmp/muse-settings-writes.png`). Not pressed
+  live: this seat cannot inject input into a WebKit view, and a real flip would change the
+  account's policy, so the writes are covered by the suites rather than by a press.
+
+  What still needs the native window, in the order it has to happen: the Local host page's
+  per-write Allow/Deny, the saved write permission and Clear log have no channel route (their
+  controls are the cards' own countdown boundary and the host's saved policy file); the drawer's
+  History rows, the search and new-chat entry points, the dialogs (updates, sign-in, first run)
+  and the keyboard map are still GTK widgets with no page; and the window itself (menu, focus,
+  a11y pane) is GTK's. Removing GTK is the last step of that list, not the first: deleting
+  `pages.rs`'s builders today would delete the reference the port is checked against on live data,
+  and the 158 Rust tests that assert the native rows are still the only assertion of most page
+  behaviour. The Tauri spike below prices the window swap that has to land before a single line of
+  GTK can go.
 
   **Tauri 2 spike (Nov 21, 2026, throwaway, outside the tree).** Three source files on tauri 2.12.7 /
   wry 0.57 / tao 0.37 loaded the unmodified `apps/muse/ui/built/app.html` with the same
