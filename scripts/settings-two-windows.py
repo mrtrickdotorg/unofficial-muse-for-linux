@@ -297,7 +297,8 @@ def exercise(label, frame_name, buttons, timeout, busy_window):
 
     presses = 0
     page_seen = native_seen = False
-    while presses < 3 and not (page_seen or native_seen):
+    mid_check = None
+    while presses < 3 and mid_check is None:
         presses += 1
         if not press(frame_name, buttons):
             raise Failure(f"the {label} card's Check button could not be pressed")
@@ -305,30 +306,35 @@ def exercise(label, frame_name, buttons, timeout, busy_window):
         while time.monotonic() - started < busy_window:
             page_status, page_button, _ = card(WEB_FRAME)
             native_status, _, _ = card(MAIN_FRAME)
-            page_seen = page_seen or page_button == WORKING or page_status == BUSY_STATUS
-            native_seen = native_seen or native_status == BUSY_STATUS
-            if page_seen or native_seen:
+            page_status = page_status or ""
+            native_status = native_status or ""
+            page_busy = page_button == WORKING or BUSY_STATUS in page_status
+            native_busy = native_status == BUSY_STATUS
+            page_seen = page_seen or page_busy
+            native_seen = native_seen or native_busy
+            # Both cards caught in the check itself: the page's own line must
+            # be the app's, word for word. A decoration the page adds (the old
+            # "Checking now…" suffix) is exactly what this catches.
+            if BUSY_STATUS in page_status and native_busy:
+                if page_status != native_status:
+                    raise Failure(
+                        f"mid-check the cards disagree: page {page_status!r} "
+                        f"vs native {native_status!r}"
+                    )
+                mid_check = page_status
                 break
             _, _, refusal = card(WEB_FRAME)
             if refusal:
                 break
             time.sleep(POLL)
-        seen = page_seen or native_seen
-        if not seen:
+        if mid_check is None:
             wait_until(idle, timeout, f"the cards to be idle after the {label} press")
-    if not seen:
+    if mid_check is None:
         raise Failure(
-            f"pressing Check on the {label} card never started a check "
-            "(no busy step on either card)"
-        )
-
-    pressed_side = "page" if frame_name == WEB_FRAME else "native"
-    pressed_seen = page_seen if frame_name == WEB_FRAME else native_seen
-    if not pressed_seen:
-        raise Failure(
-            f"the {pressed_side} card never showed the check it started "
-            f"(page {'busy' if page_seen else 'idle'}, "
-            f"native {'busy' if native_seen else 'idle'})"
+            f"the two cards were never read mid-check at the same moment after the "
+            f"{label} press (page {'busy' if page_seen else 'quiet'}, "
+            f"native {'busy' if native_seen else 'quiet'}): the check finished too "
+            "fast or one surface never took the busy state"
         )
 
     # The check has started; it must finish, and both cards must leave the
@@ -350,7 +356,7 @@ def exercise(label, frame_name, buttons, timeout, busy_window):
                     f"the cards disagree after the {label} press: "
                     f"page {page_status!r} vs native {native_status!r}"
                 )
-            return presses, page_status, page_seen, native_seen
+            return presses, page_status, mid_check
         time.sleep(POLL)
 
     page_status, page_button, _ = card(WEB_FRAME)
@@ -426,14 +432,14 @@ def run(binary, timeout, busy_window, keep, env_script):
             ("native", MAIN_FRAME, (WORKING, "Check for updates")),
         ]
         for label, frame_name, buttons in rounds:
-            presses, status, page_seen, native_seen = exercise(
+            presses, status, mid_check = exercise(
                 label, frame_name, buttons, timeout, busy_window
             )
             note = "" if presses == 1 else f" after {presses} presses"
-            seen = "page " + (f"{WORKING}" if page_seen else "quiet") + ", native " + (
-                f"{BUSY_STATUS}" if native_seen else "quiet"
+            print(
+                f"press {label}: both cards mid-check on {mid_check!r}; "
+                f"both settled on {status!r}{note}"
             )
-            print(f"press {label}: checking seen ({seen}); both cards settled on {status!r}{note}")
 
         page_status, page_button, _ = card(WEB_FRAME)
         native_status, _, _ = card(MAIN_FRAME)
