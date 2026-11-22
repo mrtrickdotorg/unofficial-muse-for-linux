@@ -1263,6 +1263,14 @@ pub(crate) fn close_page_window(page: &'static str) {
     }
 }
 
+/// The updater's answer changed: an open Settings page should re-ask, since a
+/// check it pressed lands after that press answered, and a check the native
+/// card pressed lands without the page knowing. Same hook the policy read uses:
+/// the page reads its own snapshot again instead of being handed data.
+pub(crate) fn settings_updates_changed() {
+    nudge_page("settings", "museUpdatesReady");
+}
+
 /// The policy projection changed: an open Settings window should re-ask, since
 /// the chat panel's read lands after that window opened.
 pub(crate) fn settings_policy_changed() {

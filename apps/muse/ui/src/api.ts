@@ -15,6 +15,9 @@ declare global {
     /// The app's nudge: a native paint just changed what this page shows, so
     /// ask again. Defined by the page, called from WebKit.
     musePolicyReady?: () => void;
+    /// The updater's answer landed: the Settings card asks for its snapshot
+    /// again instead of waiting on a press that already answered.
+    museUpdatesReady?: () => void;
     __MUSE_BOOT__?: Boot;
   }
 }

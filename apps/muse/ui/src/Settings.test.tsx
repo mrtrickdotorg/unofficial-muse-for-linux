@@ -190,6 +190,51 @@ describe("the Settings web page", () => {
     expect(commands.filter((command) => command === "settings.snapshot")).toHaveLength(2);
   });
 
+  it("re-reads the updater when the app says its answer landed", async () => {
+    window.__MUSE_BOOT__ = undefined;
+    const busy = bootPayload({
+      updates: {
+        appimage: true,
+        status: "Checking for updates…",
+        busy: true,
+        checked: false,
+        staged: false,
+        available: false,
+        check_label: "Check for updates",
+        action_label: null,
+      },
+    });
+    const settled = bootPayload({
+      updates: {
+        appimage: true,
+        status: "This build is up to date.",
+        busy: false,
+        checked: true,
+        staged: false,
+        available: false,
+        check_label: "Check for updates",
+        action_label: null,
+      },
+    });
+    let answers = 0;
+    const commands = installChannel(() => {
+      answers += 1;
+      return answers === 1 ? { ok: true, ...busy } : { ok: true, ...settled };
+    });
+
+    render(<Settings />);
+
+    // A press answers before the worker does: the page opens on the app's
+    // "busy" answer and would otherwise sit on it.
+    expect(await screen.findByText(/Checking for updates…/)).toBeInTheDocument();
+    await waitFor(() => expect(typeof window.museUpdatesReady).toBe("function"));
+
+    act(() => window.museUpdatesReady?.());
+
+    expect(await screen.findByText("This build is up to date.")).toBeInTheDocument();
+    expect(commands.filter((command) => command === "settings.snapshot")).toHaveLength(2);
+  });
+
   it("takes its nudge hook away when the window closes", async () => {
     window.__MUSE_BOOT__ = undefined;
     installChannel(() => ({ ok: true, ...bootPayload() }));
@@ -200,6 +245,7 @@ describe("the Settings web page", () => {
     unmount();
     // A closed page leaves nothing for a later paint to call.
     expect(window.musePolicyReady).toBeUndefined();
+    expect(window.museUpdatesReady).toBeUndefined();
   });
 
   it("flips a row through the app's route, one write per press", async () => {

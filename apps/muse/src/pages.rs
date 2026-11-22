@@ -829,7 +829,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 // Resolved per press: the window opens on what the app holds
                 // now, including the policy the chat panel last read.
                 let chat = ctx.chat.clone();
-                let updates = ctx.updates.clone();
+                let press_ctx = ctx.clone();
                 web_view.connect_clicked(move |_| {
                     // Resolved per press, so the window opens with whatever the
                     // app holds now and its flips reach the app's own update
@@ -838,7 +838,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                         let mut routes = chat.web_routes();
                         // The update state lives with this panel, so the card's
                         // page presses are attached here, where it is reachable.
-                        let (check, install) = update_press_routes(updates.clone());
+                        let (check, install) = update_press_routes(press_ctx.clone());
                         routes.update_check = check;
                         routes.update_install = install;
                         routes
@@ -875,7 +875,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 let Some(inner) = page_weak.upgrade() else {
                     return;
                 };
-                do_check(&ctx_check, &inner);
+                let _ = do_check(&ctx_check, Some(&inner));
             });
             let ctx_action = ctx.clone();
             let page_weak = inner.downgrade();
@@ -883,7 +883,7 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 let Some(inner) = page_weak.upgrade() else {
                     return;
                 };
-                do_update_action(&ctx_action, &inner);
+                let _ = do_update_action(&ctx_action, Some(&inner));
             });
             let sign_out = gtk4::Button::with_label("Sign out");
             inner.append(&sign_out);
@@ -3073,148 +3073,19 @@ pub(crate) const SIGNIN_CHOOSE: &str = "Choose a session folder…";
 pub(crate) const FIRST_RUN_HEAD: &str = "Performing first-run setup";
 pub(crate) const FIRST_RUN_SUB: &str = "This may take a few moments.";
 
-/// The two update presses, backed by the app's own update state. The check and
-/// the download run on workers and come back to the main loop; each landing
-/// re-projects the page's cache, so a page with no native card open reads its
-/// own press.
+/// The two update presses, for a page that has no native card of its own to
+/// repaint. They are [`do_check`] and [`do_update_action`] -- the same functions
+/// the panel's buttons call -- so the page cannot run a second updater, and one
+/// busy flag refuses both surfaces the same way.
 pub(crate) fn update_press_routes(
-    updates: std::rc::Rc<std::cell::RefCell<super::update::UpdateCheck>>,
+    ctx: Ctx,
 ) -> (crate::webui::WebUpdateCheck, crate::webui::WebUpdateInstall) {
-    let check = {
-        let updates = updates.clone();
-        std::rc::Rc::new(move || {
-            {
-                let mut state = updates.borrow_mut();
-                if state.busy {
-                    return Err("An update check is already running.".to_owned());
-                }
-                state.busy = true;
-                state.status = "Checking for updates…".to_owned();
-            }
-            project_update(&updates);
-            // The fetch is a blocking HTTP read, so it runs on a worker and its
-            // answer comes back on the main loop, where the state lives.
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(super::update::fetch_latest());
-            });
-            let updates = updates.clone();
-            gtk4::glib::idle_add_local(move || {
-                let outcome = match rx.try_recv() {
-                    Ok(outcome) => outcome,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        return gtk4::glib::ControlFlow::Continue;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        let mut state = updates.borrow_mut();
-                        state.busy = false;
-                        state.status = "The update check stopped without an answer.".to_owned();
-                        drop(state);
-                        project_update(&updates);
-                        return gtk4::glib::ControlFlow::Break;
-                    }
-                };
-                {
-                    let mut state = updates.borrow_mut();
-                    state.busy = false;
-                    match outcome {
-                        Ok(info) => {
-                            let available =
-                                super::update::update_available(super::update::local_sha(), &info);
-                            state.status = if available {
-                                format!("A newer build is available: {}", info.sha)
-                            } else {
-                                "Up to date.".to_owned()
-                            };
-                            state.info = available.then_some(info);
-                        }
-                        Err(message) => {
-                            state.status = message;
-                            state.info = None;
-                        }
-                    }
-                }
-                project_update(&updates);
-                gtk4::glib::ControlFlow::Break
-            });
-            Ok(())
-        }) as crate::webui::WebUpdateCheck
-    };
-    let install = {
-        let updates = updates.clone();
-        std::rc::Rc::new(move || {
-            let (staged, info) = {
-                let state = updates.borrow();
-                if state.busy {
-                    return Err("The updater is already working.".to_owned());
-                }
-                (state.staged.clone(), state.info.clone())
-            };
-            // Restart once a verified download is waiting; download once one is
-            // offered; refuse when neither, in the native card's own words.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let restarting = staged.is_some();
-            match (staged, info) {
-                (Some(staged), _) => {
-                    {
-                        let mut state = updates.borrow_mut();
-                        state.busy = true;
-                        state.status = "Restarting into the update…".to_owned();
-                    }
-                    std::thread::spawn(move || {
-                        let outcome = super::update::relaunch_verified(&staged).and_then(|()| {
-                            super::update::refresh_launcher_copy(&staged).map(|_| ())
-                        });
-                        let _ = tx.send(outcome);
-                    });
-                }
-                (None, Some(info)) => {
-                    {
-                        let mut state = updates.borrow_mut();
-                        state.busy = true;
-                        state.status = "Downloading the update…".to_owned();
-                    }
-                    std::thread::spawn(move || {
-                        let _ = tx.send(super::update::download_staged(&info).map(|_| ()));
-                    });
-                }
-                (None, None) => {
-                    return Err("Nothing to install yet: check for updates first.".to_owned());
-                }
-            }
-            project_update(&updates);
-            let updates = updates.clone();
-            gtk4::glib::idle_add_local(move || {
-                use std::sync::mpsc::TryRecvError;
-                // A download and a restart both answer with one outcome: done,
-                // or the sentence that says what stopped it.
-                let outcome = match rx.try_recv() {
-                    Ok(outcome) => outcome,
-                    Err(TryRecvError::Empty) => return gtk4::glib::ControlFlow::Continue,
-                    Err(TryRecvError::Disconnected) => {
-                        Err("The updater stopped without an answer.".to_owned())
-                    }
-                };
-                match outcome {
-                    // The new copy proved it stays up: this one goes.
-                    Ok(()) if restarting => std::process::exit(0),
-                    Ok(()) => {
-                        let mut state = updates.borrow_mut();
-                        state.busy = false;
-                        state.status = "Update downloaded. Restart to take it.".to_owned();
-                    }
-                    Err(message) => {
-                        let mut state = updates.borrow_mut();
-                        state.busy = false;
-                        state.status = message;
-                    }
-                }
-                project_update(&updates);
-                gtk4::glib::ControlFlow::Break
-            });
-            Ok(())
-        }) as crate::webui::WebUpdateInstall
-    };
+    let check_ctx = ctx.clone();
+    let check =
+        std::rc::Rc::new(move || do_check(&check_ctx, None)) as crate::webui::WebUpdateCheck;
+    let install_ctx = ctx;
+    let install = std::rc::Rc::new(move || do_update_action(&install_ctx, None))
+        as crate::webui::WebUpdateInstall;
     (check, install)
 }
 
@@ -3254,13 +3125,7 @@ pub(crate) fn held_update_from(state: &super::update::UpdateCheck) -> HeldUpdate
         .map(|info| super::update::update_available(super::update::local_sha(), info))
         .unwrap_or(false);
     let staged = state.staged.is_some();
-    let action_label = if staged {
-        Some(UPDATE_RESTART_LABEL.to_owned())
-    } else if available {
-        Some(UPDATE_DOWNLOAD_LABEL.to_owned())
-    } else {
-        None
-    };
+    let action_label = updates_action_label(state);
     let build = match super::update::local_sha() {
         Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
         None => "dev build".to_owned(),
@@ -5098,7 +4963,7 @@ fn fill_settings(ctx: &Ctx, page: &gtk4::Box) -> bool {
         )),
         None => info.set_text("No saved link."),
     }
-    paint_updates(ctx, page);
+    paint_updates(ctx, Some(page));
     // Check on visit when due: the feed read is cheap and the result
     // waits on the settings page instead of interrupting anything.
     if super::update::running_as_appimage()
@@ -5106,41 +4971,73 @@ fn fill_settings(ctx: &Ctx, page: &gtk4::Box) -> bool {
         && !ctx.updates.borrow().busy
         && ctx.updates.borrow().info.is_none()
     {
-        do_check(ctx, page);
+        let _ = do_check(ctx, Some(page));
     }
     true
 }
 
-/// Paint the updates section from the shared panel state.
-fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
-    let find = |name: &str| find_widget(page.upcast_ref(), name);
-    let state = ctx.updates.borrow();
-    // The eligibility and the last answer travel to the web view as data, so
-    // its page and this section cannot tell two different stories.
-    settings_updates_cache(UpdatesView {
-        appimage: super::update::running_as_appimage(),
-        status: state.status.clone(),
-        busy: state.busy,
-        checked: state.info.is_some(),
-        staged: state.staged.is_some(),
-        available: state.info.is_some(),
-        check_label: UPDATE_CHECK_LABEL.to_owned(),
-        action_label: if state.staged.is_some() {
-            Some(UPDATE_RESTART_LABEL.to_owned())
-        } else if state.info.is_some() {
-            Some(UPDATE_DOWNLOAD_LABEL.to_owned())
-        } else {
-            None
-        },
+/// The action's label, shared by the panel's button and the page's card: the
+/// native rule, Restart once something is staged, Download once something is
+/// offered, nothing before either.
+fn updates_action_label(state: &super::update::UpdateCheck) -> Option<String> {
+    if state.staged.is_some() {
+        Some(UPDATE_RESTART_LABEL.to_owned())
+    } else if state.info.is_some() {
+        Some(UPDATE_DOWNLOAD_LABEL.to_owned())
+    } else {
+        None
+    }
+}
+
+/// Paint the updates section from the shared panel state, and hand that same
+/// state to the page's caches. One controller, two renderers: the native card
+/// and the page's card offer the same press, and this is the one place a change
+/// from either becomes visible, so neither surface has to poll the other.
+fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
+    let appimage = super::update::running_as_appimage();
+    {
+        let state = ctx.updates.borrow();
+        // The eligibility and the last answer travel to the web view as data,
+        // so its page and this section cannot tell two different stories.
+        settings_updates_cache(UpdatesView {
+            appimage,
+            status: state.status.clone(),
+            busy: state.busy,
+            checked: state.info.is_some(),
+            staged: state.staged.is_some(),
+            available: state.info.is_some(),
+            check_label: UPDATE_CHECK_LABEL.to_owned(),
+            action_label: updates_action_label(&state),
+        });
+    }
+    // The page's own held state, read by `update.snapshot` and by the Settings
+    // card's re-read after a press.
+    project_update(&ctx.updates);
+    // A press answers before the worker does, so the page's own read can land
+    // on "busy" and stay there. This tells an open page that the answer is in,
+    // whether the press came from its card or from this one.
+    crate::webui::settings_updates_changed();
+    // A press can come from the page's card, which has no widget of its own:
+    // the native card is found where the app keeps it, so one press leaves both
+    // renderers showing the same state.
+    let card = page.cloned().or_else(|| {
+        ctx.stack
+            .child_by_name("settings")
+            .and_then(|child| child.downcast::<gtk4::Box>().ok())
     });
+    let Some(card) = card else {
+        return;
+    };
+    let find = |name: &str| find_widget(card.upcast_ref(), name);
+    let state = ctx.updates.borrow();
     if let Some(widget) = find("updates-status")
         && let Ok(label) = widget.downcast::<gtk4::Label>()
     {
         let text = if state.status.is_empty() {
-            if super::update::running_as_appimage() {
-                "Updates come from the rolling AppImage release."
+            if appimage {
+                UPDATE_ROLLING
             } else {
-                "This copy updates through its own channel (store or checkout), not here."
+                UPDATE_NOT_APPIMAGE
             }
         } else {
             &state.status
@@ -5150,32 +5047,30 @@ fn paint_updates(ctx: &Ctx, page: &gtk4::Box) {
     if let Some(widget) = find("updates-check")
         && let Ok(button) = widget.downcast::<gtk4::Button>()
     {
-        button.set_sensitive(!state.busy && super::update::running_as_appimage());
+        button.set_sensitive(!state.busy && appimage);
     }
     if let Some(widget) = find("updates-action")
         && let Ok(button) = widget.downcast::<gtk4::Button>()
     {
-        if state.staged.is_some() {
-            button.set_label("Restart to update");
-            button.set_visible(true);
-            button.set_sensitive(!state.busy);
-        } else if state.info.is_some() {
-            button.set_label("Download update");
-            button.set_visible(true);
-            button.set_sensitive(!state.busy);
-        } else {
-            button.set_visible(false);
+        match updates_action_label(&state) {
+            Some(label) => {
+                button.set_label(&label);
+                button.set_visible(true);
+                button.set_sensitive(!state.busy);
+            }
+            None => button.set_visible(false),
         }
     }
 }
 
-/// Ask the feed whether a newer build exists. One worker, one answer;
-/// the panel repaints whatever it says, including failures.
-fn do_check(ctx: &Ctx, page: &gtk4::Box) {
+/// Ask the feed whether a newer build exists. One worker, one answer; whichever
+/// card is up repaints whatever it says, including failures. The refusal is the
+/// same sentence on both surfaces.
+fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
     {
         let mut state = ctx.updates.borrow_mut();
         if state.busy {
-            return;
+            return Err("An update check is already running.".to_owned());
         }
         state.busy = true;
         state.status = "Checking for updates…".to_owned();
@@ -5187,7 +5082,7 @@ fn do_check(ctx: &Ctx, page: &gtk4::Box) {
         let _ = done_tx.send(super::update::fetch_latest());
     });
     let ctx = ctx.clone();
-    let page_strong: gtk4::Box = page.clone();
+    let page_owned = page.cloned();
     gtk4::glib::idle_add_local(move || {
         let answer = match done_rx.try_recv() {
             Ok(answer) => answer,
@@ -5198,7 +5093,7 @@ fn do_check(ctx: &Ctx, page: &gtk4::Box) {
                 let mut state = ctx.updates.borrow_mut();
                 state.busy = false;
                 state.status = "Update check stopped without an answer.".to_owned();
-                paint_updates(&ctx, &page_strong);
+                paint_updates(&ctx, page_owned.as_ref());
                 return gtk4::glib::ControlFlow::Break;
             }
         };
@@ -5222,16 +5117,17 @@ fn do_check(ctx: &Ctx, page: &gtk4::Box) {
                 }
             }
         }
-        paint_updates(&ctx, &page_strong);
+        paint_updates(&ctx, page_owned.as_ref());
         gtk4::glib::ControlFlow::Break
     });
+    Ok(())
 }
 
 /// The action button: download the staged build, or restart into it.
 /// The restart is verified on a worker (the new copy must stay up
 /// before this one exits); a failed restart reports in the panel with
 /// the staged path instead of leaving the reader with nothing.
-fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
+fn do_update_action(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
     let (info, staged) = {
         let state = ctx.updates.borrow();
         (state.info.clone(), state.staged.clone())
@@ -5240,35 +5136,38 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
         {
             let mut state = ctx.updates.borrow_mut();
             if state.busy {
-                return;
+                return Err("The updater is already working.".to_owned());
             }
             state.busy = true;
             state.status = "Restarting into the update…".to_owned();
         }
         paint_updates(ctx, page);
         let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        let staged_for_worker = staged.clone();
         std::thread::spawn(move || {
             let _ = done_tx.send(
-                super::update::relaunch_verified(&staged)
-                    .map_err(|message| format!("{message} Staged file: {}", staged.display()))
+                super::update::relaunch_verified(&staged_for_worker)
+                    .map_err(|message| {
+                        format!("{message} Staged file: {}", staged_for_worker.display())
+                    })
                     .and_then(|()| {
                         // The new copy is verified alive: refresh the
                         // launched file so the launcher opens it next
                         // time. A refresh failure keeps this copy up
                         // and says so instead of exiting into a stale
                         // launcher.
-                        super::update::refresh_launcher_copy(&staged).map(|_| ()).map_err(
-                            |message| {
+                        super::update::refresh_launcher_copy(&staged_for_worker)
+                            .map(|_| ())
+                            .map_err(|message| {
                                 format!(
                                     "The update is running, but the launcher copy kept its old build: {message}"
                                 )
-                            },
-                        )
+                            })
                     }),
             );
         });
         let ctx = ctx.clone();
-        let page_strong: gtk4::Box = page.clone();
+        let page_owned = page.cloned();
         gtk4::glib::idle_add_local(move || {
             let answer = match done_rx.try_recv() {
                 Ok(answer) => answer,
@@ -5279,7 +5178,7 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
                     let mut state = ctx.updates.borrow_mut();
                     state.busy = false;
                     state.status = "Restart check stopped without an answer.".to_owned();
-                    paint_updates(&ctx, &page_strong);
+                    paint_updates(&ctx, page_owned.as_ref());
                     return gtk4::glib::ControlFlow::Break;
                 }
             };
@@ -5290,20 +5189,20 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
                     let mut state = ctx.updates.borrow_mut();
                     state.busy = false;
                     state.status = message;
-                    paint_updates(&ctx, &page_strong);
+                    paint_updates(&ctx, page_owned.as_ref());
                 }
             }
             gtk4::glib::ControlFlow::Break
         });
-        return;
+        return Ok(());
     }
     let Some(info) = info else {
-        return;
+        return Err("Nothing to install yet: check for updates first.".to_owned());
     };
     {
         let mut state = ctx.updates.borrow_mut();
         if state.busy {
-            return;
+            return Err("The updater is already working.".to_owned());
         }
         state.busy = true;
         state.status = "Downloading the update…".to_owned();
@@ -5314,7 +5213,7 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
         let _ = done_tx.send(super::update::download_staged(&info));
     });
     let ctx = ctx.clone();
-    let page_strong: gtk4::Box = page.clone();
+    let page_owned = page.cloned();
     gtk4::glib::idle_add_local(move || {
         let answer = match done_rx.try_recv() {
             Ok(answer) => answer,
@@ -5325,7 +5224,7 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
                 let mut state = ctx.updates.borrow_mut();
                 state.busy = false;
                 state.status = "Update download stopped without an answer.".to_owned();
-                paint_updates(&ctx, &page_strong);
+                paint_updates(&ctx, page_owned.as_ref());
                 return gtk4::glib::ControlFlow::Break;
             }
         };
@@ -5345,9 +5244,10 @@ fn do_update_action(ctx: &Ctx, page: &gtk4::Box) {
                 }
             }
         }
-        paint_updates(&ctx, &page_strong);
+        paint_updates(&ctx, page_owned.as_ref());
         gtk4::glib::ControlFlow::Break
     });
+    Ok(())
 }
 
 /// One feed card: the title plus whatever framing the service gave
@@ -7475,6 +7375,40 @@ fn go_chat(ctx: &Ctx) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The action's label is one rule for both cards: the panel's button and the
+    /// page's card cannot offer different presses for the same state, and the
+    /// held update the page reads carries that same label as data.
+    #[test]
+    fn the_action_label_is_one_rule_for_both_cards() {
+        let mut state = super::super::update::UpdateCheck::default();
+        assert_eq!(updates_action_label(&state), None);
+        assert_eq!(held_update_from(&state).action_label, None);
+
+        state.info = Some(super::super::update::ReleaseInfo {
+            sha: "abc1234".to_owned(),
+            asset_url: "https://example.invalid/muse.AppImage".to_owned(),
+            asset_size: 1024,
+        });
+        assert_eq!(
+            updates_action_label(&state).as_deref(),
+            Some(UPDATE_DOWNLOAD_LABEL)
+        );
+        assert_eq!(
+            held_update_from(&state).action_label.as_deref(),
+            Some(UPDATE_DOWNLOAD_LABEL)
+        );
+
+        state.staged = Some(std::path::PathBuf::from("/tmp/muse.AppImage"));
+        assert_eq!(
+            updates_action_label(&state).as_deref(),
+            Some(UPDATE_RESTART_LABEL)
+        );
+        assert_eq!(
+            held_update_from(&state).action_label.as_deref(),
+            Some(UPDATE_RESTART_LABEL)
+        );
+    }
 
     fn schedule(title: &str, enabled: bool) -> Schedule {
         Schedule {

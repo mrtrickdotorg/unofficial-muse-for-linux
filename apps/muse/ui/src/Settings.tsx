@@ -99,8 +99,15 @@ export function Settings() {
     window.musePolicyReady = () => {
       void loadSnapshot();
     };
+    // The updater's answer lands after the press that asked for it has already
+    // answered, and it can be a press from the native card. The app says when
+    // it is in, and the page reads again -- no timer, no guessed interval.
+    window.museUpdatesReady = () => {
+      void loadSnapshot();
+    };
     return () => {
       delete window.musePolicyReady;
+      delete window.museUpdatesReady;
     };
   }, [loadSnapshot]);
 
