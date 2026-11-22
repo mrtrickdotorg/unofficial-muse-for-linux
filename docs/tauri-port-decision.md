@@ -603,19 +603,27 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   GTK 3 + WebKitGTK 4.1 and the state layer is GTK 4 + WebKitGTK 6.0. So S4 is not a window swap: it
   is a process split, and the socket hop is paid even after all the page work is done.
 
-  Measured on this seat, Xwayland, debug build, both windows reading the same app state:
+  Measured on this seat, Xwayland, debug build, both windows reading the same app state. Both
+  columns run from process start: the GTK app opens its shell window as the process comes up rather
+  than from a 2 s hook, and each figure is three runs, which is why ranges appear where the runs
+  disagreed.
 
-  | | GTK shell window | Tauri window (`muse-window`) |
+  | | GTK shell window (WebKitGTK 6.0) | Tauri window (`muse-window`, WebKitGTK 4.1) |
   |---|---|---|
-  | document ready | 266 ms after the open call (2266 ms from process start, 2 s hook) | 677 ms from process start, 558 ms of it after the window existed |
-  | first command | 308 ms after the open call | 782 ms from process start |
-  | `chat.snapshot` answered | 78-101 us in process | 1.3-1.8 ms end to end (page -> IPC -> socket -> `handle_command_with` -> socket -> `eval`) |
-  | `history.snapshot` answered | 18 us | 0.4 ms |
+  | document ready | 549 ms (486, 549, 616) | 717 ms (697, 717, 1056) |
+  | first command | 589 ms (528, 589, 662) | 827 ms (816, 827, 1405) |
+  | `chat.snapshot` answered | 113-139 us in process | 1.2, 1.8 ms end to end -- 14 ms on the run whose page was coldest |
+  | `history.snapshot` answered | 18 us | 0.41, 0.44 ms -- 10 ms on that same run |
 
-  The GTK window opens into a warm process, so its document time is not a cold start; the Tauri one
-  pays GTK 3 + wry + WebKitGTK 4.1 init and the boot fetch. The command cost is the honest part: the
-  split multiplies a read by 15-20x, from tens of microseconds to about 1.5 ms -- still under a
-  60 Hz frame, and invisible inside a 2 s poll.
+  What each column includes is now the same thing: one cold process, one window, one document, one
+  first command. GTK's number carries building the app's state, whose native window is present
+  68-89 ms after build; the Tauri window carries GTK 3 + wry + WebKitGTK 4.1 initialisation, its
+  own window build (136-306 ms) and the boot fetch on the socket, since it has no state layer to
+  read. The Tauri window is the slower one to first command on this seat (by roughly 1.4x at the
+  medians, and by 2.4x on its worst run), and it never gets the GTK window's advantage of arriving
+  into a process that has already paid for its toolkit. The command cost is the honest part of the
+  split: a read goes from tens of microseconds to about 1.5 ms, 15-20x, still under a 60 Hz frame
+  and invisible inside a 2 s poll.
 
   a11y, walked twice with each window focused and settled (children through
   `org.a11y.atspi.Accessible.GetChildren`, roles through both `GetRole` and `GetRoleName`, the walk
@@ -648,7 +656,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   | **Cost** | No shell work. S2/S3's page work is the shared cost; S5 packaging and the parity-bug tail remain. | The doc's ~9-11 weeks, of which 5-7 (read-only 3-4, chat 2-3) staying also needs; the Tauri-only delta is ~4-4.5 (shell 1-1.5, integrations 1, tests/a11y/packaging/Wayland 2). | Nil until it ships, then the same ~4-4.5 delta and a second S4; a draft, breaking milestone with no date. |
   | **Engine split** | One engine: the bundled WebKitGTK 6.0 the Feed frames and Library previews already use. | Two generations while migrating, and they cannot share a process -- measured: GTK aborts on the mixed symbols, so the shell is a second process over a socket; at the end either a second WebKit in the bundle or the Feed frames forced down to 4.1 (the doc's risk 3). | One engine, GTK4 + 6.0, in one process -- the only option that removes the split and keeps GTK4. |
   | **a11y** | AT-SPI on real widgets; the 98 GTK assertions stay authoritative until each page's DOM test replaces them, and P9 is unchanged. | ARIA on 4.1's tree -- measured the same 128-node page tree with the same numeric roles as 6.0 for the same document, so the page is not the loss; the native GTK widget tree (~439 nodes) is what a Tauri window does not have -- chrome a11y from GTK 3; the doc's risk "(4) the P9 accessibility gate getting harder". | ARIA on the 6.0 tree with no second engine; the DOM cost matches Tauri 2, the chrome is no worse than today. |
-  | **Wayland risk** | Works on this seat today; S5 still owes the "native Wayland, not XWayland" gate either way. | The doc's blank window / `AcceleratedSurfaceDMABuf` / Wayland `Error 71` hit NVIDIA and Wayland first. Spike: window built 94-115 ms, 1164 ms to first command against 688-735 ms on Xwayland, layout proven and **presentation verified** by a portal capture (KWin's own `ScreenShot2` refuses with `Error.NoAuthorized`; no `grim`/`spectacle`), and wry has no `HardwareAccelerationPolicy` guard. | Same class as Tauri 2 minus the 4.1 gap; nothing measured on it yet. |
+  | **Wayland risk** | Works on this seat today; S5 still owes the "native Wayland, not XWayland" gate either way. | The doc's blank window / `AcceleratedSurfaceDMABuf` / Wayland `Error 71` hit NVIDIA and Wayland first. Spike: window built 94-115 ms, 1164 ms to first command against 688-735 ms on Xwayland on that build (816-1405 ms in the in-tree run above), layout proven and **presentation verified** by a portal capture (KWin's own `ScreenShot2` refuses with `Error.NoAuthorized`; no `grim`/`spectacle`), and wry has no `HardwareAccelerationPolicy` guard. | Same class as Tauri 2 minus the 4.1 gap; nothing measured on it yet. |
 
   Reading the table: staying is the only option whose cost is already being paid and the only one
   with no engine split. Tauri 2 is the only one available now, and its price is a second WebKit
