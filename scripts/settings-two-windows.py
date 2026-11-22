@@ -14,7 +14,10 @@ turn, and requires that
     available." with "Download update", then the staged state with "Restart to
     update", and a Restart press is refused instead of replacing this copy,
   * with two Settings web views open at once, a press reaches every one of
-    them -- the app keeps every window a page opened, not just the newest.
+    them -- the app keeps every window a page opened, not just the newest,
+  * a Settings web view opened while a check is running boots on the busy
+    snapshot ("Checking for updates…" and "Working…") and then settles on the
+    same answer as the native card, like a window that was already up.
 
 The feed is a file, not the network: the app reads `MUSE_UPDATE_FEED` (a
 release JSON on disk) instead of the release API, stages the asset from the
@@ -25,8 +28,10 @@ two Check presses against the real feed instead, asserting only agreement.
 
 A file feed answers in microseconds, which would leave the busy step too short
 to read on both cards; the script sets `MUSE_UPDATE_DELAY_MS` (`--delay-ms`,
-default 600) so the feed and the staged copy each take long enough to be seen
-mid-press, the way a network answer would on a slow day.
+default 2500) so the feed and the staged copy each take long enough to be seen
+mid-press, the way a network answer would on a slow day. The delay also has to
+outlast a window opening, since one round opens a Settings view while a check
+is still running and needs it to boot on the busy snapshot.
 
 Both cards are read from their accessibility trees, never from pixels: the
 native label's text is its accessible name, and the page's status paragraph is
@@ -540,13 +545,43 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
                     raise Failure(f"the {label} press should offer Download, got {action!r}")
 
         if feed_mode == "newer":
-            # A second web view of the same page, opened before the press so
-            # both windows have to be told when it lands.
+            # A window opened while a check is still running boots on the busy
+            # snapshot: it must say so on its first paint, and the answer has
+            # to reach it the way it reaches a window that was already up.
+            if not press(MAIN_FRAME, CHECK_LABELS):
+                raise Failure("the native check could not be pressed to open a window on")
             if not press(MAIN_FRAME, (WEB_VIEW_BUTTON,)):
-                raise Failure("a second Settings web view could not be opened")
+                raise Failure("a Settings web view could not be opened during the check")
+
+            def booted_busy():
+                views = frames_named(WEB_FRAME)
+                if len(views) < 2:
+                    return False
+                return any(
+                    card_of(view)[0] == CHECK_STATUS and card_of(view)[1] == WORKING
+                    for view in views
+                )
+
             wait_until(
-                lambda: len(frames_named(WEB_FRAME)) >= 2, 20, "the second Settings window"
+                booted_busy, busy_window, "the new Settings web view to boot on the running check"
             )
+            views = len(frames_named(WEB_FRAME))
+            print(
+                f"opened a Settings web view mid-check: {views} windows, the new one "
+                f"booted on {CHECK_STATUS!r} with {WORKING!r}"
+            )
+            views = wait_web_windows(OFFERED_STATUS, "Download update", timeout, "mid-check boot")
+            print(f"the running check's answer reached all {views} Settings web views")
+
+            # The press below has to reach both windows, so neither may be
+            # left out of the registry: open one only if the round above did
+            # not already leave two up.
+            if len(frames_named(WEB_FRAME)) < 2:
+                if not press(MAIN_FRAME, (WEB_VIEW_BUTTON,)):
+                    raise Failure("a second Settings web view could not be opened")
+                wait_until(
+                    lambda: len(frames_named(WEB_FRAME)) >= 2, 20, "the second Settings window"
+                )
             print(f"opened {len(frames_named(WEB_FRAME))} Settings web views")
 
             presses, mid, status, action = exercise(
@@ -654,7 +689,7 @@ def main():
     parser.add_argument(
         "--delay-ms",
         type=int,
-        default=600,
+        default=2500,
         help="how long the harness feed takes to answer, so the busy step can be read "
         "(default: %(default)s)",
     )

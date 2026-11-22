@@ -559,7 +559,9 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   Settings web view before the download press and requires every window to show the staged state;
   that round is what caught the window registry keeping one weak reference per page, so the older
   window was never nudged again -- `OPEN_WINDOWS` now holds every window a page opened and prunes
-  the ones the reader closed.
+  the ones the reader closed. Another round opens that second view while a check is still in
+  flight, so a page whose first snapshot is a busy one is covered too: it must paint `Checking for
+  updates…` with `Working…`, then settle on the same answer as a window that was already up.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
