@@ -4984,7 +4984,13 @@ fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
     if let Some(widget) = find("updates-check")
         && let Ok(button) = widget.downcast::<gtk4::Button>()
     {
-        button.set_sensitive(!state.busy && appimage);
+        // A press during a check stays possible: `do_check` refuses it with
+        // the app's own sentence and paints it, which is more use to a reader
+        // than a button that quietly stops responding. An install or a
+        // restart keeps the button out of reach, since a check's refusal would
+        // name the wrong work.
+        let checking = state.busy && state.status == "Checking for updates…";
+        button.set_sensitive(appimage && (!state.busy || checking));
     }
     if let Some(widget) = find("updates-action")
         && let Ok(button) = widget.downcast::<gtk4::Button>()
@@ -5007,6 +5013,12 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
     {
         let mut state = ctx.updates.borrow_mut();
         if state.busy {
+            // A second press while one runs is refused, and the sentence is
+            // painted: both cards say why nothing happened rather than leaving
+            // the reader with a button that seemed to do nothing.
+            state.status = "An update check is already running.".to_owned();
+            drop(state);
+            paint_updates(ctx, page);
             return Err("An update check is already running.".to_owned());
         }
         state.busy = true;

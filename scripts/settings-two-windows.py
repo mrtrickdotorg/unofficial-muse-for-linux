@@ -17,7 +17,11 @@ turn, and requires that
     them -- the app keeps every window a page opened, not just the newest,
   * a Settings web view opened while a check is running boots on the busy
     snapshot ("Checking for updates…" and "Working…") and then settles on the
-    same answer as the native card, like a window that was already up.
+    same answer as the native card, like a window that was already up,
+  * two Check presses a double-click apart: the second is refused by the app's
+    own busy flag, both cards show its sentence ("An update check is already
+    running.") and the first check still lands, rather than the harness
+    retrying the press until it slips through.
 
 The feed is a file, not the network: the app reads `MUSE_UPDATE_FEED` (a
 release JSON on disk) instead of the release API, stages the asset from the
@@ -93,6 +97,7 @@ CHECK_STATUS = "Checking for updates…"
 DOWNLOAD_STATUS = "Downloading the update…"
 RESTART_STATUS = "Restarting into the update…"
 OFFERED_STATUS = "A newer build is available."
+CHECK_REFUSAL = "An update check is already running."
 DOWNLOADED_PREFIX = "Update downloaded to "
 DOWNLOADED_SUFFIX = ". Restart to switch to it."
 RESTART_REFUSAL = "Restart is disabled in this harness copy."
@@ -190,6 +195,38 @@ def find_button(frame_name, button_names):
         if role(node) in ("push button", "toggle button") and name(node) in button_names:
             return node
     return None
+
+
+def shows_text(frame_name, sentence, index=0):
+    """Whether the `index`th window named `frame_name` shows `sentence`."""
+    views = frames_named(frame_name)
+    if index >= len(views):
+        return False
+    return any(text(node) == sentence for node in walk(views[index]))
+
+
+def press_twice(frame_name, button_names, gap=0.35):
+    """Two presses on one button `gap` seconds apart.
+
+    Presses closer than a double-click interval are treated as one: only the
+    first activation reaches the app. `gap` is set just past that interval, so
+    the second press is its own press and still lands inside the check the
+    first one started -- the press the app itself has to refuse.
+    """
+    button = find_button(frame_name, button_names)
+    if button is None:
+        return False
+    try:
+        actions = button.get_action_iface()
+        if actions is None:
+            return False
+        ranks = range(actions.get_n_actions())
+        first = any(actions.do_action(index) for index in ranks)
+        time.sleep(gap)
+        second = any(actions.do_action(index) for index in ranks)
+        return first and second
+    except Exception:
+        return False
 
 
 def press(frame_name, button_names):
@@ -545,6 +582,35 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
                     raise Failure(f"the {label} press should offer Download, got {action!r}")
 
         if feed_mode == "newer":
+            # Two presses in quick succession: the second lands while the first
+            # check is still running, so the app's own busy flag must refuse it
+            # and both cards must show that sentence. The round presses to see
+            # the refusal, rather than retrying until a press slips through.
+            if not press_twice(MAIN_FRAME, CHECK_LABELS):
+                raise Failure("the check could not be pressed twice in quick succession")
+
+            wait_until(
+                lambda: shows_text(WEB_FRAME, CHECK_REFUSAL),
+                timeout,
+                "the page to show the app's refusal sentence",
+            )
+            wait_until(
+                lambda: card(MAIN_FRAME)[0] == CHECK_REFUSAL,
+                timeout,
+                "the native card to refuse in the same words",
+            )
+            print(
+                f"pressed check twice: both cards refused with {CHECK_REFUSAL!r} "
+                "while the first check ran"
+            )
+            wait_until(
+                lambda: idle() and card(WEB_FRAME)[0] == OFFERED_STATUS,
+                timeout,
+                "the refused press to leave the running check intact",
+            )
+            status, _, action, _ = card(WEB_FRAME)
+            print(f"the refused press left the check alone: both read {status!r} with {action!r}")
+
             # A window opened while a check is still running boots on the busy
             # snapshot: it must say so on its first paint, and the answer has
             # to reach it the way it reaches a window that was already up.

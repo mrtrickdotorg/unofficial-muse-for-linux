@@ -561,7 +561,13 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   window was never nudged again -- `OPEN_WINDOWS` now holds every window a page opened and prunes
   the ones the reader closed. Another round opens that second view while a check is still in
   flight, so a page whose first snapshot is a busy one is covered too: it must paint `Checking for
-  updates…` with `Working…`, then settle on the same answer as a window that was already up.
+  updates…` with `Working…`, then settle on the same answer as a window that was already up. A
+  further round presses Check twice a double-click apart: the app's busy flag refuses the second
+  press with `An update check is already running.`, paints that sentence on both cards, and the
+  first check still lands. For that refusal to be reachable at all the native check button stays
+  pressable while a check runs -- an install or a restart still takes it out of reach -- instead of
+  the press disappearing into an insensitive button, and the page shows the same sentence because
+  it is the app's status, not a message the page invented.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
