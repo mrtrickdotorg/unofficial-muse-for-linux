@@ -20,6 +20,7 @@ import { Settings } from "./Settings";
 import { LocalHost } from "./LocalHost";
 import { Threads } from "./Threads";
 import { Chat } from "./Chat";
+import { Shell } from "./Shell";
 import "./hub.css";
 
 // One bundle, one window per page: the boot payload names which page this
@@ -39,7 +40,9 @@ const page =
             ? "feed"
             : boot && "query" in boot
               ? "search"
-              : boot && "link" in boot
+              : boot && "pages" in boot
+                ? "shell"
+                : boot && "link" in boot
                 ? "settings"
                 : boot && "grants" in boot
                   ? "localhost"
@@ -64,6 +67,8 @@ if (mount) {
       <Feed />
     ) : page === "search" ? (
       <Search />
+    ) : page === "shell" ? (
+      <Shell />
     ) : page === "settings" ? (
       <Settings />
     ) : page === "localhost" ? (

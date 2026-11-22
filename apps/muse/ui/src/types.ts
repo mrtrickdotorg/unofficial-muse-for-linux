@@ -279,6 +279,18 @@ export type LocalHostSnapshot = {
   log: string[];
 };
 
+// One rail page as the shell lists it: the name the page components answer to
+// and the title the native drawer prints.
+export type ShellPage = { name: string; title: string };
+
+// The shell's own payload: the page list, and the account and build stamp the
+// native drawer carries. Page data is not here -- each page asks its snapshot.
+export type ShellSnapshot = {
+  pages: ShellPage[];
+  account: string;
+  build: string;
+};
+
 // One bundle serves every window: the boot payload names the page it opens.
 export type Boot =
   | (LibrarySnapshot & { page?: "library" })
@@ -290,4 +302,5 @@ export type Boot =
   | (SearchSnapshot & { page?: "search" })
   | (SettingsSnapshot & { page?: "settings" })
   | (LocalHostSnapshot & { page?: "localhost" })
+  | (ShellSnapshot & { page?: "shell" })
   | (ChatSnapshot & { page?: "chat" });

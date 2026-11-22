@@ -258,6 +258,32 @@ fn localhost_reply(held: &HeldLocalHost) -> serde_json::Value {
     reply
 }
 
+/// The shell page: the rail and its page list, plus the account and build
+/// stamp the native drawer prints. Each page inside the shell asks its own
+/// snapshot, so the shell carries no page data of its own.
+fn shell_payload() -> serde_json::Value {
+    serde_json::json!({
+        "pages": crate::pages::shell_pages(),
+        "account": crate::pages::chat_snapshot().account,
+        "build": match crate::update::local_sha() {
+            Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
+            None => "dev build".to_owned(),
+        },
+    })
+}
+
+fn shell_document() -> String {
+    let mut boot = shell_payload();
+    boot["page"] = serde_json::json!("shell");
+    document(&boot)
+}
+
+fn shell_reply() -> serde_json::Value {
+    let mut reply = shell_payload();
+    reply["ok"] = serde_json::json!(true);
+    reply
+}
+
 /// The Settings page as both the boot payload and a reply carry it. Nothing
 /// here is read on this side: the link, the updater's answer and the policy
 /// are the native page's own held state, projected once.
@@ -620,6 +646,7 @@ pub(crate) fn handle_command_with(
         // re-asks and sees new cards and log lines without holding a lock.
         "localhost.snapshot" => Answer::Now(localhost_reply(&crate::pages::localhost_snapshot())),
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
+        "shell.snapshot" => Answer::Now(shell_reply()),
         // Send dispatches nothing itself: the draft goes back to the
         // controller that owns the `Send` slot, which is the path the app's
         // own Send button takes -- same slot, same receipt, same history
@@ -1218,6 +1245,11 @@ const LOCALHOST_PROBE: &str = "JSON.stringify({grants: document.querySelectorAll
                                     phase: ((document.querySelector('.host-phase') || {}).textContent || '').trim(), \
                                     device: ((document.querySelector('.host-device') || {}).textContent || '').trim().slice(0, 20)})";
 
+const SHELL_PROBE: &str = "JSON.stringify({rail: document.querySelectorAll('.shell-rail-page').length, \
+     drawer: document.querySelectorAll('.shell-drawer-page').length, \
+     current: ((document.querySelector('.shell-drawer-page.current') || {}).textContent || '').trim(), \
+     title: ((document.querySelector('.shell-main .title') || {}).textContent || '').trim()})";
+
 const SETTINGS_PROBE: &str = "JSON.stringify({rows: document.querySelectorAll('.policy-row').length, \
                                  linked: (document.querySelector('.linked') ? true : false), \
                                  policy: (document.querySelector('.policy-loaded') ? true : false), \
@@ -1267,6 +1299,19 @@ pub(crate) fn open_search_window(held: HeldSearch, client: Option<AccountClient>
 /// Open the Settings page in its own window, on the link, updater answer and
 /// policy the native side holds. No client: this page reads nothing over the
 /// wire, and the presses that would stay in the app's own controllers.
+/// Open the web shell: the rail, the page list and every page in one window.
+/// Each page asks its own snapshot there, so the shell's own payload is only
+/// the list.
+pub(crate) fn open_shell_window() -> bool {
+    open_window(
+        None,
+        "Muse · web shell",
+        shell_document(),
+        None,
+        SHELL_PROBE,
+    )
+}
+
 pub(crate) fn open_settings_window(held: HeldSettings) -> bool {
     open_window(
         Some("settings"),
@@ -3032,6 +3077,37 @@ mod tests {
         assert_eq!(reply["pending"], serde_json::json!([]));
         assert_eq!(reply["notice"], "Start the local host to grant a folder.");
         assert!(reply["device"].is_null());
+    }
+
+    /// The shell's document carries the app's own page list, so the rail and
+    /// drawer cannot offer a page the app does not have.
+    #[test]
+    fn the_shell_lists_every_page_it_opens() {
+        let doc = shell_document();
+        assert!(doc.contains("\"page\":\"shell\""), "page named in boot");
+        for page in crate::pages::PAGES {
+            assert!(
+                doc.contains(&format!("\"name\":\"{page}\"")),
+                "the shell lists {page}"
+            );
+        }
+        assert!(doc.contains("Local host"));
+        assert!(!doc.contains("/*__BOOT__*/"));
+
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":91,"cmd":"shell.snapshot"}"#, None, None);
+        assert_eq!(id, serde_json::json!(91));
+        assert_eq!(command, "shell.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("the shell's list is held state");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(
+            reply["pages"].as_array().map(|pages| pages.len()),
+            Some(crate::pages::PAGES.len())
+        );
+        assert_eq!(reply["pages"][0]["title"], "Chat");
+        assert_eq!(reply["pages"][1]["name"], "threads");
     }
 
     /// Search runs the account read for the page's own query, and the answer

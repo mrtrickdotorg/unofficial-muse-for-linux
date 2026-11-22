@@ -439,6 +439,18 @@ fn show_main(split: &adw::OverlaySplitView) {
     widget::describe(&new_button, "New chat");
     tools.append(&search_button);
     tools.append(&new_button);
+    // The way into the web shell: the rail, the page list and every ported page
+    // in one window of their own. This button is the part of this window that
+    // the port retires last.
+    let shell_button = gtk4::Button::with_label("Shell");
+    shell_button.add_css_class("flat");
+    widget::describe(&shell_button, "Open the web shell");
+    shell_button.connect_clicked(move |_| {
+        if !crate::webui::open_shell_window() {
+            eprintln!("muse: the web shell is unavailable in this build");
+        }
+    });
+    tools.append(&shell_button);
     side.append(&tools);
     let sidebar = gtk4::ListBox::new();
     for name in pages::PAGES {

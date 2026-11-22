@@ -991,3 +991,118 @@ html, body {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+
+/* The web shell: the native window's three columns -- rail, page list, page --
+ * without the native window. The rail is fixed and narrow, the drawer lists
+ * the pages the boot payload names, and the page's own .page styles fill the
+ * rest, so a ported page looks identical here and in its own window. */
+.shell {
+  display: grid;
+  grid-template-columns: 68px 232px minmax(0, 1fr);
+  height: 100vh;
+  background: var(--ground);
+}
+
+.shell-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 22px 0 14px;
+  border-right: 1px solid var(--hairline);
+}
+
+.shell-rail-page {
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 17px;
+  cursor: pointer;
+}
+
+.shell-rail-page:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.shell-rail-page.current {
+  background: var(--accent-tint);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+.shell-rail-spacer {
+  flex: 1;
+}
+
+.shell-rail-glyph {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+}
+
+.shell-rail-glyph svg {
+  width: 20px;
+  height: 20px;
+  stroke: currentColor;
+}
+
+.shell-build {
+  margin-top: 12px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.shell-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 22px 14px;
+  border-right: 1px solid var(--hairline);
+  overflow-y: auto;
+}
+
+.shell-account {
+  margin-bottom: 14px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.shell-drawer-page {
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.shell-drawer-page:hover {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.shell-drawer-page.current {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.shell-drawer-note {
+  margin-top: auto;
+  padding-top: 16px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.shell-main {
+  min-width: 0;
+  overflow-y: auto;
+}

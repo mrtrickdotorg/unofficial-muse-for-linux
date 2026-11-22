@@ -82,6 +82,27 @@ pub fn title(name: &str) -> &str {
     }
 }
 
+/// One rail page as the web shell renders it: the name the stack uses and the
+/// title the drawer prints.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct ShellPage {
+    pub name: String,
+    pub title: String,
+}
+
+/// The shell's page list, in the rail's order. Built from `PAGES` and
+/// `title()` rather than restated, so a page cannot appear in one list and be
+/// missing from the other.
+pub(crate) fn shell_pages() -> Vec<ShellPage> {
+    PAGES
+        .iter()
+        .map(|name| ShellPage {
+            name: (*name).to_owned(),
+            title: title(name).to_owned(),
+        })
+        .collect()
+}
+
 /// Whether showing a page needs a sidebar selection change. Selecting
 /// the already-selected row re-fires row_selected, whose handler calls
 /// straight back into show(): an unconditional select recurses until

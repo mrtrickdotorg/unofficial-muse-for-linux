@@ -7,6 +7,11 @@ import react from "@vitejs/plugin-react";
 // and module into the document; there is no dev server in the path.
 export default defineConfig({
   plugins: [react()],
+  // The rail's icons are the app's own SVGs, one directory above this package.
+  // Neither the jsdom run nor the build should need a copy of them.
+  server: {
+    fs: { allow: ["..", "../.."] },
+  },
   build: {
     outDir: "dist",
     target: "es2020",
