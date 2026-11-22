@@ -1,9 +1,13 @@
 // Stand in for the WebKit message handler: record every command and answer
 // it the way the native side would, through window.museReply. Shared by the
 // page suites, so every page is tested against the same channel.
+// `delayMs` holds an answer back, so a suite can watch a control while its
+// write is still in flight -- the window in which the native card refuses a
+// second press.
 export function installChannel(
   answer: (command: string) => Record<string, unknown>,
   seen?: (request: Record<string, unknown>) => void,
+  delayMs = 0,
 ): string[] {
   const commands: string[] = [];
   const reply = (
@@ -18,7 +22,7 @@ export function installChannel(
           commands.push(cmd);
           seen?.(request);
           const answerFor = answer(cmd);
-          setTimeout(() => reply?.(id, answerFor), 0);
+          setTimeout(() => reply?.(id, answerFor), delayMs);
         },
       },
     },

@@ -311,6 +311,171 @@ describe("the Chat web page", () => {
     await waitFor(() => expect(dropped).toBe("pasted-1.png"));
   });
 
+  it("posts one paste per press and drops a second while the first is in flight", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })]);
+    const commands = installChannel(
+      (cmd) => (cmd === "chat.attach" ? { ok: true } : { ok: true, ...snapshot([]) }),
+      undefined,
+      60,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const attach = screen.getByRole("button", {
+      name: "Attach a picture from the clipboard",
+    });
+
+    fireEvent.click(attach);
+    // The app has not answered yet: the control is claimed, so a second press
+    // is not a second clipboard read.
+    expect(attach).toBeDisabled();
+    fireEvent.click(attach);
+    expect(commands.filter((cmd) => cmd === "chat.attach")).toHaveLength(1);
+    // The answer lands and the `+` comes back, ready for the next picture.
+    await waitFor(() => expect(attach).toBeEnabled());
+    fireEvent.click(attach);
+    await waitFor(() =>
+      expect(commands.filter((cmd) => cmd === "chat.attach")).toHaveLength(2),
+    );
+  });
+
+  it("does not offer a paste while a send is in flight", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
+      sending: true,
+    });
+    const commands = installChannel(() => ({ ok: true, ...snapshot([], { sending: true }) }));
+
+    render(<Chat pollMs={10_000} />);
+    const attach = screen.getByRole("button", {
+      name: "Attach a picture from the clipboard",
+    });
+
+    // The app refuses a paste mid-send, so the press is not offered rather
+    // than sent and dropped.
+    expect(attach).toBeDisabled();
+    fireEvent.click(attach);
+    expect(commands).not.toContain("chat.attach");
+  });
+
+  it("posts one drop per press, by name, and holds the chips while it lands", async () => {
+    window.__MUSE_BOOT__ = snapshot([], {
+      staged: [
+        { name: "a.png", width: 1, height: 1, bytes: 1 },
+        { name: "b.png", width: 2, height: 2, bytes: 2 },
+      ],
+    });
+    const dropped: string[] = [];
+    const commands = installChannel(
+      (cmd) => (cmd === "chat.unstage" ? { ok: true } : { ok: true, ...window.__MUSE_BOOT__ }),
+      (request) => {
+        if (request.cmd === "chat.unstage") dropped.push(request.name as string);
+      },
+      60,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.click(screen.getByRole("button", { name: "Drop a.png" }));
+
+    // One press, one name, and no second drop while it is unanswered.
+    expect(dropped).toEqual(["a.png"]);
+    fireEvent.click(screen.getByRole("button", { name: "Drop b.png" }));
+    expect(dropped).toEqual(["a.png"]);
+    expect(commands.filter((cmd) => cmd === "chat.unstage")).toHaveLength(1);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Drop b.png" })).toBeEnabled(),
+    );
+  });
+
+  it("posts one stop per press, and a later press still stops", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
+      sending: true,
+    });
+    const commands = installChannel(
+      (cmd) => (cmd === "chat.stop" ? { ok: true } : { ok: true, ...snapshot([], { sending: true }) }),
+      undefined,
+      60,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const stop = screen.getByRole("button", { name: "Stop" });
+
+    // A double press is one cancel, not two.
+    fireEvent.click(stop);
+    expect(stop).toBeDisabled();
+    fireEvent.click(stop);
+    expect(commands.filter((cmd) => cmd === "chat.stop")).toHaveLength(1);
+
+    // The app answered: a new press is a new stop, as on the native card.
+    await waitFor(() => expect(stop).toBeEnabled());
+    fireEvent.click(stop);
+    await waitFor(() =>
+      expect(commands.filter((cmd) => cmd === "chat.stop")).toHaveLength(2),
+    );
+  });
+
+  it("posts one approvals read per press", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })]);
+    const commands = installChannel(
+      (cmd) =>
+        cmd === "chat.approvals.refresh" ? { ok: true } : { ok: true, ...snapshot([]) },
+      undefined,
+      60,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const check = screen.getByRole("button", { name: "Check approvals" });
+
+    fireEvent.click(check);
+    expect(check).toBeDisabled();
+    fireEvent.click(check);
+    expect(commands.filter((cmd) => cmd === "chat.approvals.refresh")).toHaveLength(1);
+    await waitFor(() => expect(check).toBeEnabled());
+  });
+
+  it("decides one card at a time and posts nothing for a second card's press", async () => {
+    window.__MUSE_BOOT__ = snapshot([], {
+      approvals: {
+        loaded: true,
+        note: null,
+        cards: [
+          {
+            id: "a-1",
+            headline: "Reach example.com",
+            summary: "",
+            details: ["Host: example.com"],
+            choices: [{ word: "deny", label: "Deny" }],
+          },
+          {
+            id: "a-2",
+            headline: "Reach example.org",
+            summary: "",
+            details: ["Host: example.org"],
+            choices: [{ word: "deny", label: "Deny" }],
+          },
+        ],
+      },
+    });
+    const decided: string[] = [];
+    const commands = installChannel(
+      (cmd) => (cmd === "chat.decide" ? { ok: true } : { ok: true, ...window.__MUSE_BOOT__ }),
+      (request) => {
+        if (request.cmd === "chat.decide") decided.push(request.approval_id as string);
+      },
+      60,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const deny = screen.getAllByRole("button", { name: "Deny" });
+
+    fireEvent.click(deny[0]);
+    // Both cards are held while the one decision is unanswered: one press, one
+    // decision, and no second card racing the first.
+    expect(deny[0]).toBeDisabled();
+    expect(deny[1]).toBeDisabled();
+    fireEvent.click(deny[1]);
+    expect(decided).toEqual(["a-1"]);
+    expect(commands.filter((cmd) => cmd === "chat.decide")).toHaveLength(1);
+  });
+
   it("arms Send for a staged picture alone and sends with no words", async () => {
     window.__MUSE_BOOT__ = snapshot([], {
       staged: [{ name: "pasted-2.png", width: 4, height: 5, bytes: 7 }],

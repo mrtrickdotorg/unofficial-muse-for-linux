@@ -177,36 +177,58 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     }
   };
 
+  // One write at a time per control, the way the native card works: a press
+  // claims the control, a second press while that write is unanswered is not a
+  // second write, and the control comes back when the app's answer lands.
+  const [attaching, setAttaching] = useState(false);
+  const [dropping, setDropping] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [checking, setChecking] = useState(false);
+
   // The `+` press: the app's clipboard read, the same one its own button
-  // makes. The chip it stages comes back in the next snapshot.
+  // makes. The chip it stages comes back in the next snapshot. The app refuses
+  // a paste while a send is in flight, so this press is not offered then -- one
+  // press, one paste, and never a write the app would drop.
   const attach = async () => {
+    if (attaching || pending || data?.sending) return;
+    setAttaching(true);
     setNote(null);
     try {
       await call<{ ok: boolean }>("chat.attach", 30_000);
       void loadSnapshot();
     } catch (failure) {
       setNote(sentence(failure));
+    } finally {
+      setAttaching(false);
     }
   };
 
   const unstage = async (name: string) => {
+    if (dropping !== null) return;
+    setDropping(name);
     setNote(null);
     try {
       await call<{ ok: boolean }>("chat.unstage", 30_000, { name });
       void loadSnapshot();
     } catch (failure) {
       setNote(sentence(failure));
+    } finally {
+      setDropping(null);
     }
   };
 
   // The panel's "Check approvals", on the app's own read.
   const refreshApprovals = async () => {
+    if (checking) return;
+    setChecking(true);
     setApprovalNote(null);
     try {
       await call<{ ok: boolean }>("chat.approvals.refresh", 30_000);
       void loadSnapshot();
     } catch (failure) {
       setApprovalNote(sentence(failure));
+    } finally {
+      setChecking(false);
     }
   };
 
@@ -239,11 +261,18 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // did comes back in the status line, and what actually landed in the
   // transcript.
   const stop = async () => {
+    // A double press is one cancel, not two: the second press while the first
+    // is unanswered is dropped. Once the app answers, a later press is a new
+    // stop -- the native card allows a second press, and so does this one.
+    if (stopping) return;
+    setStopping(true);
     setNote(null);
     try {
       await call<{ ok: boolean }>("chat.stop", 30_000);
     } catch (failure) {
       setNote(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setStopping(false);
     }
   };
 
@@ -347,6 +376,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
                   <button
                     className="chat-chip-remove"
                     type="button"
+                    disabled={dropping !== null}
                     onClick={() => void unstage(chip.name)}
                     aria-label={`Drop ${chip.name}`}
                   >
@@ -360,6 +390,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
             <button
               className="chat-attach"
               type="button"
+              disabled={attaching || pending || Boolean(data?.sending)}
               onClick={() => void attach()}
               aria-label="Attach a picture from the clipboard"
             >
@@ -383,6 +414,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               <button
                 className="chat-send chat-stop"
                 type="button"
+                disabled={stopping}
                 onClick={stop}
                 aria-label="Stop"
               >
@@ -415,6 +447,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               <button
                 className="chat-check"
                 type="button"
+                disabled={checking}
                 onClick={() => void refreshApprovals()}
               >
                 Check approvals

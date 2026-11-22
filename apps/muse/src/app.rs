@@ -2638,6 +2638,15 @@ impl Chat {
     /// press. The page cannot read the clipboard and never carries bytes; it
     /// asks here, then reads the chip back from `chat.snapshot`.
     pub(crate) fn web_attach(self: &Rc<Self>) -> Result<(), String> {
+        // The native `+` is inert while a send is in flight (a paste would
+        // race the pictures that send already took), and a press that reaches
+        // here anyway hears that reason instead of being told the clipboard is
+        // empty.
+        if self.composer.borrow().sending() {
+            return Err(
+                "Still working — a picture can be staged when the send finishes.".to_owned(),
+            );
+        }
         if self.paste_from_clipboard() {
             Ok(())
         } else {
