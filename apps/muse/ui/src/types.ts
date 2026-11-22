@@ -218,9 +218,7 @@ export type SettingsUpdates = {
   appimage: boolean;
   status: string;
   busy: boolean;
-  checked: boolean;
   staged: boolean;
-  available: boolean;
   check_label: string;
   action_label?: string | null;
 };

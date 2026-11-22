@@ -3405,9 +3405,7 @@ mod tests {
             appimage: true,
             status: "Up to date (build 62ce6e3).".into(),
             busy: false,
-            checked: true,
             staged: false,
-            available: false,
             check_label: crate::pages::UPDATE_CHECK_LABEL.into(),
             action_label: None,
         });
@@ -3441,9 +3439,7 @@ mod tests {
             appimage: false,
             status: "Up to date.".into(),
             busy: false,
-            checked: true,
             staged: true,
-            available: true,
             check_label: crate::pages::UPDATE_CHECK_LABEL.into(),
             action_label: Some(crate::pages::UPDATE_RESTART_LABEL.into()),
         });

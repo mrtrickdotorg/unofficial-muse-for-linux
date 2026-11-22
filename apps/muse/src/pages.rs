@@ -3340,10 +3340,8 @@ pub(crate) struct UpdatesView {
     pub appimage: bool,
     pub status: String,
     pub busy: bool,
-    pub checked: bool,
+    /// Whether a verified download is waiting: the action becomes Restart.
     pub staged: bool,
-    /// Whether a newer build is offered: the action appears with it.
-    pub available: bool,
     pub check_label: String,
     pub action_label: Option<String>,
 }
@@ -4916,9 +4914,7 @@ fn updates_view_from(state: &super::update::UpdateCheck, appimage: bool) -> Upda
         appimage,
         status: state.status.clone(),
         busy: state.busy,
-        checked: state.info.is_some(),
         staged: state.staged.is_some(),
-        available: state.info.is_some(),
         check_label: UPDATE_CHECK_LABEL.to_owned(),
         action_label: updates_action_label(state),
     }
