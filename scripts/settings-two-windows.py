@@ -18,6 +18,9 @@ turn, and requires that
   * a Settings web view opened while a check is running boots on the busy
     snapshot ("Checking for updates…" and "Working…") and then settles on the
     same answer as the native card, like a window that was already up,
+  * the two failure paths: a feed that cannot be read and an asset whose
+    `file://` path is gone. Both cards carry the same failure sentence, and a
+    press after the feed or the asset is put back still works,
   * two Check presses a double-click apart, on the native card and again on
     the page: the second is refused by the app's own busy flag, both cards show
     its sentence ("An update check is already running."), the first check still
@@ -104,6 +107,9 @@ RESTART_STATUS = "Restarting into the update…"
 OFFERED_STATUS = "A newer build is available."
 CHECK_REFUSAL = "An update check is already running."
 NOT_APPIMAGE = "This copy updates through its own channel (store or checkout), not here."
+# The app's failure prefixes; the rest of each sentence comes from the OS.
+CHECK_FAILED = "Update check failed: "
+DOWNLOAD_FAILED = "Update download failed: "
 DOWNLOADED_PREFIX = "Update downloaded to "
 DOWNLOADED_SUFFIX = ". Restart to switch to it."
 RESTART_REFUSAL = "Restart is disabled in this harness copy."
@@ -506,7 +512,7 @@ def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
 
 
 def write_feed(root):
-    """A newer release whose asset is a local file, and the env that feeds it."""
+    """A newer release whose asset is a local file: the feed and the asset."""
     asset = root / "muse-harness.AppImage"
     body = (b"#!/bin/sh\n# harness asset: never executed, only staged\nexit 0\n" * 2048)
     asset.write_bytes(body)
@@ -523,7 +529,7 @@ def write_feed(root):
     }
     feed_path = root / "feed.json"
     feed_path.write_text(json.dumps(feed))
-    return feed_path
+    return feed_path, asset
 
 
 def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_appimage):
@@ -576,8 +582,10 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
         # A non-empty APPDIR is what makes this copy update itself, so the
         # card offers a real Check. The dir itself is never used.
         env["APPDIR"] = str(root)
+    feed_path = asset = None
     if feed_mode == "newer" and not no_appimage:
-        env["MUSE_UPDATE_FEED"] = str(write_feed(root))
+        feed_path, asset = write_feed(root)
+        env["MUSE_UPDATE_FEED"] = str(feed_path)
         env["MUSE_UPDATE_DELAY_MS"] = str(delay_ms)
 
     proc = None
@@ -773,6 +781,53 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                     lambda: len(frames_named(WEB_FRAME)) >= 2, 20, "the second Settings window"
                 )
             print(f"opened {len(frames_named(WEB_FRAME))} Settings web views")
+
+            # The seam only ever served a healthy release, so the updater's two
+            # failure sentences had never been seen live. A directory where the
+            # feed should be is a read that cannot succeed; taking the feed's
+            # own asset away is a copy that cannot be made.
+            feed_text = feed_path.read_text()
+            feed_path.unlink()
+            feed_path.mkdir()
+            try:
+                presses, mid, status, action = exercise(
+                    "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
+                )
+                if not status.startswith(CHECK_FAILED) or action is not None:
+                    raise Failure(f"an unreadable feed settled on {status!r} with {action!r}")
+                wait_web_windows(status, None, timeout, "unreadable feed")
+                print(f"unreadable feed: both cards read {status!r}, no press offered")
+            finally:
+                feed_path.rmdir()
+                feed_path.write_text(feed_text)
+
+            presses, mid, status, action = exercise(
+                "page check", WEB_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
+            )
+            if status != OFFERED_STATUS or action != "Download update":
+                raise Failure(
+                    f"the press after an unreadable feed settled on {status!r} "
+                    f"with {action!r}"
+                )
+            print(f"after an unreadable feed: a press still works, both read {status!r}")
+
+            asset_bytes = asset.read_bytes()
+            asset.unlink()
+            try:
+                presses, mid, status, action = exercise(
+                    "page download",
+                    WEB_FRAME,
+                    ("Download update",),
+                    DOWNLOAD_STATUS,
+                    timeout,
+                    busy_window,
+                )
+                if not status.startswith(DOWNLOAD_FAILED) or action != "Download update":
+                    raise Failure(f"a missing asset settled on {status!r} with {action!r}")
+                wait_web_windows(status, "Download update", timeout, "missing asset")
+                print(f"missing asset: both cards read {status!r}, Download still offered")
+            finally:
+                asset.write_bytes(asset_bytes)
 
             presses, mid, status, action = exercise(
                 "page download",

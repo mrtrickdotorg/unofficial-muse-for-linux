@@ -577,7 +577,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   a Check nor a Download press -- which is why neither surface draws the check button for such a
   copy, a greyed button being a press nobody can act on. The eligibility is the app's, not the
   views': `do_check` asks `running_as_appimage()` before anything else and refuses with that same
-  sentence, so a press reaching it from another caller cannot start a check either.
+  sentence, so a press reaching it from another caller cannot start a check either. Two last rounds
+  put the seam's own files out of reach -- a directory where the feed was, then the feed's asset
+  removed -- and require both cards to carry the app's failure sentence and a press afterwards to
+  work again, since the seam otherwise only ever serves a healthy release.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
