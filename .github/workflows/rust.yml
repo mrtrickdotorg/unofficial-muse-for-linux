@@ -46,7 +46,8 @@ jobs:
             /etc/apt/sources.list.d/ubuntu.sources
         fi
         sudo apt-get update
-        sudo apt-get install --yes libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config python3 python3-venv xauth xvfb
+        sudo apt-get install --yes libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config python3 python3-venv xauth xvfb \
+          python3-gi gir1.2-atspi-2.0 at-spi2-core dbus-x11
     - name: Install formatting and lint tools
       run: rustup component add rustfmt clippy
     - name: Check formatting
@@ -75,6 +76,32 @@ jobs:
       run: xvfb-run -a cargo test -p muse --locked -- --ignored --test-threads=1
     - name: Lint
       run: cargo clippy --workspace --all-targets --locked -- -D warnings
+    - name: Run the two-window Settings harness
+      # The real app, driven through its accessibility tree: the rounds that
+      # only a window can prove -- mid-press words, the check refusal, the
+      # staged sentence, both failure paths -- run on every push instead of
+      # only when someone has a desktop open. A private session bus carries
+      # the accessibility bus, Xvfb the window, and the saved link is seeded
+      # so the app opens on a linked copy (the harness only needs the file to
+      # exist; 0600 and uid-owned, or the app reads it as absent).
+      env:
+        XDG_CONFIG_HOME: ${{ runner.temp }}/harness-config
+        XDG_RUNTIME_DIR: ${{ runner.temp }}/harness-runtime
+      run: |
+        set -euo pipefail
+        install -d -m 700 "$XDG_RUNTIME_DIR" "$RUNNER_TEMP/muse-session"
+        account="$XDG_CONFIG_HOME/unofficial-muse-for-linux/account"
+        install -d -m 700 "$account"
+        printf '%s' "{\"python\":\"/usr/bin/python3\",\"config_dir\":\"$RUNNER_TEMP/muse-session\",\"consent\":true}" \
+          > "$account/account-connection.json"
+        chmod 600 "$account/account-connection.json"
+        # A loaded runner opens a window slower than a seat does, so the feed
+        # answer waits longer and the settle budget is stretched; both are
+        # the script's own knobs, not app behaviour.
+        dbus-run-session -- xvfb-run -a ./scripts/settings-two-windows.py \
+          --delay-ms 4000 --timeout 40
+        dbus-run-session -- xvfb-run -a ./scripts/settings-two-windows.py \
+          --no-appimage --timeout 40
 
   window-spike:
     # `apps/muse-window` is excluded from the workspace: it is GTK 3 + WebKitGTK
