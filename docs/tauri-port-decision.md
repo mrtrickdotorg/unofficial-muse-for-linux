@@ -413,6 +413,23 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   first command), but KWin's `ScreenShot2` refused a capture (`Error.NoAuthorized`, a portal prompt)
   and neither `grim` nor `spectacle` is installed here, so nothing in this note claims the surface
   is drawn on that seat.
+  **S4 decision table.** The page work is common to all three -- S2/S3 port pages into WebKit
+  views whoever owns the window -- so only the shell, its integrations and its rework are priced.
+  Estimates are the doc's above; the numbers are this seat's spike.
+
+  | | Stay on GTK 4 / WebKitGTK 6.0 | Tauri 2 now (GTK 3 / WebKitGTK 4.1) | Wait for Tauri 3 |
+  |---|---|---|---|
+  | **Cost** | No shell work. S2/S3's page work is the shared cost; S5 packaging and the parity-bug tail remain. | The doc's ~9-11 weeks, of which 5-7 (read-only 3-4, chat 2-3) staying also needs; the Tauri-only delta is ~4-4.5 (shell 1-1.5, integrations 1, tests/a11y/packaging/Wayland 2). | Nil until it ships, then the same ~4-4.5 delta and a second S4; a draft, breaking milestone with no date. |
+  | **Engine split** | One engine: the bundled WebKitGTK 6.0 the Feed frames and Library previews already use. | Two generations while migrating; at the end either a second WebKit in the bundle or the Feed frames forced down to 4.1 (the doc's risk 3). | One engine, GTK4 + 6.0, in one process -- the only option that removes the split and keeps GTK4. |
+  | **a11y** | AT-SPI on real widgets; the 98 GTK assertions stay authoritative until each page's DOM test replaces them, and P9 is unchanged. | ARIA on 4.1's tree, "weaker than GTK's", chrome a11y from GTK 3; the doc's risk "(4) the P9 accessibility gate getting harder". | ARIA on the 6.0 tree with no second engine; the DOM cost matches Tauri 2, the chrome is no worse than today. |
+  | **Wayland risk** | Works on this seat today; S5 still owes the "native Wayland, not XWayland" gate either way. | The doc's blank window / `AcceleratedSurfaceDMABuf` / Wayland `Error 71` hit NVIDIA and Wayland first. Spike: window built 94-115 ms, 1164 ms to first command against 688-735 ms on Xwayland, layout proven but **presentation unverified** (KWin `Error.NoAuthorized`, no `grim`/`spectacle`), and wry has no `HardwareAccelerationPolicy` guard. | Same class as Tauri 2 minus the 4.1 gap; nothing measured on it yet. |
+
+  Reading the table: staying is the only option whose cost is already being paid and the only one
+  with no engine split. Tauri 2 is the only one available now, and its price is a second WebKit
+  generation and a harder a11y gate rather than a shorter project. The table moves only if S1-S3
+  demonstrably cut layout churn (the measurement the decision below waits for), or if Tauri 3 ships
+  a released GTK4/6.0 target that can be measured on this seat.
+
 - **S5 — Packaging and gates.** AppImage recipe, Flatpak manifest, CI, native-Wayland and
   screen-reader checks re-run against the new build.
 
