@@ -587,6 +587,48 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   1158 ms to its first command. It is the desktop through the portal rather than a per-window API,
   and the portal writes into `~/Pictures`; the file was moved to `/tmp` for this check.
 
+  **The window, in the tree, and the one thing it cannot do.** The spike now lives in the tree as
+  `apps/muse-window`, a workspace member that is not shipped: a Tauri 2 window serving the app's own
+  shell document over a `muse://` handler built from the committed bundle, booted from the app's
+  `shell.snapshot` and forwarding every page command to the running app over the `spike-cmd` Unix
+  socket, where `handle_command_with` answers it against the state its window has painted. The first
+  attempt put the window inside the app binary behind a `tauri-shell` feature, with the GTK 4 state
+  layer initialised first. That cannot work, and GTK says so on this seat:
+
+  ```text
+  Gtk-ERROR **: GTK 2/3 symbols detected. Using GTK 2/3 and GTK 4 in the same process is not supported
+  ```
+
+  -- `SIGTRAP` before the window exists, whichever side initialises first, because tao/wry are
+  GTK 3 + WebKitGTK 4.1 and the state layer is GTK 4 + WebKitGTK 6.0. So S4 is not a window swap: it
+  is a process split, and the socket hop is paid even after all the page work is done.
+
+  Measured on this seat, Xwayland, debug build, both windows reading the same app state:
+
+  | | GTK shell window | Tauri window (`muse-window`) |
+  |---|---|---|
+  | document ready | 266 ms after the open call (2266 ms from process start, 2 s hook) | 677 ms from process start, 558 ms of it after the window existed |
+  | first command | 308 ms after the open call | 782 ms from process start |
+  | `chat.snapshot` answered | 78-101 us in process | 1.3-1.8 ms end to end (page -> IPC -> socket -> `handle_command_with` -> socket -> `eval`) |
+  | `history.snapshot` answered | 18 us | 0.4 ms |
+
+  The GTK window opens into a warm process, so its document time is not a cold start; the Tauri one
+  pays GTK 3 + wry + WebKitGTK 4.1 init and the boot fetch. The command cost is the honest part: the
+  split multiplies a read by 15-20x, from tens of microseconds to about 1.5 ms -- still under a
+  60 Hz frame, and invisible inside a 2 s poll.
+
+  a11y, counted over AT-SPI on the same seat (nodes walked through
+  `org.a11y.atspi.Accessible.GetChildren` and `GetRoleName`, applications named as AT-SPI names
+  them): a WebKitGTK 6.0 page -- the GTK shell -- exposes 440 nodes, every one with a role
+  (`label` 149, `generic` 115, `button` 106, `list item` 32); the native GTK 4 window exposes 563.
+  The Tauri window's WebKitGTK 4.1 tree exposes **129, and 124 of those return no role name at all**
+  (`filler` 3). Same DOM, same bundle, same data: that is the 4.1 bridge, not the page. A reader in
+  the Tauri shell would also cross a process boundary to reach the app's own tree, which the GTK
+  shell does not -- and the app stays a second AT-SPI application while the window is foreign.
+
+  Nothing native was deleted for this: the GTK window, the pages and the shell are untouched, and
+  `apps/muse-window` is a window with the app's answers on a socket.
+
   **S4 decision table.** The page work is common to all three -- S2/S3 port pages into WebKit
   views whoever owns the window -- so only the shell, its integrations and its rework are priced.
   Estimates are the doc's above; the numbers are this seat's spike.
@@ -594,8 +636,8 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   | | Stay on GTK 4 / WebKitGTK 6.0 | Tauri 2 now (GTK 3 / WebKitGTK 4.1) | Wait for Tauri 3 |
   |---|---|---|---|
   | **Cost** | No shell work. S2/S3's page work is the shared cost; S5 packaging and the parity-bug tail remain. | The doc's ~9-11 weeks, of which 5-7 (read-only 3-4, chat 2-3) staying also needs; the Tauri-only delta is ~4-4.5 (shell 1-1.5, integrations 1, tests/a11y/packaging/Wayland 2). | Nil until it ships, then the same ~4-4.5 delta and a second S4; a draft, breaking milestone with no date. |
-  | **Engine split** | One engine: the bundled WebKitGTK 6.0 the Feed frames and Library previews already use. | Two generations while migrating; at the end either a second WebKit in the bundle or the Feed frames forced down to 4.1 (the doc's risk 3). | One engine, GTK4 + 6.0, in one process -- the only option that removes the split and keeps GTK4. |
-  | **a11y** | AT-SPI on real widgets; the 98 GTK assertions stay authoritative until each page's DOM test replaces them, and P9 is unchanged. | ARIA on 4.1's tree, "weaker than GTK's", chrome a11y from GTK 3; the doc's risk "(4) the P9 accessibility gate getting harder". | ARIA on the 6.0 tree with no second engine; the DOM cost matches Tauri 2, the chrome is no worse than today. |
+  | **Engine split** | One engine: the bundled WebKitGTK 6.0 the Feed frames and Library previews already use. | Two generations while migrating, and they cannot share a process -- measured: GTK aborts on the mixed symbols, so the shell is a second process over a socket; at the end either a second WebKit in the bundle or the Feed frames forced down to 4.1 (the doc's risk 3). | One engine, GTK4 + 6.0, in one process -- the only option that removes the split and keeps GTK4. |
+  | **a11y** | AT-SPI on real widgets; the 98 GTK assertions stay authoritative until each page's DOM test replaces them, and P9 is unchanged. | ARIA on 4.1's tree -- measured 129 nodes against 440 in 6.0 for the same document, 124 of the 129 with no role name -- chrome a11y from GTK 3; the doc's risk "(4) the P9 accessibility gate getting harder". | ARIA on the 6.0 tree with no second engine; the DOM cost matches Tauri 2, the chrome is no worse than today. |
   | **Wayland risk** | Works on this seat today; S5 still owes the "native Wayland, not XWayland" gate either way. | The doc's blank window / `AcceleratedSurfaceDMABuf` / Wayland `Error 71` hit NVIDIA and Wayland first. Spike: window built 94-115 ms, 1164 ms to first command against 688-735 ms on Xwayland, layout proven and **presentation verified** by a portal capture (KWin's own `ScreenShot2` refuses with `Error.NoAuthorized`; no `grim`/`spectacle`), and wry has no `HardwareAccelerationPolicy` guard. | Same class as Tauri 2 minus the 4.1 gap; nothing measured on it yet. |
 
   Reading the table: staying is the only option whose cost is already being paid and the only one
