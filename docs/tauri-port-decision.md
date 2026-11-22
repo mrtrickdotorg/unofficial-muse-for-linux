@@ -396,9 +396,13 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   `WebviewWindow::eval` with `postMessage` fire-and-forget, which the spike's second build used
   alone -- so the page's ticket protocol survives unchanged. That matters because `Answer::Later`
   polls the GTK main loop over `Rc<Chat>` state that is not `Send`: an async command is not a
-  drop-in, an eval from the main thread is. Boot would need the substitution moved into a custom URI
-  handler (Tauri bakes assets at compile time) or the page reading a global instead of assigning
-  one; the navigation lock maps to `on_navigation`. Risks: wry 0.57 has no
+  drop-in, an eval from the main thread is. Boot: the substitution was then moved into a custom URI
+  handler (`muse://localhost/chat`), so one template is served per request with its own payload --
+  two windows in one run got `served_to: "chat"` at 1133 ms and `served_to: "library"` at 1173 ms
+  from 186,991- and 186,447-byte documents of the same inlined bundle, and both rendered from it
+  (the chat window's two rows, the Library window's `1 of 1 items` card), which also showed the
+  page's own mount re-read replacing boot data exactly as it does under the app. The navigation lock
+  maps to `on_navigation`. Risks: wry 0.57 has no
   `HardwareAccelerationPolicy` equivalent -- the setting the GTK view uses to stay capturable on a
   GL-less seat -- leaving only the `WEBKIT_DISABLE_*` environment variables (this seat captured fine
   without it); a Tauri shell would run GTK3/WebKitGTK 4.1 beside the GTK4/6.0 app, two renderers for
