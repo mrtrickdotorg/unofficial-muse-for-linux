@@ -173,7 +173,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the not-loaded state, the wire refresh, a refused refresh, tab+search filtering, and an empty
   filter result. The `Web UI` CI job runs them and fails if the committed `built/app.html`
   differs from a fresh build.
-- **S2 — Page migration (2–3 weeks). IN PROGRESS: Settings is the eighth page (Nov 21, 2026).**
+- **S2 — Page migration (2–3 weeks). COMPLETE: Local host is the ninth page (Nov 21, 2026).**
   Remaining read-only and settings pages, one at a time, behind the same GTK shell. Goals copies
   S1's contract: `open_goals_window` renders a boot payload of the roster and the Tracking section
   the native fill last held; `goals.snapshot` answers from those held rows, `goals.refresh` reads
@@ -289,6 +289,32 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   seat rendered the service's 14 policy rows (two flippable, the protocol table, the heading entry
   it publishes as a row), both link paths and the checkout update line, with no WebKit console
   errors and no window-level faults.
+  Local host is the ninth page, the last of S2's read-only set, and the one whose native side
+  already owned a read model: `localhost.snapshot` answers the host controller's own
+  `HostSnapshot` -- phase, notice, device id, granted folders, pending cards and the activity log
+  -- projected by `held_localhost_from` and re-projected on every native paint. The host polls
+  itself every 250 ms and each repaint lands in that cache, so the page follows the pump by
+  re-asking its own snapshot: a cache read, not a wire trip, and the reason a card's countdown
+  stays honest (the native side recomputes it per paint). A grant's line is `grant_row_text`'s
+  wording, a card's body is `preview_content`'s clamp, the deadline is `approval_countdown`'s
+  sentence, and the log is newest-first as the native list paints it, so the two renderers cannot
+  describe one grant two ways. Nothing here decides anything: granting a folder, start, stop and
+  revoke, Allow once, Deny, Clear log and the saved allow-writes policy all stay on the native
+  page, and the card says where the decision lives rather than drawing a press that would bypass
+  the one-time approval the boundary exists for. The snapshot's card array is named `pending`
+  rather than `cards` because the boot payload names the page by shape and `cards` is Feed's key:
+  the compiler refused a Feed boot that carried a Local host state, which is the argument for
+  one distinct key per page. Six DOM tests (`LocalHost.test.tsx`) cover the held read model, the
+  three empty states, a card's exact path and content with no press offered, a move's destination
+  and the deciding state, a card that arrives on a later pump, and a refused snapshot; a Rust test
+  pins the projection's borrowed wording and the log order. The page was rendered in the preview
+  browser with a stand-in channel answering its own read from the boot payload, which caught one
+  fault: the controller's ordinary status line was drawn in the error banner, and it is now a
+  neutral line beside the phase, with the pink banner kept for a refused read. The native path
+  (the page's Web view button opening the WebKit window) is unverified on this seat: synthetic
+  input stopped reaching the app here mid-check -- under Xwayland `XTestFakeMotionEvent` and key
+  events are ignored and a warped pointer's presses land at the compositor's pointer -- so the
+  button, like every other native press in this slice, needs a run on a seat that accepts input.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the
