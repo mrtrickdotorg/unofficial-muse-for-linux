@@ -563,12 +563,13 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   flight, so a page whose first snapshot is a busy one is covered too: it must paint `Checking for
   updates…` with `Working…`, must not be left on that step, and must settle on the native card's
   own status that the round reads at that moment, not on a constant it hoped for. A
-  further round presses Check twice a double-click apart: the app's busy flag refuses the second
-  press with `An update check is already running.`, paints that sentence on both cards, and the
-  first check still lands. For that refusal to be reachable at all the native check button stays
-  pressable while a check runs -- an install or a restart still takes it out of reach -- instead of
-  the press disappearing into an insensitive button, and the page shows the same sentence because
-  it is the app's status, not a message the page invented. With two windows already open, the
+  further round presses Check twice a double-click apart, once on the native card and again on the
+  page: the app's busy flag refuses the second press with `An update check is already running.`,
+  paints that sentence on both cards, the first check still lands and neither card is left on
+  `Working…`. For that refusal to be reachable at all both check buttons stay pressable while a
+  check runs -- an install or a restart still takes the native one out of reach -- instead of the
+  press disappearing into a disabled button, and the page shows the same sentence because it is the
+  app's status as well as the page's own refusal line, not a message the page invented. With two windows already open, the
   script then presses Check on the native card and requires every window to take `Working…` and
   leave it for the same answer -- an older window that the registry stopped nudging never moves at
   all, which is what that round caught.

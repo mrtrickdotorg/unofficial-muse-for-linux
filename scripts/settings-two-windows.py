@@ -18,9 +18,10 @@ turn, and requires that
   * a Settings web view opened while a check is running boots on the busy
     snapshot ("Checking for updates…" and "Working…") and then settles on the
     same answer as the native card, like a window that was already up,
-  * two Check presses a double-click apart: the second is refused by the app's
-    own busy flag, both cards show its sentence ("An update check is already
-    running.") and the first check still lands, rather than the harness
+  * two Check presses a double-click apart, on the native card and again on
+    the page: the second is refused by the app's own busy flag, both cards show
+    its sentence ("An update check is already running."), the first check still
+    lands and neither card is left on "Working…", rather than the harness
     retrying the press until it slips through.
 
 The feed is a file, not the network: the app reads `MUSE_UPDATE_FEED` (a
@@ -582,34 +583,44 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
                     raise Failure(f"the {label} press should offer Download, got {action!r}")
 
         if feed_mode == "newer":
-            # Two presses in quick succession: the second lands while the first
-            # check is still running, so the app's own busy flag must refuse it
-            # and both cards must show that sentence. The round presses to see
-            # the refusal, rather than retrying until a press slips through.
-            if not press_twice(MAIN_FRAME, CHECK_LABELS):
-                raise Failure("the check could not be pressed twice in quick succession")
-
-            wait_until(
-                lambda: shows_text(WEB_FRAME, CHECK_REFUSAL),
-                timeout,
-                "the page to show the app's refusal sentence",
-            )
-            wait_until(
-                lambda: card(MAIN_FRAME)[0] == CHECK_REFUSAL,
-                timeout,
-                "the native card to refuse in the same words",
-            )
-            print(
-                f"pressed check twice: both cards refused with {CHECK_REFUSAL!r} "
-                "while the first check ran"
-            )
-            wait_until(
-                lambda: idle() and card(WEB_FRAME)[0] == OFFERED_STATUS,
-                timeout,
-                "the refused press to leave the running check intact",
-            )
-            status, _, action, _ = card(WEB_FRAME)
-            print(f"the refused press left the check alone: both read {status!r} with {action!r}")
+            # Two presses in quick succession on each card: the second lands
+            # while the first check is running, so the app's own busy flag
+            # refuses it. Both cards must show that sentence, and neither may
+            # be left on the busy step once the first check lands. The round
+            # presses to see the refusal, rather than retrying the press until
+            # it slips through.
+            for pressed_frame in (MAIN_FRAME, WEB_FRAME):
+                pressed = "native" if pressed_frame == MAIN_FRAME else "page"
+                if not press_twice(pressed_frame, CHECK_LABELS):
+                    raise Failure(
+                        f"the {pressed} check could not be pressed twice in quick succession"
+                    )
+                wait_until(
+                    lambda: card(MAIN_FRAME)[0] == CHECK_REFUSAL,
+                    timeout,
+                    f"the native card to refuse the {pressed} double press",
+                )
+                wait_until(
+                    lambda: shows_text(WEB_FRAME, CHECK_REFUSAL),
+                    timeout,
+                    f"the page to show the refusal for the {pressed} double press",
+                )
+                wait_until(
+                    idle,
+                    timeout,
+                    f"the refused {pressed} press to leave the running check intact",
+                )
+                status, check, action, native_status, native_action, _ = cards()
+                if check == WORKING or status != native_status or action != native_action:
+                    raise Failure(
+                        f"after the {pressed} double press the cards read page "
+                        f"{status!r}/{check!r} and native {native_status!r}/{native_action!r}"
+                    )
+                print(
+                    f"pressed {pressed} check twice: both cards refused with "
+                    f"{CHECK_REFUSAL!r}, then settled on {status!r} with {action!r}, "
+                    f"neither left on {WORKING!r}"
+                )
 
             # A window opened while a check is still running boots on the busy
             # snapshot: it must say so on its first paint, and the answer has

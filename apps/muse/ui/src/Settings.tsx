@@ -193,10 +193,13 @@ export function Settings() {
           : "The native page has not painted its updates section yet."}
       </p>
       <div className="host-actions">
+        {/* A press during a check stays possible, as on the native card: the
+            app refuses it with its own sentence and the page shows that,
+            rather than the press disappearing into a disabled button. */}
         <button
           type="button"
           className="inline-button"
-          disabled={updating !== null || Boolean(updates?.busy)}
+          disabled={updating !== null}
           onClick={() => void updatePress("update.check")}
         >
           {updating === "update.check" || updates?.busy
