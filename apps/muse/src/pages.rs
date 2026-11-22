@@ -5014,15 +5014,12 @@ fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
     }
 }
 
-/// Ask the feed whether a newer build exists. One worker, one answer; whichever
-/// card is up repaints whatever it says, including failures. The refusal is the
-/// same sentence on both surfaces.
-/// Whether this copy may start a check at all. Only the AppImage release
-/// updates itself, and a press that arrives on the page's command channel is
-/// no exception: the views hide the press, but they are not what decides.
-/// The sentence is the card's own, so a refused press shows nothing new -- the
-/// card already says where its updates come from.
-fn check_eligible(appimage: bool) -> Result<(), String> {
+/// Whether this copy may press anything in the updater at all. Only the
+/// AppImage release updates itself, and a press that arrives on the page's
+/// command channel is no exception: the views hide the press, but they are not
+/// what decides. The sentence is the card's own, so a refused press shows
+/// nothing new -- the card already says where its updates come from.
+fn updates_here(appimage: bool) -> Result<(), String> {
     if appimage {
         Ok(())
     } else {
@@ -5030,8 +5027,11 @@ fn check_eligible(appimage: bool) -> Result<(), String> {
     }
 }
 
+/// Ask the feed whether a newer build exists. One worker, one answer; whichever
+/// card is up repaints whatever it says, including failures. The refusal is the
+/// same sentence on both surfaces.
 fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
-    check_eligible(super::update::running_as_appimage())?;
+    updates_here(super::update::running_as_appimage())?;
     {
         let mut state = ctx.updates.borrow_mut();
         if state.busy {
@@ -5105,6 +5105,9 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
 /// before this one exits); a failed restart reports in the panel with
 /// the staged path instead of leaving the reader with nothing.
 fn do_update_action(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
+    // The action is gated like the check: the card offers neither press on a
+    // copy that updates through its own channel, and the app agrees.
+    updates_here(super::update::running_as_appimage())?;
     let (info, staged) = {
         let state = ctx.updates.borrow();
         (state.info.clone(), state.staged.clone())
@@ -7362,15 +7365,16 @@ fn go_chat(ctx: &Ctx) {
 mod tests {
     use super::*;
 
-    /// A copy that updates through its own channel refuses a check wherever the
-    /// press comes from, in the words its card already shows.
+    /// A copy that updates through its own channel refuses both presses -- the
+    /// check and the action -- wherever the press comes from, in the words its
+    /// card already shows. It is one predicate, so the two entries cannot drift.
     #[test]
-    fn a_copy_that_updates_elsewhere_cannot_start_a_check() {
+    fn a_copy_that_updates_elsewhere_refuses_its_presses() {
         assert_eq!(
-            super::check_eligible(false),
+            super::updates_here(false),
             Err(UPDATE_NOT_APPIMAGE.to_owned())
         );
-        assert_eq!(super::check_eligible(true), Ok(()));
+        assert_eq!(super::updates_here(true), Ok(()));
     }
 
     /// The action's label is one rule for both cards: the panel's button and the
