@@ -314,13 +314,44 @@ def card(frame_name, index=0):
     return card_of(views[index])
 
 
+def actionable(node):
+    """Whether assistive tech can press this node."""
+    try:
+        actions = node.get_action_iface()
+    except Exception:
+        return False
+    return actions is not None and actions.get_n_actions() > 0
+
+
+def labelled(nodes, labels):
+    """The name of the first node carrying one of `labels`.
+
+    A node that can be pressed wins; failing that, any node with the name will
+    do, because which of the two a widget tree names is a toolkit's choice and
+    the round is about the words a reader sees. A press that this matched but
+    cannot be made still fails the press itself.
+    """
+    fallback = None
+    for node in nodes:
+        value = name(node)
+        if value not in labels:
+            continue
+        if actionable(node):
+            return value
+        if fallback is None:
+            fallback = value
+    return fallback
+
+
 def card_of(frame):
     """The card as rendered: (status, check label, action label, refusal).
 
-    Both renderers title the section "Updates"; the status is the first text
-    under that title, the check press is the first button after it, and the
-    action button (absent when there is nothing to install) follows. The check
-    button reads "Working…" while a press is in flight.
+    Both renderers title the section "Updates" and the status is the first
+    text under that title; the check press and the action press (absent when
+    there is nothing to install) are found by their words rather than by where
+    a toolkit happened to put them in the tree -- the same card reads the same
+    on GTK 4.14 and 4.22 only that way. The check button reads "Working…"
+    while a press is in flight.
     """
     nodes = walk(frame)
     refusal = None
@@ -339,23 +370,19 @@ def card_of(frame):
         return None, None, None, refusal
 
     status = None
-    check = None
-    action = None
     for node in nodes[title + 1 :]:
-        kind = role(node)
-        if kind in ("label", "paragraph") and status is None:
-            value = text(node)
+        if role(node) in ("label", "paragraph"):
+            value = text(node).strip()
             if value:
                 status = value
-        elif kind in ("push button", "toggle button"):
-            label = name(node)
-            if check is None and label in CHECK_LABELS:
-                check = label
-            elif check is not None and action is None and label in ACTION_LABELS:
-                action = label
-            if check is not None and action is not None:
                 break
-    return status, check, action, refusal
+
+    return (
+        status,
+        labelled(nodes, CHECK_LABELS),
+        labelled(nodes, ACTION_LABELS),
+        refusal,
+    )
 
 
 def wait_web_windows(status, action, timeout, label):
@@ -701,8 +728,12 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
             )
             if feed_mode == "newer":
                 if status != OFFERED_STATUS:
+                    dump_tree(MAIN_FRAME)
+                    dump_tree(WEB_FRAME)
                     raise Failure(f"the {label} press should offer an update, got {status!r}")
                 if action != "Download update":
+                    dump_tree(MAIN_FRAME)
+                    dump_tree(WEB_FRAME)
                     raise Failure(f"the {label} press should offer Download, got {action!r}")
 
         if feed_mode == "newer":
