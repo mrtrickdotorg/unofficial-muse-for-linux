@@ -1,7 +1,7 @@
 # Porting the client to Rust + Tauri + React: analysis and staging plan
 
 **Status: S0 shipped, S1 gate met, S2 seven pages, S3 slices landed (Nov 21, 2026; its paste and
-  decide presses await a live check).** The decision was made to continue
+  decide presses were checked live the same evening).** The decision was made to continue
 toward the Tauri/React end state. Stage S0 (the palette lift) is in the tree; S1's reference page —
 Library, read-only, in the existing WebKitGTK view with real rows — is implemented and verified on
 this seat; S2 has its first page, Goals, on the same contract. Everything below the stage list is
@@ -362,11 +362,19 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   same 32 rows the native transcript held (boot 32, rows 32, no script error), and a press of
   `Check approvals` in the page's panel reached the app (`chat.approvals.refresh` in the launch log)
   and repainted from "No approvals read yet." to "No pending approvals." once the app's own read
-  landed -- the service reports none waiting on this account, and the page says exactly that rather
-  than an unread section. Still not seen live: a paste staged from the page's `+` and an approval
-  decided from a page card, which need a clipboard picture and a pending request at the same
-  moment; the code paths are the app's own, and the transcript, send, stop and quote paths already
-  have their live proofs above.
+  landed -- the service reports none waiting on this account, and the page says exactly that   rather than an unread section. A picture put on the X clipboard by another process (a GTK3 owner
+  offering `image/png`, 1222×901) was then staged by the page's `+`: the log line `chat.attach`, and
+  a chip reading `pasted-1795305595283444620.png · 1222 × 901 · 77805 bytes` beside the page's own
+  composer -- the same numbers the native chip prints (the 77805 is the staged file the app encoded
+  from the texture, not the source PNG's 71128). And a card was decided from the page: a turn sent
+  on the page's composer asking the agent to POST to `https://httpbin.org/post` left the panel
+  carrying `Host httpbin.org`, `Method POST`, `Path /post`, `Policy tool_exec` with Allow once /
+  Allow task / Allow site / Allow always / Deny; the Deny press logged `chat.decide`, and the app's
+  refill then read "No pending approvals." with the card gone. That refill is the only statement
+  this path makes about the decision -- the service's own sentence for a decide is not surfaced in
+  the page, so the card's disappearance is evidence, not a printed claim. The page printed no
+  refusal line, so the busy and signed-out sentences remain covered by their tests rather than by
+  this pass.
 - **S4 — Shell decision.** Either keep the GTK chrome (rail, menus, dialogs, a11y) permanently, or
   replace it with a Tauri window. This is the only stage that forces a WebKit decision (4.1 now, or
   Tauri 3 later).
