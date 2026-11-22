@@ -916,3 +916,14 @@ html, body {
   font-size: 12.5px;
   line-height: 1.5;
 }
+
+/* Settings puts a heading straight after a paragraph (UPDATES, then POLICY),
+ * where the other pages only ever place sections between cards, so the shared
+ * 4px top margin reads as attached to the line above. */
+.settings-page .section {
+  margin-top: 22px;
+}
+
+.settings-page .linked .note {
+  margin-bottom: 4px;
+}

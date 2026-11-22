@@ -279,9 +279,16 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   action follows. `link` carries paths only; the session jar never reaches a page. An unlinked
   clone reads as "no saved link" rather than a failure, and an unread policy travels as
   `loaded: false` with the panel's own note ("Link your account first."), so an empty section is
-  never mistaken for an empty service. Eight DOM tests (`Settings.test.tsx`) cover the held link
-  and rows, the unread policy, a policy read's failure note, the staged-update sentence, the
-  updater's own status, the unlinked clone, and a refused snapshot.
+  never mistaken for an empty service. A Settings visit asks the chat controller for the policy
+  read when the cache is still empty -- otherwise the page would sit on "not read yet" until
+  someone opened Chat, which the live check found on a fresh launch -- and the page re-asks its
+  snapshot while the policy is unread, so the rows fill in when that read lands instead of staying
+  blank for the life of the window. Nine DOM tests (`Settings.test.tsx`) cover the held link and
+  rows, the unread-then-filled policy, a policy read's failure note, the staged-update sentence,
+  the updater's own status, the unlinked clone, and a refused snapshot. The live check on this
+  seat rendered the service's 14 policy rows (two flippable, the protocol table, the heading entry
+  it publishes as a row), both link paths and the checkout update line, with no WebKit console
+  errors and no window-level faults.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
 - **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the

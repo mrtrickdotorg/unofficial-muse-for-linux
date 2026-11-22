@@ -4464,6 +4464,15 @@ fn fill_history(ctx: &Ctx) {
 }
 
 fn fill_settings(ctx: &Ctx, page: &gtk4::Box) -> bool {
+    // The policy section of the web view is the chat panel's own read, so a
+    // visit here asks for it: otherwise the page would sit on "not read yet"
+    // until someone happened to open Chat. The panel caches what it paints,
+    // and the page re-asks while it is unread.
+    if !settings_snapshot().policy.loaded
+        && let Some(chat) = ctx.chat.upgrade()
+    {
+        chat.refresh_policy();
+    }
     let Some(info) = find_widget(page.upcast_ref(), "settings-info")
         .and_then(|widget| widget.downcast::<gtk4::Label>().ok())
     else {

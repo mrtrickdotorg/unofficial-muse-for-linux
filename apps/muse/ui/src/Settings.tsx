@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { call, channelAvailable } from "./api";
 import type { SettingsSnapshot, SettingsUpdates } from "./types";
 
@@ -72,12 +72,26 @@ export function Settings() {
     void loadSnapshot();
   }, [loadSnapshot]);
 
+  // An unread policy is not an empty one: the read is the chat panel's, asked
+  // for when this page opens, and it can land after the first answer. Ask a
+  // few more times rather than leaving the section unread for the whole life
+  // of the window -- and stop the moment it arrives.
+  const polls = useRef(0);
+  useEffect(() => {
+    if (!data || data.policy.loaded || polls.current >= 4) return;
+    const timer = setTimeout(() => {
+      polls.current += 1;
+      void loadSnapshot();
+    }, 900);
+    return () => clearTimeout(timer);
+  }, [data, loadSnapshot]);
+
   const link = data?.link;
   const updates = data?.updates;
   const policy = data?.policy;
 
   return (
-    <div className="page">
+    <div className="page settings-page">
       <div className="top">
         <h1 className="title">Settings</h1>
       </div>
@@ -87,6 +101,9 @@ export function Settings() {
       <h2 className="section">This app</h2>
       {link?.linked ? (
         <div className="linked">
+          {/* The native label's own first word, so the two surfaces open the
+              section the same way. */}
+          <p className="note">Linked.</p>
           <Row label="Interpreter" value={link.interpreter} />
           <Row label="Session folder" value={link.session_folder} />
         </div>

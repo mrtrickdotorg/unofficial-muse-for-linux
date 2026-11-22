@@ -1,6 +1,6 @@
 // S2's gate for the Settings page: the page's behaviour against the same
 // channel the app speaks, with no window and no account.
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Settings } from "./Settings";
 import { installChannel } from "./testChannel";
@@ -136,6 +136,32 @@ describe("the Settings web page", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("No policy settings.")).not.toBeInTheDocument();
     expect(policyRows()).toBe(0);
+  });
+
+  it("asks again while the policy read is still landing, then stops asking", async () => {
+    window.__MUSE_BOOT__ = undefined;
+    const unread = bootPayload({
+      policy: { loaded: false, rows: [], connectors: [], withheld: 0, note: null },
+    });
+    const loaded = bootPayload();
+    let answers = 0;
+    const commands = installChannel(() => {
+      answers += 1;
+      return answers === 1 ? { ok: true, ...unread } : { ok: true, ...loaded };
+    });
+
+    render(<Settings />);
+
+    expect(await screen.findByText(/has not read policy settings/)).toBeInTheDocument();
+    // The read lands after the page opened: the rows replace the note without
+    // a reload, and the polling stops once there is something to show.
+    expect(await screen.findByText("connector_default", {}, { timeout: 2500 })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText(/has not read policy settings/)).not.toBeInTheDocument(),
+    );
+    const asked = commands.filter((command) => command === "settings.snapshot").length;
+    expect(asked).toBeGreaterThanOrEqual(2);
+    expect(asked).toBeLessThanOrEqual(5);
   });
 
   it("reports the policy read's own failure rather than an empty panel", async () => {
