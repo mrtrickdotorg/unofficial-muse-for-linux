@@ -3089,83 +3089,6 @@ pub(crate) fn update_press_routes(
     (check, install)
 }
 
-/// Project the app's update state into the page's held cache.
-pub(crate) fn project_update(updates: &std::cell::RefCell<super::update::UpdateCheck>) {
-    let view = held_update_from(&updates.borrow());
-    update_cache(view);
-}
-
-/// The update surface as its page shows it: what the app's own check has read.
-/// Nothing here is a second source of truth -- the check runs in the app, and
-/// the page reads its outcome, like every other held page.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
-pub(crate) struct HeldUpdate {
-    pub busy: bool,
-    pub status: String,
-    pub available: bool,
-    pub version: Option<String>,
-    pub notes: Option<String>,
-    /// Whether a verified download is waiting: the action becomes Restart.
-    pub staged: bool,
-    /// Whether this copy updates itself at all (an AppImage does).
-    pub appimage: bool,
-    pub check_label: String,
-    pub action_label: Option<String>,
-    pub build: String,
-}
-
-/// Project the app's update state into the page's shapes. The action's label is
-/// the native button's own rule: Restart once something is staged, Download
-/// once something is offered, nothing before either.
-pub(crate) fn held_update_from(state: &super::update::UpdateCheck) -> HeldUpdate {
-    let appimage = super::update::running_as_appimage();
-    let available = state
-        .info
-        .as_ref()
-        .map(|info| super::update::update_available(super::update::local_sha(), info))
-        .unwrap_or(false);
-    let staged = state.staged.is_some();
-    let action_label = updates_action_label(state);
-    let build = match super::update::local_sha() {
-        Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
-        None => "dev build".to_owned(),
-    };
-    HeldUpdate {
-        busy: state.busy,
-        status: if state.status.is_empty() {
-            if appimage {
-                UPDATE_ROLLING
-            } else {
-                UPDATE_NOT_APPIMAGE
-            }
-            .to_owned()
-        } else {
-            state.status.clone()
-        },
-        available,
-        version: state.info.as_ref().map(|info| info.sha.clone()),
-        notes: None,
-        staged,
-        appimage,
-        check_label: UPDATE_CHECK_LABEL.to_owned(),
-        action_label,
-        build,
-    }
-}
-
-thread_local! {
-    static UPDATE_STORE: std::cell::RefCell<HeldUpdate> =
-        std::cell::RefCell::new(HeldUpdate::default());
-}
-
-pub(crate) fn update_snapshot() -> HeldUpdate {
-    UPDATE_STORE.with(|store| store.borrow().clone())
-}
-
-pub(crate) fn update_cache(view: HeldUpdate) {
-    UPDATE_STORE.with(|store| *store.borrow_mut() = view);
-}
-
 /// The sign-in page's state: the two paths, the consent, and the isolated
 /// browser flow's own status. The page types into it and presses; the app's
 /// sign-in module validates and saves, so the rules cannot fork.
@@ -4976,6 +4899,22 @@ fn fill_settings(ctx: &Ctx, page: &gtk4::Box) -> bool {
     true
 }
 
+/// The updates section as the Settings page reads it, projected from the same
+/// state the native card paints. The label comes from [`updates_action_label`],
+/// so the page's card and the panel's button cannot offer different presses.
+fn updates_view_from(state: &super::update::UpdateCheck, appimage: bool) -> UpdatesView {
+    UpdatesView {
+        appimage,
+        status: state.status.clone(),
+        busy: state.busy,
+        checked: state.info.is_some(),
+        staged: state.staged.is_some(),
+        available: state.info.is_some(),
+        check_label: UPDATE_CHECK_LABEL.to_owned(),
+        action_label: updates_action_label(state),
+    }
+}
+
 /// The action's label, shared by the panel's button and the page's card: the
 /// native rule, Restart once something is staged, Download once something is
 /// offered, nothing before either.
@@ -4995,24 +4934,13 @@ fn updates_action_label(state: &super::update::UpdateCheck) -> Option<String> {
 /// from either becomes visible, so neither surface has to poll the other.
 fn paint_updates(ctx: &Ctx, page: Option<&gtk4::Box>) {
     let appimage = super::update::running_as_appimage();
-    {
+    // The eligibility and the last answer travel to the web view as data, so
+    // its page and this section cannot tell two different stories. This cache
+    // is the only thing the Settings page reads.
+    settings_updates_cache({
         let state = ctx.updates.borrow();
-        // The eligibility and the last answer travel to the web view as data,
-        // so its page and this section cannot tell two different stories.
-        settings_updates_cache(UpdatesView {
-            appimage,
-            status: state.status.clone(),
-            busy: state.busy,
-            checked: state.info.is_some(),
-            staged: state.staged.is_some(),
-            available: state.info.is_some(),
-            check_label: UPDATE_CHECK_LABEL.to_owned(),
-            action_label: updates_action_label(&state),
-        });
-    }
-    // The page's own held state, read by `update.snapshot` and by the Settings
-    // card's re-read after a press.
-    project_update(&ctx.updates);
+        updates_view_from(&state, appimage)
+    });
     // A press answers before the worker does, so the page's own read can land
     // on "busy" and stay there. This tells an open page that the answer is in,
     // whether the press came from its card or from this one.
@@ -7377,13 +7305,13 @@ mod tests {
     use super::*;
 
     /// The action's label is one rule for both cards: the panel's button and the
-    /// page's card cannot offer different presses for the same state, and the
-    /// held update the page reads carries that same label as data.
+    /// page's card cannot offer different presses for the same state, because
+    /// the page's view takes its label from the button's own rule.
     #[test]
     fn the_action_label_is_one_rule_for_both_cards() {
         let mut state = super::super::update::UpdateCheck::default();
         assert_eq!(updates_action_label(&state), None);
-        assert_eq!(held_update_from(&state).action_label, None);
+        assert_eq!(updates_view_from(&state, true).action_label, None);
 
         state.info = Some(super::super::update::ReleaseInfo {
             sha: "abc1234".to_owned(),
@@ -7395,7 +7323,7 @@ mod tests {
             Some(UPDATE_DOWNLOAD_LABEL)
         );
         assert_eq!(
-            held_update_from(&state).action_label.as_deref(),
+            updates_view_from(&state, true).action_label.as_deref(),
             Some(UPDATE_DOWNLOAD_LABEL)
         );
 
@@ -7405,7 +7333,7 @@ mod tests {
             Some(UPDATE_RESTART_LABEL)
         );
         assert_eq!(
-            held_update_from(&state).action_label.as_deref(),
+            updates_view_from(&state, true).action_label.as_deref(),
             Some(UPDATE_RESTART_LABEL)
         );
     }

@@ -252,17 +252,6 @@ fn localhost_document(held: &HeldLocalHost) -> String {
     document(&boot)
 }
 
-fn update_payload() -> serde_json::Value {
-    serde_json::to_value(crate::pages::update_snapshot())
-        .expect("muse webui: the update payload always serializes")
-}
-
-fn update_reply() -> serde_json::Value {
-    let mut reply = update_payload();
-    reply["ok"] = serde_json::json!(true);
-    reply
-}
-
 fn signin_payload() -> serde_json::Value {
     serde_json::to_value(crate::pages::signin_snapshot())
         .expect("muse webui: the sign-in payload always serializes")
@@ -999,10 +988,9 @@ pub(crate) fn handle_command_with(
             route_answer(routes.map(|routes| (routes.host_policy)(allow)))
         }
         "localhost.clear_log" => route_answer(routes.map(|routes| (routes.host_clear_log)())),
-        // The update surface: one read of the app's own check, and the two
-        // presses the native card offers. The check and the download run in the
-        // app, on its own threads, and the page reads their outcome.
-        "update.snapshot" => Answer::Now(update_reply()),
+        // The update surface: the two presses the native card offers. The check
+        // and the download run in the app, on its own threads; the page reads
+        // their outcome from `settings.snapshot`, like the rest of the card.
         "update.check" => route_answer(routes.map(|routes| (routes.update_check)())),
         "update.install" => route_answer(routes.map(|routes| (routes.update_install)())),
         // The sign-in surface: the page owns the typing, the app owns the
