@@ -1,23 +1,38 @@
 #!/usr/bin/python3
-"""Repeat the two-window Settings check on a real seat.
+"""Repeat the two-window Settings update check on a real seat.
 
 The Settings page and its web view are two renderers of one updater. This
-script opens both under a throwaway config, presses Check on each card in
+script opens both under a throwaway config, presses the update card on each in
 turn, and requires that
 
-  * the press shows the app checking (the page's button goes "Working…" and
-    the native status says "Checking for updates…"),
-  * both cards say the same thing afterwards, and
-  * neither card is left on that busy step -- the exact failure the page used
-    to have when a press answered before the worker did.
+  * each press shows the app working (the page's button goes "Working…", both
+    statuses say the app's own busy line, word for word),
+  * both cards settle on the same words and offer the same press,
+  * neither card is left on a busy step -- the exact failure the page used to
+    have when a press answered before the worker did,
+  * with the harness feed (the default), both cards reach "A newer build is
+    available." with "Download update", then the staged state with "Restart to
+    update", and a Restart press is refused instead of replacing this copy.
+
+The feed is a file, not the network: the app reads `MUSE_UPDATE_FEED` (a
+release JSON on disk) instead of the release API, stages the asset from the
+`file://` URL the feed names, and refuses to relaunch -- so a dev build with no
+compiled-in commit can still be driven to the offered and staged states, and
+nothing here can replace the binary under test. `--feed real` runs the same
+two Check presses against the real feed instead, asserting only agreement.
+
+A file feed answers in microseconds, which would leave the busy step too short
+to read on both cards; the script sets `MUSE_UPDATE_DELAY_MS` (`--delay-ms`,
+default 600) so the feed and the staged copy each take long enough to be seen
+mid-press, the way a network answer would on a slow day.
 
 Both cards are read from their accessibility trees, never from pixels: the
-native label's text is its accessible name, and the page's status paragraph
-is read through Atspi.Text. Nothing here needs the window manager to place or
+native label's text is its accessible name, and the page's status paragraph is
+read through Atspi.Text. Nothing here needs the window manager to place or
 raise a window, so it works wherever the app can open two windows.
 
     scripts/settings-two-windows.py
-    scripts/settings-two-windows.py --binary target/debug/muse --keep
+    scripts/settings-two-windows.py --feed real --keep
 
 Needs PyGObject with Atspi (Fedora: python3-gobject, Debian: python3-gi),
 a logged-in desktop session, and the binary already built:
@@ -27,9 +42,9 @@ a logged-in desktop session, and the binary already built:
 The app is single-instance, so close any Muse already running first. The
 throwaway config copies the saved account link from the real config (the
 card's page needs a linked app) and marks first run done, so the app opens
-Chat with a working Settings page. Nothing in the real config is written: the
-copy lives in a temp dir that is removed unless --keep is given or a check
-fails.
+Chat with a working Settings page. Nothing in the real config or cache is
+written: the copy lives in a temp dir (config, cache and staged download) that
+is removed unless --keep is given or a check fails.
 
 The app is started the way scripts/muse-gui.sh starts it: on DISPLAY (or
 MUSE_DISPLAY, default :1) with the toolbox env sourced, which is what puts
@@ -39,6 +54,7 @@ WebKit on the loader's path. Pass --env-script '' to start it bare.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -65,12 +81,20 @@ WEB_FRAME = "Settings · web view"
 SETTINGS_BUTTON = "Settings"
 WEB_VIEW_BUTTON = "Web view"
 
-# The app's own words: the check's busy status, and the page's in-flight label.
-BUSY_STATUS = "Checking for updates…"
+# The app's own words (apps/muse/src/pages.rs and update.rs).
+CHECK_STATUS = "Checking for updates…"
+DOWNLOAD_STATUS = "Downloading the update…"
+RESTART_STATUS = "Restarting into the update…"
+OFFERED_STATUS = "A newer build is available."
+DOWNLOADED_PREFIX = "Update downloaded to "
+DOWNLOADED_SUFFIX = ". Restart to switch to it."
+RESTART_REFUSAL = "Restart is disabled in this harness copy."
 WORKING = "Working…"
 
-# A card's buttons, so the status line is the last text before the press.
-CARD_BUTTONS = ("Check for updates", WORKING, "Download update", "Restart to update")
+CHECK_LABELS = ("Check for updates", WORKING)
+ACTION_LABELS = ("Download update", "Restart to update")
+CARD_BUTTONS = CHECK_LABELS + ACTION_LABELS
+BUSY_STATUSES = (CHECK_STATUS, DOWNLOAD_STATUS, RESTART_STATUS)
 
 # Refusals mean the press never reached the worker; the round retries instead
 # of passing on a status that never changed.
@@ -174,16 +198,16 @@ def press(frame_name, button_names):
 
 
 def card(frame_name):
-    """The card as rendered: (status line, check button's label, refusal line).
+    """The card as rendered: (status, check label, action label, refusal).
 
     Both renderers title the section "Updates"; the status is the first text
-    under that title, and the press is the first card button after it. That
-    holds while the button is disabled for a check too, when the page's label
-    reads "Working…".
+    under that title, the check press is the first button after it, and the
+    action button (absent when there is nothing to install) follows. The check
+    button reads "Working…" while a press is in flight.
     """
     frame = first_frame(frame_name)
     if frame is None:
-        return None, None, None
+        return None, None, None, None
     nodes = walk(frame)
     refusal = None
     for node in nodes:
@@ -198,20 +222,26 @@ def card(frame_name):
             title = index
             break
     if title is None:
-        return None, None, refusal
+        return None, None, None, refusal
 
     status = None
-    button = None
+    check = None
+    action = None
     for node in nodes[title + 1 :]:
         kind = role(node)
         if kind in ("label", "paragraph") and status is None:
             value = text(node)
             if value:
                 status = value
-        elif kind in ("push button", "toggle button") and name(node) in CARD_BUTTONS:
-            button = name(node)
-            break
-    return status, button, refusal
+        elif kind in ("push button", "toggle button"):
+            label = name(node)
+            if check is None and label in CHECK_LABELS:
+                check = label
+            elif check is not None and action is None and label in ACTION_LABELS:
+                action = label
+            if check is not None and action is not None:
+                break
+    return status, check, action, refusal
 
 
 def wait_until(predicate, timeout, what):
@@ -279,100 +309,130 @@ def stop(proc):
         proc.wait(timeout=5)
 
 
+def cards():
+    """Both cards in one read: (page status, page check, page action, refusal)."""
+    page_status, page_check, page_action, refusal = card(WEB_FRAME)
+    native_status, _, native_action, _ = card(MAIN_FRAME)
+    return page_status, page_check, page_action, native_status, native_action, refusal
+
+
+def quiet():
+    """Both cards off the busy step, if both have a status: (page, native)."""
+    page_status, page_check, page_action, native_status, native_action, _ = cards()
+    if not page_status or not native_status:
+        return None
+    if page_check == WORKING or page_status in BUSY_STATUSES or native_status in BUSY_STATUSES:
+        return None
+    return page_status, page_action, native_status, native_action
+
+
 def idle():
-    page_status, page_button, _ = card(WEB_FRAME)
-    native_status, _, _ = card(MAIN_FRAME)
-    return (
-        page_status
-        and native_status
-        and page_button != WORKING
-        and page_status != BUSY_STATUS
-        and native_status != BUSY_STATUS
-    )
+    pair = quiet()
+    if pair is None:
+        return False
+    page_status, page_action, native_status, native_action = pair
+    return page_status == native_status and page_action == native_action
 
 
-def exercise(label, frame_name, buttons, timeout, busy_window):
-    """Press one card's Check, watch both cards during the check, settle."""
+def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
+    """Press one card's button, watch both cards during it, settle.
+
+    Returns (presses, mid_text, status, action). The check must be seen on both
+    cards at the same moment and the page's line must be the native card's,
+    word for word -- a decoration the page added would fail here.
+    """
     wait_until(idle, timeout, f"the cards to be idle before the {label} press")
 
     presses = 0
+    mid_text = None
     page_seen = native_seen = False
-    mid_check = None
-    while presses < 3 and mid_check is None:
+    while presses < 3 and mid_text is None:
         presses += 1
         if not press(frame_name, buttons):
-            raise Failure(f"the {label} card's Check button could not be pressed")
+            raise Failure(f"the {label} press could not be made")
         started = time.monotonic()
         while time.monotonic() - started < busy_window:
-            page_status, page_button, _ = card(WEB_FRAME)
-            native_status, _, _ = card(MAIN_FRAME)
+            page_status, page_check, _, native_status, _, refusal = cards()
             page_status = page_status or ""
             native_status = native_status or ""
-            page_busy = page_button == WORKING or BUSY_STATUS in page_status
-            native_busy = native_status == BUSY_STATUS
-            page_seen = page_seen or page_busy
-            native_seen = native_seen or native_busy
-            # Both cards caught in the check itself: the page's own line must
-            # be the app's, word for word. A decoration the page adds (the old
-            # "Checking now…" suffix) is exactly what this catches.
-            if BUSY_STATUS in page_status and native_busy:
+            page_seen = page_seen or page_check == WORKING or page_status in BUSY_STATUSES
+            native_seen = native_seen or native_status in BUSY_STATUSES
+            if busy_text in page_status and native_status == busy_text:
                 if page_status != native_status:
                     raise Failure(
-                        f"mid-check the cards disagree: page {page_status!r} "
+                        f"mid-press the cards disagree: page {page_status!r} "
                         f"vs native {native_status!r}"
                     )
-                mid_check = page_status
+                mid_text = page_status
                 break
-            _, _, refusal = card(WEB_FRAME)
             if refusal:
                 break
             time.sleep(POLL)
-        if mid_check is None:
+        if mid_text is None:
             wait_until(idle, timeout, f"the cards to be idle after the {label} press")
-    if mid_check is None:
+    if mid_text is None:
         raise Failure(
-            f"the two cards were never read mid-check at the same moment after the "
+            f"the two cards were never read mid-press at the same moment after the "
             f"{label} press (page {'busy' if page_seen else 'quiet'}, "
-            f"native {'busy' if native_seen else 'quiet'}): the check finished too "
+            f"native {'busy' if native_seen else 'quiet'}): the work finished too "
             "fast or one surface never took the busy state"
         )
 
-    # The check has started; it must finish, and both cards must leave the
-    # busy step together.
+    # The press has started; it must finish, and both cards must leave the
+    # busy step together with the same words and the same press offered.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        settled = idle()
-        if settled:
-            page_status, page_button, _ = card(WEB_FRAME)
-            native_status, _, _ = card(MAIN_FRAME)
-            if page_button == WORKING or page_status == BUSY_STATUS:
-                raise Failure(f"the page is still on the busy step after the {label} press")
-            if native_status == BUSY_STATUS:
-                raise Failure(
-                    f"the native card is still on the busy step after the {label} press"
-                )
+        pair = quiet()
+        if pair is not None:
+            page_status, page_action, native_status, native_action = pair
             if page_status != native_status:
                 raise Failure(
                     f"the cards disagree after the {label} press: "
                     f"page {page_status!r} vs native {native_status!r}"
                 )
-            return presses, page_status, mid_check
+            if page_action != native_action:
+                raise Failure(
+                    f"the cards offer different presses after the {label} press: "
+                    f"page {page_action!r} vs native {native_action!r}"
+                )
+            return presses, mid_text, page_status, page_action
         time.sleep(POLL)
 
-    page_status, page_button, _ = card(WEB_FRAME)
-    native_status, _, _ = card(MAIN_FRAME)
-    if page_button == WORKING:
+    page_status, page_check, page_action, native_status, native_action, _ = cards()
+    if page_check == WORKING:
         raise Failure(
             f"the page was left on {WORKING!r} after the {label} press "
             f"(status {page_status!r}, native {native_status!r})"
         )
     raise Failure(
         f"the cards did not settle after the {label} press "
-        f"(page {page_status!r}, native {native_status!r})"
+        f"(page {page_status!r}/{page_action!r}, "
+        f"native {native_status!r}/{native_action!r})"
     )
 
 
-def run(binary, timeout, busy_window, keep, env_script):
+def write_feed(root):
+    """A newer release whose asset is a local file, and the env that feeds it."""
+    asset = root / "muse-harness.AppImage"
+    body = (b"#!/bin/sh\n# harness asset: never executed, only staged\nexit 0\n" * 2048)
+    asset.write_bytes(body)
+    sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4"
+    feed = {
+        "body": f"Rolling x86_64 AppImage built from {sha} by the AppImage workflow.",
+        "assets": [
+            {
+                "name": "unofficial-muse-for-linux-x86_64.AppImage",
+                "browser_download_url": asset.as_uri(),
+                "size": len(body),
+            }
+        ],
+    }
+    feed_path = root / "feed.json"
+    feed_path.write_text(json.dumps(feed))
+    return feed_path
+
+
+def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
     if not os.access(binary, os.X_OK):
         raise Failure(f"{binary} is not executable; build it with `cargo build -p muse`")
     running = subprocess.run(
@@ -396,14 +456,20 @@ def run(binary, timeout, busy_window, keep, env_script):
     (config / "account").mkdir(parents=True)
     shutil.copy2(saved_link, config / "account" / "account-connection.json")
     (config / "first-run-done").touch()
+    cache = root / "cache"
+    cache.mkdir()
     log_path = root / "muse.log"
 
     env = os.environ.copy()
     env.pop("MUSE_SPIKE_CMD", None)
+    env.pop("MUSE_UPDATE_FEED", None)
     env.setdefault("DISPLAY", os.environ.get("MUSE_DISPLAY", ":1"))
     env.update(
         {
             "XDG_CONFIG_HOME": str(root / "config"),
+            # The staged download lands under the cache home; keep the real one
+            # out of it.
+            "XDG_CACHE_HOME": str(cache),
             "GDK_BACKEND": env.get("GDK_BACKEND", "x11"),
             # A non-empty APPDIR is what makes this copy update itself, so the
             # card offers a real Check. The dir itself is never used.
@@ -411,6 +477,9 @@ def run(binary, timeout, busy_window, keep, env_script):
             "MUSE_PROBE": "1",
         }
     )
+    if feed_mode == "newer":
+        env["MUSE_UPDATE_FEED"] = str(write_feed(root))
+        env["MUSE_UPDATE_DELAY_MS"] = str(delay_ms)
 
     proc = None
     ok = False
@@ -418,38 +487,74 @@ def run(binary, timeout, busy_window, keep, env_script):
         proc = open_settings(launch_command(binary, env_script), env, log_path)
 
         wait_until(idle, timeout, "both cards to show a settled status")
-        first_status, _, _ = card(WEB_FRAME)
-        native_status, _, _ = card(MAIN_FRAME)
-        if first_status != native_status:
-            raise Failure(
-                f"the cards disagree before any press: "
-                f"page {first_status!r} vs native {native_status!r}"
-            )
-        print(f"opened: both cards read {first_status!r}")
+        page_status, _, page_action, native_status, native_action, _ = cards()
+        print(f"opened: both cards read {page_status!r} (action {page_action!r})")
 
-        rounds = [
-            ("page", WEB_FRAME, (WORKING, "Check for updates")),
-            ("native", MAIN_FRAME, (WORKING, "Check for updates")),
-        ]
-        for label, frame_name, buttons in rounds:
-            presses, status, mid_check = exercise(
-                label, frame_name, buttons, timeout, busy_window
+        for label, frame_name in (("page", WEB_FRAME), ("native", MAIN_FRAME)):
+            presses, mid, status, action = exercise(
+                f"{label} check", frame_name, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
             )
             note = "" if presses == 1 else f" after {presses} presses"
             print(
-                f"press {label}: both cards mid-check on {mid_check!r}; "
-                f"both settled on {status!r}{note}"
+                f"press {label} check: both mid-check on {mid!r}; "
+                f"both read {status!r} with {action!r}{note}"
+            )
+            if feed_mode == "newer":
+                if status != OFFERED_STATUS:
+                    raise Failure(f"the {label} press should offer an update, got {status!r}")
+                if action != "Download update":
+                    raise Failure(f"the {label} press should offer Download, got {action!r}")
+
+        if feed_mode == "newer":
+            presses, mid, status, action = exercise(
+                "page download",
+                WEB_FRAME,
+                ("Download update",),
+                DOWNLOAD_STATUS,
+                timeout,
+                busy_window,
+            )
+            if not status.startswith(DOWNLOADED_PREFIX) or not status.endswith(
+                DOWNLOADED_SUFFIX
+            ):
+                raise Failure(f"the download did not report a staged copy: {status!r}")
+            if action != "Restart to update":
+                raise Failure(f"the staged card should offer Restart, got {action!r}")
+            print(
+                f"press page download: both mid-download on {mid!r}; "
+                f"both staged {status!r} with {action!r}"
             )
 
-        page_status, page_button, _ = card(WEB_FRAME)
-        native_status, _, _ = card(MAIN_FRAME)
-        if page_status != native_status:
-            raise Failure(
-                f"the cards disagree at the end: page {page_status!r} vs native {native_status!r}"
+            # The press the harness must not let through: a relaunch would
+            # replace the copy under test.
+            if not press(WEB_FRAME, ("Restart to update",)):
+                raise Failure("the staged card's Restart button could not be pressed")
+            def refused():
+                status, _, _, other, _, _ = cards()
+                return status == RESTART_REFUSAL and other == RESTART_REFUSAL
+
+            wait_until(refused, timeout, "both cards to report the restart refusal")
+            if proc.poll() is not None:
+                raise Failure("the app exited on the Restart press")
+            if first_frame(MAIN_FRAME) is None:
+                raise Failure("the app's window went away on the Restart press")
+            print(
+                f"press page restart: both cards refused with {RESTART_REFUSAL!r}; "
+                "the app is still running"
             )
-        if page_button == WORKING:
+
+        page_status, page_check, page_action, native_status, native_action, _ = cards()
+        if page_status != native_status or page_action != native_action:
+            raise Failure(
+                f"the cards disagree at the end: page {page_status!r}/{page_action!r} "
+                f"vs native {native_status!r}/{native_action!r}"
+            )
+        if page_check == WORKING:
             raise Failure("the page was left on 'Working…'")
-        print(f"PASS: both cards read {page_status!r}; neither is on the busy step")
+        print(
+            f"PASS: both cards read {page_status!r} with {page_action!r}; "
+            "neither is on the busy step"
+        )
         ok = True
     except Failure as failure:
         print(f"FAIL: {failure}", file=sys.stderr)
@@ -482,13 +587,27 @@ def main():
         "--binary", default="target/debug/muse", help="the built app (default: %(default)s)"
     )
     parser.add_argument(
+        "--feed",
+        choices=("newer", "real"),
+        default="newer",
+        help="newer: a local fake release that offers an update (default); "
+        "real: the release API, asserting only that the cards agree",
+    )
+    parser.add_argument(
         "--timeout", type=float, default=25.0, help="settle budget in seconds (default: 25)"
     )
     parser.add_argument(
         "--busy-window",
         type=float,
         default=5.0,
-        help="how long a press may take to show a check starting (default: 5)",
+        help="how long a press may take to show its work starting (default: 5)",
+    )
+    parser.add_argument(
+        "--delay-ms",
+        type=int,
+        default=600,
+        help="how long the harness feed takes to answer, so the busy step can be read "
+        "(default: %(default)s)",
     )
     parser.add_argument("--keep", action="store_true", help="keep the temp config and log")
     parser.add_argument(
@@ -505,7 +624,15 @@ def main():
     try:
         return (
             0
-            if run(args.binary, args.timeout, args.busy_window, args.keep, args.env_script)
+            if run(
+                args.binary,
+                args.timeout,
+                args.busy_window,
+                args.keep,
+                args.env_script,
+                args.feed,
+                args.delay_ms,
+            )
             else 1
         )
     except Failure as failure:

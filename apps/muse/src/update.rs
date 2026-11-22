@@ -128,8 +128,54 @@ pub fn note_check_done(now_epoch: u64) {
     }
 }
 
+/// A release feed on disk, set by the two-window harness
+/// (`scripts/settings-two-windows.py`) so a seat can be driven to the offered
+/// and staged states without the network or a real build. A shipping AppImage
+/// never sets it, and every use below is behind it.
+pub fn harness_feed() -> Option<PathBuf> {
+    std::env::var_os("MUSE_UPDATE_FEED")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+/// Pace the harness's own work so the busy step lasts long enough for the
+/// script to read both cards inside it. Zero (and no sleep) unless a feed is
+/// set, so a shipping copy never pays for it.
+fn harness_delay() {
+    if harness_feed().is_none() {
+        return;
+    }
+    let millis = std::env::var("MUSE_UPDATE_DELAY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if millis > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(millis));
+    }
+}
+
+fn read_feed(path: &Path) -> Result<ReleaseInfo, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("Update check failed: {error}"))?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| "Update feed returned invalid data.".to_string())?;
+    parse_release(&json)
+}
+
+/// A `file://` asset the harness points the feed at: the same bytes a download
+/// would fetch, without the network round trip. Only the absolute form counts;
+/// anything else takes the normal download path.
+fn local_asset(url: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(url.strip_prefix("file://")?);
+    path.is_absolute().then_some(path)
+}
+
 /// Fetch the feed answer. One blocking call, run on a worker.
 pub fn fetch_latest() -> Result<ReleaseInfo, String> {
+    if let Some(path) = harness_feed() {
+        harness_delay();
+        return read_feed(&path);
+    }
     let response = ureq::get(RELEASE_API)
         .set("User-Agent", "muse-linux-updater")
         .set("Accept", "application/vnd.github+json")
@@ -169,16 +215,24 @@ pub fn download_staged(info: &ReleaseInfo) -> Result<PathBuf, String> {
     }
     let target = dir.join(ASSET_NAME);
     let temporary = dir.join(format!(".{ASSET_NAME}.part"));
-    let response = ureq::get(&info.asset_url)
-        .set("User-Agent", "muse-linux-updater")
-        .timeout(std::time::Duration::from_secs(600))
-        .call()
-        .map_err(|error| format!("Update download failed: {error}"))?;
-    let mut staged = std::fs::File::create(&temporary)
-        .map_err(|_| "Could not write the staged update.".to_string())?;
-    let mut reader = response.into_reader();
-    std::io::copy(&mut reader, &mut staged)
-        .map_err(|_| "Update download was interrupted.".to_string())?;
+    if let (Some(_), Some(source)) = (harness_feed(), local_asset(&info.asset_url)) {
+        harness_delay();
+        let bytes =
+            std::fs::read(&source).map_err(|error| format!("Update download failed: {error}"))?;
+        std::fs::write(&temporary, &bytes)
+            .map_err(|_| "Could not write the staged update.".to_string())?;
+    } else {
+        let response = ureq::get(&info.asset_url)
+            .set("User-Agent", "muse-linux-updater")
+            .timeout(std::time::Duration::from_secs(600))
+            .call()
+            .map_err(|error| format!("Update download failed: {error}"))?;
+        let mut staged = std::fs::File::create(&temporary)
+            .map_err(|_| "Could not write the staged update.".to_string())?;
+        let mut reader = response.into_reader();
+        std::io::copy(&mut reader, &mut staged)
+            .map_err(|_| "Update download was interrupted.".to_string())?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -362,6 +416,42 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The harness feed is read exactly like a network answer, and an asset
+    /// URL only becomes a local copy for the absolute `file://` form.
+    #[test]
+    fn a_harness_feed_reads_like_the_network_answer() {
+        let dir = std::env::temp_dir().join(format!("muse-feed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe dir");
+        let sha = "d".repeat(40);
+        let path = dir.join("feed.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "body": format!("Rolling x86_64 AppImage built from {sha} by the AppImage workflow."),
+                "assets": [{
+                    "name": ASSET_NAME,
+                    "browser_download_url": "file:///tmp/muse-harness.AppImage",
+                    "size": 42,
+                }],
+            })
+            .to_string(),
+        )
+        .expect("feed file");
+        let info = read_feed(&path).expect("reads the file");
+        assert_eq!(info.sha, sha);
+        assert_eq!(info.asset_url, "file:///tmp/muse-harness.AppImage");
+        assert_eq!(info.asset_size, 42);
+        assert!(read_feed(&dir.join("missing.json")).is_err());
+        assert_eq!(
+            local_asset("file:///tmp/muse-harness.AppImage"),
+            Some(PathBuf::from("/tmp/muse-harness.AppImage"))
+        );
+        assert_eq!(local_asset("https://example.invalid/muse.AppImage"), None);
+        assert_eq!(local_asset("file://relative.AppImage"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

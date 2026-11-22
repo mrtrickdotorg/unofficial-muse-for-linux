@@ -2,23 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { call, channelAvailable } from "./api";
 import type { SettingsSnapshot, SettingsUpdates } from "./types";
 
-/// The native section's own sentence, plus what its buttons would say next.
-/// The page never offers those presses -- it names the state they would act
-/// on, so the two surfaces cannot tell different stories.
+/// The app's own sentence, word for word: the native card shows the same
+/// string, so the page adds no clause of its own -- not while checking, not
+/// when a download is waiting, not ever. The buttons carry what the state
+/// offers next.
 function updatesSentence(updates: SettingsUpdates): string {
-  const status =
+  return (
     updates.status ||
     (updates.appimage
       ? "Updates come from the rolling AppImage release."
-      : "This copy updates through its own channel (store or checkout), not here.");
-  if (updates.staged) {
-    return `${status} An update is downloaded; restart to take it.`;
-  }
-  // While the check runs, the app's own status says so ("Checking for
-  // updates…") and the button says "Working…". The page adds no second
-  // clause the native card does not have, so the two cards read alike at
-  // every step, not only once the answer lands.
-  return status;
+      : "This copy updates through its own channel (store or checkout), not here.")
+  );
 }
 
 function Row({

@@ -550,7 +550,12 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   link, opens the native Settings page and its web view, and presses Check on each card through the
   accessibility trees -- no pointer injection and no window stacking to get wrong. It fails if
   either card stays on the busy step (the page's button on `Working…`, a status still reading
-  `Checking for updates…`) or if the two cards read different words once settled.
+  `Checking for updates…`) or if the two cards read different words once settled. By default it
+  feeds the app a release JSON on disk (`MUSE_UPDATE_FEED`) whose asset is a `file://` path, paced
+  by `MUSE_UPDATE_DELAY_MS` so the busy step can be read on both cards, so a dev build reaches
+  `A newer build is available.` and the staged `Restart to update` state without the network; a
+  Restart press in that copy is refused rather than relaunching the binary under test. `--feed
+  real` runs the release API instead and asserts only that the cards agree.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would

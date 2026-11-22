@@ -5040,7 +5040,13 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
             match answer {
                 Ok(info) => {
                     super::update::note_check_done(super::update::now_epoch());
-                    if super::update::update_available(super::update::local_sha(), &info) {
+                    let local = super::update::local_sha();
+                    // A harness copy carries no compiled-in commit, so it
+                    // follows the feed it was handed instead of calling itself
+                    // current.
+                    let offered = super::update::update_available(local, &info)
+                        || (local.is_none() && super::update::harness_feed().is_some());
+                    if offered {
                         state.status = "A newer build is available.".to_owned();
                         state.info = Some(info);
                     } else {
@@ -5070,6 +5076,15 @@ fn do_update_action(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
         (state.info.clone(), state.staged.clone())
     };
     if let Some(staged) = staged {
+        // The harness can drive the card to Restart; a relaunch there would
+        // replace the copy under test, so the press is refused before any
+        // worker starts.
+        if super::update::harness_feed().is_some() {
+            const REFUSAL: &str = "Restart is disabled in this harness copy.";
+            ctx.updates.borrow_mut().status = REFUSAL.to_owned();
+            paint_updates(ctx, page);
+            return Err(REFUSAL.to_owned());
+        }
         {
             let mut state = ctx.updates.borrow_mut();
             if state.busy {

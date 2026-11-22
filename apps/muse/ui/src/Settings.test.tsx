@@ -99,10 +99,10 @@ describe("the Settings web page", () => {
 
     render(<Settings />);
 
+    // The app's own line, with nothing appended: the staged state is named by
+    // the button the page offers, as the native card does.
     expect(
-      screen.getByText(
-        "Updates come from the rolling AppImage release. An update is downloaded; restart to take it.",
-      ),
+      screen.getByText("Updates come from the rolling AppImage release."),
     ).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Restart to update" }));
     await waitFor(() => expect(commands).toContain("update.install"));
