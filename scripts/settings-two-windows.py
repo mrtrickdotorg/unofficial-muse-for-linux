@@ -536,14 +536,16 @@ def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
     # The press has started; it must finish, and both cards must leave the
     # busy step together with the same words and the same press offered. A
     # window's accessibility tree can trail its own DOM by a frame, so a pair
-    # counts only when two reads a moment apart both carry it: one lucky read
-    # in the middle of a repaint is not agreement.
+    # counts only when two reads a moment apart both carry it, with the same
+    # press on both: one lucky read in the middle of a repaint is not
+    # agreement, and a page whose button has not landed yet reads as no press
+    # at all rather than as a card that offers something else.
     deadline = time.monotonic() + timeout
     seen = None
     agreed = None
     while time.monotonic() < deadline:
         pair = quiet()
-        if pair is not None and pair == seen:
+        if pair is not None and pair == seen and pair[1] == pair[3]:
             agreed = pair
             break
         seen = pair
