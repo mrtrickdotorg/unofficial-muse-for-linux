@@ -19,13 +19,16 @@ function ResultLine({ item }: { item: Row }) {
   );
 }
 
-export function Search() {
+/// `initialQuery` is the drawer's own entry point: the shell hands over the
+/// words the reader typed there. They are typed, not read -- the page's own Run
+/// still makes the one wire read, exactly as it does for words typed here.
+export function Search({ initialQuery }: { initialQuery?: string } = {}) {
   const boot = window.__MUSE_BOOT__;
   const [data, setData] = useState<SearchSnapshot | null>(
     boot && "query" in boot ? boot : null,
   );
   const [query, setQuery] = useState(
-    boot && "query" in boot ? boot.query : "",
+    boot && "query" in boot ? boot.query : (initialQuery ?? ""),
   );
   const [error, setError] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);

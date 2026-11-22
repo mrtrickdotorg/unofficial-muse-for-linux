@@ -283,12 +283,19 @@ export type LocalHostSnapshot = {
 // and the title the native drawer prints.
 export type ShellPage = { name: string; title: string };
 
-// The shell's own payload: the page list, and the account and build stamp the
-// native drawer carries. Page data is not here -- each page asks its snapshot.
+// One row of the drawer's History: the thread's id, the exact words the native
+// sidebar prints for it, and whether it is the open thread.
+export type HistoryRow = { id: string; text: string; current: boolean };
+
+// The shell's own payload: the page list, the account and build stamp the
+// native drawer carries, and its History rows. Null History means the window
+// could not read the listing -- unread, never an empty account. Page data is
+// not here: each page asks its own snapshot.
 export type ShellSnapshot = {
   pages: ShellPage[];
   account: string;
   build: string;
+  history: HistoryRow[] | null;
 };
 
 // One bundle serves every window: the boot payload names the page it opens.

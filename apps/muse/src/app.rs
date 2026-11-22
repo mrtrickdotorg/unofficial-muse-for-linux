@@ -2692,6 +2692,8 @@ impl Chat {
         let unstage_weak = weak.clone();
         let approvals_weak = weak.clone();
         let decide_weak = weak.clone();
+        let history_weak = weak.clone();
+        let open_thread_weak = weak.clone();
         let policy_weak = weak.clone();
         let reset_weak = weak.clone();
         let grant_weak = weak.clone();
@@ -2722,6 +2724,16 @@ impl Chat {
                 Some(chat) => chat.web_decide(id, word),
                 None => Err("The app window is gone.".to_owned()),
             }),
+            history: std::rc::Rc::new(move || match history_weak.upgrade() {
+                Some(chat) => Ok(chat.web_history()),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            open_thread: std::rc::Rc::new(move |id: Option<&str>| {
+                match open_thread_weak.upgrade() {
+                    Some(chat) => chat.web_open_thread(id),
+                    None => Err("The app window is gone.".to_owned()),
+                }
+            }),
             set_policy: std::rc::Rc::new(move |label: &str, value: &str| {
                 match policy_weak.upgrade() {
                     Some(chat) => chat.web_policy_set(label, value),
@@ -2747,6 +2759,33 @@ impl Chat {
                 None => Err("The app window is gone.".to_owned()),
             }),
         }
+    }
+
+    /// The drawer's History rows, in the native sidebar's order: pinned first,
+    /// then the listing, with the open thread marked.
+    fn web_history(&self) -> Vec<crate::pages::HistoryRow> {
+        let mut threads = self.threads();
+        threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
+        let current = self.current_thread();
+        threads
+            .iter()
+            .map(|thread| crate::pages::HistoryRow {
+                id: thread.session_id.clone(),
+                text: crate::pages::history_text(thread),
+                current: current.as_deref() == Some(thread.session_id.as_str()),
+            })
+            .collect()
+    }
+
+    /// Open a thread from the drawer's History -- or, with no id, a fresh one.
+    /// The native activation's own call, without the page stack the shell does
+    /// not have.
+    fn web_open_thread(self: &Rc<Self>, id: Option<&str>) -> Result<(), String> {
+        let id = id.map(str::to_owned);
+        if self.current_thread() != id {
+            self.switch_thread(id);
+        }
+        Ok(())
     }
 
     /// The Settings page's flip press: the shared table decides what the row

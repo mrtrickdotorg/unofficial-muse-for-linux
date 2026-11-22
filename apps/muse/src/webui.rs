@@ -261,7 +261,7 @@ fn localhost_reply(held: &HeldLocalHost) -> serde_json::Value {
 /// The shell page: the rail and its page list, plus the account and build
 /// stamp the native drawer prints. Each page inside the shell asks its own
 /// snapshot, so the shell carries no page data of its own.
-fn shell_payload() -> serde_json::Value {
+fn shell_payload(routes: Option<&WebRoutes>) -> serde_json::Value {
     serde_json::json!({
         "pages": crate::pages::shell_pages(),
         "account": crate::pages::chat_snapshot().account,
@@ -269,17 +269,27 @@ fn shell_payload() -> serde_json::Value {
             Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
             None => "dev build".to_owned(),
         },
+        // The drawer's History is the panel's listing, so it arrives only with
+        // the routes that can read it. A window opened without them shows the
+        // section unread rather than empty.
+        "history": match routes {
+            Some(routes) => match (routes.history)() {
+                Ok(rows) => serde_json::json!(rows),
+                Err(_) => serde_json::Value::Null,
+            },
+            None => serde_json::Value::Null,
+        },
     })
 }
 
-fn shell_document() -> String {
-    let mut boot = shell_payload();
+fn shell_document(routes: Option<&WebRoutes>) -> String {
+    let mut boot = shell_payload(routes);
     boot["page"] = serde_json::json!("shell");
     document(&boot)
 }
 
-fn shell_reply() -> serde_json::Value {
-    let mut reply = shell_payload();
+fn shell_reply(routes: Option<&WebRoutes>) -> serde_json::Value {
+    let mut reply = shell_payload(routes);
     reply["ok"] = serde_json::json!(true);
     reply
 }
@@ -549,7 +559,9 @@ pub(crate) fn should_log_command(
         || command.ends_with(".set")
         || command.ends_with(".reset")
         || command.ends_with(".grant")
-        || command.ends_with(".start");
+        || command.ends_with(".start")
+        || command.ends_with(".open")
+        || command.ends_with(".new");
     wire || named.insert(command.to_owned())
 }
 
@@ -568,6 +580,8 @@ pub(crate) type WebAttach = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebUnstage = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 pub(crate) type WebApprovals = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebDecide = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
+pub(crate) type WebHistory = std::rc::Rc<dyn Fn() -> Result<Vec<crate::pages::HistoryRow>, String>>;
+pub(crate) type WebOpenThread = std::rc::Rc<dyn Fn(Option<&str>) -> Result<(), String>>;
 pub(crate) type WebSetPolicy = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
 pub(crate) type WebResetConnector = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 pub(crate) type WebHostGrant = std::rc::Rc<dyn Fn(bool, bool) -> Result<(), String>>;
@@ -591,6 +605,11 @@ pub(crate) struct WebRoutes {
     pub approvals: WebApprovals,
     /// Decide one pending approval: the service's own outcome word.
     pub decide: WebDecide,
+    /// The drawer's History rows: the panel's own listing, in its own words.
+    pub history: WebHistory,
+    /// Open a thread from History, or a fresh one with no id: the native
+    /// activation's call.
+    pub open_thread: WebOpenThread,
     /// Flip one policy row: the same table and the same update call as the
     /// chat panel's own press.
     pub set_policy: WebSetPolicy,
@@ -682,7 +701,7 @@ pub(crate) fn handle_command_with(
         // re-asks and sees new cards and log lines without holding a lock.
         "localhost.snapshot" => Answer::Now(localhost_reply(&crate::pages::localhost_snapshot())),
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
-        "shell.snapshot" => Answer::Now(shell_reply()),
+        "shell.snapshot" => Answer::Now(shell_reply(routes)),
         // Send dispatches nothing itself: the draft goes back to the
         // controller that owns the `Send` slot, which is the path the app's
         // own Send button takes -- same slot, same receipt, same history
@@ -803,6 +822,25 @@ pub(crate) fn handle_command_with(
                 },
             }
         }
+        // The drawer's History: the panel's own listing, and the same open the
+        // native activation makes. A window without routes cannot read it and
+        // says so, rather than claiming an empty account.
+        "history.snapshot" => match routes {
+            None => Answer::Now(serde_json::json!({
+                "ok": false,
+                "error": "this window cannot read history"
+            })),
+            Some(routes) => match (routes.history)() {
+                Ok(rows) => Answer::Now(serde_json::json!({ "ok": true, "rows": rows })),
+                Err(sentence) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
+            },
+        },
+        "history.open" => {
+            let thread = request.get("thread").and_then(|value| value.as_str());
+            route_answer(routes.map(|routes| (routes.open_thread)(thread)))
+        }
+        // A fresh thread is History's own open with no id.
+        "chat.new" => route_answer(routes.map(|routes| (routes.open_thread)(None))),
         // The Settings page's flips and resets: the same table, the same
         // update call and the same ticket the chat panel's presses take, so a
         // page press and a panel press cannot disagree or run two at once.
@@ -1386,7 +1424,7 @@ pub(crate) fn open_shell_window(routes: Option<WebRoutes>) -> bool {
     open_window_with(
         None,
         "Muse · web shell",
-        shell_document(),
+        shell_document(routes.as_ref()),
         None,
         SHELL_PROBE,
         routes,
@@ -2121,6 +2159,8 @@ mod tests {
             unstage: Rc::new(|_: &str| Ok(())),
             approvals: Rc::new(|| Ok(())),
             decide: Rc::new(|_: &str, _: &str| Ok(())),
+            history: Rc::new(|| Ok(Vec::new())),
+            open_thread: Rc::new(|_: Option<&str>| Ok(())),
             set_policy: Rc::new(|_: &str, _: &str| Ok(())),
             reset_connector: Rc::new(|_: &str| Ok(())),
             host_grant: Rc::new(|_: bool, _: bool| Ok(())),
@@ -3169,6 +3209,71 @@ mod tests {
 
     /// The shell's document carries the app's own page list, so the rail and
     /// drawer cannot offer a page the app does not have.
+    /// The drawer's History is the panel's listing and its press is the
+    /// panel's own open: both reach the routes by name, and a fresh chat is
+    /// that open with no id.
+    #[test]
+    fn the_drawer_history_reads_and_opens_through_the_routes() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let opened: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let slot = opened.clone();
+        let routes = WebRoutes {
+            history: Rc::new(|| {
+                Ok(vec![crate::pages::HistoryRow {
+                    id: "s-1".into(),
+                    text: "📌 A calmer inbox (2 unread)".into(),
+                    current: true,
+                }])
+            }),
+            open_thread: Rc::new(move |id: Option<&str>| {
+                slot.borrow_mut().push(id.map(str::to_owned));
+                Ok(())
+            }),
+            ..stub_routes()
+        };
+
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":1,"cmd":"history.snapshot"}"#, None, Some(&routes));
+        let Answer::Now(reply) = answer else {
+            panic!("history is held state");
+        };
+        assert_eq!(command, "history.snapshot");
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["rows"][0]["id"], "s-1");
+        assert_eq!(reply["rows"][0]["text"], "📌 A calmer inbox (2 unread)");
+        assert_eq!(reply["rows"][0]["current"], true);
+
+        let (_, Answer::Now(reply), _) = handle_command_with(
+            r#"{"id":2,"cmd":"history.open","thread":"s-2"}"#,
+            None,
+            Some(&routes),
+        ) else {
+            panic!("an open is answered now");
+        };
+        assert_eq!(reply["ok"], true);
+        let (_, Answer::Now(reply), _) =
+            handle_command_with(r#"{"id":3,"cmd":"chat.new"}"#, None, Some(&routes))
+        else {
+            panic!("a new chat is answered now");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(*opened.borrow(), vec![Some("s-2".to_owned()), None]);
+    }
+
+    /// A window without routes does not claim an empty account: the History
+    /// read is refused in words, and the opens are refused with the rest.
+    #[test]
+    fn a_window_without_routes_cannot_read_history() {
+        let (_, Answer::Now(reply), _) =
+            handle_command_with(r#"{"id":1,"cmd":"history.snapshot"}"#, None, None)
+        else {
+            panic!("a read is answered now");
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "this window cannot read history");
+    }
+
     /// The Settings page's flip reaches the app's own update route with the
     /// row's label and the word the page sent: the page picks nothing itself.
     #[test]
@@ -3273,7 +3378,7 @@ mod tests {
 
     #[test]
     fn the_shell_lists_every_page_it_opens() {
-        let doc = shell_document();
+        let doc = shell_document(None);
         assert!(doc.contains("\"page\":\"shell\""), "page named in boot");
         for page in crate::pages::PAGES {
             assert!(
@@ -3298,6 +3403,24 @@ mod tests {
         );
         assert_eq!(reply["pages"][0]["title"], "Chat");
         assert_eq!(reply["pages"][1]["name"], "threads");
+
+        // The same window opened with routes carries the panel's History rows,
+        // in the panel's words; without them the section is unread, not empty.
+        let routes = WebRoutes {
+            history: std::rc::Rc::new(|| {
+                Ok(vec![crate::pages::HistoryRow {
+                    id: "s-1".into(),
+                    text: "(untitled)".into(),
+                    current: false,
+                }])
+            }),
+            ..stub_routes()
+        };
+        let with = shell_document(Some(&routes));
+        assert!(with.contains("\"history\":[{"), "the rows ride in the boot");
+        assert!(with.contains("\"(untitled)\""), "the row's own words");
+        assert!(with.contains("\"id\":\"s-1\""));
+        assert!(doc.contains("\"history\":null"), "no routes, no read");
     }
 
     /// Search runs the account read for the page's own query, and the answer

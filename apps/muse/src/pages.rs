@@ -82,6 +82,37 @@ pub fn title(name: &str) -> &str {
     }
 }
 
+/// One row of the drawer's History list, as the native sidebar builds it: the
+/// thread's id, the exact words the native row prints, and whether it is the
+/// open thread.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub(crate) struct HistoryRow {
+    pub id: String,
+    pub text: String,
+    pub current: bool,
+}
+
+/// The words a History row prints: the untitled placeholder, the pin mark and
+/// the unread count, in the native sidebar's own order. The native row and the
+/// shell's row both read this, so the two lists cannot word a thread differently.
+pub(crate) fn history_text(thread: &muse_account::Thread) -> String {
+    let name = if thread.title.is_empty() {
+        "(untitled)".to_owned()
+    } else {
+        thread.title.clone()
+    };
+    let name = if thread.pinned {
+        format!("📌 {name}")
+    } else {
+        name
+    };
+    if thread.unread_count > 0 {
+        format!("{} ({} unread)", name, thread.unread_count)
+    } else {
+        name
+    }
+}
+
 /// The flip a policy row offers, if any: the service's own alternating words,
 /// never an invented third. The chat panel's press and the Settings page's
 /// press both read this table, so the two surfaces cannot offer different
@@ -4633,21 +4664,7 @@ fn fill_history(ctx: &Ctx) {
         // and the arrow keys walk the threads.
         row.set_focusable(true);
         row.set_widget_name(&format!("thread:{}", thread.session_id));
-        let name = if thread.title.is_empty() {
-            "(untitled)".to_owned()
-        } else {
-            thread.title.clone()
-        };
-        let name = if thread.pinned {
-            format!("📌 {name}")
-        } else {
-            name
-        };
-        let text = if thread.unread_count > 0 {
-            format!("{} ({} unread)", name, thread.unread_count)
-        } else {
-            name
-        };
+        let text = history_text(thread);
         let label = gtk4::Label::new(Some(&text));
         label.set_xalign(0.0);
         label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -7092,6 +7109,32 @@ mod tests {
     /// The table the panel and the Settings page both read: only the pairs the
     /// service accepts have a flip, and each flip becomes exactly one update
     /// argument -- a default's own word, or a protocol's bare key.
+    /// The native row and the shell's row read one wording: the untitled
+    /// placeholder, the pin mark, then the unread count.
+    #[test]
+    fn a_history_row_says_what_the_native_sidebar_says() {
+        let thread = |title: &str, pinned: bool, unread: u64| muse_account::Thread {
+            session_id: "s-1".into(),
+            title: title.into(),
+            archived: false,
+            pinned,
+            is_thread: true,
+            unread_count: unread,
+            snippet: None,
+            is_primary: true,
+            updated_at: None,
+        };
+        assert_eq!(
+            history_text(&thread("A calmer inbox", false, 0)),
+            "A calmer inbox"
+        );
+        assert_eq!(history_text(&thread("", false, 0)), "(untitled)");
+        assert_eq!(
+            history_text(&thread("A calmer inbox", true, 2)),
+            "📌 A calmer inbox (2 unread)"
+        );
+    }
+
     #[test]
     fn every_policy_flip_carries_the_update_it_becomes() {
         assert_eq!(

@@ -1172,3 +1172,116 @@ html, body {
 .host-actions .inline-button {
   margin-left: 0;
 }
+
+/* The drawer's own chrome: the search entry, the new-chat press, the page list
+ * and the History rows. The shell's History is the native sidebar's section,
+ * with the same words and the same "opens on press, never on selection" rule. */
+.shell-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.shell-search-form {
+  flex: 1;
+  min-width: 0;
+}
+
+.shell-search {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--ground-2);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.shell-search::placeholder {
+  color: var(--text-faint);
+}
+
+.shell-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.shell-new:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.shell-new:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.shell-new-glyph,
+.shell-new-glyph svg {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+}
+
+.shell-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.shell-section {
+  margin: 16px 0 6px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.shell-history {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.shell-history-row {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.shell-history-row:hover:not(:disabled) {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+.shell-history-row.current {
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.shell-history-row:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.shell-history-note {
+  font-size: 11.5px;
+}
