@@ -561,7 +561,8 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   window was never nudged again -- `OPEN_WINDOWS` now holds every window a page opened and prunes
   the ones the reader closed. Another round opens that second view while a check is still in
   flight, so a page whose first snapshot is a busy one is covered too: it must paint `Checking for
-  updates…` with `Working…`, then settle on the same answer as a window that was already up. A
+  updates…` with `Working…`, must not be left on that step, and must settle on the native card's
+  own status that the round reads at that moment, not on a constant it hoped for. A
   further round presses Check twice a double-click apart: the app's busy flag refuses the second
   press with `An update check is already running.`, paints that sentence on both cards, and the
   first check still lands. For that refusal to be reachable at all the native check button stays

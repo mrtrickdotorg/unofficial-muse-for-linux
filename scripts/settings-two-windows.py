@@ -637,7 +637,33 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
                 f"booted on {CHECK_STATUS!r} with {WORKING!r}"
             )
             views = wait_web_windows(OFFERED_STATUS, "Download update", timeout, "mid-check boot")
-            print(f"the running check's answer reached all {views} Settings web views")
+
+            # Settled means off the busy step and on the native card's own
+            # words -- not merely on the constant the round expected.
+            native_status, _, native_action, _ = card(MAIN_FRAME)
+            rendered = [card_of(view) for view in frames_named(WEB_FRAME)]
+            busy = [
+                value for value in rendered
+                if value[0] in BUSY_STATUSES or value[1] == WORKING
+            ]
+            if busy:
+                raise Failure(
+                    f"a Settings window that booted mid-check was left on the busy "
+                    f"step: {busy!r}"
+                )
+            disagree = [
+                value for value in rendered
+                if value[0] != native_status or value[2] != native_action
+            ]
+            if disagree:
+                raise Failure(
+                    f"the windows that booted mid-check settled on {disagree!r} while "
+                    f"the native card read {native_status!r} with {native_action!r}"
+                )
+            print(
+                f"the running check's answer reached all {views} Settings web views: "
+                f"none left on {WORKING!r}, all on the native card's {native_status!r}"
+            )
 
             # With both windows already up, a native press has to reach every
             # one of them: each takes the busy step and each leaves it for the
