@@ -695,6 +695,13 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                         f"after the {pressed} double press the cards read page "
                         f"{status!r}/{check!r} and native {native_status!r}/{native_action!r}"
                     )
+                # The refusal described the step it was refused in: once the
+                # check has landed, no refusal line may still be on screen.
+                if shows_text(WEB_FRAME, CHECK_REFUSAL):
+                    raise Failure(
+                        f"a refusal line survived the settled {pressed} double press "
+                        f"({status!r})"
+                    )
                 print(
                     f"pressed {pressed} check twice: both cards refused with "
                     f"{CHECK_REFUSAL!r}, then settled on {status!r} with {action!r}, "

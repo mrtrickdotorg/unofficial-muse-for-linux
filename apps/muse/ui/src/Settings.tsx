@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { call, channelAvailable } from "./api";
 import type { SettingsSnapshot, SettingsUpdates } from "./types";
 
@@ -60,6 +60,10 @@ export function Settings() {
   // single installer, and refuses a second press while one runs.
   const [updating, setUpdating] = useState<string | null>(null);
   const [updateRefusal, setUpdateRefusal] = useState<string | null>(null);
+  // The status the last snapshot carried. A refusal describes the step it was
+  // refused in, so once the app's own status moves on the sentence is about a
+  // step that ended.
+  const updateStatusSeen = useRef<string | null>(null);
 
   // Opening the page costs nothing: the native side answers with the state its
   // own paints left behind.
@@ -72,6 +76,13 @@ export function Settings() {
       const held = await call<SettingsSnapshot>("settings.snapshot");
       setData(held);
       setError(null);
+      if (
+        updateStatusSeen.current !== null &&
+        held.updates.status !== updateStatusSeen.current
+      ) {
+        setUpdateRefusal(null);
+      }
+      updateStatusSeen.current = held.updates.status;
     } catch (failure) {
       setError(sentence(failure));
     }
