@@ -53,7 +53,8 @@ Check nor Download -- a press nobody can act on is not an offer.
 `--restart` is the opt-in half, and the two-window rounds never take it: they
 refuse Restart so they cannot replace the copy under them, so this round runs a
 throwaway copy of the binary in the temp dir and asks the app to relaunch for
-real. The feed's asset is then a stand-in build that records the path it was
+real from the native card alone -- its subject is the relaunch, and not loading
+a web view keeps it off WebKit. The feed's asset is then a stand-in build that records the path it was
 started from and stays up, so the round can require that the new process is the
 staged file, that the old process and its window are gone, and that the copy a
 launcher would open now holds the staged bytes.
@@ -460,7 +461,7 @@ def launch_command(binary, env_script):
     ]
 
 
-def open_settings(command, env, log_path):
+def open_settings(command, env, log_path, with_page=True):
     proc = subprocess.Popen(
         command,
         env=env,
@@ -489,6 +490,10 @@ def open_settings(command, env, log_path):
         if not press(MAIN_FRAME, (SETTINGS_BUTTON,)):
             raise Failure("the native Settings button could not be pressed")
         wait_until(lambda: card(MAIN_FRAME)[0], 20, "the native card's status")
+        if not with_page:
+            # The restart round drives the native card only; nothing it checks
+            # needs a web view, and not loading one keeps it off WebKit.
+            return proc
 
         # The page's own Web view button. A button that is there but not yet
         # pressable -- insensitive while the page settles -- is waited for
@@ -643,27 +648,30 @@ def write_feed(root, marker=None):
     return feed_path, asset
 
 
-def restart_round(proc, root, copy, timeout, busy_window):
+def restart_round(proc, root, copy, timeout):
     """Stage a harness release, press Restart, require the copy to take over.
 
-    The staged file must be what runs, it must still be up when the old process
-    and its window are gone, and the file a launcher would open must now hold
-    the staged bytes -- the update is in place, not merely announced.
+    The native card drives it: the page window is the two-window rounds'
+    subject, and leaving it out keeps this round on the relaunch -- and off
+    WebKit, which a copy posing as a bundle has no reason to load here. The
+    staged file must be what runs, it must still be up when the old process and
+    its window are gone, and the file a launcher would open must now hold the
+    staged bytes: the update is in place, not merely announced.
     """
     print(f"restart: staging into the throwaway copy at {copy}")
-    exercise("native check", MAIN_FRAME, CHECK_LABELS, CHECK_STATUS, timeout, busy_window)
-    _, _, status, action = exercise(
-        "native download",
-        MAIN_FRAME,
-        ("Download update",),
-        DOWNLOAD_STATUS,
-        timeout,
-        busy_window,
+    if not press(MAIN_FRAME, CHECK_LABELS):
+        raise Failure("the native Check press could not be made")
+    wait_until(
+        lambda: card(MAIN_FRAME)[0] == OFFERED_STATUS, timeout, "the update to be offered"
     )
+    if not press(MAIN_FRAME, ("Download update",)):
+        raise Failure("the native Download press could not be made")
+    wait_until(
+        lambda: card(MAIN_FRAME)[2] == "Restart to update", timeout, "the staged card"
+    )
+    status = card(MAIN_FRAME)[0] or ""
     if not status.startswith(DOWNLOADED_PREFIX) or not status.endswith(DOWNLOADED_SUFFIX):
         raise Failure(f"the download staged nothing to restart into: {status!r}")
-    if action != "Restart to update":
-        raise Failure(f"the staged card should offer Restart, got {action!r}")
     staged = Path(status[len(DOWNLOADED_PREFIX) : -len(DOWNLOADED_SUFFIX)])
     if not staged.is_file():
         raise Failure(f"the staged copy is not a file: {staged}")
@@ -774,10 +782,12 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
     proc = None
     ok = False
     try:
-        proc = open_settings(launch_command(binary, env_script), env, log_path)
+        proc = open_settings(
+            launch_command(binary, env_script), env, log_path, with_page=not restart
+        )
 
         if restart:
-            ok = restart_round(proc, root, copy, timeout, busy_window)
+            ok = restart_round(proc, root, copy, timeout)
             return ok
 
         if no_appimage:
