@@ -1205,11 +1205,12 @@ fn await_answer(
 }
 
 thread_local! {
-    /// The window a page has open, if any: a native paint can nudge it by name.
-    /// Weak, so a window the reader closed simply stops upgrading and needs no
-    /// cleanup here.
+    /// The windows a page has open, if any: a native paint nudges every one of
+    /// them by name. A list, not one entry, because a page can be opened twice
+    /// and the older window must not go stale. Weak, so a window the reader
+    /// closed simply stops upgrading and is dropped on the next nudge.
     static OPEN_WINDOWS: std::cell::RefCell<
-        std::collections::HashMap<&'static str, gtk4::glib::WeakRef<webkit6::WebView>>,
+        std::collections::HashMap<&'static str, Vec<gtk4::glib::WeakRef<webkit6::WebView>>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
@@ -1217,37 +1218,46 @@ fn track_window(page: &'static str, view: &webkit6::WebView) {
     use webkit6::prelude::*;
     let weak = view.downgrade();
     OPEN_WINDOWS.with(|windows| {
-        windows.borrow_mut().insert(page, weak);
+        windows.borrow_mut().entry(page).or_default().push(weak);
     });
 }
 
-/// Tell the open window for `page` that a native paint changed what it shows.
-/// The page re-asks its own snapshot; nothing is pushed as data, so the cache
-/// the paint wrote stays the only source of truth.
+/// Tell every open window for `page` that a native paint changed what it
+/// shows. The page re-asks its own snapshot; nothing is pushed as data, so the
+/// cache the paint wrote stays the only source of truth. Windows the reader
+/// closed are pruned here, so the list cannot grow without bound.
 pub(crate) fn nudge_page(page: &'static str, hook: &str) {
     OPEN_WINDOWS.with(|windows| {
-        let Some(view) = windows.borrow().get(page).and_then(|weak| weak.upgrade()) else {
+        let mut windows = windows.borrow_mut();
+        let Some(views) = windows.get_mut(page) else {
             return;
         };
-        use webkit6::prelude::*;
-        let script = format!("window.{hook} && window.{hook}();");
-        view.evaluate_javascript(&script, None, None, gtk4::gio::Cancellable::NONE, |_| {});
+        views.retain(|weak| {
+            let Some(view) = weak.upgrade() else {
+                return false;
+            };
+            use webkit6::prelude::*;
+            let script = format!("window.{hook} && window.{hook}();");
+            view.evaluate_javascript(&script, None, None, gtk4::gio::Cancellable::NONE, |_| {});
+            true
+        });
     });
 }
 
-/// Close the open window for `page`, if one is up. The first-run step is one
-/// window's whole life: when the app's setup returns, the window that showed
-/// it goes, the way the modal did.
+/// Close every open window for `page`. The first-run step is one window's whole
+/// life: when the app's setup returns, the window that showed it goes, the way
+/// the modal did.
 pub(crate) fn close_page_window(page: &'static str) {
-    let open =
-        OPEN_WINDOWS.with(|windows| windows.borrow().get(page).and_then(|weak| weak.upgrade()));
-    let Some(view) = open else {
-        return;
-    };
-    if let Some(root) = gtk4::prelude::WidgetExt::root(&view)
-        && let Ok(window) = gtk4::prelude::Cast::downcast::<gtk4::Window>(root)
-    {
-        gtk4::prelude::GtkWindowExt::close(&window);
+    let open = OPEN_WINDOWS.with(|windows| windows.borrow_mut().remove(page).unwrap_or_default());
+    for weak in open {
+        let Some(view) = weak.upgrade() else {
+            continue;
+        };
+        if let Some(root) = gtk4::prelude::WidgetExt::root(&view)
+            && let Ok(window) = gtk4::prelude::Cast::downcast::<gtk4::Window>(root)
+        {
+            gtk4::prelude::GtkWindowExt::close(&window);
+        }
     }
 }
 

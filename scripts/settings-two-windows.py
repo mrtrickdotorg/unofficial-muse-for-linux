@@ -12,7 +12,9 @@ turn, and requires that
     have when a press answered before the worker did,
   * with the harness feed (the default), both cards reach "A newer build is
     available." with "Download update", then the staged state with "Restart to
-    update", and a Restart press is refused instead of replacing this copy.
+    update", and a Restart press is refused instead of replacing this copy,
+  * with two Settings web views open at once, a press reaches every one of
+    them -- the app keeps every window a page opened, not just the newest.
 
 The feed is a file, not the network: the app reads `MUSE_UPDATE_FEED` (a
 release JSON on disk) instead of the release API, stages the asset from the
@@ -124,6 +126,10 @@ def frames():
                 yield frame
 
 
+def frames_named(name):
+    return [frame for frame in frames() if (frame.get_name() or "") == name]
+
+
 def first_frame(name):
     for frame in frames():
         if (frame.get_name() or "") == name:
@@ -197,7 +203,15 @@ def press(frame_name, button_names):
     return False
 
 
-def card(frame_name):
+def card(frame_name, index=0):
+    """The card of the `index`th window named `frame_name`, as rendered."""
+    views = frames_named(frame_name)
+    if index >= len(views):
+        return None, None, None, None
+    return card_of(views[index])
+
+
+def card_of(frame):
     """The card as rendered: (status, check label, action label, refusal).
 
     Both renderers title the section "Updates"; the status is the first text
@@ -205,9 +219,6 @@ def card(frame_name):
     action button (absent when there is nothing to install) follows. The check
     button reads "Working…" while a press is in flight.
     """
-    frame = first_frame(frame_name)
-    if frame is None:
-        return None, None, None, None
     nodes = walk(frame)
     refusal = None
     for node in nodes:
@@ -242,6 +253,29 @@ def card(frame_name):
             if check is not None and action is not None:
                 break
     return status, check, action, refusal
+
+
+def wait_web_windows(status, action, timeout, label):
+    """Every open Settings web view shows `status` offering `action`.
+
+    Two windows open at once is the case the app's window registry has to get
+    right: only the newest one is tracked unless every window is, so an older
+    window silently stopping its nudges shows up here as a stale card.
+    """
+    deadline = time.monotonic() + timeout
+    seen = []
+    while time.monotonic() < deadline:
+        views = frames_named(WEB_FRAME)
+        if len(views) >= 2:
+            seen = [(value[0], value[2]) for value in (card_of(view) for view in views)]
+            if all(value == (status, action) for value in seen):
+                return len(views)
+        time.sleep(POLL)
+    detail = ", ".join(f"{value!r}" for value in seen) or "no cards read"
+    raise Failure(
+        f"the Settings web views did not all show {status!r} with {action!r} "
+        f"after the {label} press: {detail}"
+    )
 
 
 def wait_until(predicate, timeout, what):
@@ -506,6 +540,15 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
                     raise Failure(f"the {label} press should offer Download, got {action!r}")
 
         if feed_mode == "newer":
+            # A second web view of the same page, opened before the press so
+            # both windows have to be told when it lands.
+            if not press(MAIN_FRAME, (WEB_VIEW_BUTTON,)):
+                raise Failure("a second Settings web view could not be opened")
+            wait_until(
+                lambda: len(frames_named(WEB_FRAME)) >= 2, 20, "the second Settings window"
+            )
+            print(f"opened {len(frames_named(WEB_FRAME))} Settings web views")
+
             presses, mid, status, action = exercise(
                 "page download",
                 WEB_FRAME,
@@ -520,9 +563,10 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
                 raise Failure(f"the download did not report a staged copy: {status!r}")
             if action != "Restart to update":
                 raise Failure(f"the staged card should offer Restart, got {action!r}")
+            views = wait_web_windows(status, action, timeout, "download")
             print(
                 f"press page download: both mid-download on {mid!r}; "
-                f"both staged {status!r} with {action!r}"
+                f"all {views} Settings web views staged {status!r} with {action!r}"
             )
 
             # The press the harness must not let through: a relaunch would
@@ -530,16 +574,21 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms):
             if not press(WEB_FRAME, ("Restart to update",)):
                 raise Failure("the staged card's Restart button could not be pressed")
             def refused():
-                status, _, _, other, _, _ = cards()
-                return status == RESTART_REFUSAL and other == RESTART_REFUSAL
+                native, _, native_action, _ = card(MAIN_FRAME)
+                views = [card_of(view) for view in frames_named(WEB_FRAME)]
+                if native != RESTART_REFUSAL:
+                    return False
+                return bool(views) and all(
+                    view[0] == RESTART_REFUSAL and view[2] == native_action for view in views
+                )
 
-            wait_until(refused, timeout, "both cards to report the restart refusal")
+            wait_until(refused, timeout, "every card to report the restart refusal")
             if proc.poll() is not None:
                 raise Failure("the app exited on the Restart press")
             if first_frame(MAIN_FRAME) is None:
                 raise Failure("the app's window went away on the Restart press")
             print(
-                f"press page restart: both cards refused with {RESTART_REFUSAL!r}; "
+                f"press page restart: every card refused with {RESTART_REFUSAL!r}; "
                 "the app is still running"
             )
 

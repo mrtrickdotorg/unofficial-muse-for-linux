@@ -555,7 +555,11 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   by `MUSE_UPDATE_DELAY_MS` so the busy step can be read on both cards, so a dev build reaches
   `A newer build is available.` and the staged `Restart to update` state without the network; a
   Restart press in that copy is refused rather than relaunching the binary under test. `--feed
-  real` runs the release API instead and asserts only that the cards agree.
+  real` runs the release API instead and asserts only that the cards agree. It also opens a second
+  Settings web view before the download press and requires every window to show the staged state;
+  that round is what caught the window registry keeping one weak reference per page, so the older
+  window was never nudged again -- `OPEN_WINDOWS` now holds every window a page opened and prunes
+  the ones the reader closed.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
   cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
