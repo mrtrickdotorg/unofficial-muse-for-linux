@@ -10,11 +10,6 @@ default-run = "muse"
 name = "muse"
 path = "src/main.rs"
 
-[features]
-# Debug-only: a Unix-socket seam the throwaway Tauri spike asks for real
-# page answers (see src/spike_cmd.rs). Off by default; never shipped.
-spike-cmd = []
-
 [dependencies]
 adw = { package = "libadwaita", version = "0.8", features = ["v1_4"] }
 gtk4 = { version = "0.10.3", features = ["v4_8"] }

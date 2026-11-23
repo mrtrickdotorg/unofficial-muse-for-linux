@@ -95,9 +95,10 @@ jobs:
           --restart --delay-ms 4000 --timeout 40
 
   window-spike:
-    # `apps/muse-window` is excluded from the workspace: it is GTK 3 + WebKitGTK
-    # 4.1, and the app must not carry that engine in its lock, build or tests.
-    # It is compiled here so the spike in the tree cannot rot.
+    # `apps/muse-window` is the app's own window, and it is excluded from the
+    # workspace: it is GTK 3 + WebKitGTK 4.1, and the app must not carry that
+    # engine in its lock, build or tests. It is compiled here so the window the
+    # app spawns cannot rot.
     runs-on: ubuntu-latest
 
     steps:

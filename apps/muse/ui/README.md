@@ -1,11 +1,19 @@
 # Web UI slice (React)
 
-The pages of the Tauri/React migration so far, rendered by the app's own
-WebKitGTK view: **Library** (the reference page), **Goals**, **Tasks**,
-**Ideas**, **Threads**, **Feed**, **Search** and **Chat** (S3: the transcript
-the native list holds, followed live, plus a composer that sends). Sources live here; `built/app.html` is the artifact the Rust side includes
-with `include_str!`. One bundle serves every window — the boot payload names
-the page it opens.
+The pages of the Tauri/React migration so far: **Library** (the reference
+page), **Goals**, **Tasks**, **Ideas**, **Threads**, **Feed**, **Search**,
+**Chat** (S3: the transcript the native list holds, followed live, plus a
+composer that sends) and **Shell** (the rail, the page list, History and one
+page at a time — the app's own window). Sources live here; `built/app.html` is
+the artifact the Rust side includes with `include_str!`. One bundle serves
+every window — the boot payload names the page it opens.
+
+The shell page is what the app opens: `apps/muse-window` is a Tauri 2 window,
+and the app spawns it and answers its commands over pipes (`apps/muse/src/web_shell.rs`).
+Its boot payload is the app's first paint, and the account line and History
+are filled by the app's own reads after it, so the window hands the drawer the
+later answer through `window.museShellBoot` — the same nudge Settings uses for
+an unread policy, and the reason the page needs no timer of its own.
 
 ```sh
 cd apps/muse/ui

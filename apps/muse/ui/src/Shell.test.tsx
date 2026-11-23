@@ -1,7 +1,7 @@
 // The web shell's DOM tests: the rail and drawer it builds from the app's page
 // list, the History rows it reads from the panel, the entry points that reach
 // it, and the keyboard map -- all against the same channel the app speaks.
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { Shell } from "./Shell";
 import { installChannel } from "./testChannel";
@@ -71,7 +71,12 @@ const settings: SettingsSnapshot = {
 const answer = (command: string) => {
   if (command === "chat.snapshot") return { ok: true, ...chat };
   if (command === "settings.snapshot") return { ok: true, ...settings };
-  if (command === "shell.snapshot") return { ok: true, ...shell() };
+  if (command === "shell.snapshot") {
+    // The shell asks its own state once it has mounted: the boot it painted,
+    // unless the test answers with a newer payload for itself.
+    const boot = window.__MUSE_BOOT__;
+    return { ok: true, ...(boot && "pages" in boot ? boot : shell()) };
+  }
   if (command === "history.snapshot") return { ok: true, rows: shell().history };
   if (command === "search.snapshot" || command === "search.run") {
     return { ok: true, query: "", rows: [], total: 0, loaded: false };
@@ -246,6 +251,64 @@ describe("the web shell", () => {
     expect(
       screen.queryByText("No threads in the app's listing yet."),
     ).not.toBeInTheDocument();
+  });
+
+  it("adopts a later boot: the account and History the first paint could not carry", async () => {
+    // The app answers its first `shell.snapshot` before its own account and
+    // thread reads land, so the drawer starts on the placeholder; the app
+    // pushes a fresh payload when that read names the account and the window
+    // hands it here.
+    window.__MUSE_BOOT__ = shell({ account: "", history: [] });
+    installChannel(answer);
+
+    render(<Shell />);
+    expect(within(drawer()).getByText("Sign in")).toBeInTheDocument();
+    expect(screen.getByText("No threads in the app's listing yet.")).toBeInTheDocument();
+
+    act(() => {
+      window.museShellBoot?.({
+        pages: shell().pages,
+        account: "Lotus",
+        build: "build abc1234",
+        history: [{ id: "s-1", text: "📌 A calmer inbox (2 unread)", current: true }],
+      });
+    });
+
+    expect(within(drawer()).getByText("Lotus")).toBeInTheDocument();
+    expect(
+      within(drawer()).getByRole("button", { name: "📌 A calmer inbox (2 unread)" }),
+    ).toHaveAttribute("aria-current", "true");
+    expect(screen.queryByText("No threads in the app's listing yet.")).not.toBeInTheDocument();
+  });
+
+  it("recovers a payload that landed before the drawer's hook existed", async () => {
+    // The window can push the app's later read before React has installed
+    // `window.museShellBoot`. That push must not be lost: the page asks its own
+    // snapshot once at mount, the way every other page does.
+    window.__MUSE_BOOT__ = shell({ account: "", history: [] });
+    let asked = 0;
+    installChannel((command) => {
+      if (command !== "shell.snapshot") return answer(command);
+      asked += 1;
+      return {
+        ok: true,
+        pages: shell().pages,
+        build: "build abc1234",
+        account: "Lotus",
+        history: [{ id: "s-1", text: "📌 A calmer inbox (2 unread)", current: true }],
+      };
+    });
+
+    render(<Shell />);
+    expect(within(drawer()).getByText("Sign in")).toBeInTheDocument();
+
+    expect(await within(drawer()).findByText("Lotus")).toBeInTheDocument();
+    expect(
+      within(drawer()).getByRole("button", { name: "📌 A calmer inbox (2 unread)" }),
+    ).toHaveAttribute("aria-current", "true");
+    expect(within(drawer()).queryByText("Sign in")).toBeNull();
+    // One ask, not a poll: nothing on this side repeats it.
+    expect(asked).toBe(1);
   });
 
   it("names a page it has no web view for instead of hiding it", async () => {

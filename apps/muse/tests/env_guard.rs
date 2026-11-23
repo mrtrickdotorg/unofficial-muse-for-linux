@@ -37,6 +37,11 @@ const FORBIDDEN: &[&str] = &["set_var(", "remove_var("];
 /// The workflow that must keep running the guard from its own step, and the
 /// step's name and command.
 const WORKFLOW: &str = ".github/workflows/rust.yml";
+
+/// The bridge and the window on the other end of it, both relative to the
+/// workspace root; the socket guard reads them and nothing else.
+const BRIDGE: &str = "apps/muse/src/web_shell.rs";
+const WINDOW: &str = "apps/muse-window/src/main.rs";
 const GUARD_STEP: &str = "Run environment mutation guard";
 const GUARD_COMMAND: &str = "cargo test -p muse --locked --test env_guard";
 
@@ -326,6 +331,48 @@ fn ci_runs_the_guard_as_its_own_step() {
             && step.lines().any(|line| line.contains(GUARD_COMMAND)),
         "`{GUARD_STEP}` must run `{GUARD_COMMAND}` itself, got:\n{step}"
     );
+}
+
+/// The shell window's bridge is the parent's pipes, and it must stay that way.
+/// A socket is reachable by any local process, so the page's command surface --
+/// sends, decisions, grants -- would be anyone's to call; a deleted spike once
+/// opened exactly that. The pipe is asserted here, not left to a live run.
+#[test]
+fn the_shell_window_bridge_is_a_pipe_not_a_socket() {
+    let root = workspace_root();
+    let bridge = root.join(BRIDGE);
+    let window = root.join(WINDOW);
+    let pipe = code_only(
+        &fs::read_to_string(&bridge)
+            .unwrap_or_else(|error| panic!("{}: {error}", bridge.display())),
+    );
+    let window_code = code_only(
+        &fs::read_to_string(&window)
+            .unwrap_or_else(|error| panic!("{}: {error}", window.display())),
+    );
+
+    assert!(
+        pipe.contains("Stdio::piped("),
+        "{} must spawn the window on a pipe",
+        bridge.display()
+    );
+    assert!(
+        !root.join("apps/muse/src/spike_cmd.rs").exists(),
+        "the spike's socket module is deleted, not dormant"
+    );
+    for (path, source) in [(BRIDGE, &pipe), (WINDOW, &window_code)] {
+        for needle in ["UnixListener", "UnixStream", "MUSE_SPIKE_CMD"] {
+            assert!(!source.contains(needle), "{path} still names {needle}");
+        }
+    }
+    for manifest in ["apps/muse/Cargo.toml", "apps/muse-window/Cargo.toml"] {
+        let path = root.join(manifest);
+        let text = fs::read_to_string(&path).unwrap_or_else(|error| panic!("{manifest}: {error}"));
+        assert!(
+            !text.contains("spike-cmd") && !text.contains("spike_cmd"),
+            "{manifest} still declares the spike's socket feature"
+        );
+    }
 }
 
 /// The scanner decides what the whole guard reports, so it is exercised on

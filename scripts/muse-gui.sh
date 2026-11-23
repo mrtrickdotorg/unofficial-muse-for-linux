@@ -18,6 +18,10 @@ HERE=$(dirname -- "$0")
 LOG="${TMPDIR:-/tmp}/muse-gui.log"
 DISPLAY="${MUSE_DISPLAY:-:1}"
 export DISPLAY GDK_BACKEND=x11
+# This helper finds and drives the native window (its title and its widget
+# tree), so it asks for that window even where the shell window is the app's
+# default: see apps/muse/src/web_shell.rs.
+export MUSE_SHELL=gtk
 
 if [ "${1:-}" = "--relaunch" ]; then
     for pid in $(pgrep -x muse); do kill "$pid"; done

@@ -17,10 +17,9 @@ mod login;
 mod pages;
 mod session;
 mod signin;
-#[cfg(feature = "spike-cmd")]
-mod spike_cmd;
 mod update;
 mod voice;
+mod web_shell;
 mod web_signin;
 mod webui;
 pub(crate) mod widget;
@@ -89,7 +88,19 @@ fn main() {
         builder = builder.flags(gtk4::gio::ApplicationFlags::NON_UNIQUE);
     }
     let app = builder.build();
-    app.connect_activate(build_ui);
+    // One shell window per process: a second launch forwards its activation
+    // here, and the window already on screen is raised instead of a second one
+    // being built. The native shell keeps its own behaviour; the Tauri window
+    // is the app, so a duplicate would be two apps.
+    let opened = Rc::new(std::cell::Cell::new(false));
+    app.connect_activate(move |app| {
+        if web_shell::tauri() && opened.replace(true) {
+            web_shell::raise();
+            return;
+        }
+        opened.set(true);
+        build_ui(app);
+    });
     app.run();
 }
 
@@ -140,6 +151,10 @@ fn build_ui(app: &adw::Application) {
     // Permanent cold-start probe: build timestamp vs first present, so
     // a startup-cost regression shows up in logs, not as a complaint.
     let started = std::time::Instant::now();
+    // Which window this launch opens. The Tauri shell is the app's window when
+    // it can be (see `web_shell`); the native window stays the fallback and the
+    // reference.
+    let tauri = web_shell::tauri();
     // Plain ApplicationWindow: AdwApplicationWindow refuses a manually
     // set titlebar, and without one the window has no drag handle or
     // window controls.
@@ -205,15 +220,39 @@ fn build_ui(app: &adw::Application) {
     }
     // A page surface is its own window; presenting an empty app window behind
     // it would be a black rectangle with no sign-in in it.
-    if !page_signin {
+    if !page_signin && !tauri {
         window.present();
     }
     // A fresh install pays one-time setup (config folders, helper
     // staging, interpreter probe): a spinner and the reader's sentence
     // cover it, once, instead of a silent stall. Returning installs
-    // skip this entirely.
+    // skip this entirely. The shell window has no first-run surface yet, so it
+    // pays the same work without a dialog over the page being built.
     if session::first_run_marker().is_none_or(|marker| !marker.is_file()) {
-        show_first_run(&window);
+        if tauri {
+            std::thread::spawn(|| {
+                session::first_run_setup();
+                session::note_first_run_done();
+            });
+        } else {
+            show_first_run(&window);
+        }
+    }
+    if tauri {
+        let quit = Rc::new({
+            let app = app.clone();
+            move || app.quit()
+        });
+        // A window that starts and never answers is a window that cannot show
+        // anything: the native one takes its place, and the app stays native.
+        let fallback = Rc::new({
+            let window = window.clone();
+            move || window.present()
+        });
+        if !web_shell::launch(quit, fallback) {
+            eprintln!("muse: the shell window could not start; showing the native window");
+            window.present();
+        }
     }
     eprintln!(
         "muse cold-start: first present {:?} after build",
@@ -634,11 +673,12 @@ fn show_main(split: &adw::OverlaySplitView) {
     let chat_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     stack.add_named(&chat_box, Some("chat"));
     let chat = app::Chat::install(&chat_box);
-    // The throwaway Tauri spike's channel asks this window for the page's own
-    // answers; see `spike_cmd`. Only with the feature, only when asked.
-    #[cfg(feature = "spike-cmd")]
-    if let Ok(path) = std::env::var("MUSE_SPIKE_CMD") {
-        spike_cmd::install(&path, &chat);
+    // The shell window asks this process for the pages' own answers; see
+    // `web_shell`. Installed here, where the chat panel and its routes are
+    // reachable, so a page press reaches the same sender, chooser and decision
+    // path a press in this window does.
+    if web_shell::tauri() {
+        web_shell::install(chat.client_handle(), chat.web_routes());
     }
     // App-lifetime singletons: the signal handlers and idle sources
     // hold only weak references, so the strong references live here,
@@ -877,11 +917,21 @@ fn show_main(split: &adw::OverlaySplitView) {
     if let Some(first) = sidebar.row_at_index(0) {
         sidebar.select_row(Some(&first));
     }
+    if web_shell::tauri() {
+        // With the native window hidden, no visit in this window fills the
+        // shell's caches: this is the visit the reader's first page would have
+        // made. It is the same `show` a rail press runs, so the chat's own
+        // refresh and the drawer's History are the reads the native window
+        // makes, not a second set.
+        pages::show(&ctx, "chat");
+    }
     // The sign-in page hides the window while it stands, and this is the
     // surface that brings it back -- now that its sidebar and its page are in
     // place, so nothing is presented half-built. At startup the split is not in
-    // the window yet, so this is a no-op and startup's own present stands.
-    if let Some(root) = split.root()
+    // the window yet, so this is a no-op and startup's own present stands. The
+    // shell window is the app's surface, so the native one stays hidden there.
+    if !web_shell::tauri()
+        && let Some(root) = split.root()
         && let Ok(window) = root.downcast::<gtk4::Window>()
     {
         window.present();

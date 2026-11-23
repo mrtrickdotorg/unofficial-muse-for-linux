@@ -21,7 +21,7 @@ import { Search } from "./Search";
 import { Settings } from "./Settings";
 import { Tasks } from "./Tasks";
 import { Threads } from "./Threads";
-import type { HistoryRow } from "./types";
+import type { HistoryRow, ShellSnapshot } from "./types";
 
 /// The page components the shell can show, by the name the app's page list
 /// uses. A name without a component still gets its rail button -- the shell
@@ -73,6 +73,9 @@ export function Shell() {
     boot && "history" in boot ? boot.history : null,
   );
   const [historyNote, setHistoryNote] = useState<string | null>(null);
+  // The account line: the app's own name for the session, which it learns from
+  // its first read (see the nudge effect below).
+  const [account, setAccount] = useState(boot && "account" in boot ? boot.account : "");
   const [opening, setOpening] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   // The words the Search page opens with: the drawer's entry only points the
@@ -103,6 +106,46 @@ export function Shell() {
   useEffect(() => {
     void loadHistory();
   }, [current, loadHistory]);
+
+  // The drawer's account line and History are the app's own read, and the boot
+  // payload is painted before that read lands: the app pushes a fresh payload
+  // when it names the session, and the window hands it here -- the same nudge
+  // the Settings page uses, so there is no timer on this side.
+  const adopt = useCallback((snapshot: ShellSnapshot) => {
+    if (snapshot.account) setAccount(snapshot.account);
+    if (snapshot.history) {
+      setHistory(snapshot.history);
+      setHistoryNote(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.museShellBoot = adopt;
+    return () => {
+      window.museShellBoot = undefined;
+    };
+  }, [adopt]);
+
+  // The hook above exists only once this component has mounted, and the window
+  // can push between the first paint and that moment. So the page asks its own
+  // snapshot once, the way every other page asks one: a push the hook missed is
+  // not lost, it is already in the app's answer. One ask per mount, never a
+  // poll -- anything named after this arrives through `window.museShellBoot`.
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      if (!channelAvailable()) return;
+      try {
+        const answer = await call<ShellSnapshot>("shell.snapshot");
+        if (live) adopt(answer);
+      } catch {
+        // The boot payload already painted; a refused read leaves it standing.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [adopt]);
 
   // Opening a thread is the panel's own switch, and a fresh chat is that same
   // press with no id. One at a time: a second press while one is in flight
@@ -218,9 +261,7 @@ export function Shell() {
       </nav>
 
       <aside ref={drawer} className="shell-drawer" aria-label="Drawer" tabIndex={-1}>
-        <span className="shell-account">
-          {boot && "account" in boot && boot.account ? boot.account : "Sign in"}
-        </span>
+        <span className="shell-account">{account || "Sign in"}</span>
 
         <div className="shell-tools">
           <form
@@ -299,9 +340,6 @@ export function Shell() {
         )}
 
         <span className="shell-build">{boot && "build" in boot ? boot.build : ""}</span>
-        <span className="shell-drawer-note">
-          The same pages the native window carries, in one window of their own.
-        </span>
       </aside>
 
       <main ref={main} className="shell-main" tabIndex={-1}>

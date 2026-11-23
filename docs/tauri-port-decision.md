@@ -1,7 +1,8 @@
 # Porting the client to Rust + Tauri + React: analysis and staging plan
 
 **Status: S0 shipped, S1 gate met, S2 seven pages, S3 slices landed (Nov 21, 2026; its paste and
-  decide presses were checked live the same evening).** The decision was made to continue
+  decide presses were checked live the same evening), and S4's window opens as the app's window
+  (Nov 23, 2026).** The decision was made to continue
 toward the Tauri/React end state. Stage S0 (the palette lift) is in the tree; S1's reference page —
 Library, read-only, in the existing WebKitGTK view with real rows — is implemented and verified on
 this seat; S2 has its first page, Goals, on the same contract. Everything below the stage list is
@@ -889,6 +890,62 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   generation and a harder a11y gate rather than a shorter project. The table moves only if S1-S3
   demonstrably cut layout churn (the measurement the decision below waits for), or if Tauri 3 ships
   a released GTK4/6.0 target that can be measured on this seat.
+
+  **The window is the app's window (Nov 23, 2026).** S4's remaining question was who owns the
+  window at launch, and the answer in the tree is the Tauri one: `cargo run -p muse` opens the
+  React shell as the app's window, the GTK window is never presented, and the native shell stays
+  compiled as the fallback and the reference. Nothing about the page contract changed -- every page
+  still asks its own `*.snapshot` through the same channel, and every press still reaches the same
+  route in the app.
+
+  Three changes got it there, and they are worth naming because they are the shape of the S5 work:
+
+  - **The bridge is the parent's pipes, not a socket.** `apps/muse/src/web_shell.rs` spawns
+    `apps/muse-window` as a child and answers it on its own stdio: the window writes `{"id","cmd"}`
+    lines to its stdout, the app writes `{"id","reply"}` and the one control line (`{"raise":true}`)
+    to the child's stdin, and the child exits when the app's pipe closes. The spike's
+    `MUSE_SPIKE_CMD` socket and its `spike-cmd` feature are gone: a pipe carries no ambient
+    authority, so the page's command surface -- sends, decisions, grants -- is reachable only by
+    the process the app spawned.
+  - **The state layer runs headless.** The GTK window is still built (its widgets are the state the
+    pages read) but never presented, the shell's first page is visited once so the chat's own reads
+    land (`pages::show(&ctx, "chat")`), the first-run dialog's work runs without a dialog, and the
+    child's closing quits the app -- with no native window on screen, the shell window is the only
+    surface there is. A second launch raises the window through the same pipe instead of building a
+    second one.
+  - **The boot payload is a first paint, and the app pushes the rest.** The app's first
+    `shell.snapshot` is answered before its transcript and thread reads land, so the payload leaves
+    `account` empty until the app has a real name for the session (the pages print their own "Sign
+    in" for an empty one). The chat cache is where that name arrives, so it is where the window
+    hears about it: the first time `cache_web_chat` has a name, the app writes one `{"boot":{...}}`
+    line on the child's stdin -- the payload `shell_document` starts from, its History read through
+    the window's routes -- and the window hands it to the page's `window.museShellBoot` hook, the
+    same nudge Settings uses for an unread policy. That hook only exists once the page has mounted,
+    so the shell also asks `shell.snapshot` once at mount, the way every page asks its own
+    snapshot, and a push that beat the hook is found there instead of lost; the window treats a
+    push that arrives before its own boot answer as the boot, being the same payload and the newer
+    one. Nothing polls and nothing asks twice, so an idle window costs no traffic and an account
+    with nothing to read shows its unread History instead of prompting; on this seat the drawer
+    read "Lotus" with its six rows from that one push.
+
+  Selection is `MUSE_SHELL`: `tauri` forces the shell window, `gtk` forces the native one, and
+  unset picks the shell window when it can -- a window binary (`MUSE_WINDOW_BIN`, else beside the
+  app, else the dev checkout's `apps/muse-window/target/...`) and a usable saved link. Either
+  refusal logs its reason and opens the native window, so a clone without the window built is never
+  windowless; a window that starts and closes before answering a single command is the same case,
+  and the app stays native from then on. The GTK harnesses ask for their own window by name: `scripts/muse-gui.sh` and
+  `scripts/settings-two-windows.py` set `MUSE_SHELL=gtk`. Seen live on this seat (Xwayland): the
+  shell window is `1100x700` and viewable, the native `muse` window is `IsUnMapped`, the boot came
+  from the app in 0 ms, the first page command was answered in 84 us, and the drawer then filled
+  with the account and its History rows.
+
+  What still stands between this and retiring GTK: the **sign-in surface**, which stays the native
+  window on an unlinked clone (Tauri mode chooses GTK when there is no usable saved link, and says
+  so); the **folder chooser** and the **update relaunch**, which are a native dialog and a process
+  swap a page cannot be; and **packaging** -- the AppImage bundles WebKitGTK 6.0 for the state
+  layer, and a shipped shell window adds the GTK 3 / 4.1 generation beside it (the doc's risk 3)
+  plus the window binary itself. `apps/muse/src/pages.rs` therefore stays: it is still the
+  reference the pages are checked against, and its tests are still most pages' only assertion.
 
 - **S5 — Packaging and gates.** AppImage recipe, Flatpak manifest, CI, native-Wayland and
   screen-reader checks re-run against the new build.

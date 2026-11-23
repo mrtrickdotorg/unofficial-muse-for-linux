@@ -1084,6 +1084,10 @@ html, body {
 .shell {
   display: grid;
   grid-template-columns: 68px 232px minmax(0, 1fr);
+  /* One row, exactly the window: without this the row is content-sized, the
+   * drawer stretches past the bottom edge and its own scrollbar never has a
+   * box to scroll in. */
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
   background: var(--ground);
 }
@@ -1136,7 +1140,11 @@ html, body {
 }
 
 .shell-build {
-  margin-top: 12px;
+  /* At the drawer's foot when there is room to spare, and right under the
+   * History rows when there is not: the auto margin collapses to nothing
+   * instead of costing the lists space. */
+  margin-top: auto;
+  padding-top: 12px;
   color: var(--text-faint);
   font-size: 10px;
 }
@@ -1147,6 +1155,9 @@ html, body {
   gap: 2px;
   padding: 22px 14px;
   border-right: 1px solid var(--hairline);
+  /* A grid item will not shrink below its content without this, so the drawer
+   * could not scroll even with `overflow-y` set. */
+  min-height: 0;
   overflow-y: auto;
 }
 
@@ -1159,7 +1170,12 @@ html, body {
 }
 
 .shell-drawer-page {
-  padding: 9px 10px;
+  /* A row of the scrolling page list: it keeps its own height rather than
+   * being squeezed by the column. The padding is a touch tighter than the
+   * drawer's other rows so the list can show more of its ten pages in the
+   * room History leaves. */
+  flex: 0 0 auto;
+  padding: 7px 10px;
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -1177,14 +1193,6 @@ html, body {
 .shell-drawer-page.current {
   background: var(--surface-raised);
   color: var(--text);
-}
-
-.shell-drawer-note {
-  margin-top: auto;
-  padding-top: 16px;
-  color: var(--text-faint);
-  font-size: 11px;
-  line-height: 1.5;
 }
 
 .shell-main {
@@ -1346,6 +1354,23 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* The page list is the part that gives way: it takes exactly the room
+   * History and the build stamp leave and scrolls inside it, so nothing is
+   * pushed past the bottom edge at any height, and there is no height at which
+   * the drawer changes its mind about what to show. The drawer's old caption
+   * used to sit below History and cost a page and a half at the shipped size;
+   * it is gone rather than hidden by a breakpoint. `flex` needs no declaration:
+   * a flex item is already `0 1 auto`, which is exactly "shrink, never grow".
+   * The one `min-height` below does both jobs: a floor of two rows, so a window
+   * shorter than its content scrolls the drawer instead of erasing the list,
+   * and a replacement for the automatic content minimum that would otherwise
+   * stop the list shrinking to fit at all. */
+  min-height: 96px;
+  overflow-y: auto;
+  /* The clipped row at the fold reads as "there is more", not as a broken
+   * row: the list fades into the drawer instead of ending on half a word. */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 18px), transparent);
 }
 
 .shell-section {
@@ -1360,6 +1385,11 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 1px;
+  /* History keeps its natural height -- its rows are what a reader came for --
+   * so it never gives way and never scrolls itself: its box is its content, and
+   * a listing longer than the window is the drawer's own scroll, not this
+   * section's. */
+  flex: 0 0 auto;
 }
 
 .shell-history-row {

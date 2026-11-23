@@ -296,9 +296,13 @@ fn localhost_reply(held: &HeldLocalHost) -> serde_json::Value {
 /// stamp the native drawer prints. Each page inside the shell asks its own
 /// snapshot, so the shell carries no page data of its own.
 fn shell_payload(routes: Option<&WebRoutes>) -> serde_json::Value {
+    let chat = crate::pages::chat_snapshot();
     serde_json::json!({
         "pages": crate::pages::shell_pages(),
-        "account": crate::pages::chat_snapshot().account,
+        // Empty until the app has a name for the session: a page prints its own
+        // "Sign in" for that, and the app pushes a fresh payload when the name
+        // arrives rather than asking the drawer to poll for it.
+        "account": chat.account,
         "build": match crate::update::local_sha() {
             Some(sha) => format!("build {}", sha.get(..7).unwrap_or(sha)),
             None => "dev build".to_owned(),
@@ -316,10 +320,17 @@ fn shell_payload(routes: Option<&WebRoutes>) -> serde_json::Value {
     })
 }
 
-pub(crate) fn shell_document(routes: Option<&WebRoutes>) -> String {
+/// The shell's boot payload as the app holds it now: what [`shell_document`]
+/// starts from, and what the app pushes the window when its own read fills the
+/// drawer (see `web_shell::account_named`).
+pub(crate) fn shell_boot(routes: Option<&WebRoutes>) -> serde_json::Value {
     let mut boot = shell_payload(routes);
     boot["page"] = serde_json::json!("shell");
-    document(&boot)
+    boot
+}
+
+pub(crate) fn shell_document(routes: Option<&WebRoutes>) -> String {
+    document(&shell_boot(routes))
 }
 
 fn shell_reply(routes: Option<&WebRoutes>) -> serde_json::Value {
@@ -1764,6 +1775,38 @@ pub(crate) fn open_localhost_window(held: HeldLocalHost, routes: Option<WebRoute
     )
 }
 
+/// Every route the Chat window has, stubbed: a test binds only the ones it is
+/// about, so a new control cannot quietly break the others' tests. Shared with
+/// the shell window's bridge tests, which answer pages with no display.
+#[cfg(test)]
+pub(crate) fn stub_routes() -> WebRoutes {
+    use std::rc::Rc;
+    WebRoutes {
+        send: Rc::new(|_: &str, _: Option<WebQuote>| Ok(())),
+        stop: Rc::new(|| Ok(())),
+        attach: Rc::new(|| Ok(())),
+        unstage: Rc::new(|_: &str| Ok(())),
+        approvals: Rc::new(|| Ok(())),
+        decide: Rc::new(|_: &str, _: &str| Ok(())),
+        turn_delete: Rc::new(|| Ok(())),
+        draft: Rc::new(|_: &str| Ok(())),
+        dictate: Rc::new(|| Ok(())),
+        history: Rc::new(|| Ok(Vec::new())),
+        open_thread: Rc::new(|_: Option<&str>| Ok(())),
+        set_policy: Rc::new(|_: &str, _: &str| Ok(())),
+        reset_connector: Rc::new(|_: &str| Ok(())),
+        host_grant: Rc::new(|_: bool, _: bool| Ok(())),
+        host_start: Rc::new(|_: bool| Ok(())),
+        host_stop: Rc::new(|| Ok(())),
+        host_decide: Rc::new(|_: &str, _: bool| Ok(())),
+        host_policy: Rc::new(|_: bool| Ok(())),
+        host_clear_log: Rc::new(|| Ok(())),
+        update_check: Rc::new(|| Ok(())),
+        update_install: Rc::new(|| Ok(())),
+        signin_press: Rc::new(|_: SigninPress| Ok(())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2453,38 +2496,6 @@ mod tests {
     fn the_answer_wait_is_a_timed_poll() {
         assert!(ANSWER_POLL >= Duration::from_millis(50));
         assert!(ANSWER_POLL <= Duration::from_millis(500));
-    }
-
-    /// Chat boot: one page-tagged payload with the native transcript's own
-    /// rows -- day dividers, bubbles and notices -- and its thread title.
-    /// Every route the Chat window has, stubbed: a test binds only the ones
-    /// it is about, so a new control cannot quietly break the others' tests.
-    fn stub_routes() -> WebRoutes {
-        use std::rc::Rc;
-        WebRoutes {
-            send: Rc::new(|_: &str, _: Option<WebQuote>| Ok(())),
-            stop: Rc::new(|| Ok(())),
-            attach: Rc::new(|| Ok(())),
-            unstage: Rc::new(|_: &str| Ok(())),
-            approvals: Rc::new(|| Ok(())),
-            decide: Rc::new(|_: &str, _: &str| Ok(())),
-            turn_delete: Rc::new(|| Ok(())),
-            draft: Rc::new(|_: &str| Ok(())),
-            dictate: Rc::new(|| Ok(())),
-            history: Rc::new(|| Ok(Vec::new())),
-            open_thread: Rc::new(|_: Option<&str>| Ok(())),
-            set_policy: Rc::new(|_: &str, _: &str| Ok(())),
-            reset_connector: Rc::new(|_: &str| Ok(())),
-            host_grant: Rc::new(|_: bool, _: bool| Ok(())),
-            host_start: Rc::new(|_: bool| Ok(())),
-            host_stop: Rc::new(|| Ok(())),
-            host_decide: Rc::new(|_: &str, _: bool| Ok(())),
-            host_policy: Rc::new(|_: bool| Ok(())),
-            host_clear_log: Rc::new(|| Ok(())),
-            update_check: Rc::new(|| Ok(())),
-            update_install: Rc::new(|| Ok(())),
-            signin_press: Rc::new(|_: SigninPress| Ok(())),
-        }
     }
 
     /// A press on the sign-in page is the app's own validation, not a second

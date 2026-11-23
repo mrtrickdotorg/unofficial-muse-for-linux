@@ -1,7 +1,7 @@
 // The JS -> Rust channel: one JSON round trip per command, replied to by the
 // native side through window.museReply. Outside the app (a plain browser
 // preview) the handlers are absent, and callers fall back to boot data.
-import type { Boot } from "./types";
+import type { Boot, ShellSnapshot } from "./types";
 
 type Reply = { ok?: boolean; error?: string } & Record<string, unknown>;
 
@@ -18,6 +18,9 @@ declare global {
     /// The updater's answer landed: the Settings card asks for its snapshot
     /// again instead of waiting on a press that already answered.
     museUpdatesReady?: () => void;
+    /// The shell's boot payload was the app's first paint and the app has since
+    /// named the account and read its History: the drawer adopts this answer.
+    museShellBoot?: (snapshot: ShellSnapshot) => void;
     __MUSE_BOOT__?: Boot;
   }
 }

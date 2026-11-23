@@ -60,10 +60,22 @@ cargo fmt --all -- --check
 cargo build --workspace --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo run -p muse
+# The app's window is the Tauri/React shell when it can be: it is its own project
+# (GTK 3 + WebKitGTK 4.1), so build it once before running the app.
+(cd apps/muse-window && cargo build --locked)
+cargo run -p muse                  # opens the shell window on a linked clone
+MUSE_SHELL=gtk cargo run -p muse    # the native GTK window
 ```
 
-The workspace separates filesystem policy (`muse-linux-core`), the account subprocess adapter (`muse-account`), experimental developer-API/runtime crates (experiments, not account sign-in), and the native GTK4 app. See [building](docs/building.md), [architecture](docs/architecture.md), and the [full-port goal](docs/full-port-goal.md).
+The app's window is `apps/muse-window`: a Tauri 2 window over the React pages in `apps/muse/ui`,
+which the app spawns as a child process and answers over its own pipes -- the two cannot share a
+process, because the app is GTK 4 + WebKitGTK 6.0 and the window is GTK 3 + 4.1. The native GTK
+shell stays compiled as the fallback (no window binary, no saved link, or `MUSE_SHELL=gtk`) and as
+the reference the pages are checked against.
+
+The workspace separates filesystem policy (`muse-linux-core`), the account subprocess adapter
+(`muse-account`), experimental developer-API/runtime crates (experiments, not account sign-in), and
+the native GTK4 app. See [building](docs/building.md), [architecture](docs/architecture.md), and the [full-port goal](docs/full-port-goal.md).
 
 ## License
 

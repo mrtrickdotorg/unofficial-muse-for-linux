@@ -788,6 +788,10 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
 
     env = os.environ.copy()
     env.pop("MUSE_SPIKE_CMD", None)
+    # This harness drives the native Settings page and its Web view by
+    # accessibility, so it asks for the native window even where the shell
+    # window is the app's default (apps/muse/src/web_shell.rs).
+    env["MUSE_SHELL"] = "gtk"
     env.pop("MUSE_UPDATE_FEED", None)
     env.setdefault("DISPLAY", os.environ.get("MUSE_DISPLAY", ":1"))
     env.update(

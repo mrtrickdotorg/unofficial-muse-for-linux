@@ -2081,10 +2081,14 @@ impl Chat {
             )
         };
         let unread = self.thread_unread();
+        let named = account.is_some();
         crate::pages::chat_cache(crate::pages::HeldChat {
             thread,
             title,
-            account: account.unwrap_or_else(|| "Sign in".to_owned()),
+            // Empty until the app has a name for the session: the pages print
+            // their own "Sign in", so a placeholder here would only be a name
+            // a page cannot tell from a real one.
+            account: account.unwrap_or_default(),
             status,
             sending,
             staged,
@@ -2094,6 +2098,12 @@ impl Chat {
             error: None,
             ..crate::pages::HeldChat::default()
         });
+        // The name the pages print is this read's, and the shell window's boot
+        // payload was painted before it: the window is told once, here, rather
+        // than left asking the app until the drawer looks complete.
+        if named {
+            crate::web_shell::account_named();
+        }
     }
 
     /// The open thread's unread count from the service listing: the number
