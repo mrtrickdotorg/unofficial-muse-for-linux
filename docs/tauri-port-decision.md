@@ -347,10 +347,11 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   thread and composer status line, all projected from `chat::build_rows`, so the two renderers
   cannot word a turn differently. It is the first page with no refresh command: it follows
   `chat.snapshot`, refilled by every native render *including* the in-place rewrite of a growing
-  reply, so the page costs no wire trips, cannot show a different conversation than the window
-  beside it, and needs no second copy of the ticket discipline. It opens from the chat's turn menu
-  ("Open in web view"), not the header row, so the port costs the chat header no pixel. Five DOM
-  tests (`Chat.test.tsx`) cover the three row shapes and the option pills, the unread-thread state,
+  reply, so the page costs no wire trips, cannot show a different conversation than the native
+  window beside it, and needs no second copy of the ticket discipline. It opens from the chat's
+  turn menu ("Open in web view"), not the header row, so the port costs the chat header no pixel.
+  Five DOM tests (`Chat.test.tsx`) cover the three row shapes and the option pills, the
+  unread-thread state,
   the status line, a failed read beside held rows, and -- the reason this page exists -- a reply
   that grows keeping its element: the same DOM node takes the new words, which is the web half of
   the in-place rewrite.
@@ -489,7 +490,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the page reads "Confirm delete turn" on its next snapshot instead of waiting
   for an unrelated render to carry it. Refusals needed one
   honest change in the app: `delete_pressed` used to answer nothing at all when
-  a send held the `Send` slot or the window was signed out, which is silence a
+  a send held the `Send` slot or the app was signed out, which is silence a
   page cannot print. It now returns the reason -- "Another send is already in
   flight.", "Sign in before deleting a turn.", and, for a transcript with no turn
   in it, "There is no turn to delete yet." (a press that used to answer nothing
@@ -542,50 +543,54 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   so a page with a box of its own would have become a second place to dictate into. The port
   removed the second draft instead of adding a second destination. The snapshot's `composer`
   view is the app's own composer -- `draft` from `Composer::text`, `dictating` from whether a take
-  is running -- published wherever either changes: a keystroke in the window's entry, a page press,
-  a dictation's words. `chat.draft` writes the page's typing into that composer (and repaints the
-  native entry), so the box and the window's entry are one draft; the page adopts the snapshot's
-  draft only when it differs from the value both surfaces last agreed on, which is how a
-  dictation's words arrive in the box without the page's own typing being overwritten by the poll
-  that echoes it. A send clears the shared draft on both surfaces, so neither is left holding
-  words the other sent. `chat.dictate` calls `toggle_dictation`, the very function the native pill
-  calls: one take, whichever surface started it, and the mic's state is read from the app rather
-  than kept here -- it has to be, because a take also stops itself after thirty seconds. Nothing
-  else about dictation moved: the words still land as an editable draft that the reader reviews
-  and sends, and a refusal or an empty answer still speaks in the status line.
+  is running -- published wherever either changes: a keystroke in the native window's entry, a
+  page press, a dictation's words. `chat.draft` writes the page's typing into that composer (and
+  repaints the native entry), so the box and the native window's entry are one draft; the page
+  adopts the snapshot's draft only when it differs from the value both surfaces last agreed on,
+  which is how a dictation's words arrive in the box without the page's own typing being
+  overwritten by the poll that echoes it. A send clears the shared draft on both surfaces, so
+  neither is left holding words the other sent. `chat.dictate` calls `toggle_dictation`, the
+  very function the native pill calls: one take, whichever surface started it, and the mic's
+  state is read from the app rather than kept here -- it has to be, because a take also stops
+  itself after thirty seconds. Nothing else about dictation moved: the words still land as an
+  editable draft that the reader reviews and sends, and a refusal or an empty answer still
+  speaks in the status line.
 
   That last point needed a fix the live check found: a dictation's sentence arrives with no render
   behind it, so the page would never have shown "Dictation unavailable: ...". The fix was not to
-  push the cached transcript -- that rebuilt every row for one sentence, on every send outcome, stop
-  and take -- but to give the line a store of its own. `refresh_notice` paints the window's label
-  and publishes that same `Option<String>` to `status_cache`, which `chat_snapshot` merges in the
-  way it already merges the approvals, so a note reaches the page for the cost of one sentence and
-  the note is still written once, by the function that decides what the window shows. Four DOM tests (`Chat.test.tsx`, 123 in all) pin that typing writes the
-  app's draft and the poll's echo does not overwrite it, that a burst of six keystrokes inside one
-  pause costs exactly one `chat.draft`, that a dictation landing mid-typing wins over words the
-  page has not sent yet, and that the mic reads Stop only because the app says a take is running;
-  two Rust tests pin `chat.draft` and `chat.dictate` through the routes and the closed-window
-  refusal, and pin a note arriving in the snapshot while the held rows stay untouched.
+  push the cached transcript -- that rebuilt every row for one sentence, on every send outcome,
+  stop and take -- but to give the line a store of its own. `refresh_notice` paints the native
+  window's label and publishes that same `Option<String>` to `status_cache`, which
+  `chat_snapshot` merges in the way it already merges the approvals, so a note reaches the
+  page for the cost of one sentence and the note is still written once, by the function that
+  decides what the native window shows.
+  Four DOM tests (`Chat.test.tsx`, 123 in all) pin that typing writes the app's draft and the poll's
+  echo does not overwrite it, that a burst of six keystrokes inside one pause costs exactly one
+  `chat.draft`, that a dictation landing mid-typing wins over words the page has not sent yet, and
+  that the mic reads Stop only because the app says a take is running; two Rust tests pin
+  `chat.draft` and `chat.dictate` through the routes and the closed-window refusal, and pin a note
+  arriving in the snapshot while the held rows stay untouched.
 
   The draft write is the hottest path in the app, so it is the one place the page batches rather
-  than writing through: every keystroke would repaint the window's own entry, and the first cut did
-  exactly that. A burst now flushes on its pause (200 ms) and a burst that never pauses flushes a
-  beat later (600 ms), so a sentence costs one command or two rather than one per letter; a blur
-  and an unmount flush what is still pending, so leaving the box or the page does not strand the
-  window behind the reader. Agreement holds in both directions by construction rather than by
-  timing: `lastSynced` moves when a write goes out, not when a key is pressed, so a snapshot that
-  differs is the window's own change and is adopted -- and adopting **cancels** the pending write
-  instead of following it, because writing the reader's stale words afterwards would clobber the
-  dictation that just landed. The app meets the batching halfway: `web_draft` returns without
-  touching anything when the entry already holds those words, so an echo of a write costs no
-  repaint and no second publish. Not verified live: this seat cannot type into a WebKit entry (the
-  accessory text interface is not exposed for it), so the burst count, the adoption and the
-  cancellation are the DOM tests' evidence; the page's box and its mic were seen live, and the
-  app's side of the write is the same `web_draft` the suites drive. Live: the page's mic press reached the app's toggle
-  (`chat.dictate` in the launch log) and the app's own sentence landed in the page's status line
-  -- "Dictation unavailable: no microphone recorder found." on this seat, which has none, so the
-  take itself and the words landing in the box are covered by the tests and the transcribe path's
-  own publish rather than by a recording here.
+  than writing through: every keystroke would repaint the native window's own entry, and the
+  first cut did exactly that. A burst now flushes on its pause (200 ms) and a burst that never
+  pauses flushes a beat later (600 ms), so a sentence costs one command or two rather than one
+  per letter; a blur and an unmount flush what is still pending, so leaving the box or the page
+  does not strand the native window's entry behind the reader. Agreement holds in both directions by
+  construction rather than by timing: `lastSynced` moves when a write goes out, not when a key is
+  pressed, so a snapshot that differs is the native window's own change and is adopted -- and
+  adopting **cancels** the pending write instead of following it, because writing the reader's
+  stale words afterwards would clobber the dictation that just landed. The app meets the
+  batching halfway: `web_draft` returns without touching anything when the entry already holds
+  those words, so an echo of a write costs no repaint and no second publish. Not verified live:
+  this seat cannot type into a WebKit entry (the accessory text interface is not exposed for it),
+  so the burst count, the adoption and the cancellation are the DOM tests' evidence; the page's
+  box and its mic were seen live, and the app's side of the write is the same `web_draft` the
+  suites drive. Live: the page's mic press reached the app's toggle (`chat.dictate` in the launch
+  log) and the app's own sentence landed in the page's status line -- "Dictation unavailable: no
+  microphone recorder found." on this seat, which has none, so the take itself and the words
+  landing in the box are covered by the tests and the transcribe path's own publish rather than
+  by a recording here.
 
   **The take to words, attempted (Nov 23, 2026): still not evidenced, and the reasons are the
   app's, not the seat's.** The recorder half is solved: a stand-in `parecord` on `PATH` (a shell
@@ -615,13 +620,14 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
      reached the route at all. A real 24 kHz dictation therefore cannot be sent whole by this
      client, independent of the outage above.
 
-  And in the app the request never finishes at all: the window stays on `Hearing the take back...`
-  past its 90 s budget, and `op-timing.log` records no `op=dictate` line in any run -- the request
-  never reaches the host, so no completion and no refusal ever arrives and the draft is never
-  filled. That is a fourth defect, in the client's host path rather than the service's, and it is
-  why the port's claim that one draft is filled still rests on the suites rather than on a take.
-  The stand-in recorder and the driving script are throwaway `/tmp` files, not repo fixtures;
-  turning them into one would be worth doing once the rate and the hang are fixed.
+  And in the app the request never finishes at all: the native window stays on
+  `Hearing the take back...` past its 90 s budget, and `op-timing.log` records no
+  `op=dictate` line in any run -- the request never reaches the host, so no completion
+  and no refusal ever arrives and the draft is never filled. That is a fourth defect, in the
+  client's host path rather than the service's, and it is why the port's claim that one draft
+  is filled still rests on the suites rather than on a take. The stand-in recorder and the
+  driving script are throwaway `/tmp` files, not repo fixtures; turning them into one would be
+  worth doing once the rate and the hang are fixed.
 - **S4 — Shell decision. STARTED Nov 22, 2026: the shell is a web page.** Either keep the GTK
   chrome (rail, menus, dialogs, a11y) permanently, or replace it with a Tauri window. This is the
   only stage that forces a WebKit decision (4.1 now, or Tauri 3 later).
@@ -763,16 +769,16 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   refuse it so they can never move the binary under them.
 
   What still needs the native window, in the order it has to happen: the folder chooser a page
-  cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page would
-  invent); the update's relaunch, which replaces this copy with the verified download and exits it
-  -- the page asks for it over `update.install`, but the process that goes is the app's; the
-  window's own chrome -- its menu, focus and a11y pane -- is GTK's, and the shell's key map is a
-  page's map, not a window's until the window is not GTK's; and a page still cannot read the
-  disk, so every file the app opens starts from a native chooser. Removing GTK is the last step of
-  that list, not the first: deleting `pages.rs`'s builders today would delete the reference the
-  port is checked against on live data, and the 165 Rust tests that assert the native rows are
-  still the only assertion of most page behaviour. The Tauri spike below prices the window swap
-  that has to land before a single line of GTK can go.
+  cannot be (`FileChooserNative`, opened by `signin.press` `choose` and never a list the page
+  would invent); the update's relaunch, which replaces this copy with the verified download and
+  exits it -- the page asks for it over `update.install`, but the process that goes is the
+  app's; the native window's own chrome -- its menu, focus and a11y pane -- is GTK's, and the
+  shell's key map is a page's map, not a window's until the window on screen is not GTK's; and
+  a page still cannot read the disk, so every file the app opens starts from a native chooser.
+  Removing GTK is the last step of that list, not the first: deleting `pages.rs`'s builders
+  today would delete the reference the port is checked against on live data, and the 165 Rust
+  tests that assert the native rows are still the only assertion of most page behaviour.
+  The Tauri spike below prices the window swap that has to land before a single line of GTK can go.
 
   **Tauri 2 spike (Nov 21, 2026, throwaway, outside the tree).** Three source files on tauri 2.12.7 /
   wry 0.57 / tao 0.37 loaded the unmodified `apps/muse/ui/built/app.html` with the same

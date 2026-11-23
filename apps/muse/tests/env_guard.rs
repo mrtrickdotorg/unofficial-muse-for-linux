@@ -339,7 +339,7 @@ fn ci_runs_the_guard_as_its_own_step() {
 /// deleted spike once opened exactly that. The pipe is asserted here, not left
 /// to a live run.
 #[test]
-fn the_shell_window_bridge_is_a_pipe_not_a_socket() {
+fn the_bridge_to_the_shell_window_is_a_pipe_not_a_socket() {
     let root = workspace_root();
     let bridge = root.join(BRIDGE);
     let window = root.join(WINDOW);
