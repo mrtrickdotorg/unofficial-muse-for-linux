@@ -460,6 +460,44 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   write, then a second write after the answer), on Check approvals and on a second card while a
   decision is unanswered, plus that `+` is not offered mid-send; `installChannel` gained an answer
   delay so a suite can watch a control while its write is still in flight.
+
+  **The turn menu's Delete moved (Nov 23, 2026).** The page had the send, Stop,
+  the clipboard, the approvals and the quote, and the turn menu's second press --
+  Delete turn -- was still native-only. It came across on the same rule as
+  everything above: one press, one path. `chat.delete` hands the press to
+  `delete_pressed`, the very function the native button calls, so the page gains
+  no second delete and the app's arm-then-confirm rule is the only one there is:
+  a press on either surface arms the latest turn, and the next press on either
+  one confirms it. The page does not hold the arming and does not guess which of
+  the two presses it is making. The label is the app's own `delete_label`, and a
+  new `delete_armed` is the one rule behind the native button's label, the
+  page's and the press itself -- the armed id has to still be the latest turn's,
+  never a stale one, so a moved-on transcript disarms both surfaces at once. The
+  label rides `chat.snapshot` as `turn`, which means a page reading "Confirm
+  delete turn" is reporting an app that is really armed, and one reading "Delete
+  turn" is not inviting a press that would only re-arm. The label is published
+  where the app arms -- `refresh_delete_arm`, the one place the native button's
+  own label is set -- into the same kind of cache the approvals use, so a press
+  on the page reads "Confirm delete turn" on its next snapshot instead of
+  waiting for an unrelated render to carry it. Refusals needed one
+  honest change in the app: `delete_pressed` used to answer nothing at all when
+  a send held the `Send` slot or the window was signed out, which is silence a
+  page cannot print. It now returns the reason -- "Another send is already in
+  flight.", "Sign in before deleting a turn." -- and the native button drops it
+  exactly as before, because the panel has no line to put it in; the page prints
+  it beside the press and the turn stays. Nothing else about the delete changed:
+  the confirming press still takes the `Send` slot, and the removal is still
+  proven by the app's own history re-read, so the row leaves the page only when
+  the app no longer holds it. Two DOM tests (`Chat.test.tsx`, 119 in all) pin a
+  double press as one write, the row leaving with the app's snapshot, the armed
+  label coming from the app, and the refusal sentence with the turn still there;
+  one Rust test pins `chat.delete` through the routes, the app's sentence
+  travelling back, and a window without routes saying it cannot make that change.
+  Pressed live (Nov 23, 2026): the page's `Delete turn` press armed the app and
+  the page then read `Confirm delete turn` with its rows untouched -- the arming
+  crossed the route in both directions without deleting anything. The confirming
+  press is not made here: it deletes a real turn in the account, so that half is
+  the suites' and the app's own re-read evidence, not this seat's.
 - **S4 — Shell decision. STARTED Nov 22, 2026: the shell is a web page.** Either keep the GTK
   chrome (rail, menus, dialogs, a11y) permanently, or replace it with a Tauri window. This is the
   only stage that forces a WebKit decision (4.1 now, or Tauri 3 later).

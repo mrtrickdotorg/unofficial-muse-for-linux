@@ -7,7 +7,13 @@ import {
   type KeyboardEvent,
 } from "react";
 import { call, channelAvailable } from "./api";
-import type { ApprovalCard, ApprovalChoice, ChatRow as Row, ChatSnapshot } from "./types";
+import type {
+  ApprovalCard,
+  ApprovalChoice,
+  ChatRow as Row,
+  ChatSnapshot,
+  TurnMenu,
+} from "./types";
 
 // How often the page re-asks for the transcript. The app owns the reads --
 // its own polling and its streaming rewrite -- so this window costs no wire
@@ -184,6 +190,11 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const [dropping, setDropping] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [checking, setChecking] = useState(false);
+  // The turn menu's Delete, on the app's own arm-then-confirm rule: the page
+  // prints the label the app computed and posts one press per answer, so a
+  // page showing "Confirm delete turn" means the app is really armed.
+  const [deleting, setDeleting] = useState(false);
+  const [turnNote, setTurnNote] = useState<string | null>(null);
 
   // The `+` press: the app's clipboard read, the same one its own button
   // makes. The chip it stages comes back in the next snapshot. The app refuses
@@ -214,6 +225,25 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
       setNote(sentence(failure));
     } finally {
       setDropping(null);
+    }
+  };
+
+  const deleteTurn = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    setTurnNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.delete", 30_000);
+      // The label and the rows both come from the app: the armed press names
+      // itself there, and the turn only disappears once the app's own re-read
+      // no longer carries it.
+      void loadSnapshot();
+    } catch (failure) {
+      // The app's own sentence (a held send slot, a signed-out window). The
+      // turn stays: nothing is deleted on this page's say-so.
+      setTurnNote(sentence(failure));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -301,6 +331,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const loaded = data?.loaded ?? false;
+  const turn: TurnMenu | undefined = data?.turn;
 
   // The native probe reads this: how many transcript rows the page holds.
   (window as unknown as { __MUSE_ROWS__?: number }).__MUSE_ROWS__ = rows.length;
@@ -440,6 +471,23 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
           <div className="chat-panel-meta">
             {data?.thread ? `Thread ${data.thread.slice(0, 8)}…` : "New chat"}
           </div>
+
+          {turn && (
+            <section className="chat-turn" aria-label="Turn options">
+              <div className="chat-panel-head">
+                <h2 className="chat-panel-title">Turn</h2>
+              </div>
+              <button
+                className="chat-delete"
+                type="button"
+                disabled={deleting}
+                onClick={() => void deleteTurn()}
+              >
+                {turn.delete_label}
+              </button>
+              {turnNote && <p className="chat-approval-error">{turnNote}</p>}
+            </section>
+          )}
 
           <section className="chat-approvals" aria-label="Approvals">
             <div className="chat-panel-head">

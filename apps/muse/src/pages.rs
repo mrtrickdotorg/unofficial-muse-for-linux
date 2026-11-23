@@ -2803,9 +2803,23 @@ pub(crate) struct HeldChat {
     pub unread: u64,
     /// The pending approvals the native panel last painted.
     pub approvals: ApprovalsView,
+    /// The turn menu: the delete press and whether the latest turn is armed
+    /// for its confirmation. The arming stays in the app, so a press on either
+    /// surface advances the same rule.
+    pub turn: TurnMenu,
     pub rows: Vec<ChatRow>,
     pub loaded: bool,
     pub error: Option<String>,
+}
+
+/// The chat's turn menu as the page offers it. The label is the native
+/// button's own, so the page cannot word the armed press differently -- a page
+/// showing "Delete turn" beside an app that is waiting for a confirmation
+/// would invite the press that does nothing.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+pub(crate) struct TurnMenu {
+    pub delete_label: String,
+    pub armed: bool,
 }
 
 thread_local! {
@@ -2816,6 +2830,23 @@ thread_local! {
 thread_local! {
     static APPROVAL_STORE: std::cell::RefCell<ApprovalsView> =
         std::cell::RefCell::new(ApprovalsView::default());
+}
+
+thread_local! {
+    static TURN_STORE: std::cell::RefCell<TurnMenu> =
+        std::cell::RefCell::new(TurnMenu::default());
+}
+
+/// Replace the turn menu the page prints. Called wherever the app arms or
+/// disarms its own button, so the page's label follows the app's state instead
+/// of waiting for the next render to carry it.
+pub(crate) fn turn_cache(menu: TurnMenu) {
+    TURN_STORE.with(|store| *store.borrow_mut() = menu);
+}
+
+/// The turn menu the app last armed or disarmed.
+pub(crate) fn turn_view() -> TurnMenu {
+    TURN_STORE.with(|store| store.borrow().clone())
 }
 
 /// The pending approvals the native panel last painted. A cache read like the
@@ -2865,7 +2896,16 @@ pub(crate) fn chat_snapshot() -> HeldChat {
     let held = CHAT_STORE.with(|store| store.borrow().clone());
     HeldChat {
         approvals: approvals_view(),
+        turn: turn_view(),
         ..held
+    }
+}
+
+/// The turn menu the page shows: the app's own label and arming.
+pub(crate) fn turn_menu(armed: bool) -> TurnMenu {
+    TurnMenu {
+        delete_label: super::app::delete_label(armed).to_owned(),
+        armed,
     }
 }
 

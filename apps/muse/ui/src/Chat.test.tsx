@@ -431,6 +431,70 @@ describe("the Chat web page", () => {
     await waitFor(() => expect(check).toBeEnabled());
   });
 
+  it("deletes through the app's own press, one press per answer, on the app's label", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
+      turn: { delete_label: "Delete turn", armed: false },
+    });
+    let replies = 0;
+    const commands = installChannel(
+      (cmd) => {
+        if (cmd === "chat.delete") return { ok: true };
+        // The first snapshot offers the press; the one after the delete no
+        // longer carries the turn, which is how a turn leaves this page.
+        replies += 1;
+        return replies < 2
+          ? { ok: true, ...snapshot([message({ id: "m-1", text: "hi" })], {
+              turn: { delete_label: "Delete turn", armed: false },
+            }) }
+          : { ok: true, ...snapshot([], { turn: { delete_label: "Delete turn", armed: false } }) };
+      },
+      undefined,
+      60,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const press = await screen.findByRole("button", { name: "Delete turn" });
+
+    // One press, one write: the second press of a double click is not a
+    // second delete.
+    fireEvent.click(press);
+    expect(press).toBeDisabled();
+    fireEvent.click(press);
+    expect(commands.filter((cmd) => cmd === "chat.delete")).toHaveLength(1);
+
+    // The app's answer lands and the row the app no longer carries is gone.
+    await waitFor(() => expect(press).toBeEnabled());
+    await waitFor(() => expect(screen.queryByText("hi")).not.toBeInTheDocument());
+  });
+
+  it("prints the app's armed label and its refusal sentence, and keeps the turn", async () => {
+    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
+      turn: { delete_label: "Confirm delete turn", armed: true },
+    });
+    const armed = snapshot([message({ id: "m-1", text: "hi" })], {
+      turn: { delete_label: "Confirm delete turn", armed: true },
+    });
+    installChannel(
+      (cmd) =>
+        cmd === "chat.delete"
+          ? { ok: false, error: "Another send is already in flight." }
+          : { ok: true, ...armed },
+      undefined,
+      10,
+    );
+
+    render(<Chat pollMs={10_000} />);
+
+    // The label is the app's: a page that said "Delete turn" here would invite
+    // the press that only re-arms.
+    const press = await screen.findByRole("button", { name: "Confirm delete turn" });
+    fireEvent.click(press);
+
+    expect(await screen.findByText("Another send is already in flight.")).toBeInTheDocument();
+    // Nothing was deleted on this page's say-so: the turn is still there.
+    expect(screen.getByText("hi")).toBeInTheDocument();
+  });
+
   it("decides one card at a time and posts nothing for a second card's press", async () => {
     window.__MUSE_BOOT__ = snapshot([], {
       approvals: {

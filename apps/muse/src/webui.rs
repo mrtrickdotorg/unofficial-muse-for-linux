@@ -363,6 +363,9 @@ fn chat_payload(held: &HeldChat) -> serde_json::Value {
         "staged": held.staged,
         "unread": held.unread,
         "approvals": held.approvals,
+        // The turn menu's press and its own label: the page prints the app's
+        // words and cannot show "Delete" beside an app waiting to confirm.
+        "turn": held.turn,
         "rows": held.rows,
         "loaded": held.loaded,
         "error": held.error,
@@ -605,6 +608,7 @@ pub(crate) fn should_log_command(
         || command.ends_with(".send")
         || command.ends_with(".stop")
         || command.ends_with(".decide")
+        || command.ends_with(".delete")
         || command.ends_with(".set")
         || command.ends_with(".reset")
         || command.ends_with(".grant")
@@ -629,6 +633,9 @@ pub(crate) type WebAttach = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebUnstage = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 pub(crate) type WebApprovals = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebDecide = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
+/// The turn menu's Delete press: the app's own armed two-press delete, on the
+/// latest turn it names.
+pub(crate) type WebTurnDelete = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebHistory = std::rc::Rc<dyn Fn() -> Result<Vec<crate::pages::HistoryRow>, String>>;
 pub(crate) type WebOpenThread = std::rc::Rc<dyn Fn(Option<&str>) -> Result<(), String>>;
 pub(crate) type WebSetPolicy = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
@@ -679,6 +686,9 @@ pub(crate) struct WebRoutes {
     pub approvals: WebApprovals,
     /// Decide one pending approval: the service's own outcome word.
     pub decide: WebDecide,
+    /// Delete the latest turn: the app's own arm-then-confirm press, so a
+    /// press here and a press in the turn menu advance one rule.
+    pub turn_delete: WebTurnDelete,
     /// The drawer's History rows: the panel's own listing, in its own words.
     pub history: WebHistory,
     /// Open a thread from History, or a fresh one with no id: the native
@@ -902,6 +912,11 @@ pub(crate) fn handle_command_with(
                 },
             }
         }
+        // The turn menu's delete: the app's own two-press delete, so the page's
+        // press arms and confirms the same turn the native button does. The
+        // page reads its own label from the snapshot, so this press never has
+        // to guess which of the two presses it is.
+        "chat.delete" => route_answer(routes.map(|routes| (routes.turn_delete)())),
         // The drawer's History: the panel's own listing, and the same open the
         // native activation makes. A window without routes cannot read it and
         // says so, rather than claiming an empty account.
@@ -1670,6 +1685,7 @@ pub(crate) fn signin_surface(press: WebSigninPress) -> WebRoutes {
         unstage: std::rc::Rc::new(|_: &str| no_send()),
         approvals: std::rc::Rc::new(no_send),
         decide: std::rc::Rc::new(|_: &str, _: &str| no_send()),
+        turn_delete: std::rc::Rc::new(no_send),
         history: std::rc::Rc::new(|| Err("This window cannot read the drawer.".to_owned())),
         open_thread: std::rc::Rc::new(|_: Option<&str>| no_send()),
         set_policy: std::rc::Rc::new(|_: &str, _: &str| no_send()),
@@ -2426,6 +2442,7 @@ mod tests {
             unstage: Rc::new(|_: &str| Ok(())),
             approvals: Rc::new(|| Ok(())),
             decide: Rc::new(|_: &str, _: &str| Ok(())),
+            turn_delete: Rc::new(|| Ok(())),
             history: Rc::new(|| Ok(Vec::new())),
             open_thread: Rc::new(|_: Option<&str>| Ok(())),
             set_policy: Rc::new(|_: &str, _: &str| Ok(())),
@@ -2668,6 +2685,62 @@ mod tests {
         };
         assert_eq!(reply["ok"], serde_json::json!(false));
         assert_eq!(reply["error"], serde_json::json!("this window cannot send"));
+    }
+
+    /// The turn menu's Delete is the app's own armed press, not a second
+    /// delete path: the route dispatches once, the app's sentence travels back
+    /// when it refuses, and a window without routes says it cannot delete
+    /// instead of doing nothing.
+    #[test]
+    fn chat_delete_is_the_apps_own_press_and_refuses_a_closed_window() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let pressed = Rc::new(Cell::new(0));
+        let counted = pressed.clone();
+        let routes = WebRoutes {
+            turn_delete: Rc::new(move || {
+                counted.set(counted.get() + 1);
+                Ok(())
+            }),
+            ..stub_routes()
+        };
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":81,"cmd":"chat.delete"}"#, None, Some(&routes));
+        assert_eq!(id, serde_json::json!(81));
+        assert_eq!(command, "chat.delete");
+        let Answer::Now(reply) = answer else {
+            panic!("a delete answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(true));
+        assert_eq!(pressed.get(), 1);
+
+        // A press the app cannot take answers with the app's own sentence, so
+        // the page can print it beside the press instead of guessing.
+        let refusing = WebRoutes {
+            turn_delete: Rc::new(|| Err("Another send is already in flight.".to_owned())),
+            ..stub_routes()
+        };
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":82,"cmd":"chat.delete"}"#, None, Some(&refusing));
+        let Answer::Now(reply) = answer else {
+            panic!("a refusal answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert_eq!(
+            reply["error"],
+            serde_json::json!("Another send is already in flight.")
+        );
+
+        // A page with no hook has no route to the delete at all.
+        let (_, answer, _) = handle_command_with(r#"{"id":83,"cmd":"chat.delete"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a closed route answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert_eq!(
+            reply["error"],
+            serde_json::json!("this window cannot make that change")
+        );
     }
 
     /// Stop is the other control the native card has. Its route takes no

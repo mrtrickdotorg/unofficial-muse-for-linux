@@ -959,7 +959,9 @@ impl Chat {
             let weak = Rc::downgrade(&chat);
             chat.delete.connect_clicked(move |_| {
                 if let Some(chat) = weak.upgrade() {
-                    chat.delete_pressed();
+                    // The native press keeps its silence: the panel has no
+                    // line to put a refusal in, while the page reports it.
+                    let _ = chat.delete_pressed();
                 }
             });
         }
@@ -1958,6 +1960,20 @@ impl Chat {
     /// A new turn disarms a pending delete: the armed press must name
     /// the latest turn, never a stale one.
     fn refresh_delete_arm(&self) {
+        if self.armed_delete.borrow().is_some() && !self.delete_armed() {
+            *self.armed_delete.borrow_mut() = None;
+        }
+        let armed = self.delete_armed();
+        self.delete.set_label(delete_label(armed));
+        // The page prints the same label: a press there and a press here arm
+        // one state, so both surfaces have to be told when it changes.
+        crate::pages::turn_cache(crate::pages::turn_menu(armed));
+    }
+
+    /// Whether the latest turn is armed for the confirming delete press. One
+    /// rule for the native label, the page's label and the press itself: the
+    /// armed id must still be the latest turn's, never a stale one.
+    fn delete_armed(&self) -> bool {
         let latest = self
             .session
             .borrow()
@@ -1965,12 +1981,7 @@ impl Chat {
             .last()
             .map(|row| row.message_id.clone());
         let armed = self.armed_delete.borrow().clone();
-        if armed.is_some() && armed != latest {
-            *self.armed_delete.borrow_mut() = None;
-        }
-        let armed = self.armed_delete.borrow().clone();
-        self.delete
-            .set_label(delete_label(armed.is_some() && armed == latest));
+        armed.is_some() && armed == latest
     }
 
     /// The open thread's title from the service listing, or "New chat"
@@ -2692,6 +2703,7 @@ impl Chat {
         let unstage_weak = weak.clone();
         let approvals_weak = weak.clone();
         let decide_weak = weak.clone();
+        let delete_weak = weak.clone();
         let history_weak = weak.clone();
         let open_thread_weak = weak.clone();
         let policy_weak = weak.clone();
@@ -2725,6 +2737,10 @@ impl Chat {
             }),
             decide: std::rc::Rc::new(move |id: &str, word: &str| match decide_weak.upgrade() {
                 Some(chat) => chat.web_decide(id, word),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            turn_delete: std::rc::Rc::new(move || match delete_weak.upgrade() {
+                Some(chat) => chat.delete_pressed(),
                 None => Err("The app window is gone.".to_owned()),
             }),
             history: std::rc::Rc::new(move || match history_weak.upgrade() {
@@ -2934,7 +2950,10 @@ impl Chat {
     /// Armed two-press turn delete. The first press arms the latest
     /// turn, the second press on the same turn dispatches; the re-read
     /// proves the removal. Acceptance is not absence.
-    fn delete_pressed(self: &Rc<Self>) {
+    /// Returns what a page needs to know about a press it made: the two
+    /// presses the app cannot take -- a held send slot and a signed-out window
+    /// -- answer with their reason, and the native button drops it as before.
+    fn delete_pressed(self: &Rc<Self>) -> Result<(), String> {
         let latest = self
             .session
             .borrow()
@@ -2950,14 +2969,14 @@ impl Chat {
             }
             DeleteAction::Confirm(id) => {
                 *self.armed_delete.borrow_mut() = None;
-                self.delete.set_label(delete_label(false));
+                self.refresh_delete_arm();
                 let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
                     Some(ticket) => ticket,
-                    None => return,
+                    None => return Err("Another send is already in flight.".to_owned()),
                 };
                 let Some(client) = self.client.borrow().clone() else {
                     self.session.borrow_mut().accept(&ticket);
-                    return;
+                    return Err("Sign in before deleting a turn.".to_owned());
                 };
                 dispatch(
                     self,
@@ -2973,6 +2992,7 @@ impl Chat {
                 );
             }
         }
+        Ok(())
     }
 
     /// Stop cancels outside the ticket slot: it must fire while a

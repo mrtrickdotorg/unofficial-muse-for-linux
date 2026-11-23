@@ -186,6 +186,14 @@ export type ChatRow = {
 // The Chat surface as this window opens it: the open thread, the rows the
 // native transcript last built, and the composer's status line. `loaded`
 // separates a thread nobody has read yet from an empty one.
+// The chat's turn menu as the app offers it: the press's own label (the
+// native button's words) and whether the latest turn is armed for the
+// confirming press. The arming lives in the app, never here.
+export type TurnMenu = {
+  delete_label: string;
+  armed: boolean;
+};
+
 export type ChatSnapshot = {
   thread?: string | null;
   title: string;
@@ -199,6 +207,7 @@ export type ChatSnapshot = {
   staged?: StagedChip[];
   unread?: number;
   approvals?: ApprovalsView;
+  turn?: TurnMenu;
   rows: ChatRow[];
   loaded: boolean;
   error?: string | null;
