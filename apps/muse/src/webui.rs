@@ -1404,6 +1404,10 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
                 "tracking": held.tracking,
                 "tracking_total": held.tracking_total,
                 "tracking_error": held.tracking_error,
+                // The read that just cached these rows has landed, so a page
+                // painting this reply can say "no goals yet" instead of
+                // reusing the sentence for a roster nobody has read.
+                "loaded": crate::pages::goals_loaded(),
             })
         }
         Fetched::Ideas(held) => {
@@ -2948,6 +2952,7 @@ mod tests {
         let reply = reply_for(Fetched::Goals(rows), &command, Instant::now());
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["goals_total"], 40);
+        assert_eq!(reply["loaded"], true, "the reply says the roster was read");
         let cached = crate::pages::goals_snapshot();
         assert_eq!(cached.goals[0].title, "Read from the service");
         assert_eq!(cached.tracking[0].title, "Tracked from the service");

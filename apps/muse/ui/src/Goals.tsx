@@ -100,7 +100,9 @@ export function Goals() {
   // The native probe reads this: how many roster rows the page holds.
   (window as unknown as { __MUSE_ROWS__?: number }).__MUSE_ROWS__ = goals.length;
 
-  const loaded = goals.length > 0 || tracking.length > 0;
+  // The snapshot's own flag, and nothing else: a read that lands on an empty
+  // account is a read, and an empty row list alone cannot say which it is.
+  const loaded = data?.loaded === true;
   const count =
     goals.length === 0
       ? ""

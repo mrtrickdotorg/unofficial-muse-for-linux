@@ -33,8 +33,13 @@ const cards = () => document.querySelectorAll(".card").length;
 
 describe("the Library web page", () => {
   it("opens on the boot rows and names the service's total", async () => {
-    window.__MUSE_BOOT__ = { artifacts: rows(50, "File"), total: 127 };
-    const commands = installChannel(() => ({ ok: true, artifacts: rows(50, "File"), total: 127 }));
+    window.__MUSE_BOOT__ = { artifacts: rows(50, "File"), total: 127, loaded: true };
+    const commands = installChannel(() => ({
+      ok: true,
+      artifacts: rows(50, "File"),
+      total: 127,
+      loaded: true,
+    }));
 
     render(<Library />);
 
@@ -95,12 +100,25 @@ describe("the Library web page", () => {
     expect(commands).toEqual(["library.snapshot"]);
   });
 
+  // A read that lands on an empty account has been read: the page names the
+  // empty listing rather than the sentence for a listing nobody has read.
+  it("says an empty library was read rather than unread", async () => {
+    installChannel(() => ({ ok: true, artifacts: [], total: 0, loaded: true }));
+
+    render(<Library />);
+
+    expect(
+      await screen.findByText("Nothing in the Library yet."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/has not loaded yet/)).toBeNull();
+  });
+
   it("refreshes over the wire and shows the listing that comes back", async () => {
-    window.__MUSE_BOOT__ = { artifacts: rows(2, "Cached"), total: 9 };
+    window.__MUSE_BOOT__ = { artifacts: rows(2, "Cached"), total: 9, loaded: true };
     const commands = installChannel((command) =>
       command === "library.refresh"
-        ? { ok: true, artifacts: rows(3, "Fresh"), total: 128 }
-        : { ok: true, artifacts: rows(2, "Cached"), total: 9 },
+        ? { ok: true, artifacts: rows(3, "Fresh"), total: 128, loaded: true }
+        : { ok: true, artifacts: rows(2, "Cached"), total: 9, loaded: true },
     );
 
     render(<Library />);
@@ -116,11 +134,11 @@ describe("the Library web page", () => {
   });
 
   it("reports a refused refresh as a failure and keeps the rows it has", async () => {
-    window.__MUSE_BOOT__ = { artifacts: rows(2, "Held"), total: 9 };
+    window.__MUSE_BOOT__ = { artifacts: rows(2, "Held"), total: 9, loaded: true };
     installChannel((command) =>
       command === "library.refresh"
         ? { ok: false, error: "no account link in this app" }
-        : { ok: true, artifacts: rows(2, "Held"), total: 9 },
+        : { ok: true, artifacts: rows(2, "Held"), total: 9, loaded: true },
     );
 
     render(<Library />);
@@ -140,8 +158,8 @@ describe("the Library web page", () => {
       artifact({ artifact_ref: "f1", title: "File gamma" }),
       artifact({ artifact_ref: "f2", title: "File delta" }),
     ];
-    window.__MUSE_BOOT__ = { artifacts: boot, total: 4 };
-    const commands = installChannel(() => ({ ok: true, artifacts: boot, total: 4 }));
+    window.__MUSE_BOOT__ = { artifacts: boot, total: 4, loaded: true };
+    const commands = installChannel(() => ({ ok: true, artifacts: boot, total: 4, loaded: true }));
 
     render(<Library />);
     await waitFor(() => expect(commands).toEqual(["library.snapshot"]));
@@ -183,7 +201,7 @@ describe("the Library web page", () => {
     const commands = installChannel(
       (command) => {
         if (command === "library.snapshot") {
-          return { ok: true, artifacts: [space], total: 1, armed: null };
+          return { ok: true, artifacts: [space], total: 1, armed: null, loaded: true };
         }
         unshares += 1;
         if (unshares === 1) {
@@ -194,6 +212,7 @@ describe("the Library web page", () => {
             armed: "calm-space",
             artifacts: [space],
             total: 1,
+            loaded: true,
           };
         }
         return {
@@ -206,6 +225,7 @@ describe("the Library web page", () => {
             artifact({ artifact_ref: "file:after", title: "Read again file" }),
           ],
           total: 2,
+          loaded: true,
         };
       },
       (request) => seen.push(request),
@@ -256,7 +276,13 @@ describe("the Library web page", () => {
     let presses = 0;
     installChannel((command) => {
       if (command === "library.snapshot") {
-        return { ok: true, artifacts: [space], total: 1, armed: null };
+        return {
+          ok: true,
+          artifacts: [space],
+          total: 1,
+          armed: null,
+          loaded: true,
+        };
       }
       presses += 1;
       return { ok: false, error: "that space is not in the held Library listing" };
@@ -294,6 +320,7 @@ describe("the Library web page", () => {
         delete_armed: "calm-space",
         artifacts: [space],
         total: 1,
+        loaded: true,
       },
       {
         ok: true,
@@ -303,6 +330,7 @@ describe("the Library web page", () => {
         delete_armed: null,
         artifacts: [],
         total: 0,
+        loaded: true,
       },
     ];
     let presses = 0;
@@ -316,6 +344,7 @@ describe("the Library web page", () => {
             total: 1,
             armed: null,
             delete_armed: null,
+            loaded: true,
           };
         }
         return replies[presses++];
@@ -367,6 +396,7 @@ describe("the Library web page", () => {
       artifacts: [artifact({ title: "Plan.pdf", format: "pdf" })],
       total: 1,
       armed: null,
+      loaded: true,
     }));
 
     render(<Library />);
@@ -377,8 +407,8 @@ describe("the Library web page", () => {
   });
 
   it("says a filter matched nothing rather than that the library is empty", async () => {
-    window.__MUSE_BOOT__ = { artifacts: rows(2, "Held"), total: 2 };
-    installChannel(() => ({ ok: true, artifacts: rows(2, "Held"), total: 2 }));
+    window.__MUSE_BOOT__ = { artifacts: rows(2, "Held"), total: 2, loaded: true };
+    installChannel(() => ({ ok: true, artifacts: rows(2, "Held"), total: 2, loaded: true }));
 
     render(<Library />);
     fireEvent.change(screen.getByPlaceholderText("Quick Open"), {

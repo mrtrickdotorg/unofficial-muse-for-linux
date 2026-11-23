@@ -190,6 +190,10 @@ export function Library() {
           total: answer.total ?? 0,
           armed: answer.armed ?? null,
           delete_armed: answer.delete_armed ?? null,
+          // The write's reply carries the listing read that followed it, so it
+          // carries that read's flag too: dropping it here would paint a read
+          // listing as unread.
+          loaded: answer.loaded,
         });
         if (answer.delete_armed) {
           setNote(
@@ -245,7 +249,9 @@ export function Library() {
   const pinned = rows.filter((a) => a.pinned);
   const rest = rows.filter((a) => !a.pinned);
   const total = data?.total ?? 0;
-  const loaded = (data?.artifacts ?? []).length > 0;
+  // The snapshot's own flag, and nothing else: an empty listing that was read
+  // is not the same as a listing nobody has read.
+  const loaded = data?.loaded === true;
 
   return (
     <div className="page">
@@ -293,7 +299,11 @@ export function Library() {
             : "The native Library page has not loaded yet, so there is nothing to show here. Open Library in the app, then press Refresh — this window is not claiming your Library is empty."}
         </div>
       ) : rows.length === 0 ? (
-        <div className="empty">Nothing in the Library matches this filter.</div>
+        <div className="empty">
+          {query.trim() || tab !== "All"
+            ? "Nothing in the Library matches this filter."
+            : "Nothing in the Library yet."}
+        </div>
       ) : (
         <>
           {pinned.length > 0 && (

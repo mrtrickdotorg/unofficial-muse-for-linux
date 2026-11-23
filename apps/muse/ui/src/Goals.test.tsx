@@ -28,6 +28,7 @@ const bootPayload = (
   tracking,
   tracking_total: tracking.length,
   tracking_error: null,
+  loaded: true,
   ...overrides,
 });
 
@@ -67,7 +68,7 @@ describe("the Goals web page", () => {
   it("names the not-loaded state instead of an empty page", async () => {
     const commands = installChannel(() => ({
       ok: true,
-      ...bootPayload([], []),
+      ...bootPayload([], [], { loaded: false }),
     }));
 
     render(<Goals />);
@@ -77,7 +78,23 @@ describe("the Goals web page", () => {
     // No count at all: "0 goals" would be a claim about the service.
     expect(screen.queryByText(/^\d+ goals$/)).toBeNull();
     expect(cards()).toBe(0);
-    expect(commands).toEqual(["goals.snapshot"]);
+    // One open, one read: the page owed it because the snapshot said unread.
+    await waitFor(() =>
+      expect(commands).toEqual(["goals.snapshot", "goals.refresh"]),
+    );
+  });
+
+  // A read that lands on an empty account has been read: the page names the
+  // empty roster rather than the sentence for a roster nobody has read.
+  it("says an empty roster was read rather than unread", async () => {
+    installChannel(() => ({ ok: true, ...bootPayload([], []) }));
+
+    render(<Goals />);
+
+    expect(
+      await screen.findByText("No goals on this account yet."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/has not loaded yet/)).toBeNull();
   });
 
   it("refreshes both sections over the wire and shows what came back", async () => {

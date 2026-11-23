@@ -348,7 +348,17 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   Tasks read does; because that route answers when the read is dispatched rather than when it
   lands, Upcoming keeps following its own snapshot (bounded at 10 s) until the cards are in it, so
   its sentence stays "a read is in progress" instead of flashing back to "nothing has been read".
-  Library gained the `loaded` flag its snapshot lacked so it can do the same. Nothing polls: the extra read happens once per open, and the held rows take over as
+  Library gained the `loaded` flag its snapshot lacked so it can do the same. An audit of those
+  routes (Nov 23, 2026) found the one a page waits on always waits for its read: `threads.refresh`,
+  `tasks.refresh`, `ideas.refresh`, `goals.refresh`, `feed.refresh`, `library.refresh`,
+  `search.run` and `feed.hero` all answer as `Answer::Later`, and `reply_for` caches the worker's
+  answer before replying, so the page's own reply already carries the rows. The exception is
+  `chat.approvals.refresh`, which answers as soon as the read is dispatched, which is why Upcoming
+  follows it. Goals and Library read their snapshot's `loaded` flag and nothing else -- an empty
+  row list alone cannot say whether a listing was read -- so the flag travels on every payload that
+  becomes the page's data: its snapshot, its refresh reply and the space-write reply that replaces
+  it. A read that lands on an empty account therefore says so instead of reusing the unread
+  sentence. Nothing polls: the extra read happens once per open, and the held rows take over as
   soon as one has been read. The hook also holds one in-flight read per page: a page remounted
   while its read runs -- a rail press away and back -- waits for that read and then asks its own
   snapshot again, so one open is one read and the remounted page paints what that read left. While
