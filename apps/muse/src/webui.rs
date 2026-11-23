@@ -1776,8 +1776,8 @@ pub(crate) fn open_localhost_window(held: HeldLocalHost, routes: Option<WebRoute
 }
 
 /// Every route the Chat window has, stubbed: a test binds only the ones it is
-/// about, so a new control cannot quietly break the others' tests. Shared with
-/// the shell window's bridge tests, which answer pages with no display.
+/// about, so a new control cannot quietly break the others' tests. Also shared
+/// with the app's own shell bridge tests, which answer pages with no display.
 #[cfg(test)]
 pub(crate) fn stub_routes() -> WebRoutes {
     use std::rc::Rc;
