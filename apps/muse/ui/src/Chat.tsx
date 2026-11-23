@@ -21,6 +21,13 @@ import type {
 // trips of its own: it follows the rows the native list last built.
 const POLL_MS = 2000;
 
+// The draft is the one thing a reader edits keystroke by keystroke, and every
+// write of it repaints the window's own entry. So the page coalesces typing into
+// one command per pause, and one more mid-burst so a long sentence still reaches
+// the window while it is being typed.
+const DRAFT_DEBOUNCE_MS = 200;
+const DRAFT_BATCH_MS = 600;
+
 /// The quote the page stages with Reply: the row's first line, trimmed. The
 /// app owns the stored quote and caps it there; this bar ellipsises, so the
 /// page needs no second copy of the limit.
@@ -131,12 +138,52 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // surfaces agree on, so an echo of this page's own typing is not mistaken for
   // the window changing the draft underneath the reader.
   const [draft, setDraft] = useState("");
+  // The last draft both surfaces agreed on: what the app answered, never what
+  // this page has typed but not yet sent.
   const lastSynced = useRef("");
-  const typeDraft = (text: string) => {
-    setDraft(text);
+  const pendingDraft = useRef<string | null>(null);
+  const flushTimer = useRef<number | null>(null);
+  const burstStarted = useRef(0);
+
+  const cancelFlush = () => {
+    if (flushTimer.current !== null) {
+      window.clearTimeout(flushTimer.current);
+      flushTimer.current = null;
+    }
+    pendingDraft.current = null;
+    burstStarted.current = 0;
+  };
+
+  // Send whatever the reader typed since the last write, once. `lastSynced`
+  // moves here rather than on each keystroke: until the app has the words, it
+  // has not agreed to them.
+  const flushDraft = useCallback(() => {
+    if (flushTimer.current !== null) {
+      window.clearTimeout(flushTimer.current);
+      flushTimer.current = null;
+    }
+    const text = pendingDraft.current;
+    pendingDraft.current = null;
+    burstStarted.current = 0;
+    if (text === null) return;
     lastSynced.current = text;
     void call<{ ok: boolean }>("chat.draft", 15_000, { text }).catch((failure: unknown) =>
       setNote(sentence(failure)),
+    );
+  }, []);
+
+  const typeDraft = (text: string) => {
+    setDraft(text);
+    pendingDraft.current = text;
+    const now = Date.now();
+    if (burstStarted.current === 0) burstStarted.current = now;
+    if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
+    // A burst flushes on its pause; one that never pauses flushes a beat later
+    // so the window is never far behind the box.
+    const waited = now - burstStarted.current;
+    flushTimer.current = window.setTimeout(
+      flushDraft,
+      waited >= DRAFT_BATCH_MS ? 0 : DRAFT_DEBOUNCE_MS,
     );
   };
   const [pending, setPending] = useState(false);
@@ -181,6 +228,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
       // The app took it: the shared draft clears on both surfaces, exactly as
       // a press in that window clears it, and so does the quote -- one Reply
       // answers one send. The transcript and the status line carry the outcome.
+      cancelFlush();
       setDraft("");
       lastSynced.current = "";
       setQuote(null);
@@ -342,13 +390,21 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   };
 
   // The window can change the draft without this page: native typing, a
-  // dictation's words, another page proposing one. The snapshot is the news.
+  // dictation's words, another page proposing one. The snapshot is the news,
+  // and it wins over typing this page has not sent yet -- writing those stale
+  // words afterwards would clobber the dictation. A pending flush is therefore
+  // dropped, not delayed.
   const sharedDraft = data?.composer?.draft;
   useEffect(() => {
     if (sharedDraft === undefined || sharedDraft === lastSynced.current) return;
+    cancelFlush();
     lastSynced.current = sharedDraft;
     setDraft(sharedDraft);
   }, [sharedDraft]);
+
+  // Leaving the page or the box must not leave the window behind: a blur and an
+  // unmount both write what is still pending.
+  useEffect(() => flushDraft, [flushDraft]);
 
   useEffect(() => {
     if (!watching) return;
@@ -535,6 +591,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               rows={1}
               value={draft}
               onChange={(event) => typeDraft(event.target.value)}
+              onBlur={flushDraft}
               onKeyDown={draftKey}
             />
             {data?.sending || watching ? (

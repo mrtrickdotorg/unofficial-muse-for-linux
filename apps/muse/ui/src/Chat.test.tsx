@@ -453,10 +453,74 @@ describe("the Chat web page", () => {
     await waitFor(() => expect(box.value).toBe("dictated words"));
 
     // A keystroke here writes the app's draft, and the echo of the poll does not
-    // overwrite what the reader typed.
+    // overwrite what the reader typed. The write waits for a pause in the
+    // typing, so the box answers at once and the command follows.
     fireEvent.change(box, { target: { value: "typed here" } });
-    expect(commands).toContain("chat.draft");
-    await waitFor(() => expect(box.value).toBe("typed here"));
+    expect(box.value).toBe("typed here");
+    await waitFor(() => expect(commands).toContain("chat.draft"));
+    expect(current).toBe("typed here");
+  });
+
+  it("coalesces a burst of typing into one draft write", async () => {
+    let current = "";
+    const writes: string[] = [];
+    window.__MUSE_BOOT__ = snapshot([], { composer: { draft: current, dictating: false } });
+    const commands = installChannel(
+      () => ({ ok: true, ...snapshot([], { composer: { draft: current, dictating: false } }) }),
+      (request) => {
+        if (request.cmd === "chat.draft") {
+          current = String((request as { text?: string }).text ?? "");
+          writes.push(current);
+        }
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const box = screen.getByLabelText("Message") as HTMLTextAreaElement;
+
+    // Six keystrokes inside one pause: the window hears the last of them once.
+    for (const value of ["h", "he", "hel", "hell", "hello", "hello!"]) {
+      fireEvent.change(box, { target: { value } });
+    }
+    expect(box.value).toBe("hello!");
+    await waitFor(() => expect(writes.length).toBeGreaterThan(0));
+    expect(writes).toEqual(["hello!"]);
+    expect(commands.filter((cmd) => cmd === "chat.draft")).toHaveLength(1);
+  });
+
+  it("lets a dictation's words win over typing the page has not sent yet", async () => {
+    let current = "";
+    const writes: string[] = [];
+    window.__MUSE_BOOT__ = snapshot([], { composer: { draft: current, dictating: false } });
+    installChannel(
+      (cmd) => {
+        if (cmd === "chat.dictate") {
+          // The take lands as the app's draft while the reader is still typing.
+          current = "the words the app heard";
+          return { ok: true };
+        }
+        return { ok: true, ...snapshot([], { composer: { draft: current, dictating: false } }) };
+      },
+      (request) => {
+        if (request.cmd === "chat.draft") {
+          current = String((request as { text?: string }).text ?? "");
+          writes.push(current);
+        }
+      },
+      10,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const box = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "typed but unsent" } });
+
+    // The mic press re-reads the snapshot, which carries the dictation.
+    fireEvent.click(screen.getByRole("button", { name: "Dictate" }));
+    await waitFor(() => expect(box.value).toBe("the words the app heard"));
+
+    // The page's unsent words are dropped, not written afterwards over the
+    // dictation: the box, the entry and the app all hold the same draft.
+    expect(writes).toEqual([]);
   });
 
   it("presses the app's own mic and reads the take's state from the app", async () => {

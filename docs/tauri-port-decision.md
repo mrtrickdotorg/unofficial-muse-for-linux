@@ -556,10 +556,28 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   That last point needed a fix the live check found: a dictation's sentence arrives with no render
   behind it, so the page would never have shown "Dictation unavailable: ...". `say_send_note` now
   pushes the cached snapshot as it paints the window's own line, which is the one place a send or
-  a take answers in words. Two DOM tests (`Chat.test.tsx`, 121 in all) pin that typing writes the
-  app's draft and the poll's echo does not overwrite it, and that the mic reads Stop only because
-  the app says a take is running; one Rust test pins `chat.draft` and `chat.dictate` through the
-  routes and the closed-window refusal. Live: the page's mic press reached the app's toggle
+  a take answers in words. Four DOM tests (`Chat.test.tsx`, 123 in all) pin that typing writes the
+  app's draft and the poll's echo does not overwrite it, that a burst of six keystrokes inside one
+  pause costs exactly one `chat.draft`, that a dictation landing mid-typing wins over words the
+  page has not sent yet, and that the mic reads Stop only because the app says a take is running;
+  one Rust test pins `chat.draft` and `chat.dictate` through the routes and the closed-window
+  refusal.
+
+  The draft write is the hottest path in the app, so it is the one place the page batches rather
+  than writing through: every keystroke would repaint the window's own entry, and the first cut did
+  exactly that. A burst now flushes on its pause (200 ms) and a burst that never pauses flushes a
+  beat later (600 ms), so a sentence costs one command or two rather than one per letter; a blur
+  and an unmount flush what is still pending, so leaving the box or the page does not strand the
+  window behind the reader. Agreement holds in both directions by construction rather than by
+  timing: `lastSynced` moves when a write goes out, not when a key is pressed, so a snapshot that
+  differs is the window's own change and is adopted -- and adopting **cancels** the pending write
+  instead of following it, because writing the reader's stale words afterwards would clobber the
+  dictation that just landed. The app meets the batching halfway: `web_draft` returns without
+  touching anything when the entry already holds those words, so an echo of a write costs no
+  repaint and no second publish. Not verified live: this seat cannot type into a WebKit entry (the
+  accessory text interface is not exposed for it), so the burst count, the adoption and the
+  cancellation are the DOM tests' evidence; the page's box and its mic were seen live, and the
+  app's side of the write is the same `web_draft` the suites drive. Live: the page's mic press reached the app's toggle
   (`chat.dictate` in the launch log) and the app's own sentence landed in the page's status line
   -- "Dictation unavailable: no microphone recorder found." on this seat, which has none, so the
   take itself and the words landing in the box are covered by the tests and the transcribe path's
