@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import type { Artifact, LibrarySnapshot } from "./types";
 
 const TABS = ["All", "Spaces", "Files"] as const;
@@ -112,16 +113,19 @@ export function Library() {
   // Opening the page costs nothing on the wire: the native side answers
   // from the rows it already holds, which is the same list the boot payload
   // came from.
-  const loadSnapshot = useCallback(async () => {
+  const loadSnapshot = useCallback(async (): Promise<LibrarySnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<LibrarySnapshot>("library.snapshot"));
+      const answer = await call<LibrarySnapshot>("library.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
@@ -144,11 +148,7 @@ export function Library() {
     }
   }, []);
 
-  // Ask the native side for its rows on mount: boot data is a head start,
-  // never the source of truth.
-  useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+  useHeldRead("library", loadSnapshot, refresh);
 
   // A space write, on the app's one-armed-press rule: the first press sends
   // nothing, the second press on the same row and write sends the app's own

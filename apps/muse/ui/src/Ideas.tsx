@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import { groupOf, snippet } from "./listing";
 import type { IdeasSnapshot, ListingItem } from "./types";
 
@@ -28,16 +29,19 @@ export function Ideas() {
 
   // Opening the page costs nothing on the wire: the native side answers
   // from the roster it already holds.
-  const loadSnapshot = useCallback(async () => {
+  const loadSnapshot = useCallback(async (): Promise<IdeasSnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<IdeasSnapshot>("ideas.snapshot"));
+      const answer = await call<IdeasSnapshot>("ideas.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
@@ -58,9 +62,7 @@ export function Ideas() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+  useHeldRead("ideas", loadSnapshot, refresh);
 
   const ideas = useMemo(() => data?.ideas ?? [], [data]);
   const loaded = data?.loaded ?? false;

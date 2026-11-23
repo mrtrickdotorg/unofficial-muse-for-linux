@@ -67,7 +67,9 @@ describe("the Ideas web page", () => {
     expect(screen.queryByText("No ideas on this account yet.")).toBeNull();
     expect(screen.queryByText(/^\d+ ideas$/)).toBeNull();
     expect(cards()).toBe(0);
-    expect(commands).toEqual(["ideas.snapshot"]);
+    // Unread is a read owed: the page asks once, and this channel still says
+    // nothing has been read.
+    expect(commands).toEqual(["ideas.snapshot", "ideas.refresh"]);
   });
 
   it("refreshes over the wire and shows the listing that comes back", async () => {

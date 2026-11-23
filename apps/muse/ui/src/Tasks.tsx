@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import type { TaskRow, TasksSnapshot } from "./types";
 
 function Rows({ rows }: { rows: TaskRow[] }) {
@@ -25,16 +26,19 @@ export function Tasks() {
   // Opening the page costs nothing on the wire for the schedules and runs:
   // the native side answers from what it already holds, and re-reads the
   // local reminder store because that is local state.
-  const loadSnapshot = useCallback(async () => {
+  const loadSnapshot = useCallback(async (): Promise<TasksSnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<TasksSnapshot>("tasks.snapshot"));
+      const answer = await call<TasksSnapshot>("tasks.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
@@ -57,9 +61,7 @@ export function Tasks() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+  useHeldRead("tasks", loadSnapshot, refresh);
 
   const schedules = data?.schedules ?? [];
   const runs = data?.runs ?? [];

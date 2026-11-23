@@ -337,6 +337,17 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   that activated the window and reported it active), so the hook made the two calls the button
   makes rather than a click making them.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
+  Every page now reads for itself when the shell is the only surface (Nov 23, 2026). The contracts
+  above answer from the held rows, and those rows are filled by the native paint -- which a shell
+  launch never runs, so every page but chat opened on "nothing has been read". Each page now treats
+  that state as a read owed: Threads, Tasks, Ideas, Goals and Feed ask their own `*.refresh` when
+  their snapshot says `loaded === false` (strictly `false`, so an answer that does not say is left
+  alone), Upcoming asks `tasks.refresh` and then its own snapshot again because the run it names
+  lives in the Tasks listing, and Library gained the `loaded` flag its snapshot lacked so it can
+  do the same. Nothing polls: the extra read happens once per open, and the held rows take over as
+  soon as one has been read. The hook also holds one in-flight read per page: a page remounted
+  while its read runs -- a rail press away and back -- waits for that read and then asks its own
+  snapshot again, so one open is one read and the remounted page paints what that read left.
 - **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only;
   GATE CLOSED Nov 21, 2026, and the slices after it extend the page rather than reopen the gate.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import type { FeedCard as Card, FeedSnapshot } from "./types";
 
 /// One graphic's markup, in a shadow root: the service's own `<style>` stays
@@ -113,16 +114,19 @@ export function Feed() {
 
   // Opening the page costs nothing on the wire: the native side answers
   // from the cards it already painted.
-  const loadSnapshot = useCallback(async () => {
+  const loadSnapshot = useCallback(async (): Promise<FeedSnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<FeedSnapshot>("feed.snapshot"));
+      const answer = await call<FeedSnapshot>("feed.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
@@ -144,9 +148,7 @@ export function Feed() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+  useHeldRead("feed", loadSnapshot, refresh);
 
   const cards = useMemo(() => data?.cards ?? [], [data]);
   const loaded = data?.loaded ?? false;

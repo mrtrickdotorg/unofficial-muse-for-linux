@@ -29,6 +29,25 @@ const bootPayload = (overrides: Partial<ThreadsSnapshot> = {}) => ({
 const rows = () => document.querySelectorAll(".thread").length;
 
 describe("the Threads web page", () => {
+  // The shell can be the only surface: with nothing painted into the app's
+  // held rows, the page asks for the listing itself rather than presenting an
+  // account with no conversations.
+  it("reads the listing itself when the app says none was painted", async () => {
+    const commands = installChannel((command) =>
+      command === "threads.refresh"
+        ? {
+            ok: true,
+            ...bootPayload({ threads: [row({ title: "Read now" })], total: 1 }),
+          }
+        : { ok: true, ...bootPayload({ loaded: false }) },
+    );
+
+    render(<Threads />);
+
+    expect(await screen.findByText("Read now")).toBeInTheDocument();
+    expect(commands).toEqual(["threads.snapshot", "threads.refresh"]);
+  });
+
   it("opens on the held rows under their day groups", async () => {
     const held = bootPayload({
       threads: [
@@ -79,7 +98,9 @@ describe("the Threads web page", () => {
 
     expect(await screen.findByText(/has not loaded yet/)).toBeInTheDocument();
     expect(screen.queryByText("No threads yet.")).toBeNull();
-    expect(commands).toEqual(["threads.snapshot"]);
+    // An unread listing is a read owed: the page asks for it once itself, and
+    // this channel answers "still unread", so the sentence stands.
+    expect(commands).toEqual(["threads.snapshot", "threads.refresh"]);
   });
 
   it("refreshes over the wire and shows the listing that comes back", async () => {

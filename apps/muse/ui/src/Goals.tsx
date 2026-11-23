@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import { groupOf, snippet } from "./listing";
 import type { GoalsSnapshot, ListingItem } from "./types";
 
@@ -51,16 +52,19 @@ export function Goals() {
 
   // Opening the page costs nothing on the wire: the native side answers
   // from the roster it already holds.
-  const loadSnapshot = useCallback(async () => {
+  const loadSnapshot = useCallback(async (): Promise<GoalsSnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<GoalsSnapshot>("goals.snapshot"));
+      const answer = await call<GoalsSnapshot>("goals.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
@@ -83,9 +87,7 @@ export function Goals() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+  useHeldRead("goals", loadSnapshot, refresh);
 
   const goals = useMemo(() => data?.goals ?? [], [data]);
   const tracking = data?.tracking ?? [];

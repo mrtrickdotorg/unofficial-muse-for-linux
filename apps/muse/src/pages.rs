@@ -2781,6 +2781,11 @@ thread_local! {
     /// confirm the other.
     static SPACE_DELETE_ARMED: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    /// Whether a listing has been read into the store above. The shell can be
+    /// the only surface, and there no native paint fills it, so a page has to
+    /// tell "nothing has been read" from "the account is empty" -- the split
+    /// `loaded` makes on the other pages.
+    static LIBRARY_LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The held Library rows and the service's total, for the web UI slice: it
@@ -2800,6 +2805,15 @@ pub(crate) fn library_snapshot() -> (Vec<ArtifactSummary>, u64) {
 pub(crate) fn library_cache(artifacts: Vec<ArtifactSummary>, total: u64) {
     ART_STORE.with(|store| *store.borrow_mut() = artifacts);
     ART_TOTAL.with(|total_cell| total_cell.set(total));
+    LIBRARY_LOADED.set(true);
+}
+
+/// Whether a Library listing has been read in this process. The shell can be
+/// the only surface, and there no native paint ever fills the held rows, so a
+/// page has to be able to tell "nothing has been read" from "the account is
+/// empty" -- the same split `loaded` makes on the other pages.
+pub(crate) fn library_loaded() -> bool {
+    LIBRARY_LOADED.with(|loaded| loaded.get())
 }
 
 /// What one unshare press means against the armed row: the first press arms
@@ -2872,6 +2886,9 @@ pub(crate) struct HeldGoals {
 thread_local! {
     static GOAL_STORE: std::cell::RefCell<HeldGoals> =
         std::cell::RefCell::new(HeldGoals::default());
+    /// Whether a Goals listing was read into the store above: the shell can be
+    /// the only surface, and there no native paint fills it.
+    static GOAL_LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// The held Goals rows, for the web UI slice: never a second trip to the
@@ -2885,6 +2902,14 @@ pub(crate) fn goals_snapshot() -> HeldGoals {
 /// afterwards. Called on the main loop, from the thread's answer.
 pub(crate) fn goals_cache(held: HeldGoals) {
     GOAL_STORE.with(|store| *store.borrow_mut() = held);
+    GOAL_LOADED.with(|loaded| loaded.set(true));
+}
+
+/// Whether a Goals listing has been read in this process: the shell can be the
+/// only surface, and there no native paint fills the held rows, so the page
+/// has to tell "not read" from "an account with no goals".
+pub(crate) fn goals_loaded() -> bool {
+    GOAL_LOADED.with(|loaded| loaded.get())
 }
 
 /// The Ideas page as the web view opens it. `loaded` is the difference
@@ -7994,6 +8019,15 @@ mod tests {
             ("Confirm unshare", Some("Press again to unshare"))
         );
         assert_eq!(unshare_words(Some("a"), "b"), ("Unshare", None));
+    }
+
+    /// "Nothing has been read" is not "the account is empty": the Library's
+    /// own flag, which the shell's pages ask before deciding to read.
+    #[test]
+    fn the_library_says_when_no_listing_was_read() {
+        assert!(!library_loaded(), "a fresh process holds no listing");
+        library_cache(vec![], 0);
+        assert!(library_loaded(), "a listing, even an empty one, is a read");
     }
 
     /// The delete label: the armed row's word, never its neighbour's.

@@ -164,7 +164,9 @@ describe("the Feed web page", () => {
 
     expect(await screen.findByText(/has not loaded yet/)).toBeInTheDocument();
     expect(screen.queryByText(/No units in this edition/)).not.toBeInTheDocument();
-    expect(commands).toEqual(["feed.snapshot"]);
+    // Unread is a read owed: the page asks once, and this channel still says
+    // nothing has been read.
+    expect(commands).toEqual(["feed.snapshot", "feed.refresh"]);
   });
 
   it("refreshes over the wire and repaints the cards the channel answers", async () => {

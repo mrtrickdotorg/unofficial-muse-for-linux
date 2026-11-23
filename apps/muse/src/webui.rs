@@ -863,6 +863,7 @@ pub(crate) fn handle_command_with(
                 "total": total,
                 "armed": crate::pages::unshare_armed(),
                 "delete_armed": crate::pages::space_delete_armed(),
+                "loaded": crate::pages::library_loaded(),
             }))
         }
         "library.refresh" => Answer::Later(fresh_listing(client)),
@@ -891,6 +892,7 @@ pub(crate) fn handle_command_with(
                     "accepted": false,
                     "slug": slug,
                     "armed": slug,
+                    "loaded": crate::pages::library_loaded(),
                     "artifacts": artifacts,
                     "total": total,
                 }))
@@ -924,6 +926,7 @@ pub(crate) fn handle_command_with(
                     "slug": slug,
                     "delete_armed": slug,
                     "armed": crate::pages::unshare_armed(),
+                    "loaded": crate::pages::library_loaded(),
                     "artifacts": artifacts,
                     "total": total,
                 }))
@@ -940,6 +943,7 @@ pub(crate) fn handle_command_with(
                 "tracking": held.tracking,
                 "tracking_total": held.tracking_total,
                 "tracking_error": held.tracking_error,
+                "loaded": crate::pages::goals_loaded(),
             }))
         }
         "goals.refresh" => Answer::Later(fresh_goals(client)),
@@ -1306,6 +1310,9 @@ fn space_write_reply(
         "slug": slug,
         "armed": null,
         "delete_armed": null,
+        // The rows may be the held ones when the re-read failed, so this says
+        // what the cache actually holds, never what the press hoped.
+        "loaded": crate::pages::library_loaded(),
         "error": error,
         "reread_error": reread_error,
         "artifacts": artifacts,
@@ -1331,7 +1338,7 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
             );
             serde_json::json!({
                 "ok": true, "artifacts": artifacts, "total": total,
-                "armed": null, "delete_armed": null
+                "armed": null, "delete_armed": null, "loaded": true
             })
         }
         Fetched::Unshare {
@@ -2281,6 +2288,99 @@ mod tests {
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shell's own sequence for a page with no native paint behind it:
+    /// the opening snapshot says nothing has been read, the page's refresh is
+    /// the read that fills the rows, and the snapshot after it answers from
+    /// those rows. Driven over a stub host socket, so the case costs no window
+    /// and no service.
+    #[test]
+    fn an_unread_snapshot_then_the_pages_refresh_fills_the_rows() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        // Nothing has painted a listing into this process: the state a shell
+        // launch starts every page but chat in.
+        assert!(
+            !crate::pages::library_loaded(),
+            "a fresh thread holds no listing"
+        );
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":61,"cmd":"library.snapshot"}"#, None, None);
+        assert_eq!(command, "library.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("a snapshot is a cache read");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["loaded"], false, "nothing has been read yet");
+        assert_eq!(reply["artifacts"], serde_json::json!([]));
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let reply_text = serde_json::json!({
+            "ok": true,
+            "data": {
+                "total_count": 1,
+                "has_more": false,
+                "artifacts": [summary("Read by the page", false)],
+            }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone"))
+                .read_line(&mut line)
+                .expect("request");
+            let mut writer = stream;
+            writer.write_all(reply_text.as_bytes()).expect("reply");
+            writer.write_all(b"\n").expect("newline");
+            writer.flush().expect("flush");
+            line
+        });
+
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":62,"cmd":"library.refresh"}"#, Some(client), None);
+        assert_eq!(command, "library.refresh");
+        let Answer::Later(receiver) = answer else {
+            panic!("the page's read leaves the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+        let reply = reply_for(fetched, "library.refresh", Instant::now());
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["artifacts"][0]["title"], "Read by the page");
+        assert_eq!(
+            reply["loaded"], true,
+            "the read is what makes the rows the page's"
+        );
+        assert!(crate::pages::library_loaded());
+        // The read crossed the host once, as the listing: no second trip, and
+        // no paint involved anywhere in the sequence.
+        let request = server.join().expect("server");
+        assert!(request.contains(r#""op":"artifacts""#), "{request}");
+
+        // The page's next open is answered from the read, not from "nothing".
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":63,"cmd":"library.snapshot"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a snapshot is a cache read");
+        };
+        assert_eq!(reply["loaded"], true);
+        assert_eq!(reply["artifacts"][0]["title"], "Read by the page");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

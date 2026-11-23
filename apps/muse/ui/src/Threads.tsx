@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import type { ThreadRow as Row, ThreadsSnapshot } from "./types";
 
 /// One conversation row: pin, title, unread badge, then the listing's
@@ -38,16 +39,19 @@ export function Threads() {
 
   // Opening the page costs nothing on the wire: the native side answers
   // from the listing it already holds.
-  const loadSnapshot = useCallback(async () => {
+  const loadSnapshot = useCallback(async (): Promise<ThreadsSnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<ThreadsSnapshot>("threads.snapshot"));
+      const answer = await call<ThreadsSnapshot>("threads.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
@@ -69,9 +73,7 @@ export function Threads() {
     }
   }, []);
 
-  useEffect(() => {
-    void loadSnapshot();
-  }, [loadSnapshot]);
+  useHeldRead("threads", loadSnapshot, refresh);
 
   const threads = useMemo(() => data?.threads ?? [], [data]);
   const main = useMemo(() => threads.filter((thread) => !thread.side), [threads]);

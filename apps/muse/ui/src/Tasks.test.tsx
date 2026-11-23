@@ -57,7 +57,9 @@ describe("the Tasks web page", () => {
     // Local reminders do not depend on the service read, so their own
     // honest empty line still shows.
     expect(screen.getByText("No local reminders.")).toBeInTheDocument();
-    expect(commands).toEqual(["tasks.snapshot"]);
+    // Unread is a read owed: the page asks once, and this channel still says
+    // nothing has been read.
+    expect(commands).toEqual(["tasks.snapshot", "tasks.refresh"]);
   });
 
   it("refreshes over the wire and shows the listing that comes back", async () => {

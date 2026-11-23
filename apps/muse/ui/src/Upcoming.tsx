@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { useHeldRead } from "./held";
 import { usePageNav } from "./navigation";
 import type { UpcomingSnapshot } from "./types";
 
@@ -12,24 +13,33 @@ export function Upcoming() {
   const [data, setData] = useState<UpcomingSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<UpcomingSnapshot | null> => {
     if (!channelAvailable()) {
       setError("The app's command channel is not available in this window.");
-      return;
+      return null;
     }
     try {
-      setData(await call<UpcomingSnapshot>("upcoming.snapshot"));
+      const answer = await call<UpcomingSnapshot>("upcoming.snapshot");
+      setData(answer);
       setError(null);
+      return answer;
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
+      return null;
     }
   }, []);
 
-  // One read on mount, the way every page asks its own snapshot: the shell
-  // mounts the page it shows, so becoming the visible page asks again.
-  useEffect(() => {
-    void load();
-  }, [load]);
+  // The run this page names lives in the Tasks listing, so the owed read is
+  // that listing first and this page's snapshot after it, in that order.
+  useHeldRead(
+    "tasks",
+    load,
+    async () => {
+      await call("tasks.refresh", 120_000);
+      await load();
+    },
+    (answer) => answer.schedules_loaded === false,
+  );
 
   // A Tasks read landing anywhere in the app moves the run this page names.
   // The app nudges this hook rather than pushing rows, so the page re-asks its

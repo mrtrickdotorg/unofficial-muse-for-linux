@@ -44,6 +44,22 @@ describe("the Library web page", () => {
     expect(commands).toEqual(["library.snapshot"]);
   });
 
+  // The shell can be the only surface: when the app says no listing has been
+  // read, the page reads the service itself instead of claiming an empty
+  // library.
+  it("reads the listing itself when the app holds none", async () => {
+    const commands = installChannel((command) =>
+      command === "library.refresh"
+        ? { ok: true, artifacts: rows(2, "Read"), total: 2, loaded: true }
+        : { ok: true, artifacts: [], total: 0, loaded: false },
+    );
+
+    render(<Library />);
+
+    expect(await screen.findByText("Read 1")).toBeInTheDocument();
+    expect(commands).toEqual(["library.snapshot", "library.refresh"]);
+  });
+
   it("names the not-loaded state instead of showing an empty library", async () => {
     const commands = installChannel(() => ({ ok: true, artifacts: [], total: 0 }));
 

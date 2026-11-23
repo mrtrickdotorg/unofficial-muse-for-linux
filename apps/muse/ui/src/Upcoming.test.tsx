@@ -43,6 +43,34 @@ describe("the Upcoming web page", () => {
     expect(commands).toEqual(["upcoming.snapshot"]);
   });
 
+  // The run this page names lives in the Tasks listing. With no native paint
+  // behind the shell, the page asks for that read and then for its own
+  // snapshot again -- one read, in that order.
+  it("asks the Tasks listing for a read when nothing has been painted", async () => {
+    let snapshots = 0;
+    const commands = installChannel((command) => {
+      if (command === "tasks.refresh") {
+        return { ok: true, schedules: [], runs: [], local: [], loaded: true };
+      }
+      snapshots += 1;
+      return {
+        ok: true,
+        ...(snapshots === 1
+          ? payload({ schedules_loaded: false })
+          : payload({ next_run: { title: "Nightly build", when: "in 2h" } })),
+      };
+    });
+
+    render(<Upcoming />);
+
+    expect(await screen.findByText("Nightly build")).toBeInTheDocument();
+    expect(commands).toEqual([
+      "upcoming.snapshot",
+      "tasks.refresh",
+      "upcoming.snapshot",
+    ]);
+  });
+
   it("separates an unread listing from an empty account", async () => {
     installChannel(() => ({
       ok: true,
@@ -87,7 +115,17 @@ describe("the Upcoming web page", () => {
     act(() => window.museUpcomingReady?.());
 
     expect(await screen.findByText("Nightly build")).toBeInTheDocument();
-    await waitFor(() => expect(commands).toEqual(["upcoming.snapshot", "upcoming.snapshot"]));
+    // The opening snapshot says the schedules were never read, so the page
+    // asks for that read and then for its own snapshot again; the nudge adds
+    // one more ask.
+    await waitFor(() =>
+      expect(commands).toEqual([
+        "upcoming.snapshot",
+        "tasks.refresh",
+        "upcoming.snapshot",
+        "upcoming.snapshot",
+      ]),
+    );
   });
 
   // A waiting approval is named here and decided in Chat, so the row hands the

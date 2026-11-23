@@ -21,6 +21,10 @@ export type LibrarySnapshot = {
   total: number;
   armed?: string | null;
   delete_armed?: string | null;
+  /// `loaded` separates an account with no artifacts from a listing nothing
+  /// has read yet: the shell can be the only surface, and there no native
+  /// paint fills the held rows.
+  loaded?: boolean;
 };
 
 // One Goals roster or Tracking row, projected by the bridge. Only these
@@ -44,6 +48,10 @@ export type GoalsSnapshot = {
   tracking: ListingItem[];
   tracking_total: number;
   tracking_error?: string | null;
+  /// `loaded` separates an account with no goals from a roster nothing has
+  /// read yet: the shell can be the only surface, where no native paint fills
+  /// the held rows.
+  loaded?: boolean;
 };
 
 // The Ideas roster, with `loaded` separating an account with no ideas from a
