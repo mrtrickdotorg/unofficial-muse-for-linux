@@ -585,6 +585,42 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   -- "Dictation unavailable: no microphone recorder found." on this seat, which has none, so the
   take itself and the words landing in the box are covered by the tests and the transcribe path's
   own publish rather than by a recording here.
+
+  **The take to words, attempted (Nov 23, 2026): still not evidenced, and the reasons are the
+  app's, not the seat's.** The recorder half is solved: a stand-in `parecord` on `PATH` (a shell
+  script that writes a real 16 kHz mono 16-bit WAV to the file last in the app's argument list,
+  then sleeps until killed) satisfies `find_recorder` and `Recording::start`, so a press on the
+  page's mic starts a take (`Listening -- press again to stop.`, the pill reading `■`), the second
+  press stops it, `Recording::stop` reads the file, `strip_wav` accepts the audio, and
+  `transcribe` takes its `Op::Voice` ticket and prints `Hearing the take back...`. Everything up to
+  the service is observed.
+
+  What stops there is the service, in three separate ways, each reproduced outside the app:
+
+  1. **The app records the wrong rate.** `voice::SAMPLE_RATE_HZ` is 16000 and the recorders are
+     asked for 16 kHz, but the route now refuses that rate: driving
+     `scripts/muse_account_bridge.py` directly with a 16 kHz take answers
+     `gateway status=400` / `` `sample_rate_hz` must be 24000; got 16000. Resample before sending:
+     this route does not convert.`` The route wants 24 kHz.
+  2. **At 24 kHz the route itself fails upstream.** A 24 kHz take (the same speech resampled,
+     `sample_rate_hz=24000`) is accepted by the gateway and then answers `gateway status=500` /
+     `failed to open dictation session: streaming asr upstream closed the session` -- for three
+     different clips, with and without lead-in silence, so it is not the sample. That is the
+     service's ASR upstream, not this client.
+  3. **The transport caps a take at about 1.35 s once it is 24 kHz.** `muse.py`'s gateway sends the
+     body in one Noise frame, and `noise` refuses anything over 65535 bytes, so a 24 kHz body
+     longer than ~1.3 s raises `NoiseInvalidMessage: Data must be bytes and less or equal 65535
+     bytes in length` and is classified `bridge_failure`. A 5 s take failed this way; only ~1.3 s
+     reached the route at all. A real 24 kHz dictation therefore cannot be sent whole by this
+     client, independent of the outage above.
+
+  And in the app the request never finishes at all: the window stays on `Hearing the take back...`
+  past its 90 s budget, and `op-timing.log` records no `op=dictate` line in any run -- the request
+  never reaches the host, so no completion and no refusal ever arrives and the draft is never
+  filled. That is a fourth defect, in the client's host path rather than the service's, and it is
+  why the port's claim that one draft is filled still rests on the suites rather than on a take.
+  The stand-in recorder and the driving script are throwaway `/tmp` files, not repo fixtures;
+  turning them into one would be worth doing once the rate and the hang are fixed.
 - **S4 — Shell decision. STARTED Nov 22, 2026: the shell is a web page.** Either keep the GTK
   chrome (rail, menus, dialogs, a11y) permanently, or replace it with a Tauri window. This is the
   only stage that forces a WebKit decision (4.1 now, or Tauri 3 later).
