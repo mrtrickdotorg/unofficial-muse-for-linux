@@ -165,6 +165,19 @@ export type ApprovalsView = {
   note?: string | null;
 };
 
+// The run the account has next, as Upcoming names it: the schedule's own title
+// and the app's own word for the distance, never a time this page computed.
+export type NextRun = { title: string; when: string };
+
+// Upcoming's own payload: the next run the last Tasks read named and the
+// approvals the panel last painted. `schedules_loaded` separates "nothing is
+// scheduled" from "no listing has been read yet".
+export type UpcomingSnapshot = {
+  next_run: NextRun | null;
+  schedules_loaded: boolean;
+  approvals: ApprovalsView;
+};
+
 // One transcript row, in the three shapes the native list builds: a day
 // divider, a message, or a service notice. `id` is the service's own message
 // id, which is what lets a reply that grows keep its element.

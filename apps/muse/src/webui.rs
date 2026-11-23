@@ -77,6 +77,7 @@ fn tasks_payload(held: &HeldTasks) -> serde_json::Value {
         "schedules": held.schedules,
         "runs": held.runs,
         "local": held.local,
+        "next_run": held.next_run,
         "loaded": held.loaded,
         "error": held.error,
     })
@@ -800,6 +801,20 @@ pub(crate) fn handle_command_with(
             Answer::Now(tasks_reply(&crate::pages::tasks_snapshot()))
         }
         "tasks.refresh" => Answer::Later(fresh_tasks(client)),
+        // Upcoming, from the state the panel holds: the next run the last
+        // Tasks read named and the approvals the panel last painted. No wire
+        // read of its own, so a page open costs nothing and cannot queue
+        // behind a listing; `schedules_loaded` separates "nothing scheduled"
+        // from "nobody has read it yet".
+        "upcoming.snapshot" => {
+            let tasks = crate::pages::tasks_snapshot();
+            Answer::Now(serde_json::json!({
+                "ok": true,
+                "next_run": tasks.next_run,
+                "schedules_loaded": tasks.loaded,
+                "approvals": crate::pages::approvals_view(),
+            }))
+        }
         "ideas.snapshot" => Answer::Now(ideas_reply(&crate::pages::ideas_snapshot())),
         "ideas.refresh" => Answer::Later(fresh_ideas(client)),
         "threads.snapshot" => Answer::Now(threads_reply(&crate::pages::threads_snapshot())),
@@ -2228,6 +2243,7 @@ mod tests {
             schedules: vec![task_row("job-1", "Nightly build (on)")],
             runs: vec![task_row("run-1", "ok: built")],
             local: vec![task_row("7", "Call the dentist · in 2h · pending")],
+            next_run: None,
             loaded: true,
             error: None,
         };
@@ -2246,6 +2262,7 @@ mod tests {
             schedules: vec![task_row("job-1", "Nightly build (on)")],
             runs: vec![task_row("run-1", "failed")],
             local: Vec::new(),
+            next_run: None,
             loaded: true,
             error: None,
         });
@@ -3979,6 +3996,34 @@ mod tests {
             assert_eq!(reply["ok"], false, "{command} is refused");
             assert_eq!(reply["error"], "this window cannot make that change");
         }
+    }
+
+    /// Upcoming's payload carries the two things its page cannot read: the run
+    /// the last Tasks read named and the approvals the panel last painted --
+    /// including the panel's "not read yet" state, which is not the same claim
+    /// as "nothing waiting".
+    #[test]
+    fn upcoming_carries_the_next_run_and_the_unread_approvals() {
+        crate::pages::tasks_cache(HeldTasks {
+            next_run: Some(crate::pages::NextRun {
+                title: "Nightly build".to_owned(),
+                when: "in 2h".to_owned(),
+            }),
+            loaded: true,
+            ..HeldTasks::default()
+        });
+        crate::pages::approvals_cache(crate::pages::ApprovalsView::default());
+        let (id, answer, command) =
+            handle_command_with(r#"{"id":71,"cmd":"upcoming.snapshot"}"#, None, None);
+        assert_eq!(id, serde_json::json!(71));
+        assert_eq!(command, "upcoming.snapshot");
+        let Answer::Now(reply) = answer else {
+            panic!("upcoming answers from held state");
+        };
+        assert_eq!(reply["next_run"]["title"], "Nightly build");
+        assert_eq!(reply["next_run"]["when"], "in 2h");
+        assert_eq!(reply["schedules_loaded"], true);
+        assert_eq!(reply["approvals"]["loaded"], false);
     }
 
     #[test]

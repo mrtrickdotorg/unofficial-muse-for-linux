@@ -21,6 +21,7 @@ import { Search } from "./Search";
 import { Settings } from "./Settings";
 import { Tasks } from "./Tasks";
 import { Threads } from "./Threads";
+import { Upcoming } from "./Upcoming";
 import type { HistoryRow, ShellSnapshot } from "./types";
 
 /// The page components the shell can show, by the name the app's page list
@@ -30,6 +31,7 @@ const COMPONENTS: Record<string, ComponentType> = {
   chat: Chat,
   threads: Threads,
   tasks: Tasks,
+  upcoming: Upcoming,
   library: Library,
   feed: Feed,
   search: Search,
@@ -45,6 +47,7 @@ const ICONS: Record<string, string> = {
   chat: chatIcon,
   threads: libraryIcon,
   tasks: tasksIcon,
+  upcoming: tasksIcon,
   library: shapesIcon,
   feed: libraryIcon,
   search: searchIcon,

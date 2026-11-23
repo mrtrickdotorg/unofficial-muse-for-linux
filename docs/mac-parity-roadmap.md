@@ -726,6 +726,16 @@ evidence class as `goals.delete`, and are the next buildable pair in this phase,
 `spaces.save` (POST) has no recorded body and waits; preview remains blocked service-side
 per the `fetch_url` finding above, with the `spaces.export_html` read the one unprobed lead.
 
+*Upcoming is built (Nov 23, 2026).* The merged surface the Mac client opens is a page beside Tasks
+in both windows: the run the account has next — the earliest enabled schedule whose
+`next_run_at_utc` is still ahead, worded by the panel's own `next_run_label` ("in 2h", "tomorrow",
+"due now" for a run already owed) — and the approvals the Chat panel last painted, in their own
+headline and summary. It reads no wire route of its own: `next_scheduled` is a pure function over
+the last `TasksSnapshot`, `upcoming.snapshot` answers from what the panel holds, and the page
+renders once on open with no timer, so there is nothing to storm. A listing nobody has read says
+so — `schedules_loaded` and `approvals.loaded` keep "not read yet" apart from "nothing scheduled".
+The cards are read-only; Allow once and Deny stay on Chat, where `chat.decide` lives.
+
 *Work:* probe workspace/artifact routes; list and preview the supported types (PDF, DOCX, TXT, MD,
 XLSX, CSV, PNG/JPEG/GIF/WebP), open-in-app, upload, download; sharing off until explicitly approved per
 artifact; Upcoming as a merged view of schedules and pending approvals.

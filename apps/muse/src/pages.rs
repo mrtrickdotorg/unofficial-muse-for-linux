@@ -56,6 +56,7 @@ pub const PAGES: &[&str] = &[
     "chat",
     "threads",
     "tasks",
+    "upcoming",
     "library",
     "feed",
     "search",
@@ -71,6 +72,7 @@ pub fn title(name: &str) -> &str {
         "chat" => "Chat",
         "threads" => "Threads",
         "tasks" => "Tasks",
+        "upcoming" => "Upcoming",
         "library" => "Library",
         "feed" => "Feed",
         "localhost" => "Local host",
@@ -611,6 +613,31 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 let Some(chat) = weak.upgrade() else { return };
                 do_search(&ctx_search, &chat, &inner);
             });
+        }
+        "upcoming" => {
+            // P5's Upcoming surface, beside the web page of the same name:
+            // the run the account has next and the approvals waiting on the
+            // reader, painted from what the panel already holds.
+            let heading = gtk4::Label::new(Some("Upcoming"));
+            heading.add_css_class("muse-page-title");
+            heading.set_halign(gtk4::Align::Start);
+            inner.append(&heading);
+            let next_head = gtk4::Label::new(Some("Next scheduled run"));
+            next_head.add_css_class("dim-label");
+            next_head.set_halign(gtk4::Align::Start);
+            inner.append(&next_head);
+            let next_run_list = gtk4::ListBox::new();
+            next_run_list.set_widget_name("upcoming-next-run");
+            next_run_list.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&next_run_list);
+            let waiting = gtk4::Label::new(Some("Waiting on you"));
+            waiting.add_css_class("dim-label");
+            waiting.set_halign(gtk4::Align::Start);
+            inner.append(&waiting);
+            let list = gtk4::ListBox::new();
+            list.set_widget_name("upcoming-approvals");
+            list.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&list);
         }
         "ideas" | "goals" => {
             let heading = gtk4::Label::new(Some(if name == "ideas" { "Ideas" } else { "Goals" }));
@@ -1404,6 +1431,7 @@ fn fill(ctx: &Ctx, name: &str) -> bool {
             dispatched
         }
         "library" => fill_library(ctx, &page),
+        "upcoming" => fill_upcoming(&page),
         "search" => fill_search_hint(&page),
         "ideas" => fill_ideas(ctx, &page),
         "goals" => fill_goals(ctx, &page),
@@ -1446,6 +1474,36 @@ pub fn next_run_label(next_utc: Option<i64>, now_utc: i64) -> String {
         return format!("in {days}d");
     }
     format!("in {}w", days / 7)
+}
+
+/// The next scheduled run as Upcoming shows it: the schedule's own title and
+/// the panel's own word for the distance, so neither surface computes a time.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct NextRun {
+    pub title: String,
+    pub when: String,
+}
+
+/// The earliest run the account still has ahead of `now`: an enabled schedule
+/// with a time on it. A schedule whose time has gone by but whose run has not
+/// been recorded still names the next thing due, however overdue it is, so
+/// the page says "due now" rather than going blank. Pure over an explicit
+/// now, so the choice and its wording are tested without a clock.
+pub fn next_scheduled(schedules: &[Schedule], now_utc: i64) -> Option<NextRun> {
+    let timed: Vec<(&Schedule, i64)> = schedules
+        .iter()
+        .filter(|schedule| schedule.enabled)
+        .filter_map(|schedule| schedule.next_run_at_utc.map(|at| (schedule, at)))
+        .collect();
+    let ahead = timed
+        .iter()
+        .filter(|(_, at)| *at >= now_utc)
+        .min_by_key(|(_, at)| *at);
+    let pick = ahead.or_else(|| timed.iter().max_by_key(|(_, at)| *at))?;
+    Some(NextRun {
+        title: pick.0.title.clone(),
+        when: next_run_label(Some(pick.1), now_utc),
+    })
 }
 
 /// One-line run label: status plus the human summary when one exists.
@@ -2227,6 +2285,74 @@ fn open_goal_detail(ctx: &Ctx, list: &gtk4::ListBox, goal_id: String) {
 /// history. "Run now" is single-press like send: the run holds the
 /// shared page slot, so a double press waits instead of starting two
 /// runs of the same job.
+/// Paint Upcoming from the state the panel holds: the next run the last Tasks
+/// read named and the approvals the last approvals read painted. No wire read
+/// of its own, so opening the page cannot queue behind a listing -- and a
+/// listing nobody has read says so instead of claiming an idle account.
+fn fill_upcoming(page: &gtk4::Box) -> bool {
+    let held = tasks_snapshot();
+    let approvals = approvals_view();
+    if let Some(list) = named_list(page, "upcoming-next-run") {
+        clear_list(&list);
+        match (held.loaded, &held.next_run) {
+            (true, Some(run)) => {
+                list.append(&detail_row(&run.title, Some(&run.when)));
+            }
+            (true, None) => list.append(&detail_row("No run scheduled.", None)),
+            (false, _) => list.append(&detail_row(
+                "The schedule listing has not been read yet.",
+                None,
+            )),
+        }
+    }
+    let Some(list) = named_list(page, "upcoming-approvals") else {
+        return true;
+    };
+    clear_list(&list);
+    if !approvals.loaded {
+        // The panel's own link-first sentence, not a quieter copy of "none".
+        list.append(&detail_row(
+            approvals
+                .note
+                .as_deref()
+                .unwrap_or("The approvals have not been read yet."),
+            None,
+        ));
+    } else if approvals.cards.is_empty() {
+        list.append(&detail_row("No pending approvals.", None));
+    } else {
+        for card in &approvals.cards {
+            list.append(&detail_row(&card.headline, Some(&card.summary)));
+        }
+    }
+    true
+}
+
+/// One row of Upcoming: a headline and, when there is one, the panel's dim
+/// detail under it. Both lists read this one shape, and a row that is only a
+/// sentence (not read yet, nothing waiting) is dim throughout.
+fn detail_row(headline: &str, detail: Option<&str>) -> gtk4::ListBoxRow {
+    let row = gtk4::ListBoxRow::new();
+    row.set_selectable(false);
+    let line = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    let head = gtk4::Label::new(Some(headline));
+    head.set_halign(gtk4::Align::Start);
+    head.set_wrap(true);
+    if detail.is_none() {
+        head.add_css_class("dim-label");
+    }
+    line.append(&head);
+    if let Some(detail) = detail {
+        let text = gtk4::Label::new(Some(detail));
+        text.add_css_class("dim-label");
+        text.set_halign(gtk4::Align::Start);
+        text.set_wrap(true);
+        line.append(&text);
+    }
+    row.set_child(Some(&line));
+    row
+}
+
 fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let Some(schedules) = named_list(page, "tasks-schedules") else {
         return true;
@@ -3698,6 +3824,9 @@ pub(crate) struct HeldTasks {
     pub schedules: Vec<TaskRow>,
     pub runs: Vec<TaskRow>,
     pub local: Vec<TaskRow>,
+    /// The run the account has next, projected from the same read: Upcoming's
+    /// row, so both windows read one answer.
+    pub next_run: Option<NextRun>,
     pub loaded: bool,
     /// The last read's failure, kept beside whatever rows are held.
     pub error: Option<String>,
@@ -3711,6 +3840,10 @@ thread_local! {
 /// The service rows in the native paint's own labels: schedule title plus
 /// its on/off word, run status plus its summary.
 pub(crate) fn held_tasks_from(snapshot: &muse_account::TasksSnapshot) -> HeldTasks {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
     HeldTasks {
         schedules: snapshot
             .schedules
@@ -3729,6 +3862,7 @@ pub(crate) fn held_tasks_from(snapshot: &muse_account::TasksSnapshot) -> HeldTas
             })
             .collect(),
         local: Vec::new(),
+        next_run: next_scheduled(&snapshot.schedules, now),
         loaded: true,
         error: None,
     }
@@ -7551,6 +7685,38 @@ mod tests {
         assert!(!rail_closes(None, "feed", true));
         assert!(!rail_closes(Some("goals"), "feed", true));
         assert!(!rail_closes(Some("feed"), "feed", false));
+    }
+
+    /// Upcoming names the run the account has next, in the panel's own words:
+    /// enabled and timed schedules only, the earliest ahead first, and a
+    /// schedule whose time has gone by still reads "due now" rather than
+    /// dropping off the page.
+    #[test]
+    fn upcoming_names_the_next_run_ahead() {
+        let timed = |title: &str, at: Option<i64>, enabled: bool| Schedule {
+            id: format!("job-{title}"),
+            title: title.to_owned(),
+            enabled,
+            timezone: None,
+            next_run_at_utc: at,
+        };
+        let schedules = vec![
+            timed("later", Some(40_000), true),
+            timed("sooner", Some(7_200), true),
+            timed("off", Some(3_600), false),
+            timed("untimed", None, true),
+        ];
+        let next = next_scheduled(&schedules, 0).expect("a run is ahead");
+        assert_eq!(next.title, "sooner");
+        assert_eq!(next.when, "in 2h");
+
+        let past = vec![timed("past", Some(-3_600), true)];
+        let due = next_scheduled(&past, 0).expect("the run is still owed");
+        assert_eq!(due.title, "past");
+        assert_eq!(due.when, "due now");
+
+        assert!(next_scheduled(&[timed("off", Some(3_600), false)], 0).is_none());
+        assert!(next_scheduled(&[timed("untimed", None, true)], 0).is_none());
     }
 
     #[test]
