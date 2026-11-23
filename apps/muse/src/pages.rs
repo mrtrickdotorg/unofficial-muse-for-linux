@@ -2819,6 +2819,24 @@ pub(crate) struct TurnMenu {
 }
 
 thread_local! {
+    /// The status line the window's notice carries: a send outcome, a
+    /// dictation's refusal, the service's limit sentence. Mirrored on its own
+    /// because a note is one line: rebuilding the transcript to say it would
+    /// make every send, stop and take pay for the whole conversation.
+    static STATUS: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Publish the notice's line. The window's label is painted from the same
+/// value, so the page and the window cannot say different things.
+pub(crate) fn status_cache(text: Option<String>) {
+    STATUS.with(|cell| *cell.borrow_mut() = text);
+}
+
+pub(crate) fn status_view() -> Option<String> {
+    STATUS.with(|cell| cell.borrow().clone())
+}
+
+thread_local! {
     static CHAT_STORE: std::cell::RefCell<HeldChat> =
         std::cell::RefCell::new(HeldChat::default());
 }
@@ -2917,12 +2935,14 @@ pub(crate) fn held_approvals_from(list: &muse_account::PendingApprovals) -> Vec<
 
 /// The transcript the native list last painted. A cache read by construction:
 /// the page follows the app's own reads, so the two can never show different
-/// conversations. The approvals are merged in from their own store, which the
-/// panel paints, so a render never has to know about them.
+/// conversations. The approvals and the status line are merged in from their
+/// own stores, which the panel and the notice paint, so a render never has to
+/// know about them -- and a note costs one line instead of a rebuild.
 pub(crate) fn chat_snapshot() -> HeldChat {
     let held = CHAT_STORE.with(|store| store.borrow().clone());
     HeldChat {
         approvals: approvals_view(),
+        status: status_view(),
         ..held
     }
 }

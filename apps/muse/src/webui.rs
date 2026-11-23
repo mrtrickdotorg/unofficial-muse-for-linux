@@ -2876,6 +2876,44 @@ mod tests {
         assert_eq!(reply["error"], serde_json::json!("this window cannot stop"));
     }
 
+    /// A send outcome, a stop or a dictation's refusal is one line. The page
+    /// reads it from the notice's own store, so saying it never rebuilds the
+    /// transcript the page is already holding.
+    #[test]
+    fn a_note_reaches_the_page_without_rebuilding_the_transcript() {
+        crate::pages::chat_cache(HeldChat {
+            thread: Some("s-4".into()),
+            title: "Held".into(),
+            account: "Muse".into(),
+            rows: vec![crate::pages::ChatRow {
+                kind: "message",
+                id: "m-4".into(),
+                role: "assistant".into(),
+                text: "Held reply".into(),
+                ..crate::pages::ChatRow::default()
+            }],
+            loaded: true,
+            error: None,
+            ..HeldChat::default()
+        });
+        crate::pages::status_cache(None);
+        let (_, answer, _) = handle_command_with(r#"{"id":61,"cmd":"chat.snapshot"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a snapshot answers at once")
+        };
+        assert_eq!(reply["status"], serde_json::json!(null));
+        assert_eq!(reply["rows"].as_array().map(Vec::len), Some(1));
+
+        crate::pages::status_cache(Some("Send failed (Timeout).".into()));
+        let (_, answer, _) = handle_command_with(r#"{"id":62,"cmd":"chat.snapshot"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a snapshot answers at once")
+        };
+        assert_eq!(reply["status"], serde_json::json!("Send failed (Timeout)."));
+        assert_eq!(reply["rows"][0]["id"], serde_json::json!("m-4"));
+        crate::pages::status_cache(None);
+    }
+
     /// The page follows the app: `chat.snapshot` answers from the held
     /// transcript without a wire trip, and a grown reply is in the answer, so
     /// a poll while a reply streams sees the words arrive.

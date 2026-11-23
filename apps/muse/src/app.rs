@@ -1946,18 +1946,21 @@ impl Chat {
     /// picture mismatch, send failed) while one stands; otherwise it
     /// shows the service's latest limit sentence, hidden when neither.
     fn refresh_notice(&self) {
-        if let Some(note) = self.send_note.borrow().clone() {
-            self.notice.set_text(&note);
-            self.notice.set_visible(true);
-            return;
-        }
-        match self.session.borrow().latest_quota.clone() {
+        let line = self
+            .send_note
+            .borrow()
+            .clone()
+            .or_else(|| self.session.borrow().latest_quota.clone());
+        match &line {
             Some(text) => {
-                self.notice.set_text(&text);
+                self.notice.set_text(text);
                 self.notice.set_visible(true);
             }
             None => self.notice.set_visible(false),
         }
+        // The page shows the same sentence, and it is one sentence: publish the
+        // line on its own rather than rebuilding the transcript to carry it.
+        crate::pages::status_cache(line);
     }
 
     /// A new turn disarms a pending delete: the armed press must name
@@ -2446,11 +2449,10 @@ impl Chat {
     /// line until the next send; cleared by a fresh press.
     fn say_send_note(&self, note: &str) {
         *self.send_note.borrow_mut() = Some(note.to_owned());
+        // The notice publishes the line itself, so a note reaches the page with
+        // no render behind it -- a dictation's refusal is exactly that -- and
+        // costs one sentence rather than a transcript rebuild.
         self.refresh_notice();
-        // The page shows this line too, and a note can arrive with no render
-        // behind it -- a dictation's refusal is exactly that. Push it now
-        // rather than waiting for a paint the app may not do.
-        self.cache_web_chat();
     }
 
     /// Stage another page's text as an editable chat draft: Discuss

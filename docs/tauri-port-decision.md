@@ -554,14 +554,17 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   and sends, and a refusal or an empty answer still speaks in the status line.
 
   That last point needed a fix the live check found: a dictation's sentence arrives with no render
-  behind it, so the page would never have shown "Dictation unavailable: ...". `say_send_note` now
-  pushes the cached snapshot as it paints the window's own line, which is the one place a send or
-  a take answers in words. Four DOM tests (`Chat.test.tsx`, 123 in all) pin that typing writes the
+  behind it, so the page would never have shown "Dictation unavailable: ...". The fix was not to
+  push the cached transcript -- that rebuilt every row for one sentence, on every send outcome, stop
+  and take -- but to give the line a store of its own. `refresh_notice` paints the window's label
+  and publishes that same `Option<String>` to `status_cache`, which `chat_snapshot` merges in the
+  way it already merges the approvals, so a note reaches the page for the cost of one sentence and
+  the note is still written once, by the function that decides what the window shows. Four DOM tests (`Chat.test.tsx`, 123 in all) pin that typing writes the
   app's draft and the poll's echo does not overwrite it, that a burst of six keystrokes inside one
   pause costs exactly one `chat.draft`, that a dictation landing mid-typing wins over words the
   page has not sent yet, and that the mic reads Stop only because the app says a take is running;
-  one Rust test pins `chat.draft` and `chat.dictate` through the routes and the closed-window
-  refusal.
+  two Rust tests pin `chat.draft` and `chat.dictate` through the routes and the closed-window
+  refusal, and pin a note arriving in the snapshot while the held rows stay untouched.
 
   The draft write is the hottest path in the app, so it is the one place the page batches rather
   than writing through: every keystroke would repaint the window's own entry, and the first cut did
