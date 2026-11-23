@@ -689,7 +689,8 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
             Sends, Stop, pictures, decisions, Delete turn and the mic go through
             the app's own: the same sender, the same clipboard, the same decide
             path, the same history read, the same armed delete, the same take.
-            The draft in that box is the window's own, so dictation fills both.
+            The draft in that box is the native window's own, so dictation fills
+            both.
           </div>
         </aside>
       </div>
