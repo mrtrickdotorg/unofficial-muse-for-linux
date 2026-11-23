@@ -336,7 +336,8 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   that activated the window and reported it active), so the hook made the two calls the button
   makes rather than a click making them.
   Gate: every page's behaviour has a DOM test that replaces the GTK assertion.
-- **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only.** This
+- **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only;
+  GATE CLOSED Nov 21, 2026, and the slices after it extend the page rather than reopen the gate.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the
   app's ~185 geometry-changing UI commits in chat and shell, so this is the surface that can decide
   S4, while settings (25 commits, 19 geometry) and local host (8, 5) are the quietest in the tree.
@@ -377,9 +378,14 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   Stop through the same beat in which it watches fast for the reply. With those, a press sent from
   this window and stopped a second later ended at `status: "Stopped."` -- the service's own
   `cancelled: true`, not an assumption -- and the transcript's last row stayed the reader's turn
-  with no reply behind it. **Remaining for S3's gate:** attachments and their verified-send
-  receipts, approvals and unread badges; the native composer is still where pictures and
-  dictation live.
+  with no reply behind it. **Remaining for S3's gate at that point:** attachments and their
+  verified-send receipts, approvals and unread badges -- all closed below, with pictures following
+  them, so the gate itself shut on Nov 21, 2026. What has not moved since, and is the only chat
+  control the page still lacks, is **dictation**: the app records the take, sends it for
+  transcription and puts the words in *its* composer as a draft, so moving it means the page's
+  draft following the app's composer rather than a second place to dictate into. No slice has
+  done that yet, and the page says so where the panel lists what it reaches ("Dictation still
+  lives in the app window").
 
   Quote staging came last and cost almost nothing, because the pieces already existed: the page's
   Reply takes the turn's first line through the same cap the app applies, the bar above the composer
@@ -461,7 +467,9 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   decision is unanswered, plus that `+` is not offered mid-send; `installChannel` gained an answer
   delay so a suite can watch a control while its write is still in flight.
 
-  **The turn menu's Delete moved (Nov 23, 2026).** The page had the send, Stop,
+  **The turn menu's Delete moved (Nov 23, 2026).** This is post-gate work: S3's gate shut with
+  pictures, approvals and badges, and the delete is the turn menu's second press arriving after
+  it, so it extends the slice rather than reopening the gate. The page had the send, Stop,
   the clipboard, the approvals and the quote, and the turn menu's second press --
   Delete turn -- was still native-only. It came across on the same rule as
   everything above: one press, one path. `chat.delete` hands the press to
@@ -485,7 +493,14 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   page cannot print. It now returns the reason -- "Another send is already in
   flight.", "Sign in before deleting a turn." -- and the native button drops it
   exactly as before, because the panel has no line to put it in; the page prints
-  it beside the press and the turn stays. Nothing else about the delete changed:
+  it beside the press and the turn stays. A refused confirm keeps the arming,
+  and that was a decision worth naming: the press did not happen, so the
+  confirmation was not spent, and making the reader arm the turn again would ask
+  them to say the same thing twice on the strength of a transient refusal. The
+  arming is still dropped in the one case that matters for safety -- the latest
+  turn moving on, which `delete_armed` enforces on both surfaces -- and the
+  confirming press that does go clears it as it dispatches. Nothing else about
+  the delete changed:
   the confirming press still takes the `Send` slot, and the removal is still
   proven by the app's own history re-read, so the row leaves the page only when
   the app no longer holds it. Three DOM tests (`Chat.test.tsx`, 120 in all) pin a

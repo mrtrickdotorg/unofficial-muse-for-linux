@@ -504,8 +504,13 @@ describe("the Chat web page", () => {
     fireEvent.click(press);
 
     expect(await screen.findByText("Another send is already in flight.")).toBeInTheDocument();
-    // Nothing was deleted on this page's say-so: the turn is still there.
+    // Nothing was deleted on this page's say-so: the turn is still there, and
+    // so is the confirmation -- a refusal deleted nothing, so the app keeps the
+    // arming and the page must not quietly drop it to "Delete turn".
     expect(screen.getByText("hi")).toBeInTheDocument();
+    expect(
+      within(menu).getByRole("button", { name: "Confirm delete turn" }),
+    ).toBeInTheDocument();
   });
 
   it("closes the turn menu on the confirming press", async () => {

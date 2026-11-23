@@ -2968,8 +2968,12 @@ impl Chat {
                 self.refresh_delete_arm();
             }
             DeleteAction::Confirm(id) => {
-                *self.armed_delete.borrow_mut() = None;
-                self.refresh_delete_arm();
+                // The refusals come before the arming is spent: a press the app
+                // could not take deleted nothing, so the confirmation still
+                // stands and the reader's next press is the one that tries
+                // again. A send slot that frees up and a signed-in window are
+                // both transient, and the arming is still dropped when the
+                // latest turn moves on, which `delete_armed` enforces.
                 let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
                     Some(ticket) => ticket,
                     None => return Err("Another send is already in flight.".to_owned()),
@@ -2978,6 +2982,10 @@ impl Chat {
                     self.session.borrow_mut().accept(&ticket);
                     return Err("Sign in before deleting a turn.".to_owned());
                 };
+                // The press is going out: the confirmation is spent, on both
+                // surfaces, before the service answers.
+                *self.armed_delete.borrow_mut() = None;
+                self.refresh_delete_arm();
                 dispatch(
                     self,
                     move || client.chat_delete("turn", &id),

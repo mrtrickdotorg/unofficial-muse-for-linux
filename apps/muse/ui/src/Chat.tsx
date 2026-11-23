@@ -588,9 +588,10 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
           </section>
 
           <div className="chat-panel-note">
-            Sends, Stop, pictures and decisions go through the app's own: the
-            same sender, the same clipboard, the same one decide path, the same
-            history read. Dictation still lives in the app window.
+            Sends, Stop, pictures, decisions and Delete turn go through the
+            app's own: the same sender, the same clipboard, the same one decide
+            path, the same history read, the same armed delete. Dictation is the
+            one chat control still in the app window.
           </div>
         </aside>
       </div>
