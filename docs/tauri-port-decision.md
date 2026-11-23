@@ -937,9 +937,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   Selection is `MUSE_SHELL`: `tauri` forces the shell window, `gtk` forces the native one, and
   unset picks the shell window when it can -- a window binary (`MUSE_WINDOW_BIN`, else beside the
   app, else the dev checkout's `apps/muse-window/target/...`) and a usable saved link. Either
-  refusal logs its reason and opens the native window, so a clone without the window built is never
-  windowless; a window that starts and closes before answering a single command is the same case,
-  and the app stays native from then on. The GTK harnesses ask for their own window by name: `scripts/muse-gui.sh` and
+  refusal logs its reason and opens the native window, so a clone without the shell window built
+  is never windowless; a window that starts and closes before answering a single command is the
+  same case, and the app stays native from then on. The GTK harnesses ask for their own
+  window by name: `scripts/muse-gui.sh` and
   `scripts/settings-two-windows.py` set `MUSE_SHELL=gtk`. Seen live on this seat (Xwayland): the
   shell window is `1100x700` and viewable, the native `muse` window is `IsUnMapped`, the boot came
   from the app in 0 ms, the first page command was answered in 84 us, and the drawer then filled
