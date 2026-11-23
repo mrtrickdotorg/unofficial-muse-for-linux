@@ -1105,6 +1105,9 @@ impl Chat {
                         .set_text(&buffer.text(&start, &end, false));
                     chat.composer_row.sync_placeholder();
                     chat.composer_row.refresh(&chat.composer.borrow());
+                    // The page shows this same draft, so a keystroke here is a
+                    // change there: one draft, whichever surface typed it.
+                    chat.publish_composer();
                 }
             });
         // Enter sends; Shift+Enter keeps a newline. The web's bar
@@ -1970,6 +1973,25 @@ impl Chat {
         crate::pages::turn_cache(armed);
     }
 
+    /// Publish the composer for the page: its draft and the mic's state. The
+    /// page types into this draft and reads the mic from it, so neither can
+    /// hold a second copy of what the window shows.
+    fn publish_composer(&self) {
+        crate::pages::composer_cache(crate::pages::ComposerView {
+            draft: self.composer.borrow().text().to_owned(),
+            dictating: self.recording.borrow().is_some(),
+        });
+    }
+
+    /// The page's draft press: the words go into the app's own composer, so the
+    /// window's entry and the page's box are one draft.
+    pub(crate) fn web_draft(self: &Rc<Self>, text: &str) {
+        self.composer.borrow_mut().set_text(text);
+        self.composer_row.set_input_text(text);
+        self.composer_row.refresh(&self.composer.borrow());
+        self.publish_composer();
+    }
+
     /// Whether the latest turn is armed for the confirming delete press. One
     /// rule for the native label, the page's label and the press itself: the
     /// armed id must still be the latest turn's, never a stale one.
@@ -2297,6 +2319,7 @@ impl Chat {
             Ok(recording) => {
                 *self.recording.borrow_mut() = Some(recording);
                 self.composer_row.mic.set_label("■");
+                self.publish_composer();
                 self.say_send_note("Listening — press again to stop.");
                 let weak = Rc::downgrade(self);
                 gtk4::glib::timeout_add_local(std::time::Duration::from_secs(30), move || {
@@ -2318,6 +2341,7 @@ impl Chat {
     fn finish_dictation(self: &Rc<Self>) {
         let recording = self.recording.borrow_mut().take();
         self.composer_row.mic.set_label("🎤");
+        self.publish_composer();
         let Some(recording) = recording else {
             return;
         };
@@ -2362,6 +2386,9 @@ impl Chat {
                             chat.composer.borrow_mut().set_text(&joined);
                             chat.composer_row.set_input_text(&joined);
                             chat.composer_row.refresh(&chat.composer.borrow());
+                            // The dictation's words are the draft both
+                            // surfaces show: the page's box fills with them.
+                            chat.publish_composer();
                             *chat.send_note.borrow_mut() = None;
                             chat.refresh_notice();
                         }
@@ -2413,6 +2440,10 @@ impl Chat {
     fn say_send_note(&self, note: &str) {
         *self.send_note.borrow_mut() = Some(note.to_owned());
         self.refresh_notice();
+        // The page shows this line too, and a note can arrive with no render
+        // behind it -- a dictation's refusal is exactly that. Push it now
+        // rather than waiting for a paint the app may not do.
+        self.cache_web_chat();
     }
 
     /// Stage another page's text as an editable chat draft: Discuss
@@ -2420,6 +2451,7 @@ impl Chat {
     pub(crate) fn propose_draft(&self, text: &str) {
         self.composer.borrow_mut().set_text(text);
         self.composer_row.refresh(&self.composer.borrow());
+        self.publish_composer();
     }
 
     /// Dispatch one message: the composer's draft, an option button's
@@ -2630,7 +2662,12 @@ impl Chat {
         self.paint_reply();
         self.composer_row.refresh(&self.composer.borrow());
         match self.send_text(dispatch.text, dispatch.images, reply) {
-            SendStart::Dispatched => Ok(()),
+            SendStart::Dispatched => {
+                // One draft: the words the page sent leave the window's entry
+                // too, so the two surfaces agree on an empty box after a send.
+                self.web_draft("");
+                Ok(())
+            }
             SendStart::Refused(sentence) => {
                 self.refresh_notice();
                 Err(sentence.to_owned())
@@ -2704,6 +2741,8 @@ impl Chat {
         let approvals_weak = weak.clone();
         let decide_weak = weak.clone();
         let delete_weak = weak.clone();
+        let draft_weak = weak.clone();
+        let dictate_weak = weak.clone();
         let history_weak = weak.clone();
         let open_thread_weak = weak.clone();
         let policy_weak = weak.clone();
@@ -2741,6 +2780,20 @@ impl Chat {
             }),
             turn_delete: std::rc::Rc::new(move || match delete_weak.upgrade() {
                 Some(chat) => chat.delete_pressed(),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            draft: std::rc::Rc::new(move |text: &str| match draft_weak.upgrade() {
+                Some(chat) => {
+                    chat.web_draft(text);
+                    Ok(())
+                }
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            dictate: std::rc::Rc::new(move || match dictate_weak.upgrade() {
+                Some(chat) => {
+                    chat.toggle_dictation();
+                    Ok(())
+                }
                 None => Err("The app window is gone.".to_owned()),
             }),
             history: std::rc::Rc::new(move || match history_weak.upgrade() {

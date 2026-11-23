@@ -823,6 +823,24 @@ html, body {
 
 .chat-chip-remove { padding: 0 2px; color: var(--text-faint); }
 
+/* The mic: the app's own toggle, listening while the app says a take is
+   running. */
+.chat-mic {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-mic.listening { border-color: var(--warn); color: var(--warn); }
+.chat-mic:disabled { opacity: 0.55; cursor: default; }
+
 .chat-attach {
   flex: none;
   width: 28px;

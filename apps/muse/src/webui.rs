@@ -366,6 +366,9 @@ fn chat_payload(held: &HeldChat) -> serde_json::Value {
         // The turn menu's press and its own label: the page prints the app's
         // words and cannot show "Delete" beside an app waiting to confirm.
         "turn": crate::pages::turn_view(),
+        // The draft both surfaces share, and the mic's state: the page types
+        // into the window's own draft instead of keeping a second one.
+        "composer": crate::pages::composer_view(),
         "rows": held.rows,
         "loaded": held.loaded,
         "error": held.error,
@@ -636,6 +639,12 @@ pub(crate) type WebDecide = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>
 /// The turn menu's Delete press: the app's own armed two-press delete, on the
 /// latest turn it names.
 pub(crate) type WebTurnDelete = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+/// The page's typing, written into the app's own composer so both surfaces show
+/// one draft.
+pub(crate) type WebDraft = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+/// The mic pill: the app's own toggle, so a take started here and one started
+/// in the window are the same take.
+pub(crate) type WebDictate = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebHistory = std::rc::Rc<dyn Fn() -> Result<Vec<crate::pages::HistoryRow>, String>>;
 pub(crate) type WebOpenThread = std::rc::Rc<dyn Fn(Option<&str>) -> Result<(), String>>;
 pub(crate) type WebSetPolicy = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
@@ -689,6 +698,10 @@ pub(crate) struct WebRoutes {
     /// Delete the latest turn: the app's own arm-then-confirm press, so a
     /// press here and a press in the turn menu advance one rule.
     pub turn_delete: WebTurnDelete,
+    /// Write the page's typing into the app's composer draft.
+    pub draft: WebDraft,
+    /// Start or stop a dictation take: the app's own mic toggle.
+    pub dictate: WebDictate,
     /// The drawer's History rows: the panel's own listing, in its own words.
     pub history: WebHistory,
     /// Open a thread from History, or a fresh one with no id: the native
@@ -917,6 +930,17 @@ pub(crate) fn handle_command_with(
         // page reads its own label from the snapshot, so this press never has
         // to guess which of the two presses it is.
         "chat.delete" => route_answer(routes.map(|routes| (routes.turn_delete)())),
+        // The composer's two controls the page shares with the window: the
+        // draft it types into is the app's own, and the mic is the app's own
+        // toggle -- one draft, one take, whichever surface pressed.
+        "chat.draft" => {
+            let text = request
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            route_answer(routes.map(|routes| (routes.draft)(text)))
+        }
+        "chat.dictate" => route_answer(routes.map(|routes| (routes.dictate)())),
         // The drawer's History: the panel's own listing, and the same open the
         // native activation makes. A window without routes cannot read it and
         // says so, rather than claiming an empty account.
@@ -1686,6 +1710,8 @@ pub(crate) fn signin_surface(press: WebSigninPress) -> WebRoutes {
         approvals: std::rc::Rc::new(no_send),
         decide: std::rc::Rc::new(|_: &str, _: &str| no_send()),
         turn_delete: std::rc::Rc::new(no_send),
+        draft: std::rc::Rc::new(|_: &str| no_send()),
+        dictate: std::rc::Rc::new(no_send),
         history: std::rc::Rc::new(|| Err("This window cannot read the drawer.".to_owned())),
         open_thread: std::rc::Rc::new(|_: Option<&str>| no_send()),
         set_policy: std::rc::Rc::new(|_: &str, _: &str| no_send()),
@@ -2443,6 +2469,8 @@ mod tests {
             approvals: Rc::new(|| Ok(())),
             decide: Rc::new(|_: &str, _: &str| Ok(())),
             turn_delete: Rc::new(|| Ok(())),
+            draft: Rc::new(|_: &str| Ok(())),
+            dictate: Rc::new(|| Ok(())),
             history: Rc::new(|| Ok(Vec::new())),
             open_thread: Rc::new(|_: Option<&str>| Ok(())),
             set_policy: Rc::new(|_: &str, _: &str| Ok(())),
@@ -2685,6 +2713,61 @@ mod tests {
         };
         assert_eq!(reply["ok"], serde_json::json!(false));
         assert_eq!(reply["error"], serde_json::json!("this window cannot send"));
+    }
+
+    /// The composer's two shared controls: typing writes the app's own draft,
+    /// and the mic is the app's own toggle. Neither has a second path, and a
+    /// window without routes says it cannot make the change.
+    #[test]
+    fn chat_draft_and_dictate_are_the_apps_own() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        let written: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen = written.clone();
+        let presses = Rc::new(Cell::new(0));
+        let counted = presses.clone();
+        let routes = WebRoutes {
+            draft: Rc::new(move |text: &str| {
+                seen.borrow_mut().push(text.to_owned());
+                Ok(())
+            }),
+            dictate: Rc::new(move || {
+                counted.set(counted.get() + 1);
+                Ok(())
+            }),
+            ..stub_routes()
+        };
+
+        let (id, answer, command) = handle_command_with(
+            r#"{"id":91,"cmd":"chat.draft","text":"hello"}"#,
+            None,
+            Some(&routes),
+        );
+        assert_eq!(id, serde_json::json!(91));
+        assert_eq!(command, "chat.draft");
+        let Answer::Now(reply) = answer else {
+            panic!("a draft answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(true));
+        assert_eq!(written.borrow().as_slice(), ["hello"]);
+
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":92,"cmd":"chat.dictate"}"#, None, Some(&routes));
+        let Answer::Now(reply) = answer else {
+            panic!("a mic press answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(true));
+        assert_eq!(presses.get(), 1);
+
+        let (_, answer, _) = handle_command_with(r#"{"id":93,"cmd":"chat.dictate"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a closed route answers at once")
+        };
+        assert_eq!(reply["ok"], serde_json::json!(false));
+        assert_eq!(
+            reply["error"],
+            serde_json::json!("this window cannot make that change")
+        );
     }
 
     /// The turn menu's Delete is the app's own armed press, not a second

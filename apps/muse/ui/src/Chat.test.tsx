@@ -431,6 +431,64 @@ describe("the Chat web page", () => {
     await waitFor(() => expect(check).toBeEnabled());
   });
 
+  it("types into the app's own draft, so both surfaces share one", async () => {
+    let current = "dictated words";
+    window.__MUSE_BOOT__ = snapshot([], {
+      composer: { draft: current, dictating: false },
+    });
+    const commands = installChannel(
+      () => ({ ok: true, ...snapshot([], { composer: { draft: current, dictating: false } }) }),
+      (request) => {
+        if (request.cmd === "chat.draft") {
+          current = String((request as { text?: string }).text ?? "");
+        }
+      },
+    );
+
+    render(<Chat pollMs={10_000} />);
+    const box = screen.getByLabelText("Message") as HTMLTextAreaElement;
+
+    // The window's draft is this box: words dictated into the app are already
+    // here, before this page typed anything.
+    await waitFor(() => expect(box.value).toBe("dictated words"));
+
+    // A keystroke here writes the app's draft, and the echo of the poll does not
+    // overwrite what the reader typed.
+    fireEvent.change(box, { target: { value: "typed here" } });
+    expect(commands).toContain("chat.draft");
+    await waitFor(() => expect(box.value).toBe("typed here"));
+  });
+
+  it("presses the app's own mic and reads the take's state from the app", async () => {
+    let dictating = false;
+    window.__MUSE_BOOT__ = snapshot([], { composer: { draft: "", dictating } });
+    const commands = installChannel(
+      (cmd) => {
+        if (cmd === "chat.dictate") {
+          dictating = !dictating;
+          return { ok: true };
+        }
+        return { ok: true, ...snapshot([], { composer: { draft: "", dictating } }) };
+      },
+      undefined,
+      10,
+    );
+
+    render(<Chat pollMs={10_000} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dictate" }));
+
+    // The take's state is the app's: the mic reads Stop only because the app
+    // says a take is running.
+    expect(
+      await screen.findByRole("button", { name: "Stop dictation" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop dictation" }));
+    await waitFor(() =>
+      expect(commands.filter((cmd) => cmd === "chat.dictate")).toHaveLength(2),
+    );
+    expect(await screen.findByRole("button", { name: "Dictate" })).toBeInTheDocument();
+  });
+
   it("deletes through the app's own press, one press per answer, on the app's label", async () => {
     window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], {
       turn: { delete_label: "Delete turn", armed: false },

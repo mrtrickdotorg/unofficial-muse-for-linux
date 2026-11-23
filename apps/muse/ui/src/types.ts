@@ -194,6 +194,8 @@ export type TurnMenu = {
   armed: boolean;
 };
 
+export type ChatComposer = { draft: string; dictating: boolean };
+
 export type ChatSnapshot = {
   thread?: string | null;
   title: string;
@@ -208,6 +210,9 @@ export type ChatSnapshot = {
   unread?: number;
   approvals?: ApprovalsView;
   turn?: TurnMenu;
+  // The composer the page and the window share: the draft, typed in either
+  // one or dictated into the window, and whether a take is running.
+  composer?: { draft: string; dictating: boolean };
   rows: ChatRow[];
   loaded: boolean;
   error?: string | null;

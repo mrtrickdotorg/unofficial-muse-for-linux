@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type KeyboardEvent,
@@ -124,10 +125,20 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   }, [loadSnapshot, pollMs]);
 
 
-  // The draft lives here, but the send does not: `chat.send` hands the words
-  // back to the app's controller, which owns the `Send` slot, the receipt and
-  // the history reload. This window never dispatches on its own.
+  // One draft, not two: the box shows the app's own composer text, a keystroke
+  // here writes it back through `chat.draft`, and a dictation's words arrive as
+  // the same draft on the next snapshot. `lastSynced` is the value both
+  // surfaces agree on, so an echo of this page's own typing is not mistaken for
+  // the window changing the draft underneath the reader.
   const [draft, setDraft] = useState("");
+  const lastSynced = useRef("");
+  const typeDraft = (text: string) => {
+    setDraft(text);
+    lastSynced.current = text;
+    void call<{ ok: boolean }>("chat.draft", 15_000, { text }).catch((failure: unknown) =>
+      setNote(sentence(failure)),
+    );
+  };
   const [pending, setPending] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   // One decision at a time: the app takes the page slot per press, and every
@@ -167,10 +178,11 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
         text,
         ...(quote ? { quote } : {}),
       });
-      // The app took it: the entry clears, exactly as a press in that window
-      // clears it, and so does the quote -- one Reply answers one send. The
-      // transcript and the status line carry the outcome.
+      // The app took it: the shared draft clears on both surfaces, exactly as
+      // a press in that window clears it, and so does the quote -- one Reply
+      // answers one send. The transcript and the status line carry the outcome.
       setDraft("");
+      lastSynced.current = "";
       setQuote(null);
       void loadSnapshot();
       setWatching(true);
@@ -251,6 +263,25 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     }
   };
 
+  // The mic: the app's own toggle, so a press here and a press in the window
+  // are the same take, and its words land in the draft both surfaces show.
+  const [dictatingPress, setDictatingPress] = useState(false);
+  const dictate = async () => {
+    if (dictatingPress) return;
+    setDictatingPress(true);
+    setNote(null);
+    try {
+      await call<{ ok: boolean }>("chat.dictate", 30_000);
+      // A take opens or closes; either way the app's own sentence lands in the
+      // status line and the mic's state comes back in the next snapshot.
+      void loadSnapshot();
+    } catch (failure) {
+      setNote(sentence(failure));
+    } finally {
+      setDictatingPress(false);
+    }
+  };
+
   // The panel's "Check approvals", on the app's own read.
   const refreshApprovals = async () => {
     if (checking) return;
@@ -310,6 +341,15 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     }
   };
 
+  // The window can change the draft without this page: native typing, a
+  // dictation's words, another page proposing one. The snapshot is the news.
+  const sharedDraft = data?.composer?.draft;
+  useEffect(() => {
+    if (sharedDraft === undefined || sharedDraft === lastSynced.current) return;
+    lastSynced.current = sharedDraft;
+    setDraft(sharedDraft);
+  }, [sharedDraft]);
+
   useEffect(() => {
     if (!watching) return;
     const fast = setInterval(() => void loadSnapshot(), 300);
@@ -336,6 +376,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const loaded = data?.loaded ?? false;
   const turn: TurnMenu | undefined = data?.turn;
+  const dictating = data?.composer?.dictating ?? false;
 
   // The native probe reads this: how many transcript rows the page holds.
   (window as unknown as { __MUSE_ROWS__?: number }).__MUSE_ROWS__ = rows.length;
@@ -475,13 +516,25 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
             >
               +
             </button>
+            {/* The mic is the app's own toggle, and its state is the app's:
+                a take also stops itself after thirty seconds, which only the
+                window knows. */}
+            <button
+              className={`chat-mic${dictating ? " listening" : ""}`}
+              type="button"
+              disabled={dictatingPress}
+              onClick={() => void dictate()}
+              aria-label={dictating ? "Stop dictation" : "Dictate"}
+            >
+              {dictating ? "■" : "🎤"}
+            </button>
             <textarea
               className="chat-draft"
               aria-label="Message"
               placeholder="Message"
               rows={1}
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={(event) => typeDraft(event.target.value)}
               onKeyDown={draftKey}
             />
             {data?.sending || watching ? (
@@ -576,10 +629,10 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
           </section>
 
           <div className="chat-panel-note">
-            Sends, Stop, pictures, decisions and Delete turn go through the
-            app's own: the same sender, the same clipboard, the same one decide
-            path, the same history read, the same armed delete. Dictation is the
-            one chat control still in the app window.
+            Sends, Stop, pictures, decisions, Delete turn and the mic go through
+            the app's own: the same sender, the same clipboard, the same decide
+            path, the same history read, the same armed delete, the same take.
+            The draft in that box is the window's own, so dictation fills both.
           </div>
         </aside>
       </div>

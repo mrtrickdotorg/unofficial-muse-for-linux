@@ -2828,6 +2828,33 @@ thread_local! {
         std::cell::RefCell::new(ApprovalsView::default());
 }
 
+/// The composer as both surfaces see it. The draft is the app's own -- typed in
+/// the window's entry or dictated into it -- so the page types into the same
+/// draft instead of keeping a second one. `dictating` is the mic's state, which
+/// only the app knows (a take also stops itself after thirty seconds).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct ComposerView {
+    pub draft: String,
+    pub dictating: bool,
+}
+
+thread_local! {
+    static COMPOSER: std::cell::RefCell<ComposerView> =
+        std::cell::RefCell::new(ComposerView::default());
+}
+
+/// Publish what the composer holds, wherever it changes: a keystroke in the
+/// window's entry, a page press, a dictation's words.
+pub(crate) fn composer_cache(view: ComposerView) {
+    COMPOSER.with(|store| *store.borrow_mut() = view);
+}
+
+/// The draft the page shows and the mic's state, as the app last published
+/// them.
+pub(crate) fn composer_view() -> ComposerView {
+    COMPOSER.with(|store| store.borrow().clone())
+}
+
 thread_local! {
     /// Whether the latest turn is armed for its confirming delete press: the
     /// app's state, mirrored so a page press shows the app's own label without

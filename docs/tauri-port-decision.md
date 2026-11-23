@@ -380,12 +380,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   `cancelled: true`, not an assumption -- and the transcript's last row stayed the reader's turn
   with no reply behind it. **Remaining for S3's gate at that point:** attachments and their
   verified-send receipts, approvals and unread badges -- all closed below, with pictures following
-  them, so the gate itself shut on Nov 21, 2026. What has not moved since, and is the only chat
-  control the page still lacks, is **dictation**: the app records the take, sends it for
-  transcription and puts the words in *its* composer as a draft, so moving it means the page's
-  draft following the app's composer rather than a second place to dictate into. No slice has
-  done that yet, and the page says so where the panel lists what it reaches ("Dictation still
-  lives in the app window").
+  them, so the gate itself shut on Nov 21, 2026. What held out longest was **dictation**: the app
+  records the take, sends it for transcription and puts the words in *its* composer as a draft, so
+  moving it meant the page's box following the app's composer instead of becoming a second place
+  to dictate into. That arrived on Nov 23, 2026, and is described after the delete below.
 
   Quote staging came last and cost almost nothing, because the pieces already existed: the page's
   Reply takes the turn's first line through the same cap the app applies, the bar above the composer
@@ -506,7 +504,7 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the delete changed:
   the confirming press still takes the `Send` slot, and the removal is still
   proven by the app's own history re-read, so the row leaves the page only when
-  the app no longer holds it. Two DOM tests (`Chat.test.tsx`, 119 in all) pin a
+  the app no longer holds it. Two DOM tests in `Chat.test.tsx` pin a
   double press as one write, the row leaving with the app's snapshot, the armed
   label coming from the app, the refusal sentence with the turn and the
   confirmation still there, and the press being absent until its menu opens; one
@@ -537,6 +535,35 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   crossed the route in both directions without deleting anything. The confirming
   press is not made here: it deletes a real turn in the account, so that half is
   the suites' and the app's own re-read evidence, not this seat's.
+
+  **Dictation, and one draft (Nov 23, 2026).** The mic was the last chat control the page
+  lacked, and the reason it had stayed native was the draft: the app dictated into *its* composer,
+  so a page with a box of its own would have become a second place to dictate into. The port
+  removed the second draft instead of adding a second destination. The snapshot's `composer`
+  view is the app's own composer -- `draft` from `Composer::text`, `dictating` from whether a take
+  is running -- published wherever either changes: a keystroke in the window's entry, a page press,
+  a dictation's words. `chat.draft` writes the page's typing into that composer (and repaints the
+  native entry), so the box and the window's entry are one draft; the page adopts the snapshot's
+  draft only when it differs from the value both surfaces last agreed on, which is how a
+  dictation's words arrive in the box without the page's own typing being overwritten by the poll
+  that echoes it. A send clears the shared draft on both surfaces, so neither is left holding
+  words the other sent. `chat.dictate` calls `toggle_dictation`, the very function the native pill
+  calls: one take, whichever surface started it, and the mic's state is read from the app rather
+  than kept here -- it has to be, because a take also stops itself after thirty seconds. Nothing
+  else about dictation moved: the words still land as an editable draft that the reader reviews
+  and sends, and a refusal or an empty answer still speaks in the status line.
+
+  That last point needed a fix the live check found: a dictation's sentence arrives with no render
+  behind it, so the page would never have shown "Dictation unavailable: ...". `say_send_note` now
+  pushes the cached snapshot as it paints the window's own line, which is the one place a send or
+  a take answers in words. Two DOM tests (`Chat.test.tsx`, 121 in all) pin that typing writes the
+  app's draft and the poll's echo does not overwrite it, and that the mic reads Stop only because
+  the app says a take is running; one Rust test pins `chat.draft` and `chat.dictate` through the
+  routes and the closed-window refusal. Live: the page's mic press reached the app's toggle
+  (`chat.dictate` in the launch log) and the app's own sentence landed in the page's status line
+  -- "Dictation unavailable: no microphone recorder found." on this seat, which has none, so the
+  take itself and the words landing in the box are covered by the tests and the transcribe path's
+  own publish rather than by a recording here.
 - **S4 — Shell decision. STARTED Nov 22, 2026: the shell is a web page.** Either keep the GTK
   chrome (rail, menus, dialogs, a11y) permanently, or replace it with a Tauri window. This is the
   only stage that forces a WebKit decision (4.1 now, or Tauri 3 later).
