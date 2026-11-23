@@ -18,6 +18,9 @@ declare global {
     /// The updater's answer landed: the Settings card asks for its snapshot
     /// again instead of waiting on a press that already answered.
     museUpdatesReady?: () => void;
+    /// A Tasks read landed: the next run Upcoming names moved, so an open
+    /// Upcoming asks for its own snapshot again.
+    museUpcomingReady?: () => void;
     /// The shell's boot payload was the app's first paint and the app has since
     /// named the account and read its History: the drawer adopts this answer.
     museShellBoot?: (snapshot: ShellSnapshot) => void;

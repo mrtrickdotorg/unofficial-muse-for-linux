@@ -637,6 +637,11 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             let list = gtk4::ListBox::new();
             list.set_widget_name("upcoming-approvals");
             list.set_selection_mode(gtk4::SelectionMode::None);
+            // A waiting approval's row opens Chat, where the decision is made:
+            // Upcoming names the card and takes the reader to it, and never
+            // offers a decision of its own.
+            let chat_ctx = ctx.clone();
+            list.connect_row_activated(move |_, _| show(&chat_ctx, "chat"));
             inner.append(&list);
         }
         "ideas" | "goals" => {
@@ -2322,7 +2327,10 @@ fn fill_upcoming(page: &gtk4::Box) -> bool {
         list.append(&detail_row("No pending approvals.", None));
     } else {
         for card in &approvals.cards {
-            list.append(&detail_row(&card.headline, Some(&card.summary)));
+            let row = detail_row(&card.headline, Some(&card.summary));
+            row.set_activatable(true);
+            row.set_tooltip_text(Some("Open in Chat"));
+            list.append(&row);
         }
     }
     true
@@ -2373,8 +2381,11 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
     };
     let chat_strong = chat.clone();
     // Held by value for the answer closure: the web view's entry point waits
-    // on a read, and the cache is the rows the paint just showed.
+    // on a read, and the cache is the rows the paint just showed. The pages
+    // context rides along too, so the answer can refill Upcoming if it is the
+    // page on screen when the read lands.
     let page_owned = page.clone();
+    let pages = ctx.clone();
     dispatch(
         &chat,
         move || client.tasks(),
@@ -2437,6 +2448,10 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
             // The web view opens on exactly these rows; the local reminders
             // are re-read from their store when a page or a reply asks.
             tasks_cache(held_tasks_from(&snapshot));
+            // Upcoming names this read's run: an open Upcoming re-asks its held
+            // state instead of keeping the sentence from before the read.
+            crate::webui::upcoming_changed();
+            refresh_upcoming(&pages);
             if let Some(button) = find_widget(page_owned.upcast_ref(), "tasks-web")
                 .and_then(|widget| widget.downcast::<gtk4::Button>().ok())
             {
@@ -2474,6 +2489,19 @@ fn reminder_row_text(task: &muse_tasks::Task, now_unix_secs: u64) -> String {
 /// Re-read the local reminder store and repaint its list. Local
 /// only: the store lock serializes against the runner, so no page
 /// ticket is needed and nothing touches the service.
+/// Refill Upcoming when it is the page on screen: a Tasks read that just
+/// landed moved the run it names, and the page paints only held state.
+fn refresh_upcoming(ctx: &Ctx) {
+    if ctx.stack.visible_child_name().as_deref() != Some("upcoming") {
+        return;
+    }
+    if let Some(page) = ctx.stack.child_by_name("upcoming")
+        && let Ok(page) = page.downcast::<gtk4::Box>()
+    {
+        fill_upcoming(&page);
+    }
+}
+
 fn refresh_local_tasks(page: &gtk4::Box) -> bool {
     let Some(list) = named_list(page, "tasks-local") else {
         return true;
@@ -2743,6 +2771,16 @@ thread_local! {
     /// The service's own total for the listing, not this page's length:
     /// the web view must say "50 of 76", never "50 items".
     static ART_TOTAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The space whose unshare press is armed, by the handle the listing
+    /// gave. At most one row is ever armed, and a paint of the listing
+    /// clears it, so a repaint cannot leave a live confirm behind.
+    static UNSHARE_ARMED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    /// The space whose delete press is armed. Its own arm, on the same rule:
+    /// deleting and unsharing are two different writes and neither may
+    /// confirm the other.
+    static SPACE_DELETE_ARMED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The held Library rows and the service's total, for the web UI slice: it
@@ -2762,6 +2800,60 @@ pub(crate) fn library_snapshot() -> (Vec<ArtifactSummary>, u64) {
 pub(crate) fn library_cache(artifacts: Vec<ArtifactSummary>, total: u64) {
     ART_STORE.with(|store| *store.borrow_mut() = artifacts);
     ART_TOTAL.with(|total_cell| total_cell.set(total));
+}
+
+/// What one unshare press means against the armed row: the first press arms
+/// that row and sends nothing, the second press on the same row confirms, and
+/// a press on another row only re-arms that one. The one-armed-press rule the
+/// chat's delete turn uses, on the space's own handle.
+pub(crate) fn unshare_press(slug: &str) -> bool {
+    UNSHARE_ARMED.with(|armed| {
+        let mut armed = armed.borrow_mut();
+        if armed.as_deref() == Some(slug) {
+            *armed = None;
+            true
+        } else {
+            *armed = Some(slug.to_owned());
+            false
+        }
+    })
+}
+
+/// The row both surfaces paint as armed, if any: the page reads this from its
+/// snapshot instead of keeping a copy that could drift from the app's.
+pub(crate) fn unshare_armed() -> Option<String> {
+    UNSHARE_ARMED.with(|armed| armed.borrow().clone())
+}
+
+/// The listing was painted again: an arm does not survive a repaint.
+pub(crate) fn unshare_forget() {
+    UNSHARE_ARMED.with(|armed| *armed.borrow_mut() = None);
+}
+
+/// What one delete press means against the armed row: the first press arms
+/// that row and sends nothing, the second on the same row confirms. Same rule
+/// and same state as the unshare gate, on its own arm.
+pub(crate) fn space_delete_press(slug: &str) -> bool {
+    SPACE_DELETE_ARMED.with(|armed| {
+        let mut armed = armed.borrow_mut();
+        if armed.as_deref() == Some(slug) {
+            *armed = None;
+            true
+        } else {
+            *armed = Some(slug.to_owned());
+            false
+        }
+    })
+}
+
+/// The row both surfaces paint as delete-armed, if any.
+pub(crate) fn space_delete_armed() -> Option<String> {
+    SPACE_DELETE_ARMED.with(|armed| armed.borrow().clone())
+}
+
+/// The listing was painted again: the delete arm does not survive it either.
+pub(crate) fn space_delete_forget() {
+    SPACE_DELETE_ARMED.with(|armed| *armed.borrow_mut() = None);
 }
 
 /// The Goals page as the web view opens it: the roster and the Tracking
@@ -3929,6 +4021,10 @@ fn paint_library(
     tab: &str,
     query: &str,
 ) {
+    // A repaint disarms: the confirm a reader was looking at belongs to the
+    // rows they were looking at.
+    unshare_forget();
+    space_delete_forget();
     clear_list(list);
     while let Some(child) = tabs.first_child() {
         tabs.remove(&child);
@@ -3977,7 +4073,7 @@ fn paint_library(
             list.append(&head);
         }
         for artifact in &spaces {
-            list.append(&space_row(ctx, artifact));
+            list.append(&space_row(ctx, artifact, list));
         }
         if !files.is_empty() {
             let head = gtk4::Label::new(Some("Recent"));
@@ -3991,7 +4087,7 @@ fn paint_library(
     } else {
         for artifact in spaces.iter().chain(files.iter()) {
             if artifact.target_kind.as_deref() == Some("space") {
-                list.append(&space_row(ctx, artifact));
+                list.append(&space_row(ctx, artifact, list));
             } else {
                 list.append(&file_row(ctx, artifact));
             }
@@ -4002,10 +4098,70 @@ fn paint_library(
     }
 }
 
-/// One space row: title plus recency, with the two writes the protocol
-/// offers. Export reports what came back; unshare reports acceptance.
-/// Open is omitted: its mechanism was never observed.
-fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
+/// One space row: title plus recency, with the writes the protocol offers.
+/// Export reports what came back; unshare and delete report acceptance, and
+/// both are gated by one armed press. Open is omitted: its mechanism was
+/// never observed.
+/// The word and tooltip one row's unshare press wears for the app's arm. One
+/// row at a time: a press that arms a new row must take the word off the old
+/// one, or two rows would both claim the confirmation.
+fn unshare_words(armed: Option<&str>, slug: &str) -> (&'static str, Option<&'static str>) {
+    if armed == Some(slug) {
+        ("Confirm unshare", Some("Press again to unshare"))
+    } else {
+        ("Unshare", None)
+    }
+}
+
+/// The delete press's word and tooltip, on the same one-row rule.
+fn delete_words(armed: Option<&str>, slug: &str) -> (&'static str, Option<&'static str>) {
+    if armed == Some(slug) {
+        ("Confirm delete", Some("Press again to delete this space"))
+    } else {
+        ("Delete space", None)
+    }
+}
+
+/// Repaint every named arm button in the listing from the app's own arm. A
+/// press is the only thing that moves an arm without a repaint, so each press
+/// calls this; rows name their buttons `<kind>:<slug>` where they are built.
+fn sync_arms(
+    list: &gtk4::ListBox,
+    prefix: &str,
+    armed: Option<String>,
+    words: fn(Option<&str>, &str) -> (&'static str, Option<&'static str>),
+) {
+    let mut row = list.first_child();
+    while let Some(row_widget) = row {
+        row = row_widget.next_sibling();
+        let Some(line) = row_widget.first_child() else {
+            continue;
+        };
+        let mut widget = line.first_child();
+        while let Some(entry) = widget {
+            widget = entry.next_sibling();
+            let name = entry.widget_name();
+            let Some(slug) = name.as_str().strip_prefix(prefix) else {
+                continue;
+            };
+            let Ok(button) = entry.downcast::<gtk4::Button>() else {
+                continue;
+            };
+            let (label, tip) = words(armed.as_deref(), slug);
+            button.set_label(label);
+            button.set_tooltip_text(tip);
+        }
+    }
+}
+
+/// Every arm in the listing, from the app's state: both writes live on the
+/// same rows, and a press of either can move only its own arm.
+fn sync_space_arms(list: &gtk4::ListBox) {
+    sync_arms(list, "unshare:", unshare_armed(), unshare_words);
+    sync_arms(list, "delete:", space_delete_armed(), delete_words);
+}
+
+fn space_row(ctx: &Ctx, artifact: &ArtifactSummary, list: &gtk4::ListBox) -> gtk4::ListBoxRow {
     let row = gtk4::ListBoxRow::new();
     let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
     let words = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
@@ -4054,11 +4210,32 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
     if let Some(share) = share.as_ref() {
         line.append(share);
     }
-    let unshare = gtk4::Button::with_label("Unshare");
+    // One armed press: the first press arms this row and sends nothing, the
+    // second sends the path-only DELETE. A row painted while armed says so,
+    // because the label comes from the app's own arm rather than a local flag.
+    let slug_row = artifact.slug.as_deref().unwrap_or("");
+    let (unshare_label, unshare_tip) = unshare_words(unshare_armed().as_deref(), slug_row);
+    let unshare = gtk4::Button::with_label(unshare_label);
+    unshare.set_tooltip_text(unshare_tip);
+    if let Some(slug) = &artifact.slug {
+        // Named so a press can repaint every row's word from the one arm.
+        unshare.set_widget_name(&format!("unshare:{slug}"));
+    }
     unshare.add_css_class("flat");
     unshare.add_css_class("muse-danger");
     unshare.set_valign(gtk4::Align::Start);
     line.append(&unshare);
+    let (delete_label, delete_tip) = delete_words(space_delete_armed().as_deref(), slug_row);
+    let delete = gtk4::Button::with_label(delete_label);
+    delete.set_tooltip_text(delete_tip);
+    if let Some(slug) = &artifact.slug {
+        delete.set_widget_name(&format!("delete:{slug}"));
+    }
+    delete.add_css_class("flat");
+    delete.add_css_class("muse-danger");
+    delete.set_valign(gtk4::Align::Start);
+    line.append(&delete);
+    connect_space_delete(&delete, ctx, list, &line, artifact);
     row.set_child(Some(&line));
     let slug = artifact.slug.clone();
     let name = artifact.title.clone();
@@ -4144,6 +4321,7 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
     {
         let ctx = ctx.clone();
         let line_inner = line.clone();
+        let list_inner = list.clone();
         unshare.connect_clicked(move |_| {
             let Some(slug) = slug.clone() else {
                 line_inner.append(&card_note("This space carries no handle."));
@@ -4156,6 +4334,21 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
                 line_inner.append(&card_note("Link your account first."));
                 return;
             };
+            // The gate, before anything leaves the app: the first press only
+            // arms the row, and the second press on that same row is the
+            // confirmation. Unsharing is not undoable from here.
+            if !unshare_press(&slug) {
+                // The arm moved to this row, so the row that held it before
+                // cannot keep the confirmation's word.
+                sync_space_arms(&list_inner);
+                line_inner.append(&card_note(
+                    "The space becomes private. Press Confirm unshare to send it.",
+                ));
+                return;
+            }
+            // The confirm spends the arm: every row goes back to "Unshare"
+            // before the DELETE leaves, whatever its answer turns out to be.
+            sync_space_arms(&list_inner);
             let line_for_done = line_inner.clone();
             let ctx_for_done = ctx.clone();
             super::app::dispatch(
@@ -4164,6 +4357,9 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
                 move |chat, answer| {
                     let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
                     if accepted {
+                        // Acceptance is not the change: the page is refilled
+                        // from the service's listing again, so the row is what
+                        // that read says it is.
                         show(&ctx_for_done, "library");
                     } else {
                         line_for_done.append(&card_note(
@@ -4176,6 +4372,64 @@ fn space_row(ctx: &Ctx, artifact: &ArtifactSummary) -> gtk4::ListBoxRow {
         });
     }
     row
+}
+
+/// The delete press: permanent, one armed press, then the listing read again
+/// as the only proof the row is gone.
+fn connect_space_delete(
+    delete: &gtk4::Button,
+    ctx: &Ctx,
+    list: &gtk4::ListBox,
+    line: &gtk4::Box,
+    artifact: &ArtifactSummary,
+) {
+    let ctx = ctx.clone();
+    let line_inner = line.clone();
+    let slug = artifact.slug.clone();
+    let list_inner = list.clone();
+    delete.connect_clicked(move |_| {
+        let Some(slug) = slug.clone() else {
+            line_inner.append(&card_note("This space carries no handle."));
+            return;
+        };
+        let Some(chat) = ctx.chat.upgrade() else {
+            return;
+        };
+        let Some(client) = chat.client_handle() else {
+            line_inner.append(&card_note("Link your account first."));
+            return;
+        };
+        // Its own arm, on the same one-press rule: the first press sends
+        // nothing, the second on this row is the confirmation.
+        if !space_delete_press(&slug) {
+            sync_space_arms(&list_inner);
+            line_inner.append(&card_note(
+                "Deleting the space is permanent. Press Confirm delete to send it.",
+            ));
+            return;
+        }
+        sync_space_arms(&list_inner);
+        let line_for_done = line_inner.clone();
+        let ctx_for_done = ctx.clone();
+        super::app::dispatch(
+            &chat,
+            move || client.space_delete(&slug),
+            move |chat, answer| {
+                let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                if accepted {
+                    // Acceptance is not the change: the page is refilled from
+                    // the service's listing again, and the row is gone from
+                    // it or still there exactly as that read says.
+                    show(&ctx_for_done, "library");
+                } else {
+                    line_for_done.append(&card_note(
+                        "The service did not delete it. Nothing changed.",
+                    ));
+                }
+                let _ = chat;
+            },
+        );
+    });
 }
 
 /// The export result, read-only: what came back and how big, with the
@@ -7685,6 +7939,121 @@ mod tests {
         assert!(!rail_closes(None, "feed", true));
         assert!(!rail_closes(Some("goals"), "feed", true));
         assert!(!rail_closes(Some("feed"), "feed", false));
+    }
+
+    /// The repaint every press runs: it walks the listing and re-words each
+    /// named button from the one arm, so the row that lost the arm cannot keep
+    /// saying "Confirm unshare".
+    #[test]
+    fn a_press_rewords_every_row_from_the_one_arm() {
+        gtk4::init().expect("gtk init");
+        let list = gtk4::ListBox::new();
+        let row = |slug: &str| {
+            let row = gtk4::ListBoxRow::new();
+            let line = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+            let button = gtk4::Button::with_label("Unshare");
+            button.set_widget_name(&format!("unshare:{slug}"));
+            line.append(&button);
+            row.set_child(Some(&line));
+            row
+        };
+        list.append(&row("a"));
+        list.append(&row("b"));
+        unshare_forget();
+        assert!(!unshare_press("b"), "the press arms b");
+
+        sync_space_arms(&list);
+
+        let mut labels = Vec::new();
+        let mut row_widget = list.first_child();
+        while let Some(entry) = row_widget {
+            row_widget = entry.next_sibling();
+            let Some(line) = entry.first_child() else {
+                continue;
+            };
+            let mut widget = line.first_child();
+            while let Some(child) = widget {
+                widget = child.next_sibling();
+                if let Ok(button) = child.downcast::<gtk4::Button>() {
+                    labels.push(button.label().unwrap_or_default().to_string());
+                }
+            }
+        }
+        assert_eq!(labels, vec!["Unshare", "Confirm unshare"]);
+        unshare_forget();
+    }
+
+    /// Two rows can never both wear the confirmation: the word is a function
+    /// of the app's one arm and the row's own handle, so a press that arms a
+    /// new row takes it off the old one.
+    #[test]
+    fn only_the_armed_space_wears_the_confirmation() {
+        assert_eq!(unshare_words(None, "a"), ("Unshare", None));
+        assert_eq!(
+            unshare_words(Some("a"), "a"),
+            ("Confirm unshare", Some("Press again to unshare"))
+        );
+        assert_eq!(unshare_words(Some("a"), "b"), ("Unshare", None));
+    }
+
+    /// The delete label: the armed row's word, never its neighbour's.
+    #[test]
+    fn the_delete_word_belongs_to_the_armed_row_only() {
+        assert_eq!(delete_words(None, "a"), ("Delete space", None));
+        assert_eq!(
+            delete_words(Some("a"), "a"),
+            ("Confirm delete", Some("Press again to delete this space"))
+        );
+        assert_eq!(delete_words(Some("a"), "b"), ("Delete space", None));
+    }
+
+    /// The delete gate is its own arm on the same rule, so arming a delete
+    /// can never stand in for an armed unshare.
+    #[test]
+    fn delete_takes_one_armed_press_and_keeps_its_own_arm() {
+        unshare_forget();
+        space_delete_forget();
+        assert!(
+            !space_delete_press("calm-space"),
+            "the first press only arms"
+        );
+        assert_eq!(space_delete_armed().as_deref(), Some("calm-space"));
+        assert_eq!(unshare_armed(), None, "a delete press arms no unshare");
+        assert!(
+            !space_delete_press("other-space"),
+            "another row re-arms rather than confirms"
+        );
+        assert!(
+            space_delete_press("other-space"),
+            "the second press on the armed row confirms"
+        );
+        assert_eq!(space_delete_armed(), None);
+        assert!(!space_delete_press("calm-space"));
+        space_delete_forget();
+        assert_eq!(space_delete_armed(), None);
+    }
+
+    /// The unshare gate: one armed press, the second on the same row confirms,
+    /// and another row's press only re-arms -- the rule the chat's delete turn
+    /// follows. A repaint forgets the arm entirely.
+    #[test]
+    fn unshare_takes_one_armed_press_per_row() {
+        unshare_forget();
+        assert!(!unshare_press("calm-space"), "the first press only arms");
+        assert_eq!(unshare_armed().as_deref(), Some("calm-space"));
+        assert!(
+            !unshare_press("other-space"),
+            "another row re-arms rather than confirms"
+        );
+        assert_eq!(unshare_armed().as_deref(), Some("other-space"));
+        assert!(
+            unshare_press("other-space"),
+            "the second press on the armed row confirms"
+        );
+        assert_eq!(unshare_armed(), None);
+        assert!(!unshare_press("calm-space"));
+        unshare_forget();
+        assert_eq!(unshare_armed(), None);
     }
 
     /// Upcoming names the run the account has next, in the panel's own words:

@@ -721,10 +721,33 @@ unprobed. This is a service-side block, not a missing client feature, so the pag
 
 *State (Nov 13, 2026).* The Library page now loads when it becomes visible, like the other
 data pages. Still open here: pagination (the list shows the first 50 of 76 and says so);
-Spaces actions — `spaces.delete` and `spaces.unshare` are path-only DELETEs, the same
-evidence class as `goals.delete`, and are the next buildable pair in this phase, while
-`spaces.save` (POST) has no recorded body and waits; preview remains blocked service-side
+Spaces actions — `spaces.delete` is a path-only DELETE, the same evidence class as
+`goals.delete`, and is built below, while `spaces.save` (POST) has no recorded body and
+waits; preview remains blocked service-side
 per the `fetch_url` finding above, with the `spaces.export_html` read the one unprobed lead.
+
+*Unshare is built on both windows (Nov 23, 2026).* A space row carries the press on the
+native Library page and in the shell's Library page, behind one rule held by the app: the first
+press arms that row and sends nothing, the second press on the same row sends `spaces.unshare`,
+and a press on another row only re-arms. The DELETE is path-only — the slug the listing gave,
+validated against the held rows, so a handle the page made up never reaches the service. The
+answer is acceptance and nothing more; the proof is the Library listing read again after it,
+which is what the row is then painted from, and a failed re-read says the change is unproven
+instead of showing the held rows as new. A repaint forgets the arm, as a repaint disarms the
+chat's delete turn. No live unshare has been pressed yet.
+
+*Deleting a space is built on both windows (Nov 23, 2026).* A space row carries a second
+press beside its unshare, on its own arm and the same rule: the first press arms that row and
+sends nothing, the second on the same row sends `spaces.delete`. Two arms rather than one, so
+an armed unshare can never stand for a delete. The DELETE is path-only — the slug the listing
+gave, validated against the held rows, and the bridge sends it once, never retried. The route
+table also names a saved-space variant, and the app does not choose between variants: it sends
+the recorded `spaces.delete` shape, and a row whose ownership the service reads differently is
+refused, not re-aimed at another route. The answer is acceptance only; the proof is the Library
+listing read again, which is what the page is then painted from, and a failed re-read says the
+change is unproven instead of showing the held rows as new. On the shell the route is
+`library.delete-space`, not `library.delete`: that name still means deleting an artifact, which
+stays unbuilt and unknown. No live delete has been pressed yet.
 
 *Upcoming is built (Nov 23, 2026).* The merged surface the Mac client opens is a page beside Tasks
 in both windows: the run the account has next — the earliest enabled schedule whose
@@ -868,9 +891,11 @@ _The previous "next three actions" are folded into the groups below: the P2 and 
 presses are in the live-proof group, and the P5 export probe is in the buildable group._
 
 **Buildable now (shapes recorded; no new evidence needed).**
-- P5: Library pagination and Spaces unshare shipped Nov 13, 2026. Spaces delete stays
-  held until the spaces listing probe settles which delete variant (owned vs saved) a
-  row needs.
+- P5: Library pagination and Spaces unshare shipped Nov 13, 2026. Spaces delete shipped
+  Nov 23, 2026 on the recorded `spaces.delete` route, with its own arm and the listing read
+  again as the proof; the owned-vs-saved variant question is answered by the service's
+  refusal rather than by the client guessing, and a live delete on both variants is the
+  remaining proof.
 - P5 space preview: shipped Nov 14, 2026. A Library space row's Preview button reads
   `spaces.export_html` through the gateway's raw request (the route is a binary GET;
   `call_json` cannot carry it) and renders the export in a navigation-locked WebView

@@ -16,9 +16,10 @@
 //! process answers with one `{"id","reply"}` line on the child's stdin, through
 //! [`crate::webui::handle_command_with`], against the state the app holds. The
 //! same pipe carries the app's own control lines: `{"raise":true}` when a
-//! second launch activates the running instance, and `{"boot":{...}}` when the
-//! chat cache first names the account, which the window's first paint could not
-//! know.
+//! second launch activates the running instance, `{"boot":{...}}` when the chat
+//! cache first names the account, which the window's first paint could not know,
+//! and `{"nudge":"<page>"}` when a read landed that an open page shows -- the
+//! window maps the name to its own fixed hook, so no code crosses the pipe.
 //!
 //! A pipe rather than a socket on purpose: only the child this process spawned
 //! holds the other end, so the page's command surface -- sends, decisions,
@@ -234,6 +235,15 @@ pub(crate) fn raise() {
     write(&serde_json::json!({ "raise": true }));
 }
 
+/// A read landed that an open page shows: ask the window to have that page ask
+/// its own snapshot again. Only the page's name crosses the pipe -- the window
+/// owns the hook -- and a launch with no shell window simply drops the line.
+pub(crate) fn page_changed(page: &'static str) {
+    // The writer exists only while a shell window does, so a launch on the
+    // native window drops the line here rather than needing its own gate.
+    write(&serde_json::json!({ "nudge": page }));
+}
+
 /// The chat cache has named the account: push the window a payload the app's
 /// own read fills, once. The window's boot answer is its first paint, asked
 /// before that read landed, so this is the line that closes the gap -- the app
@@ -388,7 +398,8 @@ fn clean_library_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PUSHED, WRITER, candidates, clean_library_path, install, push_drawer_boot, serve, write,
+        PUSHED, WRITER, candidates, clean_library_path, install, page_changed, push_drawer_boot,
+        serve, write,
     };
     use crate::pages::HistoryRow;
     use crate::webui::{WebRoutes, stub_routes};
@@ -522,6 +533,20 @@ mod tests {
         write(&serde_json::json!({ "raise": true }));
 
         assert_eq!(lines(&written), vec![serde_json::json!({ "raise": true })]);
+    }
+
+    /// A page nudge is a control line too: the page's name and nothing else,
+    /// so the window maps it to its own hook and no code crosses the pipe.
+    #[test]
+    fn a_page_nudge_carries_the_page_name_and_no_code() {
+        let written = window_stdin();
+
+        page_changed("upcoming");
+
+        assert_eq!(
+            lines(&written),
+            vec![serde_json::json!({ "nudge": "upcoming" })]
+        );
     }
 
     /// The drawer's one push: the page list, the name slot and the History rows

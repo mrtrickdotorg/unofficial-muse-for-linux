@@ -10,6 +10,7 @@ import newIcon from "../../assets/icons/new.svg?raw";
 import searchIcon from "../../assets/icons/search.svg?raw";
 import shapesIcon from "../../assets/icons/shapes.svg?raw";
 import tasksIcon from "../../assets/icons/tasks.svg?raw";
+import upcomingIcon from "../../assets/icons/upcoming.svg?raw";
 import { call, channelAvailable } from "./api";
 import { Chat } from "./Chat";
 import { Feed } from "./Feed";
@@ -22,6 +23,7 @@ import { Settings } from "./Settings";
 import { Tasks } from "./Tasks";
 import { Threads } from "./Threads";
 import { Upcoming } from "./Upcoming";
+import { PageNav } from "./navigation";
 import type { HistoryRow, ShellSnapshot } from "./types";
 
 /// The page components the shell can show, by the name the app's page list
@@ -47,7 +49,7 @@ const ICONS: Record<string, string> = {
   chat: chatIcon,
   threads: libraryIcon,
   tasks: tasksIcon,
-  upcoming: tasksIcon,
+  upcoming: upcomingIcon,
   library: shapesIcon,
   feed: libraryIcon,
   search: searchIcon,
@@ -346,7 +348,9 @@ export function Shell() {
       </aside>
 
       <main ref={main} className="shell-main" tabIndex={-1}>
-        {renderPage()}
+        {/* A page may hand the reader to another surface (Upcoming's waiting
+            approvals open Chat); the provider is the shell's own switch. */}
+        <PageNav.Provider value={setCurrent}>{renderPage()}</PageNav.Provider>
       </main>
     </div>
   );

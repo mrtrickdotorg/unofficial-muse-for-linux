@@ -14,7 +14,14 @@ export type Artifact = {
   can_share: boolean;
 };
 
-export type LibrarySnapshot = { artifacts: Artifact[]; total: number };
+// `armed` is the space whose unshare press the app has armed: the page paints
+// the confirm from the app's own arm, never from a local flag that could drift.
+export type LibrarySnapshot = {
+  artifacts: Artifact[];
+  total: number;
+  armed?: string | null;
+  delete_armed?: string | null;
+};
 
 // One Goals roster or Tracking row, projected by the bridge. Only these
 // fields reach the page; a row always has a title.

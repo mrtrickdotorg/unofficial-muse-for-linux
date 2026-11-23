@@ -28,7 +28,7 @@ MAX_RESPONSE = 4 * 1024 * 1024
 # Requests whose upstream calls are cheap only on a reused connection. One
 # handshake costs 1.5-2.2s and a call on an open connection ~0.1s, so these are
 # the operations where the reuse pays for itself.
-SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "message_react", "space_share", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "attach_probe", "send_images"})
+SHARED_GATEWAY_OPS = frozenset({"send", "watch", "tasks", "delete_task", "tasks_run", "scoped_update", "chat_delete", "message_react", "space_share", "start_session", "session_op", "idea_execute", "idea_engagement", "idea_feedback", "feed_react", "feed_unit_delete", "feed_prompt_update", "artifact_pin", "file_delete", "goal_delete", "goal_rename", "goal_set_complete", "goal_get", "goal_create", "goal_add_subgoal", "goals_tracking", "idea_detail", "mark_seen", "space_unshare", "space_delete", "attach_probe", "send_images"})
 
 # The session mutations the recorded route table names, with the
 # body shapes its own consumer sends (docs/PROTOCOL.md in the pin):
@@ -748,6 +748,7 @@ def validate_request(request):
                "mark_seen": {"thread_id"},
                "space_share": {"slug", "share_type", "disclosure_confirmation"},
                "space_unshare": {"slug"},
+               "space_delete": {"slug"},
                "space_export": {"slug"},
                "memory_search": {"query"},
                "memory_get": {"memory_uri"},
@@ -1192,7 +1193,7 @@ def validate_request(request):
             if (not isinstance(uri, str) or not uri.startswith("memory://")
                     or not 1 <= len(uri) <= 2048 or "\x00" in uri):
                 raise BridgeFailure("invalid_request")
-    if op in ("space_share", "space_unshare", "space_export"):
+    if op in ("space_share", "space_unshare", "space_delete", "space_export"):
         # The slug is the service's own, taken from the Library
         # listing's open target; it is one path segment, so a
         # slash would be aiming the route somewhere else.
@@ -4240,14 +4241,27 @@ class Adapter:
             # the listing's own open target). The answer's shape is
             # not recorded, so acceptance is the call not failing;
             # whether the space now reads as unshared is proven by
-            # re-reading, not by this answer. Deleting a space is
-            # deliberately NOT offered yet: the table also carries a
-            # saved-space variant, and which one a row needs depends
-            # on ownership fields whose names the spaces probe is
-            # still to settle.
+            # re-reading, not by this answer.
             with self.client._gateway(self.config) as gateway:
                 gateway.call_json(
                     "spaces.unshare",
+                    path_params={"slug": request["slug"]},
+                )
+            return {"slug": request["slug"], "accepted": True}
+        if request["op"] == "space_delete":
+            # A write on the shared gateway: delete one space, once.
+            # The route is a path-only DELETE, the same evidence class
+            # as spaces.unshare and goals.delete. The table also carries
+            # a saved-space variant, and a row's ownership fields are
+            # not settled here, so this sends the recorded
+            # spaces.delete shape and does not guess: a row the service
+            # refuses stays refused, with the listing read again after
+            # it, rather than being retried on another route. Acceptance
+            # is the call not failing; that the space is gone is proven
+            # by that re-read.
+            with self.client._gateway(self.config) as gateway:
+                gateway.call_json(
+                    "spaces.delete",
                     path_params={"slug": request["slug"]},
                 )
             return {"slug": request["slug"], "accepted": True}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { usePageNav } from "./navigation";
 import type { UpcomingSnapshot } from "./types";
 
 /// Upcoming: the run the account has next and the approvals waiting on the
@@ -7,6 +8,7 @@ import type { UpcomingSnapshot } from "./types";
 /// the app answers from what its own reads already said -- so opening the page
 /// costs nothing on the wire and cannot queue behind a listing.
 export function Upcoming() {
+  const onNavigate = usePageNav();
   const [data, setData] = useState<UpcomingSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,10 +25,21 @@ export function Upcoming() {
     }
   }, []);
 
-  // One read on mount, the way every page asks its own snapshot. Nothing here
-  // polls: a run or an approval that lands later shows on the next visit.
+  // One read on mount, the way every page asks its own snapshot: the shell
+  // mounts the page it shows, so becoming the visible page asks again.
   useEffect(() => {
     void load();
+  }, [load]);
+
+  // A Tasks read landing anywhere in the app moves the run this page names.
+  // The app nudges this hook rather than pushing rows, so the page re-asks its
+  // own snapshot and never keeps the "not read yet" sentence from before that
+  // read. Nothing here polls.
+  useEffect(() => {
+    window.museUpcomingReady = () => void load();
+    return () => {
+      window.museUpcomingReady = undefined;
+    };
   }, [load]);
 
   const approvals = data?.approvals ?? null;
@@ -69,11 +82,22 @@ export function Upcoming() {
         <div className="empty">No pending approvals.</div>
       ) : (
         <div className="rows">
+          {/* The row opens Chat, where the decision lives: Upcoming names a
+              waiting approval and hands the reader to its card, and never
+              offers a decision of its own. */}
           {approvals.cards.map((card) => (
-            <div className="task" key={card.id}>
-              <div>{card.headline}</div>
-              {card.summary && <div className="meta">{card.summary}</div>}
-            </div>
+            <button
+              type="button"
+              className="task task-link"
+              key={card.id}
+              title="Open in Chat"
+              aria-label={`${card.headline} — open in Chat`}
+              onClick={() => onNavigate("chat")}
+            >
+              <span>{card.headline}</span>
+              {card.summary && <span className="meta">{card.summary}</span>}
+              <span className="task-hint">Open in Chat</span>
+            </button>
           ))}
         </div>
       )}

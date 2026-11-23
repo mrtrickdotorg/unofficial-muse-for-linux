@@ -918,6 +918,16 @@ pub struct SpaceUnshareAnswer {
     pub accepted: bool,
 }
 
+/// What the service said about a space delete it took.
+///
+/// Acceptance only: whether the space is gone is proven by re-reading the
+/// Library, never by this answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceDeleteAnswer {
+    pub slug: String,
+    pub accepted: bool,
+}
+
 // The disclosure flags the web's share dialog reads. Fixed names
 // per the 12.1 bundle; the bridge drops anything else.
 const SHARE_DISCLOSURE_FLAG_NAMES: [&str; 4] = [
@@ -1636,6 +1646,24 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "space_unshare", "slug": slug}),
+            false,
+        )
+    }
+    /// Delete exactly one space, once.
+    ///
+    /// The slug must be one the Library listing's open target
+    /// published, and the bridge makes a single path-only DELETE
+    /// (`spaces.delete`), so one confirmed press maps to one write.
+    /// The route table also names a saved-space variant; this client
+    /// does not choose between them, so a row the service refuses is
+    /// reported as refused. Whether the space is gone is proven by
+    /// re-reading the Library, never by this answer.
+    pub fn space_delete(&self, slug: &str) -> Result<SpaceDeleteAnswer, AccountError> {
+        if slug.is_empty() || slug.len() > 256 || slug.contains('\0') || slug.contains('/') {
+            return Err(AccountError::new(ErrorCode::InvalidRequest, false));
+        }
+        self.request(
+            serde_json::json!({"op": "space_delete", "slug": slug}),
             false,
         )
     }

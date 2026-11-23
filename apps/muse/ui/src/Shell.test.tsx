@@ -139,6 +139,27 @@ describe("the web shell", () => {
     expect(screen.queryByText("hello from the shell")).not.toBeInTheDocument();
   });
 
+  // Upcoming is its own surface, so its rail glyph is its own too: a page that
+  // borrowed Tasks' check would read as the same page twice.
+  it("gives Upcoming a glyph of its own beside Tasks", () => {
+    window.__MUSE_BOOT__ = shell({
+      pages: [
+        { name: "tasks", title: "Tasks" },
+        { name: "upcoming", title: "Upcoming" },
+      ],
+    });
+    installChannel(answer);
+
+    render(<Shell />);
+
+    const glyph = (title: string) =>
+      within(rail())
+        .getByRole("button", { name: title })
+        .querySelector(".shell-rail-glyph")?.innerHTML ?? "";
+    expect(glyph("Upcoming")).toContain("<svg");
+    expect(glyph("Upcoming")).not.toEqual(glyph("Tasks"));
+  });
+
   it("opens from the rail as well as the page list", async () => {
     window.__MUSE_BOOT__ = shell();
     installChannel(answer);

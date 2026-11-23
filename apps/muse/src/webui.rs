@@ -409,6 +409,27 @@ pub(crate) enum Fetched {
     Feed(HeldFeed),
     /// A cached hero's data URI, or None when nothing is cached.
     Hero(Option<String>),
+    /// One space's unshare answer, and the Library listing read again after
+    /// it: acceptance is the service's, the change is whatever that read
+    /// says. `listing` is None when the re-read failed, so the reply can say
+    /// the change is not proven instead of painting the held rows as new.
+    Unshare {
+        slug: String,
+        accepted: bool,
+        error: Option<String>,
+        listing: Option<(Vec<ArtifactSummary>, u64)>,
+        reread_error: Option<String>,
+    },
+    /// One space's delete answer, and the Library listing read again after
+    /// it, for the same reason the unshare carries one: acceptance is not the
+    /// change, the read is.
+    SpaceDelete {
+        slug: String,
+        accepted: bool,
+        error: Option<String>,
+        listing: Option<(Vec<ArtifactSummary>, u64)>,
+        reread_error: Option<String>,
+    },
     Search(HeldSearch),
     Failed(String),
 }
@@ -452,6 +473,63 @@ fn fresh_tasks(client: Option<AccountClient>) -> Receiver<Fetched> {
             },
         };
         let _ = sender.send(fetched);
+    });
+    receiver
+}
+
+/// One space's unshare, on a worker thread: a single path-only DELETE, never
+/// retried, then the Library listing read again. The DELETE's answer is only
+/// acceptance; the rows in the reply are the proof of what changed.
+fn fresh_unshare(client: Option<AccountClient>, slug: String) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(client) = client else {
+            let _ = sender.send(Fetched::Failed("no account link in this app".into()));
+            return;
+        };
+        let (accepted, error) = match client.space_unshare(&slug) {
+            Ok(answer) => (answer.accepted, None),
+            Err(failure) => (false, Some(failure.to_string())),
+        };
+        let (listing, reread_error) = match client.artifacts() {
+            Ok(listing) => (Some((listing.artifacts, listing.total_count)), None),
+            Err(failure) => (None, Some(failure.to_string())),
+        };
+        let _ = sender.send(Fetched::Unshare {
+            slug,
+            accepted,
+            error,
+            listing,
+            reread_error,
+        });
+    });
+    receiver
+}
+
+/// Delete one space on a worker thread, then read the listing again: the
+/// DELETE's acceptance and the rows as they now are travel together.
+fn fresh_space_delete(client: Option<AccountClient>, slug: String) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(client) = client else {
+            let _ = sender.send(Fetched::Failed("no account link in this app".into()));
+            return;
+        };
+        let (accepted, error) = match client.space_delete(&slug) {
+            Ok(answer) => (answer.accepted, None),
+            Err(failure) => (false, Some(failure.to_string())),
+        };
+        let (listing, reread_error) = match client.artifacts() {
+            Ok(listing) => (Some((listing.artifacts, listing.total_count)), None),
+            Err(failure) => (None, Some(failure.to_string())),
+        };
+        let _ = sender.send(Fetched::SpaceDelete {
+            slug,
+            accepted,
+            error,
+            listing,
+            reread_error,
+        });
     });
     receiver
 }
@@ -779,9 +857,80 @@ pub(crate) fn handle_command_with(
     let answer = match command.as_str() {
         "library.snapshot" => {
             let (artifacts, total) = crate::pages::library_snapshot();
-            Answer::Now(serde_json::json!({ "ok": true, "artifacts": artifacts, "total": total }))
+            Answer::Now(serde_json::json!({
+                "ok": true,
+                "artifacts": artifacts,
+                "total": total,
+                "armed": crate::pages::unshare_armed(),
+                "delete_armed": crate::pages::space_delete_armed(),
+            }))
         }
         "library.refresh" => Answer::Later(fresh_listing(client)),
+        // A space's unshare, from its own row: one armed press, then one
+        // path-only DELETE, then the listing read again. The row is addressed
+        // by the handle the held listing carries -- never a ref the page made
+        // up -- and the first press writes nothing at all.
+        "library.unshare" => {
+            let slug = request
+                .get("slug")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let held = crate::pages::library_snapshot().0;
+            let known = held.iter().any(|row| {
+                row.target_kind.as_deref() == Some("space") && row.slug.as_deref() == Some(slug)
+            });
+            if !known {
+                Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "that space is not in the held Library listing",
+                }))
+            } else if !crate::pages::unshare_press(slug) {
+                let (artifacts, total) = crate::pages::library_snapshot();
+                Answer::Now(serde_json::json!({
+                    "ok": true,
+                    "accepted": false,
+                    "slug": slug,
+                    "armed": slug,
+                    "artifacts": artifacts,
+                    "total": total,
+                }))
+            } else {
+                Answer::Later(fresh_unshare(client, slug.to_owned()))
+            }
+        }
+        // Deleting a space is its own route with its own arm, so neither
+        // confirm can spend the other. It is not named `library.delete`:
+        // that name still means deleting an artifact, which stays unbuilt
+        // and unknown.
+        "library.delete-space" => {
+            let slug = request
+                .get("slug")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let held = crate::pages::library_snapshot().0;
+            let known = held.iter().any(|row| {
+                row.target_kind.as_deref() == Some("space") && row.slug.as_deref() == Some(slug)
+            });
+            if !known {
+                Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "that space is not in the held Library listing",
+                }))
+            } else if !crate::pages::space_delete_press(slug) {
+                let (artifacts, total) = crate::pages::library_snapshot();
+                Answer::Now(serde_json::json!({
+                    "ok": true,
+                    "accepted": false,
+                    "slug": slug,
+                    "delete_armed": slug,
+                    "armed": crate::pages::unshare_armed(),
+                    "artifacts": artifacts,
+                    "total": total,
+                }))
+            } else {
+                Answer::Later(fresh_space_delete(client, slug.to_owned()))
+            }
+        }
         "goals.snapshot" => {
             let held = crate::pages::goals_snapshot();
             Answer::Now(serde_json::json!({
@@ -1126,12 +1275,53 @@ pub(crate) fn handle_command_with(
     (id, answer, command)
 }
 
+/// The reply a space write shares with its sibling: the service's acceptance,
+/// and the rows as whatever listing read came after it said. A failed re-read
+/// leaves the held rows in place and says the change is not proven rather
+/// than painting them as the read.
+fn space_write_reply(
+    command: &str,
+    slug: String,
+    accepted: bool,
+    error: Option<String>,
+    listing: Option<(Vec<ArtifactSummary>, u64)>,
+    reread_error: Option<String>,
+    started: Instant,
+) -> serde_json::Value {
+    let reread = listing.is_some();
+    let (artifacts, total) = match listing {
+        Some((artifacts, total)) => {
+            crate::pages::library_cache(artifacts.clone(), total);
+            (artifacts, total)
+        }
+        None => crate::pages::library_snapshot(),
+    };
+    eprintln!(
+        "muse webui: {command} space={slug} accepted={accepted} reread={reread} ms={}",
+        started.elapsed().as_millis()
+    );
+    serde_json::json!({
+        "ok": true,
+        "accepted": accepted,
+        "slug": slug,
+        "armed": null,
+        "delete_armed": null,
+        "error": error,
+        "reread_error": reread_error,
+        "artifacts": artifacts,
+        "total": total,
+    })
+}
+
 /// The reply a worker's answer becomes, and the cache it leaves behind: the
 /// native page, the boot payload and this reply tell the same story
 /// afterwards. Pure over the answer, so a test can read it without a window.
 pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> serde_json::Value {
     match fetched {
         Fetched::Rows(artifacts, total) => {
+            // A listing read disarms whatever row a confirm belonged to.
+            crate::pages::unshare_forget();
+            crate::pages::space_delete_forget();
             crate::pages::library_cache(artifacts.clone(), total);
             eprintln!(
                 "muse webui: {command} read the service: rows={} total={} ms={}",
@@ -1139,7 +1329,47 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
                 total,
                 started.elapsed().as_millis()
             );
-            serde_json::json!({ "ok": true, "artifacts": artifacts, "total": total })
+            serde_json::json!({
+                "ok": true, "artifacts": artifacts, "total": total,
+                "armed": null, "delete_armed": null
+            })
+        }
+        Fetched::Unshare {
+            slug,
+            accepted,
+            error,
+            listing,
+            reread_error,
+        } => {
+            // A confirm spends the arm whatever its answer was.
+            crate::pages::unshare_forget();
+            space_write_reply(
+                command,
+                slug,
+                accepted,
+                error,
+                listing,
+                reread_error,
+                started,
+            )
+        }
+        Fetched::SpaceDelete {
+            slug,
+            accepted,
+            error,
+            listing,
+            reread_error,
+        } => {
+            crate::pages::space_delete_forget();
+            space_write_reply(
+                command,
+                slug,
+                accepted,
+                error,
+                listing,
+                reread_error,
+                started,
+            )
         }
         Fetched::Goals(mut held) => {
             // A failed Tracking read must not empty a section that is merely
@@ -1181,6 +1411,7 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
         }
         Fetched::Tasks(held) => {
             crate::pages::tasks_cache(held);
+            upcoming_changed();
             // Local reminders are local state: the worker did not read them,
             // so they are re-read here, on the main loop.
             crate::pages::tasks_local_refresh();
@@ -1338,6 +1569,17 @@ pub(crate) fn settings_updates_changed() {
 /// the chat panel's read lands after that window opened.
 pub(crate) fn settings_policy_changed() {
     nudge_page("settings", "musePolicyReady");
+}
+
+/// A Tasks read landed: the next run Upcoming names is that read's answer, so
+/// an open Upcoming -- in the shell or in its own window -- re-asks its own
+/// snapshot. Nothing is pushed as data, so the held cache stays the only
+/// source, and a page that was showing "not read yet" stops saying it.
+pub(crate) fn upcoming_changed() {
+    nudge_page("upcoming", "museUpcomingReady");
+    // The shell runs every page in one window, so its nudge rides the pipe
+    // rather than `nudge_page`: the window calls the same hook, by name.
+    crate::web_shell::page_changed("upcoming");
 }
 
 /// Open one page in its own window on the rows the native page last read.
@@ -2034,6 +2276,8 @@ mod tests {
             Fetched::Feed(..) => panic!("a library read must not answer with a feed"),
             Fetched::Hero(..) => panic!("a library read must not answer with a hero"),
             Fetched::Search(..) => panic!("a library read must not answer with a search"),
+            Fetched::Unshare { .. } => panic!("a library read must not answer with an unshare"),
+            Fetched::SpaceDelete { .. } => panic!("a library read must not answer with a delete"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -2062,7 +2306,465 @@ mod tests {
             Fetched::Feed(..) => panic!("no client, no feed"),
             Fetched::Hero(..) => panic!("no client, no hero"),
             Fetched::Search(..) => panic!("no client, no search"),
+            Fetched::Unshare { .. } => panic!("no client, no unshare"),
+            Fetched::SpaceDelete { .. } => panic!("no client, no delete"),
         }
+    }
+
+    /// A space's unshare arms before it writes: the first press leaves a
+    /// confirmation owed and no request made, and a handle the held listing
+    /// does not carry is refused instead of being sent.
+    #[test]
+    fn a_space_unshare_press_arms_first_and_refuses_an_unknown_handle() {
+        let space = || muse_account::ArtifactSummary {
+            artifact_ref: "space:calm-space".into(),
+            title: "Calm space".into(),
+            target_kind: Some("space".into()),
+            slug: Some("calm-space".into()),
+            can_share: true,
+            ..muse_account::ArtifactSummary::default()
+        };
+        crate::pages::library_cache(vec![space()], 1);
+        crate::pages::unshare_forget();
+
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":31,"cmd":"library.unshare","slug":"calm-space"}"#,
+            None,
+            None,
+        );
+        assert_eq!(command, "library.unshare");
+        let Answer::Now(reply) = answer else {
+            panic!("the first press only arms: nothing leaves the app");
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["accepted"], false);
+        assert_eq!(reply["armed"], "calm-space");
+        assert_eq!(reply["artifacts"][0]["title"], "Calm space");
+        assert_eq!(crate::pages::unshare_armed().as_deref(), Some("calm-space"));
+
+        // A handle the held rows do not carry never reaches the service, and
+        // it does not disturb the arm either.
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":32,"cmd":"library.unshare","slug":"not-here"}"#,
+            None,
+            None,
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("an unknown handle is refused at once");
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(crate::pages::unshare_armed().as_deref(), Some("calm-space"));
+        crate::pages::unshare_forget();
+    }
+
+    /// An unshare's answer is the listing read after it: those rows are cached
+    /// as the held ones, and the answer spends the arm -- acceptance by itself
+    /// is never the change.
+    #[test]
+    fn an_unshare_answer_carries_the_re_read_listing() {
+        let row = |title: &str| muse_account::ArtifactSummary {
+            artifact_ref: "space:a".into(),
+            title: title.into(),
+            target_kind: Some("space".into()),
+            slug: Some("a".into()),
+            ..muse_account::ArtifactSummary::default()
+        };
+        crate::pages::library_cache(vec![row("Before")], 1);
+        crate::pages::unshare_forget();
+        assert!(!crate::pages::unshare_press("a"), "the press arms");
+
+        let reply = reply_for(
+            Fetched::Unshare {
+                slug: "a".into(),
+                accepted: true,
+                error: None,
+                listing: Some((vec![row("After")], 1)),
+                reread_error: None,
+            },
+            "library.unshare",
+            Instant::now(),
+        );
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(reply["armed"], serde_json::Value::Null);
+        assert_eq!(reply["artifacts"][0]["title"], "After");
+        assert_eq!(crate::pages::library_snapshot().0[0].title, "After");
+        assert_eq!(crate::pages::unshare_armed(), None);
+    }
+
+    /// The confirm half of the unshare press, against a stub host: the second
+    /// press sends exactly one path-only DELETE for the held handle, reads the
+    /// listing again, and the rows the page paints are that read's, not the
+    /// ones it held.
+    #[test]
+    fn a_confirmed_unshare_sends_one_path_only_delete_and_paints_the_re_read() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-unshare-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+
+        // The listing deliberately differs from the held row, so an answer
+        // that painted the cache instead of the read would fail here.
+        let after = serde_json::json!({
+            "ok": true,
+            "data": {
+                "total_count": 1,
+                "has_more": false,
+                "artifacts": [{
+                    "artifact_ref": "space:calm-space",
+                    "title": "Read after the unshare",
+                    "target_kind": "space",
+                    "slug": "calm-space",
+                    "pinned": false,
+                    "can_open": false,
+                    "can_share": true,
+                }],
+            }
+        })
+        .to_string();
+        let accepted = serde_json::json!({
+            "ok": true,
+            "data": { "slug": "calm-space", "accepted": true }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            // Two calls, two connections: the DELETE, then the listing read.
+            for reply in [accepted, after] {
+                let (stream, _) = listener.accept().expect("accept");
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().expect("clone"))
+                    .read_line(&mut line)
+                    .expect("request");
+                seen.push(line);
+                let mut writer = stream;
+                writer.write_all(reply.as_bytes()).expect("reply");
+                writer.write_all(b"\n").expect("newline");
+                writer.flush().expect("flush");
+            }
+            seen
+        });
+
+        let held = |title: &str| muse_account::ArtifactSummary {
+            artifact_ref: "space:calm-space".into(),
+            title: title.into(),
+            target_kind: Some("space".into()),
+            slug: Some("calm-space".into()),
+            ..muse_account::ArtifactSummary::default()
+        };
+        crate::pages::library_cache(vec![held("Held before the press")], 1);
+        crate::pages::unshare_forget();
+
+        // The first press only arms: no request leaves the app.
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":41,"cmd":"library.unshare","slug":"calm-space"}"#,
+            None,
+            None,
+        );
+        assert!(
+            matches!(answer, Answer::Now(_)),
+            "the first press sends nothing"
+        );
+        assert_eq!(crate::pages::unshare_armed().as_deref(), Some("calm-space"));
+
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":42,"cmd":"library.unshare","slug":"calm-space"}"#,
+            Some(client),
+            None,
+        );
+        assert_eq!(command, "library.unshare");
+        let Answer::Later(receiver) = answer else {
+            panic!("the confirm leaves the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+
+        // What crossed the pipe to the host: one DELETE, whose whole payload
+        // is the handle -- no path, no body, nothing that could aim it
+        // elsewhere and no second call.
+        let requests = server.join().expect("server");
+        let sent: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|line| serde_json::from_str(line.trim()).expect("one request per line"))
+            .collect();
+        let deletes: Vec<&serde_json::Value> = sent
+            .iter()
+            .filter(|request| request["op"] == "space_unshare")
+            .collect();
+        assert_eq!(deletes.len(), 1, "one unshare, never retried");
+        assert_eq!(deletes[0]["slug"], "calm-space");
+        let mut keys: Vec<&String> = deletes[0]
+            .as_object()
+            .expect("the request is an object")
+            .keys()
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["config_dir", "op", "slug"],
+            "the handle and the app's own config dir, nothing else"
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|request| request["op"] == "artifacts")
+                .count(),
+            1,
+            "the listing is read once"
+        );
+        assert_eq!(
+            sent.iter()
+                .map(|request| request["op"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>(),
+            ["space_unshare", "artifacts"],
+            "the DELETE goes first; the listing read is the proof after it"
+        );
+
+        // The rows in the answer are the read's: nothing is painted from the
+        // held cache until that reply lands.
+        assert_eq!(
+            crate::pages::library_snapshot().0[0].title,
+            "Held before the press"
+        );
+        let Fetched::Unshare {
+            slug,
+            accepted,
+            error,
+            listing,
+            reread_error,
+        } = fetched
+        else {
+            panic!("an unshare answers with its own variant");
+        };
+        assert_eq!(slug, "calm-space");
+        assert!(accepted, "the stub accepted the DELETE");
+        assert!(error.is_none(), "delete error: {error:?}");
+        assert!(reread_error.is_none(), "re-read error: {reread_error:?}");
+        let reply = reply_for(
+            Fetched::Unshare {
+                slug,
+                accepted,
+                error,
+                listing,
+                reread_error,
+            },
+            "library.unshare",
+            Instant::now(),
+        );
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(reply["artifacts"][0]["title"], "Read after the unshare");
+        assert_eq!(
+            crate::pages::library_snapshot().0[0].title,
+            "Read after the unshare"
+        );
+        assert_eq!(crate::pages::unshare_armed(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The delete's confirm half, against a stub host: the second press sends
+    /// exactly one path-only DELETE, reads the listing again, and the reply
+    /// paints the rows of that read -- with the deleted row absent from it.
+    #[test]
+    fn a_confirmed_delete_sends_one_path_only_delete_and_paints_the_re_read() {
+        use muse_account::BridgeConfig;
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = std::env::temp_dir().join(format!("muse-webui-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp");
+        let socket = dir.join("host.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+
+        // The read after the delete no longer lists the space.
+        let after = serde_json::json!({
+            "ok": true,
+            "data": {
+                "total_count": 1,
+                "has_more": false,
+                "artifacts": [{
+                    "artifact_ref": "file:kept",
+                    "title": "Kept file",
+                    "target_kind": "file",
+                    "pinned": false,
+                    "can_open": true,
+                    "can_share": false,
+                }],
+            }
+        })
+        .to_string();
+        let accepted = serde_json::json!({
+            "ok": true,
+            "data": { "slug": "calm-space", "accepted": true }
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for reply in [accepted, after] {
+                let (stream, _) = listener.accept().expect("accept");
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().expect("clone"))
+                    .read_line(&mut line)
+                    .expect("request");
+                seen.push(line);
+                let mut writer = stream;
+                writer.write_all(reply.as_bytes()).expect("reply");
+                writer.write_all(b"\n").expect("newline");
+                writer.flush().expect("flush");
+            }
+            seen
+        });
+
+        crate::pages::library_cache(
+            vec![muse_account::ArtifactSummary {
+                artifact_ref: "space:calm-space".into(),
+                title: "Held space".into(),
+                target_kind: Some("space".into()),
+                slug: Some("calm-space".into()),
+                ..muse_account::ArtifactSummary::default()
+            }],
+            1,
+        );
+        crate::pages::space_delete_forget();
+        crate::pages::unshare_forget();
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":51,"cmd":"library.delete-space","slug":"calm-space"}"#,
+            None,
+            None,
+        );
+        assert!(
+            matches!(answer, Answer::Now(_)),
+            "the first press sends nothing"
+        );
+        assert_eq!(
+            crate::pages::space_delete_armed().as_deref(),
+            Some("calm-space")
+        );
+        // The other write's arm is not moved by this one.
+        assert_eq!(crate::pages::unshare_armed(), None);
+
+        let client = AccountClient::new(BridgeConfig {
+            python: "/nonexistent/python".into(),
+            script: dir.join("bridge.py"),
+            config_dir: dir.join("config"),
+        })
+        .use_host_socket(socket);
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":52,"cmd":"library.delete-space","slug":"calm-space"}"#,
+            Some(client),
+            None,
+        );
+        assert_eq!(command, "library.delete-space");
+        let Answer::Later(receiver) = answer else {
+            panic!("the confirm leaves the main loop");
+        };
+        let fetched = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker answers");
+
+        let requests = server.join().expect("server");
+        let sent: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|line| serde_json::from_str(line.trim()).expect("one request per line"))
+            .collect();
+        let deletes: Vec<&serde_json::Value> = sent
+            .iter()
+            .filter(|request| request["op"] == "space_delete")
+            .collect();
+        assert_eq!(deletes.len(), 1, "one delete, never retried");
+        assert_eq!(deletes[0]["slug"], "calm-space");
+        let mut keys: Vec<&String> = deletes[0]
+            .as_object()
+            .expect("the request is an object")
+            .keys()
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["config_dir", "op", "slug"],
+            "the handle and the app's own config dir, nothing else"
+        );
+        assert_eq!(
+            sent.iter()
+                .map(|request| request["op"].as_str().unwrap_or("?"))
+                .collect::<Vec<_>>(),
+            ["space_delete", "artifacts"],
+            "the DELETE goes first; the listing read is the proof after it"
+        );
+
+        let Fetched::SpaceDelete {
+            slug,
+            accepted,
+            error,
+            listing,
+            reread_error,
+        } = fetched
+        else {
+            panic!("a delete answers with its own variant");
+        };
+        assert_eq!(slug, "calm-space");
+        assert!(accepted, "the stub accepted the DELETE");
+        assert!(error.is_none(), "delete error: {error:?}");
+        assert!(reread_error.is_none(), "re-read error: {reread_error:?}");
+        let reply = reply_for(
+            Fetched::SpaceDelete {
+                slug,
+                accepted,
+                error,
+                listing,
+                reread_error,
+            },
+            "library.delete-space",
+            Instant::now(),
+        );
+        // The reply's rows are the read's: the space is gone from them.
+        assert_eq!(reply["artifacts"][0]["title"], "Kept file");
+        assert_eq!(reply["accepted"], true);
+        let held = crate::pages::library_snapshot().0;
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].title, "Kept file");
+        assert_eq!(crate::pages::space_delete_armed(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A refused DELETE still re-reads, and says both things: the service's
+    /// refusal and the rows as they now are.
+    #[test]
+    fn a_refused_unshare_still_reports_the_held_listing() {
+        let held = vec![muse_account::ArtifactSummary {
+            artifact_ref: "space:a".into(),
+            title: "Still shared".into(),
+            target_kind: Some("space".into()),
+            slug: Some("a".into()),
+            ..muse_account::ArtifactSummary::default()
+        }];
+        crate::pages::library_cache(held, 1);
+        let reply = reply_for(
+            Fetched::Unshare {
+                slug: "a".into(),
+                accepted: false,
+                error: Some("invalid_request".into()),
+                listing: None,
+                reread_error: Some("timeout".into()),
+            },
+            "library.unshare",
+            Instant::now(),
+        );
+        assert_eq!(reply["accepted"], false);
+        assert_eq!(reply["error"], "invalid_request");
+        assert_eq!(reply["reread_error"], "timeout");
+        assert_eq!(reply["artifacts"][0]["title"], "Still shared");
     }
 
     /// Goals refresh reads both sections on one thread, keeps the roster when

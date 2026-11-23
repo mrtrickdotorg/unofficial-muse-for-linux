@@ -136,6 +136,19 @@ html, body {
   transform: translateY(-1px);
 }
 
+/* Library: a space's unshare press sits beside the title it would affect --
+ * the page's one write, so it wears the shared inline button and the warn
+ * colour, and an armed press says so in the app's own word. */
+.card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.inline-button.armed {
+  font-weight: 650;
+  border-color: rgba(245, 158, 11, 0.65);
+}
+
 .card h3 {
   margin: 0;
   font-size: 15px;
@@ -301,6 +314,27 @@ html, body {
   color: var(--text);
   font-size: 13px;
   overflow-wrap: anywhere;
+}
+
+/* Upcoming: a waiting approval is the same row wearing a button, because the
+ * row opens Chat's card. Left-aligned, a hint line, and the accent border on
+ * hover or focus so it reads as something to press. */
+.task-link {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-link:hover,
+.task-link:focus-visible { border-color: var(--accent-border); }
+
+.task-hint {
+  color: var(--text-faint);
+  font-size: 11.5px;
 }
 
 /* Threads: one card per conversation -- pin, title, unread badge, then the

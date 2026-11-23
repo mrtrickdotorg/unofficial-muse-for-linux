@@ -1313,6 +1313,33 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(calls, [("spaces.unshare", {"path_params": {"slug": "my-space"}})])
         self.assertEqual(result, {"slug": "my-space", "accepted": True})
 
+    def test_space_delete_dispatches_one_path_only_delete(self):
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        calls = []
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                calls.append((method, kwargs))
+                return {"whatever": "the answer shape is unrecorded"}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "space_delete", "slug": "my-space"})
+        self.assertEqual(calls, [("spaces.delete", {"path_params": {"slug": "my-space"}})])
+        self.assertEqual(result, {"slug": "my-space", "accepted": True})
+
+    def test_space_delete_requests_are_validated(self):
+        bridge = load_bridge()
+        bridge.validate_request({"op": "space_delete", "slug": "ok-slug",
+                                   "config_dir": "/tmp/x"})
+        for bad in ({}, {"slug": ""}, {"slug": "a/b"}, {"slug": 7},
+                    {"slug": "x" * 257}):
+            with self.assertRaises(bridge.BridgeFailure):
+                bridge.validate_request(dict(bad, op="space_delete",
+                                               config_dir="/tmp/x"))
+
     def test_space_share_sends_the_probed_publish_once(self):
         from contextlib import contextmanager
         bridge = load_bridge()

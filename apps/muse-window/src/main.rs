@@ -15,9 +15,11 @@
 //! carries one `{"id","cmd"}` line per page command to the app; its **stdin**
 //! carries the app's `{"id","reply"}` answers -- handed to the page through
 //! `window.museReply(id, reply)`, so the page's ticket protocol is unchanged --
-//! and two control lines: `{"raise":true}` when a second launch activates the
-//! running instance, and `{"boot":{...}}` when the app's own account read first
-//! names the session, which the boot answer below was asked too early to carry.
+//! and three control lines: `{"raise":true}` when a second launch activates the
+//! running instance, `{"boot":{...}}` when the app's own account read first
+//! names the session, which the boot answer below was asked too early to carry,
+//! and `{"nudge":"<page>"}` when a read landed that an open page shows -- the
+//! page asks its own snapshot again, and no data or code crosses the pipe.
 //! The app closing the pipe means the app is gone, and this window goes with
 //! it.
 //!
@@ -212,6 +214,8 @@ enum FromApp {
     Raise,
     /// The app's own read landed: the drawer's payload, pushed.
     Boot(serde_json::Value),
+    /// A read moved what an open page shows: ask that page to re-ask.
+    Nudge(String),
     /// An answer to a page's command, by the page's own ticket.
     Reply {
         id: serde_json::Value,
@@ -236,6 +240,12 @@ fn parse(line: &str) -> FromApp {
             FromApp::Boot(boot.clone())
         } else {
             FromApp::Ignore
+        };
+    }
+    if let Some(page) = answer.get("nudge") {
+        return match page.as_str() {
+            Some(page) => FromApp::Nudge(page.to_owned()),
+            None => FromApp::Ignore,
         };
     }
     let Some(id) = answer.get("id").cloned() else {
@@ -281,6 +291,16 @@ fn read_loop(mut answers: BufReader<std::io::Stdin>, app: AppHandle) {
             // The app's own read landed: this is the drawer's payload, pushed
             // rather than asked for, so the page keeps no clock of its own.
             FromApp::Boot(boot) => adopt_boot(boot, &app),
+            FromApp::Nudge(page) => {
+                if let Some(script) = nudge_script(&page) {
+                    let window = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Some(view) = window.get_webview_window("shell") {
+                            let _ = view.eval(script);
+                        }
+                    });
+                }
+            }
             FromApp::Reply { id, reply } => {
                 let script = reply_script(&id, &reply);
                 let window = app.clone();
@@ -295,6 +315,17 @@ fn read_loop(mut answers: BufReader<std::io::Stdin>, app: AppHandle) {
     eprintln!("muse-window: the app closed the bridge; closing the window");
     let exiting = app.clone();
     let _ = app.run_on_main_thread(move || exiting.exit(0));
+}
+
+/// The hook a nudge may reach, from a fixed table: the app names a page and
+/// this side owns the script, so the pipe can ask a page to re-ask but can
+/// never carry code. A name this build does not know is dropped, the way an
+/// unknown control line is.
+fn nudge_script(page: &str) -> Option<&'static str> {
+    match page {
+        "upcoming" => Some("window.museUpcomingReady && window.museUpcomingReady();"),
+        _ => None,
+    }
 }
 
 /// A pushed boot payload: kept for a reload, and handed to the drawer so the
@@ -362,7 +393,7 @@ const SHIM: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use super::{FromApp, boot_empty, parse, read_boot, reply_script};
+    use super::{FromApp, boot_empty, nudge_script, parse, read_boot, reply_script};
     use serde_json::json;
 
     /// A raise is the app's control line, not one of a page's answers: it is
@@ -373,6 +404,27 @@ mod tests {
         assert!(matches!(parse(r#"{"raise":true,"id":4}"#), FromApp::Raise));
         assert!(matches!(parse(r#"{"raise":false}"#), FromApp::Ignore));
         assert!(matches!(parse(r#"{"raise":"please"}"#), FromApp::Ignore));
+    }
+
+    /// A nudge names a page and carries nothing else: the window owns the hook
+    /// it calls, so an unknown name or a non-string is dropped like any other
+    /// line this build does not know.
+    #[test]
+    fn a_nudge_names_a_page_and_never_carries_code() {
+        assert!(matches!(
+            parse(r#"{"nudge":"upcoming"}"#),
+            FromApp::Nudge(page) if page == "upcoming"
+        ));
+        assert!(matches!(parse(r#"{"nudge":4}"#), FromApp::Ignore));
+        assert!(matches!(
+            parse(r#"{"nudge":{"eval":"x"}}"#),
+            FromApp::Ignore
+        ));
+        assert_eq!(
+            nudge_script("upcoming"),
+            Some("window.museUpcomingReady && window.museUpcomingReady();")
+        );
+        assert_eq!(nudge_script("chat"), None);
     }
 
     /// The app's push is its payload and nothing else: an object, adopted as a
