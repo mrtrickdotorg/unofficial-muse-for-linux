@@ -566,7 +566,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   further round presses Check twice a double-click apart, once on the native card and again on the
   page: the app's busy flag refuses the second press with `An update check is already running.`,
   paints that sentence on both cards, the first check still lands and neither card is left on
-  `Working…`. For that refusal to be reachable at all both check buttons stay pressable while a
+  `Working…`. Every other round presses once, and a press the app swallows -- refused, or a busy
+  step that never appears -- fails it: retrying was how a real defect could hide behind the
+  harness's own patience, and the page's habit of checking itself on open is why the rounds wait for
+  the app to be idle before pressing instead of pressing and hoping. For that refusal to be reachable at all both check buttons stay pressable while a
   check runs -- an install or a restart still takes the native one out of reach -- instead of the
   press disappearing into a disabled button, and the page shows the same sentence because it is the
   app's status as well as the page's own refusal line, not a message the page invented. That line

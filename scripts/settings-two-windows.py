@@ -25,8 +25,9 @@ turn, and requires that
   * two Check presses a double-click apart, on the native card and again on
     the page: the second is refused by the app's own busy flag, both cards show
     its sentence ("An update check is already running."), the first check still
-    lands and neither card is left on "Working…", rather than the harness
-    retrying the press until it slips through,
+    lands and neither card is left on "Working…", and every other round presses
+    once: a press the app swallows -- refused, or never taken -- fails it rather
+    than being retried until it slips through,
   * with `--restart`, the one step nothing else drives: the update is staged
     into a throwaway copy, Restart is pressed for real, and the staged build has
     to take over -- it records where it was started from, it is still up when
@@ -218,13 +219,33 @@ def text(node):
     return name(node)
 
 
+# The accessible action that presses a control. Anything else a named node
+# offers -- a label's text-selection actions, for one -- is not a press, and
+# taking it would report a press the app never received.
+PRESS_ACTIONS = ("click", "press", "activate")
+
+
+def press_action(node):
+    """The index of the press action on `node`, or None if it has none."""
+    try:
+        actions = node.get_action_iface()
+        if actions is None:
+            return None
+        for index in range(actions.get_n_actions()):
+            if (actions.get_action_name(index) or "").lower() in PRESS_ACTIONS:
+                return index
+    except Exception:
+        return None
+    return None
+
+
 def find_button(frame_name, button_names):
     """The node to press for one of `button_names`.
 
-    A button is preferred, but any other node carrying the name and an action
-    will do: GTK versions differ in which widget ends up as the actionable
-    accessible node (a rail press has been a plain button and a list row), and
-    the harness must not care which.
+    A button is preferred, but any other node carrying the name and a press
+    action will do: GTK versions differ in which widget ends up as the
+    actionable accessible node (a rail press has been a plain button and a list
+    row), and the harness must not care which.
     """
     frame = first_frame(frame_name)
     if frame is None:
@@ -233,11 +254,7 @@ def find_button(frame_name, button_names):
     for node in walk(frame):
         if name(node) not in button_names:
             continue
-        try:
-            actions = node.get_action_iface()
-        except Exception:
-            actions = None
-        if actions is None or actions.get_n_actions() == 0:
+        if press_action(node) is None:
             continue
         if role(node) in ("push button", "toggle button"):
             return node
@@ -292,16 +309,14 @@ def press_twice(frame_name, button_names, gap=0.35):
     first one started -- the press the app itself has to refuse.
     """
     button = find_button(frame_name, button_names)
-    if button is None:
+    index = press_action(button) if button is not None else None
+    if index is None:
         return False
     try:
         actions = button.get_action_iface()
-        if actions is None:
-            return False
-        ranks = range(actions.get_n_actions())
-        first = any(actions.do_action(index) for index in ranks)
+        first = actions.do_action(index)
         time.sleep(gap)
-        second = any(actions.do_action(index) for index in ranks)
+        second = actions.do_action(index)
         return first and second
     except Exception:
         return False
@@ -319,13 +334,11 @@ def press(frame_name, button_names, window=2.0):
     deadline = time.monotonic() + window
     while True:
         button = find_button(frame_name, button_names)
-        if button is not None:
+        index = press_action(button) if button is not None else None
+        if index is not None:
             try:
-                actions = button.get_action_iface()
-                if actions is not None:
-                    for index in range(actions.get_n_actions()):
-                        if actions.do_action(index):
-                            return True
+                if button.get_action_iface().do_action(index):
+                    return True
             except Exception:
                 pass
         if time.monotonic() >= deadline:
@@ -343,11 +356,7 @@ def card(frame_name, index=0):
 
 def actionable(node):
     """Whether assistive tech can press this node."""
-    try:
-        actions = node.get_action_iface()
-    except Exception:
-        return False
-    return actions is not None and actions.get_n_actions() > 0
+    return press_action(node) is not None
 
 
 def labelled(nodes, labels):
@@ -581,33 +590,47 @@ def settled(timeout, label):
 def exercise(label, frame_name, buttons, busy_text, timeout, busy_window):
     """Press one card's button, watch both cards during it, settle.
 
-    Returns (presses, mid_text, status, action). The busy step must be seen on
-    both cards at the same moment, with the page's line the native card's word
-    for word -- a decoration the page added would fail here -- and both cards
-    must leave it agreeing.
-    """
-    wait_until(idle, timeout, f"the cards to be idle before the {label} press")
+    Returns (mid_text, status, action). The busy step must be seen on both cards
+    at the same moment, with the page's line the native card's word for word --
+    a decoration the page added would fail here -- and both cards must leave it
+    agreeing.
 
-    for presses in range(1, 4):
-        if not press(frame_name, buttons):
-            raise Failure(f"the {label} press could not be made")
-        started = time.monotonic()
-        while time.monotonic() - started < busy_window:
-            page_status, _, _, native_status, _, refusal = cards()
-            page_status = page_status or ""
-            native_status = native_status or ""
-            if busy_text in page_status and native_status == busy_text:
-                if page_status != native_status:
-                    raise Failure(
-                        f"mid-press the cards disagree: page {page_status!r} "
-                        f"vs native {native_status!r}"
-                    )
-                status, action = settled(timeout, label)
-                return presses, page_status, status, action
-            if refusal:
-                break
-            time.sleep(POLL)
-        wait_until(idle, timeout, f"the cards to be idle after the {label} press")
+    The press is made once. A press the app swallowed -- refused because it was
+    already working, or never taken at all -- fails the round: pressing again
+    would hide exactly the defect the round exists to catch.
+    """
+    # The page checks itself when it opens; a press during that check is
+    # refused, and a refusal is not a bug to retry past. Wait for the app's own
+    # check to finish -- on the native card, where the updater's state lands
+    # first -- and only then press, once.
+    def app_idle():
+        status, check, _, _ = card(MAIN_FRAME)
+        if not status or check == WORKING or status in BUSY_STATUSES:
+            return False
+        return status != CHECK_REFUSAL
+
+    wait_until(app_idle, timeout, f"the app to be idle before the {label} press")
+    if not press(frame_name, buttons):
+        raise Failure(f"the {label} press could not be made")
+
+    started = time.monotonic()
+    while time.monotonic() - started < busy_window:
+        page_status, _, _, native_status, _, refusal = cards()
+        page_status = page_status or ""
+        native_status = native_status or ""
+        if busy_text in page_status and native_status == busy_text:
+            if page_status != native_status:
+                raise Failure(
+                    f"mid-press the cards disagree: page {page_status!r} "
+                    f"vs native {native_status!r}"
+                )
+            status, action = settled(timeout, label)
+            return page_status, status, action
+        if refusal:
+            raise Failure(
+                f"the {label} press was refused with {refusal!r} instead of running"
+            )
+        time.sleep(POLL)
 
     raise Failure(
         f"the {label} press never showed {busy_text!r} on both cards "
@@ -684,11 +707,16 @@ def restart_round(proc, root, copy, asset, timeout):
     staged bytes: the update is in place, not merely announced.
     """
     print(f"restart: staging into the throwaway copy at {copy}")
-    if not press(MAIN_FRAME, CHECK_LABELS):
-        raise Failure("the native Check press could not be made")
-    wait_until(
-        lambda: card(MAIN_FRAME)[0] == OFFERED_STATUS, timeout, "the update to be offered"
-    )
+    # The page checks itself when it opens; pressing during that check would be
+    # refused, so the round waits for the card's own answer and asks only if it
+    # did not land on an offer.
+    offered = lambda: card(MAIN_FRAME)[0] == OFFERED_STATUS
+    try:
+        wait_until(offered, timeout, "the update to be offered")
+    except Failure:
+        if not press(MAIN_FRAME, CHECK_LABELS):
+            raise Failure("the native Check press could not be made")
+        wait_until(offered, timeout, "the update to be offered")
     if not press(MAIN_FRAME, ("Download update",)):
         raise Failure("the native Download press could not be made")
     wait_until(
@@ -851,13 +879,12 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
         print(f"opened: both cards read {page_status!r} (action {page_action!r})")
 
         for label, frame_name in (("page", WEB_FRAME), ("native", MAIN_FRAME)):
-            presses, mid, status, action = exercise(
+            mid, status, action = exercise(
                 f"{label} check", frame_name, CHECK_LABELS, CHECK_STATUS, timeout, busy_window
             )
             print(
-                f"press {label} check: both mid-check on {mid!r}; both read "
-                f"{status!r} with {action!r} in {presses} "
-                f"{'press' if presses == 1 else 'presses'}"
+                f"press {label} check: both mid-check on {mid!r}; "
+                f"both read {status!r} with {action!r}"
             )
             if feed_mode == "newer" and (status, action) != (OFFERED_STATUS, "Download update"):
                 dump_tree(MAIN_FRAME)
@@ -872,8 +899,8 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
             # while the first check is running, so the app's own busy flag
             # refuses it. Both cards must show that sentence, and neither may
             # be left on the busy step once the first check lands. The round
-            # presses to see the refusal, rather than retrying the press until
-            # it slips through.
+            # presses to see the refusal; no other round may lose a press, as
+            # `exercise` fails on one instead of pressing again.
             for pressed_frame in (MAIN_FRAME, WEB_FRAME):
                 pressed = "native" if pressed_frame == MAIN_FRAME else "page"
                 if not press_twice(pressed_frame, CHECK_LABELS):
@@ -1016,7 +1043,7 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
             # and each must leave a press working once the seam is whole again.
             def round_failure(label, buttons, busy_text, expected, offered):
                 """One broken-seam press: its sentence on every card."""
-                _, _, status, action = exercise(
+                _, status, action = exercise(
                     label, WEB_FRAME, buttons, busy_text, timeout, busy_window
                 )
                 if not status.startswith(expected) or action != offered:
@@ -1052,7 +1079,7 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                 finally:
                     whole_feed()
 
-                _, _, status, action = exercise(
+                _, status, action = exercise(
                     f"{label} with the feed whole again",
                     WEB_FRAME,
                     CHECK_LABELS,
@@ -1078,7 +1105,7 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
             finally:
                 asset.write_bytes(asset_bytes)
 
-            presses, mid, status, action = exercise(
+            mid, status, action = exercise(
                 "page download",
                 WEB_FRAME,
                 ("Download update",),
