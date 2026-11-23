@@ -195,6 +195,10 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // page showing "Confirm delete turn" means the app is really armed.
   const [deleting, setDeleting] = useState(false);
   const [turnNote, setTurnNote] = useState<string | null>(null);
+  // The turn menu, where the native "…" pill keeps it: a popover beside the
+  // thread title, so the one destructive press is not a stray link under some
+  // other section's heading.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   // The `+` press: the app's clipboard read, the same one its own button
   // makes. The chip it stages comes back in the next snapshot. The app refuses
@@ -232,11 +236,16 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     if (deleting) return;
     setDeleting(true);
     setTurnNote(null);
+    // The press that answers an armed menu item has done the deletion, so the
+    // menu closes on it; the arming press leaves it open, showing the app's
+    // confirming label.
+    const confirming = menuTurn?.armed ?? false;
     try {
       await call<{ ok: boolean }>("chat.delete", 30_000);
       // The label and the rows both come from the app: the armed press names
       // itself there, and the turn only disappears once the app's own re-read
       // no longer carries it.
+      if (confirming) setMenuOpen(false);
       void loadSnapshot();
     } catch (failure) {
       // The app's own sentence (a held send slot, a signed-out window). The
@@ -332,6 +341,13 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const loaded = data?.loaded ?? false;
   const turn: TurnMenu | undefined = data?.turn;
+  // The menu closes when the turn it named is gone: the app disarms on a moved
+  // transcript, and a popover left open over an empty thread would offer a
+  // press the app would refuse.
+  const menuTurn = menuOpen ? turn : undefined;
+  useEffect(() => {
+    if (menuOpen && !turn) setMenuOpen(false);
+  }, [menuOpen, turn]);
 
   // The native probe reads this: how many transcript rows the page holds.
   (window as unknown as { __MUSE_ROWS__?: number }).__MUSE_ROWS__ = rows.length;
@@ -345,6 +361,50 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
             {data.unread}
           </span>
         ) : null}
+        {turn && (
+          <div className="chat-turn-menu">
+            {/* A plain disclosure button, not `aria-haspopup="menu"`: WebKit
+                maps that to a combo box with only a `select` action, which is
+                the wrong thing to announce and the wrong thing to press. */}
+            <button
+              className="chat-turn-pill"
+              type="button"
+              aria-label="Turn options"
+              aria-expanded={menuOpen}
+              aria-controls="chat-turn-menu"
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              …
+            </button>
+            {/* A labelled group of buttons, not `role="menu"`: a menu role
+                promises arrow-key navigation and focus handling this popover
+                does not implement, and WebKit gives a menu item an unnamed
+                action that no assistive press can address by name. */}
+            {menuTurn && (
+              <div
+                className="chat-turn-pop"
+                id="chat-turn-menu"
+                role="group"
+                aria-label="Turn options"
+              >
+                <button
+                  className={`chat-turn-delete${menuTurn.armed ? " armed" : ""}`}
+                  type="button"
+                  disabled={deleting}
+                  onClick={() => void deleteTurn()}
+                >
+                  {menuTurn.delete_label}
+                </button>
+                {menuTurn.armed && (
+                  <p className="chat-turn-hint">
+                    This deletes the latest turn and cannot be undone.
+                  </p>
+                )}
+                {turnNote && <p className="chat-approval-error">{turnNote}</p>}
+              </div>
+            )}
+          </div>
+        )}
         <span className="count">{data?.account ?? ""}</span>
         <span className="chat-live">following the app</span>
       </div>
@@ -471,23 +531,6 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
           <div className="chat-panel-meta">
             {data?.thread ? `Thread ${data.thread.slice(0, 8)}…` : "New chat"}
           </div>
-
-          {turn && (
-            <section className="chat-turn" aria-label="Turn options">
-              <div className="chat-panel-head">
-                <h2 className="chat-panel-title">Turn</h2>
-              </div>
-              <button
-                className="chat-delete"
-                type="button"
-                disabled={deleting}
-                onClick={() => void deleteTurn()}
-              >
-                {turn.delete_label}
-              </button>
-              {turnNote && <p className="chat-approval-error">{turnNote}</p>}
-            </section>
-          )}
 
           <section className="chat-approvals" aria-label="Approvals">
             <div className="chat-panel-head">

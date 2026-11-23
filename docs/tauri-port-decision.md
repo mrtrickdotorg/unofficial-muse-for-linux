@@ -488,11 +488,31 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   it beside the press and the turn stays. Nothing else about the delete changed:
   the confirming press still takes the `Send` slot, and the removal is still
   proven by the app's own history re-read, so the row leaves the page only when
-  the app no longer holds it. Two DOM tests (`Chat.test.tsx`, 119 in all) pin a
+  the app no longer holds it. Three DOM tests (`Chat.test.tsx`, 120 in all) pin a
   double press as one write, the row leaving with the app's snapshot, the armed
-  label coming from the app, and the refusal sentence with the turn still there;
-  one Rust test pins `chat.delete` through the routes, the app's sentence
-  travelling back, and a window without routes saying it cannot make that change.
+  label coming from the app, the refusal sentence with the turn still there, and
+  the menu closing on the press that answered it; one Rust test pins `chat.delete`
+  through the routes, the app's sentence travelling back, and a window without
+  routes saying it cannot make that change.
+
+  The press sits where the native one does -- in the header, behind a `…` pill,
+  closed until pressed -- rather than in the details panel where the approvals
+  live, and the armed entry is the destructive affordance a delete needs: the
+  warning colour, the app's own "Confirm delete turn", and a line naming what
+  the press costs. Two accessibility decisions came out of driving it live, both
+  the same rule as the harness's: name what you press, and press only what is
+  named. A pill carrying `aria-haspopup="menu"` is exposed by WebKit as a combo
+  box whose only action is `select` -- the wrong thing to announce and the wrong
+  thing to press -- so it is a plain disclosure button with `aria-expanded` and
+  `aria-controls`. And `role="menu"` with `role="menuitem"` came out as a menu
+  item carrying one *unnamed* action, which no assistive press can address by
+  name (and a menu role would promise arrow-key navigation this popover does not
+  implement), so the popover is a labelled `group` of ordinary buttons: each one
+  a push button with a `press` action, which is what a screen reader and the
+  harness both reach. Verified live: the pill is in the header, the page shows
+  no `Delete turn` before it is pressed, the menu then holds it, and pressing it
+  reads "Confirm delete turn" with the warning line while the transcript stays
+  put.
   Pressed live (Nov 23, 2026): the page's `Delete turn` press armed the app and
   the page then read `Confirm delete turn` with its rows untouched -- the arming
   crossed the route in both directions without deleting anything. The confirming
