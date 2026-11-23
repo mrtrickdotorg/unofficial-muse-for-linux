@@ -22,9 +22,9 @@ import type {
 const POLL_MS = 2000;
 
 // The draft is the one thing a reader edits keystroke by keystroke, and every
-// write of it repaints the window's own entry. So the page coalesces typing into
-// one command per pause, and one more mid-burst so a long sentence still reaches
-// the window while it is being typed.
+// write of it repaints the native window's own entry. So the page coalesces
+// typing into one command per pause, and one more mid-burst so a long sentence
+// still reaches the native window while it is being typed.
 const DRAFT_DEBOUNCE_MS = 200;
 const DRAFT_BATCH_MS = 600;
 
@@ -136,7 +136,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   // here writes it back through `chat.draft`, and a dictation's words arrive as
   // the same draft on the next snapshot. `lastSynced` is the value both
   // surfaces agree on, so an echo of this page's own typing is not mistaken for
-  // the window changing the draft underneath the reader.
+  // the native window changing the draft underneath the reader.
   const [draft, setDraft] = useState("");
   // The last draft both surfaces agreed on: what the app answered, never what
   // this page has typed but not yet sent.
@@ -179,7 +179,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     if (burstStarted.current === 0) burstStarted.current = now;
     if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
     // A burst flushes on its pause; one that never pauses flushes a beat later
-    // so the window is never far behind the box.
+    // so the native window is never far behind the box.
     const waited = now - burstStarted.current;
     flushTimer.current = window.setTimeout(
       flushDraft,
@@ -311,8 +311,8 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     }
   };
 
-  // The mic: the app's own toggle, so a press here and a press in the window
-  // are the same take, and its words land in the draft both surfaces show.
+  // The mic: the app's own toggle, so a press here and a press in the native
+  // window are the same take, and its words land in the draft both surfaces show.
   const [dictatingPress, setDictatingPress] = useState(false);
   const dictate = async () => {
     if (dictatingPress) return;
@@ -402,8 +402,8 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     setDraft(sharedDraft);
   }, [sharedDraft]);
 
-  // Leaving the page or the box must not leave the window behind: a blur and an
-  // unmount both write what is still pending.
+  // Leaving the page or the box must not leave the native window behind: a blur
+  // and an unmount both write what is still pending.
   useEffect(() => flushDraft, [flushDraft]);
 
   useEffect(() => {

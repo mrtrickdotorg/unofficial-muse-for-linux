@@ -478,7 +478,7 @@ describe("the Chat web page", () => {
     render(<Chat pollMs={10_000} />);
     const box = screen.getByLabelText("Message") as HTMLTextAreaElement;
 
-    // Six keystrokes inside one pause: the window hears the last of them once.
+    // Six keystrokes inside one pause: the app hears the last of them once.
     for (const value of ["h", "he", "hel", "hell", "hello", "hello!"]) {
       fireEvent.change(box, { target: { value } });
     }

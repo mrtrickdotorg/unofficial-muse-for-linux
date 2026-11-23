@@ -378,7 +378,7 @@ fn chat_payload(held: &HeldChat) -> serde_json::Value {
         // words and cannot show "Delete" beside an app waiting to confirm.
         "turn": crate::pages::turn_view(),
         // The draft both surfaces share, and the mic's state: the page types
-        // into the window's own draft instead of keeping a second one.
+        // into the native window's own draft instead of keeping a second one.
         "composer": crate::pages::composer_view(),
         "rows": held.rows,
         "loaded": held.loaded,
@@ -654,7 +654,7 @@ pub(crate) type WebTurnDelete = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 /// one draft.
 pub(crate) type WebDraft = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 /// The mic pill: the app's own toggle, so a take started here and one started
-/// in the window are the same take.
+/// in the native window are the same take.
 pub(crate) type WebDictate = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 pub(crate) type WebHistory = std::rc::Rc<dyn Fn() -> Result<Vec<crate::pages::HistoryRow>, String>>;
 pub(crate) type WebOpenThread = std::rc::Rc<dyn Fn(Option<&str>) -> Result<(), String>>;

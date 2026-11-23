@@ -333,10 +333,11 @@ fn ci_runs_the_guard_as_its_own_step() {
     );
 }
 
-/// The shell window's bridge is the parent's pipes, and it must stay that way.
-/// A socket is reachable by any local process, so the page's command surface --
-/// sends, decisions, grants -- would be anyone's to call; a deleted spike once
-/// opened exactly that. The pipe is asserted here, not left to a live run.
+/// The app's bridge to the shell window is the parent's pipes, and it must
+/// stay that way. A socket is reachable by any local process, so the page's
+/// command surface -- sends, decisions, grants -- would be anyone's to call; a
+/// deleted spike once opened exactly that. The pipe is asserted here, not left
+/// to a live run.
 #[test]
 fn the_shell_window_bridge_is_a_pipe_not_a_socket() {
     let root = workspace_root();

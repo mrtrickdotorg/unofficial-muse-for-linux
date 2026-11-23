@@ -210,8 +210,9 @@ export type ChatSnapshot = {
   unread?: number;
   approvals?: ApprovalsView;
   turn?: TurnMenu;
-  // The composer the page and the window share: the draft, typed in either
-  // one or dictated into the window, and whether a take is running.
+  // The composer the page and the native window share: the draft, typed in
+  // either one or dictated into the native window, and whether a take is
+  // running.
   composer?: { draft: string; dictating: boolean };
   rows: ChatRow[];
   loaded: boolean;
@@ -227,7 +228,7 @@ export type SettingsLink = {
 };
 
 // The updater's last answer, with the native card's own labels: the page
-// offers the press the window offers, in the same words.
+// offers the press the native window offers, in the same words.
 export type SettingsUpdates = {
   appimage: boolean;
   status: string;
@@ -312,8 +313,8 @@ export type ShellPage = { name: string; title: string };
 export type HistoryRow = { id: string; text: string; current: boolean };
 
 // The shell's own payload: the page list, the account and build stamp the
-// native drawer carries, and its History rows. Null History means the window
-// could not read the listing -- unread, never an empty account. Page data is
+// native drawer carries, and its History rows. Null History means the app's
+// read of the listing failed -- unread, never an empty account. Page data is
 // not here: each page asks its own snapshot.
 export type ShellSnapshot = {
   pages: ShellPage[];

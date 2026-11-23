@@ -370,7 +370,7 @@ type ShellKeys = std::rc::Rc<dyn Fn(gtk4::gdk::Key, gtk4::gdk::ModifierType) -> 
 
 thread_local! {
     /// The page drawer's Escape action, installed by the shell that owns
-    /// the drawer and run by the window: the window sees every key press
+    /// the drawer and run by the native window: it sees every key press
     /// wherever focus sits on the page, the split view does not. The
     /// action folds the drawer and answers whether it did.
     static FOLD_DRAWER: std::cell::RefCell<Option<std::rc::Rc<dyn Fn() -> bool>>> =
@@ -676,7 +676,7 @@ fn show_main(split: &adw::OverlaySplitView) {
     // The shell window asks this process for the pages' own answers; see
     // `web_shell`. Installed here, where the chat panel and its routes are
     // reachable, so a page press reaches the same sender, chooser and decision
-    // path a press in this window does.
+    // path a press in the native window does.
     if web_shell::tauri() {
         web_shell::install(chat.client_handle(), chat.web_routes());
     }

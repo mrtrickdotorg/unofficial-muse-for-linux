@@ -1987,7 +1987,7 @@ impl Chat {
     }
 
     /// The page's draft press: the words go into the app's own composer, so the
-    /// window's entry and the page's box are one draft.
+    /// native window's entry and the page's box are one draft.
     pub(crate) fn web_draft(self: &Rc<Self>, text: &str) {
         // A write that says what the composer already holds is free: the entry
         // would repaint the same words and the "changed" handler would answer
@@ -2682,8 +2682,9 @@ impl Chat {
         self.composer_row.refresh(&self.composer.borrow());
         match self.send_text(dispatch.text, dispatch.images, reply) {
             SendStart::Dispatched => {
-                // One draft: the words the page sent leave the window's entry
-                // too, so the two surfaces agree on an empty box after a send.
+                // One draft: the words the page sent leave the native window's
+                // entry too, so the two surfaces agree on an empty box after a
+                // send.
                 self.web_draft("");
                 Ok(())
             }

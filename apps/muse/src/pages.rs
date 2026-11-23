@@ -2847,9 +2847,9 @@ thread_local! {
 }
 
 /// The composer as both surfaces see it. The draft is the app's own -- typed in
-/// the window's entry or dictated into it -- so the page types into the same
-/// draft instead of keeping a second one. `dictating` is the mic's state, which
-/// only the app knows (a take also stops itself after thirty seconds).
+/// the native window's entry or dictated into it -- so the page types into the
+/// same draft instead of keeping a second one. `dictating` is the mic's state,
+/// which only the app knows (a take also stops itself after thirty seconds).
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct ComposerView {
     pub draft: String,
@@ -2862,7 +2862,7 @@ thread_local! {
 }
 
 /// Publish what the composer holds, wherever it changes: a keystroke in the
-/// window's entry, a page press, a dictation's words.
+/// native window's entry, a page press, a dictation's words.
 pub(crate) fn composer_cache(view: ComposerView) {
     COMPOSER.with(|store| *store.borrow_mut() = view);
 }

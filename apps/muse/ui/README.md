@@ -56,7 +56,7 @@ command arrives with the first page that mutates.
 Chat is the first page with no refresh of its own: it follows
 `chat.snapshot`, which the native render refills — including the in-place
 rewrite of a reply that is still arriving — so the page costs no wire trips
-and cannot show a different conversation than the window beside it.
+and cannot show a different conversation than the native window beside it.
 
 Its composer is the slice's one mutating control, and `chat.send` dispatches
 nothing itself. The command hands the trimmed draft back to the app's

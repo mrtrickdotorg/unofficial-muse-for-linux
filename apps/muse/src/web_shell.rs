@@ -1,4 +1,5 @@
-//! The shell window: the app's pages in a Tauri window.
+//! The app's side of the shell window: the app's pages in a Tauri window,
+//! answered from this process over the parent's pipes.
 //!
 //! The port's end state is a React document in a Tauri window with this process
 //! behind it as the state layer. They cannot share a process: this app is
