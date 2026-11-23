@@ -148,7 +148,7 @@ export function Library() {
     }
   }, []);
 
-  useHeldRead("library", loadSnapshot, refresh);
+  const reading = useHeldRead("library", loadSnapshot, refresh);
 
   // A space write, on the app's one-armed-press rule: the first press sends
   // nothing, the second press on the same row and write sends the app's own
@@ -288,9 +288,9 @@ export function Library() {
 
       {!loaded ? (
         <div className="empty">
-          The native Library page has not loaded yet, so there is nothing to
-          show here. Open Library in the app, then press Refresh — this window
-          is not claiming your Library is empty.
+          {reading
+            ? "Reading your Library now. It will appear here when the answer lands."
+            : "The native Library page has not loaded yet, so there is nothing to show here. Open Library in the app, then press Refresh — this window is not claiming your Library is empty."}
         </div>
       ) : rows.length === 0 ? (
         <div className="empty">Nothing in the Library matches this filter.</div>

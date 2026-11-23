@@ -73,7 +73,7 @@ export function Threads() {
     }
   }, []);
 
-  useHeldRead("threads", loadSnapshot, refresh);
+  const reading = useHeldRead("threads", loadSnapshot, refresh);
 
   const threads = useMemo(() => data?.threads ?? [], [data]);
   const main = useMemo(() => threads.filter((thread) => !thread.side), [threads]);
@@ -109,9 +109,9 @@ export function Threads() {
 
       {!loaded ? (
         <div className="empty">
-          The native Threads page has not loaded yet, so there is nothing to
-          show here. Open Threads in the app, then press Refresh — this window
-          is not claiming your account has no conversations.
+          {reading
+            ? "Reading your conversations now. They will appear here when the answer lands."
+            : "The native Threads page has not loaded yet, so there is nothing to show here. Open Threads in the app, then press Refresh — this window is not claiming your account has no conversations."}
         </div>
       ) : threads.length === 0 ? (
         <div className="empty">No threads yet.</div>

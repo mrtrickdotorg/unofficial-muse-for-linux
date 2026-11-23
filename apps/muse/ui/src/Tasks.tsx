@@ -61,7 +61,7 @@ export function Tasks() {
     }
   }, []);
 
-  useHeldRead("tasks", loadSnapshot, refresh);
+  const reading = useHeldRead("tasks", loadSnapshot, refresh);
 
   const schedules = data?.schedules ?? [];
   const runs = data?.runs ?? [];
@@ -89,9 +89,9 @@ export function Tasks() {
 
       {!loaded ? (
         <div className="empty">
-          The native Tasks page has not loaded yet, so its schedules and runs
-          are not shown here. Open Tasks in the app, then press Refresh — this
-          window is not claiming they are empty.
+          {reading
+            ? "Reading your schedules and runs now. They will appear here when the answer lands."
+            : "The native Tasks page has not loaded yet, so its schedules and runs are not shown here. Open Tasks in the app, then press Refresh — this window is not claiming they are empty."}
         </div>
       ) : (
         <>

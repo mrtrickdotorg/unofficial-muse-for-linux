@@ -347,7 +347,9 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   do the same. Nothing polls: the extra read happens once per open, and the held rows take over as
   soon as one has been read. The hook also holds one in-flight read per page: a page remounted
   while its read runs -- a rail press away and back -- waits for that read and then asks its own
-  snapshot again, so one open is one read and the remounted page paints what that read left.
+  snapshot again, so one open is one read and the remounted page paints what that read left. While
+  that read runs the page's unread state says a read is in progress, because an owed read that
+  still says "nothing has been read" reads as an empty account.
 - **S3 — Chat surface (2–3 weeks). STARTED Nov 20, 2026: the transcript is ported, read-only;
   GATE CLOSED Nov 21, 2026, and the slices after it extend the page rather than reopen the gate.** This
   slice was pulled ahead of S2's tail (settings, local host): the churn measurement puts 126 of the

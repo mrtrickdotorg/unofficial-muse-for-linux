@@ -87,7 +87,7 @@ export function Goals() {
     }
   }, []);
 
-  useHeldRead("goals", loadSnapshot, refresh);
+  const reading = useHeldRead("goals", loadSnapshot, refresh);
 
   const goals = useMemo(() => data?.goals ?? [], [data]);
   const tracking = data?.tracking ?? [];
@@ -126,9 +126,9 @@ export function Goals() {
 
       {!loaded ? (
         <div className="empty">
-          The native Goals page has not loaded yet, so there is nothing to
-          show here. Open Goals in the app, then press Refresh — this window
-          is not claiming your Goals page is empty.
+          {reading
+            ? "Reading your Goals now. They will appear here when the answer lands."
+            : "The native Goals page has not loaded yet, so there is nothing to show here. Open Goals in the app, then press Refresh — this window is not claiming your Goals page is empty."}
         </div>
       ) : (
         <>

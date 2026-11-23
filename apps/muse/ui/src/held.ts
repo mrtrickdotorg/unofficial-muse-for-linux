@@ -6,7 +6,7 @@
 // `loaded: false` is "nothing has been read", never an empty account. Strictly
 // false -- an answer that does not say is not a claim of emptiness. Nothing
 // polls: the read happens once on mount, and the held rows take over after it.
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /// Pages whose owed read is still running in this window, by page. A page
 /// remounted while its own read is in flight -- a rail press away and back --
@@ -16,12 +16,15 @@ const running = new Map<string, Promise<void>>();
 const unreadByDefault = (answer: unknown): boolean =>
   (answer as { loaded?: boolean }).loaded === false;
 
+/// Whether this page's owed read is running now, so its unread state can say
+/// a read is in progress instead of reading as an empty account.
 export function useHeldRead<T>(
   page: string,
   load: () => Promise<T | null>,
   read: () => Promise<unknown>,
   unread: (answer: T) => boolean = unreadByDefault,
-): void {
+): boolean {
+  const [reading, setReading] = useState(false);
   // The newest callbacks, read once at mount: the read belongs to the open,
   // not to every render its answer causes, and inline callers cannot loop it.
   const latest = useRef({ load, read, unread });
@@ -34,23 +37,29 @@ export function useHeldRead<T>(
       // it would turn one failure into two.
       if (answer === null || !unread(answer)) return;
       const existing = running.get(page);
-      if (existing) {
-        // Another open started this read: wait for it, then paint what it left
-        // rather than sitting on the unread sentence it replaced.
-        await existing.catch(() => {});
-        await load();
-        return;
-      }
-      const paid = (async () => {
-        try {
-          await read();
-        } finally {
-          // A refused read is still over: the next open may ask again.
-          running.delete(page);
+      setReading(true);
+      try {
+        if (existing) {
+          // Another open started this read: wait for it, then paint what it
+          // left rather than sitting on the unread sentence it replaced.
+          await existing.catch(() => {});
+          await load();
+          return;
         }
-      })();
-      running.set(page, paid);
-      await paid;
+        const paid = (async () => {
+          try {
+            await read();
+          } finally {
+            // A refused read is still over: the next open may ask again.
+            running.delete(page);
+          }
+        })();
+        running.set(page, paid);
+        await paid;
+      } finally {
+        setReading(false);
+      }
     })();
   }, [page]);
+  return reading;
 }

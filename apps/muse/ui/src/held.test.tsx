@@ -1,7 +1,7 @@
 // The shared first-open rule, on its own: the strict-false test a page's
 // snapshot has to meet before the page pays a read, the failure that must not
 // pay one, and the remount that waits for the read already in flight.
-import { render, waitFor } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { useCallback } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { useHeldRead } from "./held";
@@ -56,6 +56,26 @@ describe("the held-state read", () => {
     render(<Page page="failed" answer={null} onRead={onRead} />);
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(onRead).not.toHaveBeenCalled();
+  });
+
+  // The page has to be able to say a read is in progress: an unread answer
+  // alone reads as an empty account while the read is still running.
+  it("reports reading while the owed read runs", async () => {
+    let release = () => {};
+    const readInFlight = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    function Telling() {
+      const reading = useHeldRead("telling", async () => ({ loaded: false }), () =>
+        readInFlight,
+      );
+      return <p>{reading ? "reading" : "settled"}</p>;
+    }
+
+    render(<Telling />);
+    expect(await screen.findByText("reading")).toBeInTheDocument();
+    release();
+    expect(await screen.findByText("settled")).toBeInTheDocument();
   });
 
   // A page pressed away and back while its read runs asks an unread snapshot

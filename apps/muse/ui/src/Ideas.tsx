@@ -62,7 +62,7 @@ export function Ideas() {
     }
   }, []);
 
-  useHeldRead("ideas", loadSnapshot, refresh);
+  const reading = useHeldRead("ideas", loadSnapshot, refresh);
 
   const ideas = useMemo(() => data?.ideas ?? [], [data]);
   const loaded = data?.loaded ?? false;
@@ -98,9 +98,9 @@ export function Ideas() {
 
       {!loaded ? (
         <div className="empty">
-          The native Ideas page has not loaded yet, so there is nothing to show
-          here. Open Ideas in the app, then press Refresh — this window is not
-          claiming your Ideas page is empty.
+          {reading
+            ? "Reading your Ideas now. They will appear here when the answer lands."
+            : "The native Ideas page has not loaded yet, so there is nothing to show here. Open Ideas in the app, then press Refresh — this window is not claiming your Ideas page is empty."}
         </div>
       ) : ideas.length === 0 ? (
         <div className="empty">No ideas on this account yet.</div>

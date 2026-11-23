@@ -148,7 +148,7 @@ export function Feed() {
     }
   }, []);
 
-  useHeldRead("feed", loadSnapshot, refresh);
+  const reading = useHeldRead("feed", loadSnapshot, refresh);
 
   const cards = useMemo(() => data?.cards ?? [], [data]);
   const loaded = data?.loaded ?? false;
@@ -188,9 +188,9 @@ export function Feed() {
 
       {!loaded ? (
         <div className="empty">
-          The native Feed page has not loaded yet, so there is nothing to show
-          here. Open Feed in the app, then press Refresh — this window is not
-          claiming your feed is empty.
+          {reading
+            ? "Reading your feed now. It will appear here when the answer lands."
+            : "The native Feed page has not loaded yet, so there is nothing to show here. Open Feed in the app, then press Refresh — this window is not claiming your feed is empty."}
         </div>
       ) : cards.length === 0 ? (
         <div className="empty">No units in this edition.</div>

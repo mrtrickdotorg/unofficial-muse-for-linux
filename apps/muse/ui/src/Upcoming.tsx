@@ -31,7 +31,7 @@ export function Upcoming() {
 
   // The run this page names lives in the Tasks listing, so the owed read is
   // that listing first and this page's snapshot after it, in that order.
-  useHeldRead(
+  const reading = useHeldRead(
     "tasks",
     load,
     async () => {
@@ -67,8 +67,9 @@ export function Upcoming() {
         <div className="empty">Reading what the app holds…</div>
       ) : !data.schedules_loaded ? (
         <div className="empty">
-          The schedule listing has not been read yet. Open Tasks in the app,
-          then come back — this page is not claiming nothing is scheduled.
+          {reading
+            ? "Reading the schedule listing now. The next run will appear here when it lands."
+            : "The schedule listing has not been read yet. Open Tasks in the app, then come back — this page is not claiming nothing is scheduled."}
         </div>
       ) : data.next_run ? (
         <div className="rows">

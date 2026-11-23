@@ -3,11 +3,12 @@
 // page suites, so every page is tested against the same channel.
 // `delayMs` holds an answer back, so a suite can watch a control while its
 // write is still in flight -- the window in which the native card refuses a
-// second press.
+// second press. A function picks the wait per command, for the suites that
+// hold one read open while the page's snapshot answers at once.
 export function installChannel(
   answer: (command: string) => Record<string, unknown>,
   seen?: (request: Record<string, unknown>) => void,
-  delayMs = 0,
+  delayMs: number | ((command: string) => number) = 0,
 ): string[] {
   const commands: string[] = [];
   const reply = (
@@ -22,7 +23,8 @@ export function installChannel(
           commands.push(cmd);
           seen?.(request);
           const answerFor = answer(cmd);
-          setTimeout(() => reply?.(id, answerFor), delayMs);
+          const wait = typeof delayMs === "function" ? delayMs(cmd) : delayMs;
+          setTimeout(() => reply?.(id, answerFor), wait);
         },
       },
     },

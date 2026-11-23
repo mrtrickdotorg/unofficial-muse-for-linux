@@ -60,6 +60,27 @@ describe("the Library web page", () => {
     expect(commands).toEqual(["library.snapshot", "library.refresh"]);
   });
 
+  // While the owed read runs the page must not read as an empty account: the
+  // unread sentence becomes a read in progress, and the rows replace it.
+  it("says a read is in progress while the owed read runs", async () => {
+    installChannel(
+      (command) =>
+        command === "library.refresh"
+          ? { ok: true, artifacts: rows(1, "Landed"), total: 1, loaded: true }
+          : { ok: true, artifacts: [], total: 0, loaded: false },
+      undefined,
+      (command) => (command === "library.refresh" ? 150 : 0),
+    );
+
+    render(<Library />);
+
+    expect(
+      await screen.findByText(/Reading your Library now/),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Landed 0")).toBeInTheDocument();
+    expect(screen.queryByText(/Reading your Library now/)).toBeNull();
+  });
+
   it("names the not-loaded state instead of showing an empty library", async () => {
     const commands = installChannel(() => ({ ok: true, artifacts: [], total: 0 }));
 
