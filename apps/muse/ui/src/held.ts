@@ -17,11 +17,13 @@ const unreadByDefault = (answer: unknown): boolean =>
   (answer as { loaded?: boolean }).loaded === false;
 
 /// Whether this page's owed read is running now, so its unread state can say
-/// a read is in progress instead of reading as an empty account.
+/// a read is in progress instead of reading as an empty account. The read is
+/// handed the answer it was owed for, so a page whose snapshot carries two
+/// listings asks only for the half this open found unread.
 export function useHeldRead<T>(
   page: string,
   load: () => Promise<T | null>,
-  read: () => Promise<unknown>,
+  read: (answer: T) => Promise<unknown>,
   unread: (answer: T) => boolean = unreadByDefault,
 ): boolean {
   const [reading, setReading] = useState(false);
@@ -48,7 +50,7 @@ export function useHeldRead<T>(
         }
         const paid = (async () => {
           try {
-            await read();
+            await read(answer);
           } finally {
             // A refused read is still over: the next open may ask again.
             running.delete(page);

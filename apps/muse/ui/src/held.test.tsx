@@ -65,15 +65,24 @@ describe("the held-state read", () => {
     const readInFlight = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let owed: unknown;
     function Telling() {
-      const reading = useHeldRead("telling", async () => ({ loaded: false }), () =>
-        readInFlight,
+      const reading = useHeldRead(
+        "telling",
+        async () => ({ loaded: false }),
+        (answer) => {
+          // The read is handed the answer it was owed for, so a page with two
+          // listings in one snapshot can ask only for the unread half.
+          owed = answer;
+          return readInFlight;
+        },
       );
       return <p>{reading ? "reading" : "settled"}</p>;
     }
 
     render(<Telling />);
     expect(await screen.findByText("reading")).toBeInTheDocument();
+    expect(owed).toEqual({ loaded: false });
     release();
     expect(await screen.findByText("settled")).toBeInTheDocument();
   });

@@ -29,16 +29,39 @@ export function Upcoming() {
     }
   }, []);
 
-  // The run this page names lives in the Tasks listing, so the owed read is
-  // that listing first and this page's snapshot after it, in that order.
+  // `chat.approvals.refresh` answers when the read is dispatched, not when it
+  // lands, so the page follows its own held state until the cards arrive. The
+  // read is in progress for as long as that takes, and the sentence says so
+  // rather than flashing "nothing has been read" back. Bounded, because a
+  // refused read leaves the note instead of an answer to wait for.
+  const readApprovals = useCallback(async () => {
+    await call("chat.approvals.refresh", 30_000);
+    for (let tries = 0; tries < 40; tries += 1) {
+      const held = await load();
+      if (!held || held.approvals.loaded !== false) return;
+      await new Promise((settle) => setTimeout(settle, 250));
+    }
+  }, [load]);
+
+  // The run this page names lives in the Tasks listing and its cards in the
+  // approvals read, so an open asks for each half that has not been read --
+  // the hook hands back the answer it decided from -- and then asks its own
+  // snapshot again to paint what those reads left.
   const reading = useHeldRead(
-    "tasks",
+    "upcoming",
     load,
-    async () => {
-      await call("tasks.refresh", 120_000);
+    async (held) => {
+      if (held.schedules_loaded === false) {
+        await call("tasks.refresh", 120_000);
+      }
+      if (held.approvals.loaded === false) {
+        await readApprovals();
+        return;
+      }
       await load();
     },
-    (answer) => answer.schedules_loaded === false,
+    (answer) =>
+      answer.schedules_loaded === false || answer.approvals.loaded === false,
   );
 
   // A Tasks read landing anywhere in the app moves the run this page names.
@@ -87,7 +110,9 @@ export function Upcoming() {
         <div className="empty">Reading what the app holds…</div>
       ) : !approvals.loaded ? (
         <div className="empty">
-          {approvals.note ?? "The approvals have not been read yet."}
+          {reading && !approvals.note
+            ? "Reading the approvals now. They will appear here when they land."
+            : approvals.note ?? "The approvals have not been read yet."}
         </div>
       ) : approvals.cards.length === 0 ? (
         <div className="empty">No pending approvals.</div>

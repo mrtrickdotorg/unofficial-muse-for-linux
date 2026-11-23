@@ -342,9 +342,13 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   launch never runs, so every page but chat opened on "nothing has been read". Each page now treats
   that state as a read owed: Threads, Tasks, Ideas, Goals and Feed ask their own `*.refresh` when
   their snapshot says `loaded === false` (strictly `false`, so an answer that does not say is left
-  alone), Upcoming asks `tasks.refresh` and then its own snapshot again because the run it names
-  lives in the Tasks listing, and Library gained the `loaded` flag its snapshot lacked so it can
-  do the same. Nothing polls: the extra read happens once per open, and the held rows take over as
+  alone), Upcoming asks `tasks.refresh` for the run it names and `chat.approvals.refresh` for the
+  cards waiting on the reader -- only the half its snapshot says is unread -- then asks its own
+  snapshot again to paint what those reads left, and a landing approvals read nudges it the way a
+  Tasks read does; because that route answers when the read is dispatched rather than when it
+  lands, Upcoming keeps following its own snapshot (bounded at 10 s) until the cards are in it, so
+  its sentence stays "a read is in progress" instead of flashing back to "nothing has been read".
+  Library gained the `loaded` flag its snapshot lacked so it can do the same. Nothing polls: the extra read happens once per open, and the held rows take over as
   soon as one has been read. The hook also holds one in-flight read per page: a page remounted
   while its read runs -- a rail press away and back -- waits for that read and then asks its own
   snapshot again, so one open is one read and the remounted page paints what that read left. While

@@ -71,21 +71,112 @@ describe("the Upcoming web page", () => {
     ]);
   });
 
-  it("separates an unread listing from an empty account", async () => {
-    installChannel(() => ({
-      ok: true,
-      ...payload({
-        schedules_loaded: false,
-        approvals: { cards: [], loaded: false, note: "Link your account first." },
-      }),
-    }));
+  // The cards come from the approvals read, not from the Tasks listing, so an
+  // open that finds them unread asks for that read too -- and only that half,
+  // because the schedule it names was already held.
+  it("asks the approvals for a read when none has been painted", async () => {
+    let snapshots = 0;
+    const commands = installChannel((command) => {
+      if (command === "chat.approvals.refresh") return { ok: true };
+      snapshots += 1;
+      return {
+        ok: true,
+        ...payload(
+          snapshots === 1
+            ? { approvals: { loaded: false, cards: [], note: null } }
+            : { approvals: { loaded: true, cards: [waiting], note: null } },
+        ),
+      };
+    });
 
     render(<Upcoming />);
 
-    expect(await screen.findByText(/not been read yet/)).toBeInTheDocument();
-    expect(screen.getByText("Link your account first.")).toBeInTheDocument();
+    expect(await screen.findByText("Write /tmp/notes.txt")).toBeInTheDocument();
+    expect(commands).toEqual([
+      "upcoming.snapshot",
+      "chat.approvals.refresh",
+      "upcoming.snapshot",
+    ]);
+  });
+
+  // The approvals route answers before its read lands, so the sentence has to
+  // outlive that answer: the page keeps saying a read is in progress until the
+  // cards are in its own snapshot, and never falls back to "nothing read".
+  it("keeps saying a read is in progress until the approvals land", async () => {
+    vi.useFakeTimers();
+    try {
+      let snapshots = 0;
+      installChannel(
+        (command) => {
+          if (command === "chat.approvals.refresh") return { ok: true };
+          snapshots += 1;
+          return {
+            ok: true,
+            ...payload(
+              snapshots === 1
+                ? { approvals: { loaded: false, cards: [], note: null } }
+                : { approvals: { loaded: true, cards: [waiting], note: null } },
+            ),
+          };
+        },
+        undefined,
+        (command) => (command === "upcoming.snapshot" ? 500 : 0),
+      );
+
+      render(<Upcoming />);
+      // The opening snapshot, then the approvals route's own answer: after
+      // both the read is still running, and only the snapshot can end it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      // The opening snapshot has answered unread and the approvals route has
+      // answered too; the cards are not in the page yet.
+      expect(
+        screen.getByText(/Reading the approvals now/),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/not been read yet/)).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+      expect(screen.getByText("Write /tmp/notes.txt")).toBeInTheDocument();
+      expect(screen.queryByText(/Reading the approvals now/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The reads land and leave the listing unread while the approvals come back
+  // empty: the page names the unread half instead of reading as an empty
+  // account, and "no pending approvals" only once that list has been read.
+  it("separates an unread listing from an empty account", async () => {
+    let snapshots = 0;
+    installChannel((command) => {
+      if (command === "tasks.refresh") {
+        return { ok: true, schedules: [], runs: [], local: [], loaded: true };
+      }
+      if (command === "chat.approvals.refresh") return { ok: true };
+      snapshots += 1;
+      return {
+        ok: true,
+        ...payload(
+          snapshots === 1
+            ? {
+                schedules_loaded: false,
+                approvals: { cards: [], loaded: false, note: null },
+              }
+            : { schedules_loaded: false },
+        ),
+      };
+    });
+
+    render(<Upcoming />);
+
+    expect(
+      await screen.findByText(/not been read yet/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     expect(screen.queryByText("No run scheduled.")).not.toBeInTheDocument();
-    expect(screen.queryByText("No pending approvals.")).not.toBeInTheDocument();
   });
 
   it("says plainly when the account has nothing ahead", async () => {
@@ -109,6 +200,10 @@ describe("the Upcoming web page", () => {
     }));
 
     render(<Upcoming />);
+    // The read runs first, and its answer says the listing is still unread.
+    expect(
+      await screen.findByText(/Reading the schedule listing now/),
+    ).toBeInTheDocument();
     expect(await screen.findByText(/not been read yet/)).toBeInTheDocument();
 
     read = true;

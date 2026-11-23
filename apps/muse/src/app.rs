@@ -1528,6 +1528,10 @@ impl Chat {
             loaded: true,
             note: None,
         });
+        // The cards are part of what Upcoming names, and the read that filled
+        // them lands after any window opened: an open Upcoming asks its own
+        // snapshot again instead of keeping the "not read yet" sentence.
+        crate::webui::upcoming_changed();
         while let Some(child) = chat.panel_approvals.first_child() {
             chat.panel_approvals.remove(&child);
         }
