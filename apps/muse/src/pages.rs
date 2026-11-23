@@ -2803,10 +2803,6 @@ pub(crate) struct HeldChat {
     pub unread: u64,
     /// The pending approvals the native panel last painted.
     pub approvals: ApprovalsView,
-    /// The turn menu: the delete press and whether the latest turn is armed
-    /// for its confirmation. The arming stays in the app, so a press on either
-    /// surface advances the same rule.
-    pub turn: TurnMenu,
     pub rows: Vec<ChatRow>,
     pub loaded: bool,
     pub error: Option<String>,
@@ -2816,9 +2812,9 @@ pub(crate) struct HeldChat {
 /// button's own, so the page cannot word the armed press differently -- a page
 /// showing "Delete turn" beside an app that is waiting for a confirmation
 /// would invite the press that does nothing.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub(crate) struct TurnMenu {
-    pub delete_label: String,
+    pub delete_label: &'static str,
     pub armed: bool,
 }
 
@@ -2833,20 +2829,24 @@ thread_local! {
 }
 
 thread_local! {
-    static TURN_STORE: std::cell::RefCell<TurnMenu> =
-        std::cell::RefCell::new(TurnMenu::default());
+    /// Whether the latest turn is armed for its confirming delete press: the
+    /// app's state, mirrored so a page press shows the app's own label without
+    /// waiting for an unrelated render.
+    static TURN_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Replace the turn menu the page prints. Called wherever the app arms or
-/// disarms its own button, so the page's label follows the app's state instead
-/// of waiting for the next render to carry it.
-pub(crate) fn turn_cache(menu: TurnMenu) {
-    TURN_STORE.with(|store| *store.borrow_mut() = menu);
+/// Publish the app's arming for the page, wherever the native label changes.
+pub(crate) fn turn_cache(armed: bool) {
+    TURN_ARMED.with(|cell| cell.set(armed));
 }
 
-/// The turn menu the app last armed or disarmed.
+/// The turn menu the page prints, in the app's own words.
 pub(crate) fn turn_view() -> TurnMenu {
-    TURN_STORE.with(|store| store.borrow().clone())
+    let armed = TURN_ARMED.with(std::cell::Cell::get);
+    TurnMenu {
+        delete_label: super::app::delete_label(armed),
+        armed,
+    }
 }
 
 /// The pending approvals the native panel last painted. A cache read like the
@@ -2896,16 +2896,7 @@ pub(crate) fn chat_snapshot() -> HeldChat {
     let held = CHAT_STORE.with(|store| store.borrow().clone());
     HeldChat {
         approvals: approvals_view(),
-        turn: turn_view(),
         ..held
-    }
-}
-
-/// The turn menu the page shows: the app's own label and arming.
-pub(crate) fn turn_menu(armed: bool) -> TurnMenu {
-    TurnMenu {
-        delete_label: super::app::delete_label(armed).to_owned(),
-        armed,
     }
 }
 

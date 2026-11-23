@@ -236,16 +236,11 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
     if (deleting) return;
     setDeleting(true);
     setTurnNote(null);
-    // The press that answers an armed menu item has done the deletion, so the
-    // menu closes on it; the arming press leaves it open, showing the app's
-    // confirming label.
-    const confirming = menuTurn?.armed ?? false;
     try {
       await call<{ ok: boolean }>("chat.delete", 30_000);
       // The label and the rows both come from the app: the armed press names
       // itself there, and the turn only disappears once the app's own re-read
       // no longer carries it.
-      if (confirming) setMenuOpen(false);
       void loadSnapshot();
     } catch (failure) {
       // The app's own sentence (a held send slot, a signed-out window). The
@@ -341,13 +336,6 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const loaded = data?.loaded ?? false;
   const turn: TurnMenu | undefined = data?.turn;
-  // The menu closes when the turn it named is gone: the app disarms on a moved
-  // transcript, and a popover left open over an empty thread would offer a
-  // press the app would refuse.
-  const menuTurn = menuOpen ? turn : undefined;
-  useEffect(() => {
-    if (menuOpen && !turn) setMenuOpen(false);
-  }, [menuOpen, turn]);
 
   // The native probe reads this: how many transcript rows the page holds.
   (window as unknown as { __MUSE_ROWS__?: number }).__MUSE_ROWS__ = rows.length;
@@ -380,7 +368,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
                 promises arrow-key navigation and focus handling this popover
                 does not implement, and WebKit gives a menu item an unnamed
                 action that no assistive press can address by name. */}
-            {menuTurn && (
+            {menuOpen && turn && (
               <div
                 className="chat-turn-pop"
                 id="chat-turn-menu"
@@ -388,14 +376,14 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
                 aria-label="Turn options"
               >
                 <button
-                  className={`chat-turn-delete${menuTurn.armed ? " armed" : ""}`}
+                  className={`chat-turn-delete${turn.armed ? " armed" : ""}`}
                   type="button"
                   disabled={deleting}
                   onClick={() => void deleteTurn()}
                 >
-                  {menuTurn.delete_label}
+                  {turn.delete_label}
                 </button>
-                {menuTurn.armed && (
+                {turn.armed && (
                   <p className="chat-turn-hint">
                     This deletes the latest turn and cannot be undone.
                   </p>

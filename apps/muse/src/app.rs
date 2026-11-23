@@ -1967,7 +1967,7 @@ impl Chat {
         self.delete.set_label(delete_label(armed));
         // The page prints the same label: a press there and a press here arm
         // one state, so both surfaces have to be told when it changes.
-        crate::pages::turn_cache(crate::pages::turn_menu(armed));
+        crate::pages::turn_cache(armed);
     }
 
     /// Whether the latest turn is armed for the confirming delete press. One
@@ -2962,7 +2962,10 @@ impl Chat {
             .map(|row| row.message_id.clone());
         let armed = self.armed_delete.borrow().clone();
         match delete_action(latest.as_deref(), armed.as_deref()) {
-            DeleteAction::Nothing => {}
+            // A transcript with no turn in it leaves nothing to arm: the press
+            // did nothing, and a page that offered it says so rather than
+            // answering "ok" for a delete that never existed.
+            DeleteAction::Nothing => return Err("There is no turn to delete yet.".to_owned()),
             DeleteAction::Arm(id) => {
                 *self.armed_delete.borrow_mut() = Some(id);
                 self.refresh_delete_arm();

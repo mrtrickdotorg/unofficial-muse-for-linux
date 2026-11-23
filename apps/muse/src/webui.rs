@@ -365,7 +365,7 @@ fn chat_payload(held: &HeldChat) -> serde_json::Value {
         "approvals": held.approvals,
         // The turn menu's press and its own label: the page prints the app's
         // words and cannot show "Delete" beside an app waiting to confirm.
-        "turn": held.turn,
+        "turn": crate::pages::turn_view(),
         "rows": held.rows,
         "loaded": held.loaded,
         "error": held.error,

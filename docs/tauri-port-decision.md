@@ -485,13 +485,16 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   delete turn" is reporting an app that is really armed, and one reading "Delete
   turn" is not inviting a press that would only re-arm. The label is published
   where the app arms -- `refresh_delete_arm`, the one place the native button's
-  own label is set -- into the same kind of cache the approvals use, so a press
-  on the page reads "Confirm delete turn" on its next snapshot instead of
-  waiting for an unrelated render to carry it. Refusals needed one
+  own label is set -- as one word of state, whether the latest turn is armed,
+  that the snapshot's `turn` view words with the app's own label, so a press on
+  the page reads "Confirm delete turn" on its next snapshot instead of waiting
+  for an unrelated render to carry it. Refusals needed one
   honest change in the app: `delete_pressed` used to answer nothing at all when
   a send held the `Send` slot or the window was signed out, which is silence a
   page cannot print. It now returns the reason -- "Another send is already in
-  flight.", "Sign in before deleting a turn." -- and the native button drops it
+  flight.", "Sign in before deleting a turn.", and, for a transcript with no turn
+  in it, "There is no turn to delete yet." (a press that used to answer nothing
+  at all) -- and the native button drops it
   exactly as before, because the panel has no line to put it in; the page prints
   it beside the press and the turn stays. A refused confirm keeps the arming,
   and that was a decision worth naming: the press did not happen, so the
@@ -503,10 +506,11 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   the delete changed:
   the confirming press still takes the `Send` slot, and the removal is still
   proven by the app's own history re-read, so the row leaves the page only when
-  the app no longer holds it. Three DOM tests (`Chat.test.tsx`, 120 in all) pin a
+  the app no longer holds it. Two DOM tests (`Chat.test.tsx`, 119 in all) pin a
   double press as one write, the row leaving with the app's snapshot, the armed
-  label coming from the app, the refusal sentence with the turn still there, and
-  the menu closing on the press that answered it; one Rust test pins `chat.delete`
+  label coming from the app, the refusal sentence with the turn and the
+  confirmation still there, and the press being absent until its menu opens; one
+  Rust test pins `chat.delete`
   through the routes, the app's sentence travelling back, and a window without
   routes saying it cannot make that change.
 

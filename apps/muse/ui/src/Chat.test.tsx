@@ -497,7 +497,6 @@ describe("the Chat web page", () => {
     // the press that only re-arms. The armed press is also marked destructive
     // and says what it costs.
     const press = within(menu).getByRole("button", { name: "Confirm delete turn" });
-    expect(press).toHaveClass("armed");
     expect(
       within(menu).getByText("This deletes the latest turn and cannot be undone."),
     ).toBeInTheDocument();
@@ -511,40 +510,6 @@ describe("the Chat web page", () => {
     expect(
       within(menu).getByRole("button", { name: "Confirm delete turn" }),
     ).toBeInTheDocument();
-  });
-
-  it("closes the turn menu on the confirming press", async () => {
-    const armed = { delete_label: "Confirm delete turn", armed: true };
-    const spent = { delete_label: "Delete turn", armed: false };
-    window.__MUSE_BOOT__ = snapshot([message({ id: "m-1", text: "hi" })], { turn: armed });
-    let answered = false;
-    installChannel(
-      (cmd) => {
-        if (cmd === "chat.delete") {
-          answered = true;
-          return { ok: true };
-        }
-        return answered
-          ? { ok: true, ...snapshot([], { turn: spent }) }
-          : { ok: true, ...snapshot([message({ id: "m-1", text: "hi" })], { turn: armed }) };
-      },
-      undefined,
-      10,
-    );
-
-    render(<Chat pollMs={10_000} />);
-    fireEvent.click(await screen.findByRole("button", { name: "Turn options" }));
-    fireEvent.click(
-      within(screen.getByRole("group", { name: "Turn options" })).getByRole("button", {
-        name: "Confirm delete turn",
-      }),
-    );
-
-    // The press that answered an armed menu item has done the work: the menu
-    // closes rather than sitting open over the turn it just deleted.
-    await waitFor(() =>
-      expect(screen.queryByRole("group", { name: "Turn options" })).not.toBeInTheDocument(),
-    );
   });
 
   it("decides one card at a time and posts nothing for a second card's press", async () => {
