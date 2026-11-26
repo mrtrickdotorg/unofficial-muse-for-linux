@@ -352,6 +352,9 @@ fn focus_first(widget: &gtk4::Widget) -> bool {
 /// sender.
 pub(crate) enum SendStart {
     Dispatched,
+    /// The press waits in line behind the stream holding the send
+    /// slot; it dispatches when that stream's completion drains it.
+    Queued,
     Refused(&'static str),
 }
 
@@ -2279,23 +2282,34 @@ impl Chat {
     /// One press dispatches once. The entry clears on dispatch; the
     /// reply reloads history, and a quota-limited send lands as the
     /// service's own notice row through the transcript builders.
+    /// A press while a send is in flight dispatches nothing itself:
+    /// it waits in line behind that send and goes out when the send
+    /// lands, so back-to-back messages both arrive, in order.
     fn send_pressed(self: &Rc<Self>) {
-        // Snapshot the quote before begin_send takes it: a send that
-        // never dispatches hands the quote back like the pictures.
-        let staged = self.composer.borrow().reply().cloned();
         let dispatch = match self.composer.borrow_mut().begin_send() {
             Some(dispatch) => dispatch,
-            None => return,
+            None => {
+                if self.composer.borrow_mut().queue_press() {
+                    // The entry clears exactly as a dispatched press
+                    // clears it; the words live in the line now.
+                    self.composer_row.set_input_text("");
+                    self.paint_chips();
+                    self.paint_reply();
+                    self.composer_row.refresh(&self.composer.borrow());
+                    self.say_send_note("Queued — it sends as soon as this one lands.");
+                }
+                return;
+            }
         };
         self.composer_row.set_input_text("");
         // A fresh send clears yesterday's send note; the outcome of
-        // this one writes its own. The quote clears with its send:
-        // one Reply quotes one send.
+        // this one writes its own. The quote rides the dispatch: one
+        // Reply quotes one send.
         *self.send_note.borrow_mut() = None;
         self.paint_chips();
         self.paint_reply();
         self.composer_row.refresh(&self.composer.borrow());
-        let _ = self.send_text(dispatch.text, dispatch.images, staged);
+        let _ = self.send_text(dispatch.text, dispatch.images, dispatch.reply);
     }
 
     /// Stage the clipboard's picture as a chip. Returns whether the
@@ -2479,8 +2493,10 @@ impl Chat {
 
     /// Dispatch one message: the composer's draft, an option button's
     /// text, staged pictures, or text with pictures. One press
-    /// dispatches once; a press while the slot is held releases the
-    /// composer instead of queueing.
+    /// dispatches once; a press while the slot is held by the one
+    /// stream that can hold it without the composer knowing (a turn
+    /// delete, an option press) waits in line behind it and goes out
+    /// when that stream's completion drains the line.
     fn send_text(
         self: &Rc<Self>,
         draft: String,
@@ -2490,24 +2506,52 @@ impl Chat {
         let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
             Some(ticket) => ticket,
             None => {
-                self.composer.borrow_mut().finish_send();
-                self.composer.borrow_mut().restore(images);
-                self.paint_chips();
-                self.restore_quote(reply.clone());
-                self.composer_row.refresh(&self.composer.borrow());
-                // A held slot is never silent: the reader sees the
-                // message is kept and the log names the contention.
-                eprintln!("muse: send pressed while the session slot is held; message kept");
-                self.say_send_note("Still working — your message is kept; send again in a moment.");
-                return SendStart::Refused(
-                    "Still working — your message is kept; send again in a moment.",
-                );
+                let dispatch = super::composer::Dispatch {
+                    text: draft,
+                    images,
+                    reply,
+                };
+                match self.composer.borrow_mut().queue(dispatch) {
+                    Ok(()) => {
+                        self.composer.borrow_mut().mark_sending();
+                        self.paint_chips();
+                        self.composer_row.refresh(&self.composer.borrow());
+                        eprintln!(
+                            "muse: send pressed while the session slot is held; message queued"
+                        );
+                        self.say_send_note("Queued — it sends as soon as this one lands.");
+                        return SendStart::Queued;
+                    }
+                    Err(dispatch) => {
+                        // The line is already taken: this press is
+                        // refused, and its words go back into the
+                        // entry whole, so "kept" is literal.
+                        let _ = self.composer.borrow_mut().finish_send();
+                        self.composer.borrow_mut().restore(dispatch.images);
+                        self.restore_words(&dispatch.text);
+                        self.paint_chips();
+                        self.restore_quote(dispatch.reply.clone());
+                        self.composer_row.refresh(&self.composer.borrow());
+                        // A held slot is never silent: the reader sees the
+                        // message is kept and the log names the contention.
+                        eprintln!(
+                            "muse: send pressed while the session slot is held; message kept"
+                        );
+                        self.say_send_note(
+                            "Still working — your message is kept; send again in a moment.",
+                        );
+                        return SendStart::Refused(
+                            "Still working — your message is kept; send again in a moment.",
+                        );
+                    }
+                }
             }
         };
         let Some(client) = self.client.borrow().clone() else {
             self.session.borrow_mut().accept(&ticket);
-            self.composer.borrow_mut().finish_send();
+            let _ = self.composer.borrow_mut().finish_send();
             self.composer.borrow_mut().restore(images);
+            self.restore_words(&draft);
             self.paint_chips();
             self.restore_quote(reply.clone());
             self.composer_row.refresh(&self.composer.borrow());
@@ -2523,8 +2567,9 @@ impl Chat {
         // hand them back instead of dropping them down the plain path.
         if !images.is_empty() && verified.is_none() {
             self.session.borrow_mut().accept(&ticket);
-            self.composer.borrow_mut().finish_send();
+            let _ = self.composer.borrow_mut().finish_send();
             self.composer.borrow_mut().restore(images);
+            self.restore_words(&draft);
             self.paint_chips();
             self.restore_quote(reply.clone());
             self.say_send_note("Sign in before sending pictures.");
@@ -2572,7 +2617,7 @@ impl Chat {
             },
             move |chat, (answer, images, with_images, reply)| {
                 chat.session.borrow_mut().accept(&ticket);
-                chat.composer.borrow_mut().finish_send();
+                let next = chat.composer.borrow_mut().finish_send();
                 chat.composer_row.refresh(&chat.composer.borrow());
                 if answer.is_err() {
                     chat.restore_quote(reply);
@@ -2633,6 +2678,13 @@ impl Chat {
                         ));
                     }
                 }
+                // A press that waited in line behind this send goes
+                // out now, in the order it was pressed: back-to-back
+                // messages both land, each with its own receipt and
+                // its own prove-by-re-read reload.
+                if let Some(next) = next {
+                    let _ = chat.send_text(next.text, next.images, next.reply);
+                }
             },
         );
         // The flag the card swaps Send for Stop on is only true for the length
@@ -2673,6 +2725,20 @@ impl Chat {
         };
         let Some(dispatch) = armed else {
             if sending {
+                // A send is in flight: the press waits in line behind
+                // it instead of being refused, and the answer is the
+                // same as a dispatch -- the app took the words, and
+                // they go out when the in-flight send lands. Only a
+                // press that finds the line already taken hears the
+                // refusal, with its words still in the page's own box.
+                if self.composer.borrow_mut().queue_remote(text, reply) {
+                    self.paint_chips();
+                    self.paint_reply();
+                    self.composer_row.refresh(&self.composer.borrow());
+                    self.say_send_note("Queued — it sends as soon as this one lands.");
+                    self.web_draft("");
+                    return Ok(());
+                }
                 return Err(
                     "Still working — your message is kept; send again in a moment.".to_owned(),
                 );
@@ -2685,10 +2751,11 @@ impl Chat {
         self.paint_reply();
         self.composer_row.refresh(&self.composer.borrow());
         match self.send_text(dispatch.text, dispatch.images, reply) {
-            SendStart::Dispatched => {
+            SendStart::Dispatched | SendStart::Queued => {
                 // One draft: the words the page sent leave the native window's
                 // entry too, so the two surfaces agree on an empty box after a
-                // send.
+                // send. A queued press clears the same way -- the words live
+                // in the line now, not in the box.
                 self.web_draft("");
                 Ok(())
             }
@@ -3076,6 +3143,9 @@ impl Chat {
                             // history shows the turn is gone.
                             chat.reload_history();
                         }
+                        // A send that waited in line behind this
+                        // delete goes out now the slot is free.
+                        chat.drain_queued_send();
                     },
                 );
             }
@@ -3148,6 +3218,29 @@ impl Chat {
                 self.composer_row.refresh(&self.composer.borrow());
             }
             Err(_) => self.say_send_note("That message cannot be quoted."),
+        }
+    }
+
+    /// Hand a refused press its words back: composer and entry
+    /// together, so the draft the reader typed survives the refusal
+    /// on both surfaces and "kept" is literal.
+    fn restore_words(&self, text: &str) {
+        self.composer.borrow_mut().set_text(text);
+        self.composer_row.set_input_text(text);
+    }
+
+    /// Dispatch the press that waited in line, if one did: the slot
+    /// the stream that just finished held is free the moment its
+    /// ticket is accepted, so a queued send leaves from any send-slot
+    /// completion, not only a send's own.
+    fn drain_queued_send(self: &Rc<Self>) {
+        if !self.composer.borrow().queued() {
+            return;
+        }
+        let next = self.composer.borrow_mut().finish_send();
+        self.composer_row.refresh(&self.composer.borrow());
+        if let Some(next) = next {
+            let _ = self.send_text(next.text, next.images, next.reply);
         }
     }
 

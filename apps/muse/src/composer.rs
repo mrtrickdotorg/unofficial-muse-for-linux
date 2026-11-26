@@ -68,12 +68,14 @@ pub fn remove_image(images: &mut Vec<StagedImage>, name: &str) {
     images.retain(|image| image.name != name);
 }
 
-/// What `begin_send` hands the dispatch: text, pictures, or both.
-/// A send with neither is dropped, never queued.
+/// What `begin_send` hands the dispatch: text, pictures, or both,
+/// plus the quote the press answers. A dispatch with neither words
+/// nor pictures is never built.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Dispatch {
     pub text: String,
     pub images: Vec<StagedImage>,
+    pub reply: Option<ReplyQuote>,
 }
 
 /// A staged reply quote: the quoted row's id plus one capped line. The id
@@ -109,13 +111,15 @@ pub fn staged_quote(id: String, excerpt: String) -> Result<ReplyQuote, &'static 
 }
 
 /// Draft plus in-flight send flag. One press dispatches once; a second
-/// press while the send holds the slot waits instead of duplicating.
+/// press while the send holds the slot waits in line behind it instead
+/// of duplicating — or dropping.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Composer {
     text: String,
     sending: bool,
     images: Vec<StagedImage>,
     reply: Option<ReplyQuote>,
+    queued: Option<Dispatch>,
 }
 
 impl Composer {
@@ -144,8 +148,11 @@ impl Composer {
 
     /// Take the draft (and any staged pictures) for dispatch, marking
     /// the send in flight. Returns `None` when there is nothing
-    /// sendable -- the press is dropped, never queued. A staged quote
-    /// rides along for context and clears, so one reply quotes one send.
+    /// sendable, and also when a send is already in flight -- that
+    /// press is not dropped: the caller offers it the line through
+    /// `queue_press`, and it goes out when the in-flight send lands.
+    /// A staged quote rides along for context and clears, so one
+    /// reply quotes one send.
     pub fn begin_send(&mut self) -> Option<Dispatch> {
         if !self.can_send() {
             return None;
@@ -153,10 +160,10 @@ impl Composer {
         self.sending = true;
         // One Reply answers one send: the quote clears with the dispatch,
         // and `send_text` hands it back if the send never goes out.
-        self.reply = None;
         let dispatch = Dispatch {
             text: self.text.trim().to_owned(),
             images: std::mem::take(&mut self.images),
+            reply: self.reply.take(),
         };
         self.text.clear();
         Some(dispatch)
@@ -179,6 +186,7 @@ impl Composer {
         Some(Dispatch {
             text: text.to_owned(),
             images: std::mem::take(&mut self.images),
+            reply: None,
         })
     }
 
@@ -234,10 +242,99 @@ impl Composer {
         }
     }
 
-    /// Release the send flag when the dispatch completes, whatever the
-    /// outcome. The entry stays as the reader left it after the press.
-    pub fn finish_send(&mut self) {
+    /// Hold one dispatch in line behind the in-flight send. One
+    /// message may wait; a dispatch that finds the line taken, or has
+    /// nothing sendable in it, comes back to the caller whole, so the
+    /// words are the caller's to keep -- never eaten here.
+    pub fn queue(&mut self, dispatch: Dispatch) -> Result<(), Dispatch> {
+        if self.queued.is_some() || (dispatch.text.trim().is_empty() && dispatch.images.is_empty())
+        {
+            return Err(dispatch);
+        }
+        self.queued = Some(dispatch);
+        Ok(())
+    }
+
+    /// A press of this entry's own Send while a send is in flight: the
+    /// draft waits in line instead of the press dropping. `false`
+    /// when nothing is sendable or the line is already taken -- then
+    /// the draft stands exactly as typed, unqueued and uneaten.
+    pub fn queue_press(&mut self) -> bool {
+        if !self.sending || (self.text.trim().is_empty() && self.images.is_empty()) {
+            return false;
+        }
+        let dispatch = Dispatch {
+            text: self.text.trim().to_owned(),
+            images: std::mem::take(&mut self.images),
+            reply: self.reply.take(),
+        };
+        match self.queue(dispatch) {
+            Ok(()) => {
+                self.text.clear();
+                true
+            }
+            Err(dispatch) => {
+                self.restore(dispatch.images);
+                if let Some(reply) = dispatch.reply {
+                    let _ = self.stage_reply(reply.id, reply.excerpt);
+                }
+                false
+            }
+        }
+    }
+
+    /// The same wait for the mirror page's press: its words and its
+    /// quote, with this composer's staged pictures -- exactly what
+    /// `begin_remote` would have dispatched, held in line instead of
+    /// refused while a send is in flight.
+    pub fn queue_remote(&mut self, text: &str, reply: Option<ReplyQuote>) -> bool {
+        if !self.sending {
+            return false;
+        }
+        let text = text.trim();
+        if text.is_empty() && self.images.is_empty() {
+            return false;
+        }
+        let dispatch = Dispatch {
+            text: text.to_owned(),
+            images: std::mem::take(&mut self.images),
+            reply,
+        };
+        match self.queue(dispatch) {
+            Ok(()) => {
+                // A remote press spends the staged quote the same way
+                // `begin_remote` does.
+                self.reply = None;
+                true
+            }
+            Err(dispatch) => {
+                self.restore(dispatch.images);
+                false
+            }
+        }
+    }
+
+    /// Whether a press is waiting in line behind the in-flight send.
+    pub fn queued(&self) -> bool {
+        self.queued.is_some()
+    }
+
+    /// Mark a send in flight without taking a draft: a dispatch the
+    /// session slot refused wears the flag while it waits in line, so
+    /// the card keeps showing Stop and a further press queues behind
+    /// it the same way.
+    pub fn mark_sending(&mut self) {
+        self.sending = true;
+    }
+
+    /// Release the send flag when the dispatch completes, whatever
+    /// the outcome. A press that waited in line comes back with the
+    /// release: the caller dispatches it as the next send, so two
+    /// back-to-back messages both go out, in the order they were
+    /// pressed. The entry stays as the reader left it after the press.
+    pub fn finish_send(&mut self) -> Option<Dispatch> {
         self.sending = false;
+        self.queued.take()
     }
 }
 
@@ -491,10 +588,12 @@ mod tests {
         assert!(composer.begin_send().is_none());
         composer.set_text("hello");
         assert!(composer.begin_send().is_some());
-        // Second press while in flight: dropped, not queued.
+        // A second press while in flight dispatches nothing itself:
+        // it waits through `queue_press` or not at all (see the queue
+        // tests below).
         assert!(!composer.can_send());
         assert!(composer.begin_send().is_none());
-        composer.finish_send();
+        assert!(composer.finish_send().is_none());
         assert!(!composer.can_send());
     }
 
@@ -558,7 +657,7 @@ mod tests {
             .expect("stage");
         let dispatch = composer.begin_send().expect("sendable");
         assert!(composer.staged().is_empty());
-        composer.finish_send();
+        assert!(composer.finish_send().is_none());
         composer.restore(dispatch.images);
         assert_eq!(composer.staged().len(), 1);
         assert!(composer.can_send());
@@ -653,9 +752,10 @@ mod tests {
         assert!(composer.staged().is_empty());
         assert!(composer.sending(), "Stop shows for a page send too");
         assert_eq!(composer.text(), "the app's own draft");
-        // A second press while the first is in flight is dropped, not queued.
+        // A second press while the first is in flight dispatches
+        // nothing itself; `queue_remote` is its way into the line.
         assert!(composer.begin_remote("again").is_none());
-        composer.finish_send();
+        assert!(composer.finish_send().is_none());
         // Nothing words and no picture: nothing to send.
         assert!(composer.begin_remote("   ").is_none());
     }
@@ -670,5 +770,92 @@ mod tests {
         let dispatch = composer.begin_send().expect("sendable");
         assert_eq!(dispatch.text, "answer");
         assert!(composer.reply().is_none());
+        // The quote rides the dispatch itself, so a send that waits in
+        // line answers the same turn as one that goes out at once.
+        assert_eq!(
+            dispatch.reply,
+            Some(ReplyQuote {
+                id: "m9".to_owned(),
+                excerpt: "quoted".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_second_press_queues_and_goes_out_when_the_first_lands() {
+        let mut composer = Composer::new();
+        composer.set_text("first");
+        let first = composer.begin_send().expect("first dispatches");
+        assert_eq!(first.text, "first");
+        // Typed and pressed while the first is still in flight. This
+        // press used to drop here: the words went nowhere, and the
+        // second message simply never arrived.
+        composer.set_text("second");
+        assert!(composer.begin_send().is_none());
+        assert!(composer.queue_press());
+        assert_eq!(composer.text(), "");
+        assert!(composer.queued());
+        // A third press finds the line taken and is refused whole:
+        // its words stay in the entry, unqueued and uneaten.
+        composer.set_text("third");
+        assert!(!composer.queue_press());
+        assert_eq!(composer.text(), "third");
+        // The first send lands: the waiting press comes back as the
+        // next dispatch, in the order it was pressed.
+        let next = composer.finish_send().expect("the queued press drains");
+        assert_eq!(next.text, "second");
+        assert!(!composer.queued());
+        assert!(composer.finish_send().is_none());
+    }
+
+    #[test]
+    fn a_remote_press_queues_with_its_quote_and_the_staged_pictures() {
+        let mut composer = Composer::new();
+        composer.set_text("the app's own draft");
+        let first = composer
+            .begin_remote("first from the page")
+            .expect("dispatches");
+        assert_eq!(first.text, "first from the page");
+        composer
+            .stage("pasted-1.png".to_owned(), vec![7], 4, 5)
+            .expect("stage");
+        let quote = staged_quote("m9".to_owned(), "quoted".to_owned()).expect("quote");
+        assert!(composer.queue_remote(" second from the page ", Some(quote.clone())));
+        assert!(
+            composer.staged().is_empty(),
+            "the picture waits in line with its words"
+        );
+        let next = composer.finish_send().expect("the queued press drains");
+        assert_eq!(next.text, "second from the page");
+        assert_eq!(next.images.len(), 1);
+        assert_eq!(next.reply, Some(quote));
+        // The app's own draft was never the page's to queue or clear.
+        assert_eq!(composer.text(), "the app's own draft");
+        assert!(composer.finish_send().is_none());
+    }
+
+    #[test]
+    fn a_dispatch_the_slot_refused_waits_in_the_same_line() {
+        let mut composer = Composer::new();
+        let dispatch = Dispatch {
+            text: "kept".to_owned(),
+            images: Vec::new(),
+            reply: None,
+        };
+        assert!(composer.queue(dispatch).is_ok());
+        assert!(composer.queued());
+        // The line holds one: a second dispatch comes back whole.
+        let refused = Dispatch {
+            text: "one too many".to_owned(),
+            images: Vec::new(),
+            reply: None,
+        };
+        assert_eq!(
+            composer.queue(refused).map_err(|dispatch| dispatch.text),
+            Err("one too many".to_owned())
+        );
+        let next = composer.finish_send().expect("the queued dispatch drains");
+        assert_eq!(next.text, "kept");
+        assert!(composer.finish_send().is_none());
     }
 }
