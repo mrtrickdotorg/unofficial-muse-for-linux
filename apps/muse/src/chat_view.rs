@@ -686,6 +686,11 @@ mod tests {
         reply_chat.stage_reply("".to_owned(), "no id, no quote".to_owned());
         super::super::app::verify_chat_scroll_navigation();
         let _frame = super::super::widget::widget_frame("<b>hi</b>", Some("fallback"));
+
+        // The Library unshare repaint, for the same one-init reason:
+        // its assertions build widgets too, so they live here beside
+        // the rest instead of initializing GTK a second time.
+        super::super::pages::tests::a_press_rewords_every_row_from_the_one_arm();
     }
 
     /// The newest turn is rewritten where it stands, never rebuilt: a

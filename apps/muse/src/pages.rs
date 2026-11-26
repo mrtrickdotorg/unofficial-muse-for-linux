@@ -4181,7 +4181,7 @@ fn sync_arms(
 
 /// Every arm in the listing, from the app's state: both writes live on the
 /// same rows, and a press of either can move only its own arm.
-fn sync_space_arms(list: &gtk4::ListBox) {
+pub(crate) fn sync_space_arms(list: &gtk4::ListBox) {
     sync_arms(list, "unshare:", unshare_armed(), unshare_words);
     sync_arms(list, "delete:", space_delete_armed(), delete_words);
 }
@@ -7854,7 +7854,7 @@ fn go_chat(ctx: &Ctx) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A copy that updates through its own channel refuses both presses -- the
@@ -7969,9 +7969,12 @@ mod tests {
     /// The repaint every press runs: it walks the listing and re-words each
     /// named button from the one arm, so the row that lost the arm cannot keep
     /// saying "Confirm unshare".
-    #[test]
-    fn a_press_rewords_every_row_from_the_one_arm() {
-        gtk4::init().expect("gtk init");
+    ///
+    /// Not its own `#[test]`: GTK may be initialized from one thread
+    /// only, libtest gives every test its own thread, and a second
+    /// initializing test panics before it asserts anything. It runs
+    /// from the suite's one GTK test, beside the other widget checks.
+    pub(crate) fn a_press_rewords_every_row_from_the_one_arm() {
         let list = gtk4::ListBox::new();
         let row = |slug: &str| {
             let row = gtk4::ListBoxRow::new();
