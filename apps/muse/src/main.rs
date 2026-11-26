@@ -38,6 +38,11 @@ pub(crate) fn register_icons() {
 /// bundle's helpers on every launch. A WebView with no helpers
 /// aborts the process, so frames check it before constructing one.
 pub(crate) const WEBKIT_STAGING: &str = "/tmp/.webkitgtk-6.0-umfl";
+/// The same staging for the shell window's engine: the bundled
+/// WebKitGTK 4.1 library is patched to look at this path, and the app
+/// points it at the bundle's 4.1 helpers before it spawns the window,
+/// whose WebKit spawns the same way this process's does.
+pub(crate) const WEBKIT41_STAGING: &str = "/tmp/.webkit2gtk-4.1-umfl";
 const DEFAULT_WINDOW_WIDTH: i32 = 1100;
 const DEFAULT_WINDOW_HEIGHT: i32 = 700;
 
@@ -104,11 +109,13 @@ fn main() {
     app.run();
 }
 
-/// Point WEBKIT_STAGING at the bundle's helpers. Inside the AppImage
-/// the helpers ride beside the binary (`usr/lib/webkitgtk-6.0` next
-/// to `usr/bin/muse`); outside it there is nothing to stage and this
-/// is a silent no-op. Failures only log: a missing stage means widget
-/// frames fall back to text instead of aborting the process.
+/// Point the staging paths at the bundle's helpers. Inside the
+/// AppImage the helpers ride beside the binary (`usr/lib/webkitgtk-6.0`
+/// and `usr/lib/webkit2gtk-4.1` next to `usr/bin/muse`); outside it
+/// there is nothing to stage and this is a silent no-op. Failures only
+/// log: a missing stage means widget frames fall back to text instead
+/// of aborting the process, and a missing 4.1 stage means the shell
+/// window cannot come up and the native one takes its place.
 fn stage_webkit_helpers() {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -117,15 +124,27 @@ fn stage_webkit_helpers() {
             return;
         }
     };
-    let helpers = match exe.parent().and_then(|bin| bin.parent()) {
-        Some(prefix) => prefix.join("lib/webkitgtk-6.0"),
+    let prefix = match exe.parent().and_then(|bin| bin.parent()) {
+        Some(prefix) => prefix,
         None => return,
     };
+    stage_helpers(
+        &prefix.join("lib/webkitgtk-6.0"),
+        std::path::Path::new(WEBKIT_STAGING),
+    );
+    stage_helpers(
+        &prefix.join("lib/webkit2gtk-4.1"),
+        std::path::Path::new(WEBKIT41_STAGING),
+    );
+}
+
+/// Link one generation's staging path at its bundled helpers, when the
+/// bundle carries them.
+fn stage_helpers(helpers: &std::path::Path, stage: &std::path::Path) {
     if !helpers.join("WebKitNetworkProcess").is_file() {
         return;
     }
-    let stage = std::path::Path::new(WEBKIT_STAGING);
-    if std::fs::read_link(stage).ok().as_deref() == Some(helpers.as_path()) {
+    if std::fs::read_link(stage).ok().as_deref() == Some(helpers) {
         return;
     }
     let _ = std::fs::remove_file(stage);
@@ -135,7 +154,7 @@ fn stage_webkit_helpers() {
         eprintln!("muse: cannot clear {}", stage.display());
         return;
     }
-    if std::os::unix::fs::symlink(&helpers, stage).is_err() {
+    if std::os::unix::fs::symlink(helpers, stage).is_err() {
         eprintln!("muse: cannot stage WebKit helpers at {}", stage.display());
     } else {
         eprintln!("muse: staged WebKit helpers from {}", helpers.display());

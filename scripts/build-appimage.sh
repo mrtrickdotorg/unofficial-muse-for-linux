@@ -45,6 +45,9 @@ cd "$ROOT"
 cargo test --workspace --locked
 cargo build --release --locked -p muse
 cargo build --release --locked -p muse-reminder-runner
+# The shell window is its own project on purpose (GTK 3 must not join
+# this workspace's lock, build or tests), so it builds by manifest.
+cargo build --release --locked --manifest-path "$ROOT/apps/muse-window/Cargo.toml"
 
 rm -rf -- "$APPDIR"
 ACCOUNT_DIR="$APPDIR/usr/share/unofficial-muse-for-linux/account"
@@ -54,6 +57,10 @@ install -m 755 "$ROOT/target/release/muse" "$APPDIR/usr/bin/muse"
 # and install the user service (scripts/install-reminder-service.sh); the
 # image itself cannot register a systemd unit.
 install -m 755 "$ROOT/target/release/muse-reminder-runner" "$APPDIR/usr/bin/muse-reminder-runner"
+# The shell window rides beside the app binary: the app looks for it
+# there first, and linuxdeploy deploys its GTK 3 / WebKitGTK 4.1
+# library closure alongside the app's own GTK 4 one.
+install -m 755 "$ROOT/apps/muse-window/target/release/muse-window" "$APPDIR/usr/bin/muse-window"
 
 # WebKit's helper processes are not part of the binary's library
 # closure, so linuxdeploy cannot find them on its own — copy the
@@ -75,6 +82,24 @@ if [[ -z "$webkit_helpers" ]]; then
 fi
 mkdir -p "$APPDIR/usr/lib"
 cp -r "$webkit_helpers" "$APPDIR/usr/lib/"
+
+# The shell window's helpers are the same story for the other WebKit
+# generation: copy the directory in explicitly, and fail the build
+# rather than ship a window whose first page can never render. (Its
+# library is patched to the 4.1 staging path by the same
+# patch-webkit-path.py run, and the app links that path on launch.)
+webkit41_helpers=""
+for candidate in /usr/lib/*/webkit2gtk-4.1; do
+    if [[ -d "$candidate" ]]; then
+        webkit41_helpers="$candidate"
+        break
+    fi
+done
+if [[ -z "$webkit41_helpers" ]]; then
+    printf 'WebKit 4.1 helper processes not found (is libwebkit2gtk-4.1-dev installed?).\n' >&2
+    exit 1
+fi
+cp -r "$webkit41_helpers" "$APPDIR/usr/lib/"
 install -m 644 "$ROOT/resources/unofficial-muse-for-linux.appdata.xml" "$APPDIR/usr/share/metainfo/unofficial-muse-for-linux.appdata.xml"
 # Bundle only this project's typed sidecars, never the external community
 # checkout, Meta-derived protocol assets, Python environment, or account state.
@@ -120,6 +145,19 @@ for helper in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
 done
 patchelf --set-rpath '$ORIGIN/../..' \
     "$APPDIR/usr/lib/webkitgtk-6.0/injected-bundle/libwebkitgtkinjectedbundle.so"
+
+# The shell window's helpers need the same RUNPATH treatment: its
+# WebKit launches them with the same scrubbed environment.
+for helper in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
+    helper_path="$APPDIR/usr/lib/webkit2gtk-4.1/$helper"
+    if [[ ! -f "$helper_path" ]]; then
+        printf 'WebKit 4.1 helper missing from the AppDir: %s\n' "$helper" >&2
+        exit 1
+    fi
+    patchelf --set-rpath '$ORIGIN/..' "$helper_path"
+done
+patchelf --set-rpath '$ORIGIN/../..' \
+    "$APPDIR/usr/lib/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so"
 
 ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "$ROOT/target/unofficial-muse-for-linux-x86_64.AppImage"
 

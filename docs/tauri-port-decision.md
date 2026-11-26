@@ -984,6 +984,19 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
 - **S5 — Packaging and gates.** AppImage recipe, Flatpak manifest, CI, native-Wayland and
   screen-reader checks re-run against the new build.
 
+  The AppImage half landed Nov 25, 2026: the builder container carries the GTK 3 /
+  WebKitGTK 4.1 dev stack beside the 6.0 one, `build-appimage.sh` builds
+  `apps/muse-window` by manifest and installs it beside the app binary (where
+  `web_shell` looks first), and linuxdeploy deploys its library closure into the same
+  AppDir. The 4.1 helpers ride in `usr/lib/webkit2gtk-4.1` with the same treatment as
+  the 6.0 set — RUNPATH on the helpers and injected bundle, the library's compiled-in
+  helper path patched to a staging path (`/tmp/.webkit2gtk-4.1-umfl`) that the app
+  links on launch beside the 6.0 stage — and `patch-webkit-path.py` now refuses to
+  package unless both generations were patched. The bundle therefore carries both
+  WebKit generations (the doc's risk 3, accepted for this slice). Still open in S5:
+  the Flatpak manifest, and the native-Wayland and screen-reader gates against the
+  shipped shell window.
+
 S0–S3 are the same work under either end state (GTK shell or Tauri shell), which is why they are
 staged before S4 rather than after it.
 

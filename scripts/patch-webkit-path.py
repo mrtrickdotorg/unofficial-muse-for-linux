@@ -22,6 +22,13 @@ FORMS = [
      b"/tmp/.webkitgtk-6.0-umfl/injected-bundle/"),
     (b"/usr/lib/x86_64-linux-gnu/webkitgtk-6.0",
      b"/tmp/.webkitgtk-6.0-umfl"),
+    # The shell window's engine is the other generation: its library
+    # gets the same treatment under its own staging path, which the
+    # app links at the bundle's 4.1 helpers on launch.
+    (b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/injected-bundle/",
+     b"/tmp/.webkit2gtk-4.1-umfl/injected-bundle/"),
+    (b"/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1",
+     b"/tmp/.webkit2gtk-4.1-umfl"),
 ]
 
 
@@ -70,6 +77,9 @@ def main(root):
     print(f"total replacements: {sum(patched.values())}")
     if not any("libwebkitgtk" in os.path.basename(p) for p in patched):
         print("libwebkitgtk was not patched — refusing to package", file=sys.stderr)
+        return 1
+    if not any("libwebkit2gtk" in os.path.basename(p) for p in patched):
+        print("libwebkit2gtk was not patched — refusing to package", file=sys.stderr)
         return 1
     for path in files_under(root):
         try:
