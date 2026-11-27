@@ -90,10 +90,21 @@ configuration. Caller should use the returned app-owned jar explicitly.
   non-group/world-writable file with timestamps at least as recent as launch.
   Missing files are retried; stale, malformed, symlinked, and unsafe files fail
   closed. The launched process must still be alive.
-- Linux `/proc/net/tcp`, `/proc/net/tcp6`, process parentage, and socket FD ownership
-  must prove the listener belongs to the just-launched process or one of its
-  descendants and binds only loopback. If that proof is unavailable, sign-in is
-  rejected. Only the validated `ws://127.0.0.1:<port>/devtools/browser/<token>`
+- Linux `/proc/net/tcp`, `/proc/net/tcp6`, process parentage, and socket FD
+  ownership must prove the listener belongs to the just-launched process or one
+  of its descendants and binds only loopback. A Flatpak launch cannot pass that
+  exact proof: `flatpak run` hands the app to a session helper that double-forks
+  it out of the launcher's tree, and a browser inside a user namespace publishes
+  no FD targets at all (`/proc/<pid>/fd` answers `EACCES` even for its owner), so
+  no socket inode can be attributed to a process. It carries its own fail-closed
+  proof instead: a live process must carry this launch's freshly generated
+  profile in its own `--user-data-dir` (a 128-bit name nobody else was told) and
+  run in the Flatpak scope of the app id that was launched, and no process whose
+  FD table the host *can* read may hold the socket. A browser cannot bind a port
+  another process already holds, so the port it wrote into the private profile
+  is the one its sandbox owns. Every other launch must pass the exact
+  FD-and-parentage proof, and a launch that passes neither is rejected. Only the
+  validated `ws://127.0.0.1:<port>/devtools/browser/<token>`
   endpoint is accepted. A preconnected IPv4 loopback socket prevents proxy/DNS
   substitution, the peer is checked, and the standard-library WebSocket client
   accepts only an HTTP 101 upgrade with a valid nonce/accept handshake. It has
@@ -160,8 +171,13 @@ closed. It is never reused on a later attempt.
   temporary profile, and redirects XDG config/cache/data/state into that
   profile. Chromium's new user-data directory provides instance isolation;
   `flatpak run` has no `--new-instance` option.
-- Flatpak browser support is a guarded compatibility path, **not live-login
-  verified**. Distribution wrappers, enterprise policy, PID namespace behavior,
+- Flatpak browser support is a guarded compatibility path. Its ownership proof
+  was exercised against the real Flatpak Brave on this host (Nov 27, 2026,
+  headless, fresh profile): with the FD-and-parentage proof alone the launch ended
+  as `unsafe_devtools` -- the reported failure -- and with the sandbox proof it
+  reached the endpoint, connected, and listed the `https://muse.ai/` target over
+  CDP. A human sign-in through a Flatpak window is still **not** live-verified.
+  Distribution wrappers, enterprise policy, PID namespace behavior,
   portal/Wayland/X11 restrictions, AppImage environment contamination, or
   restricted `/proc` may prevent startup/ownership proof. Fail closed and select
   a supported native browser instead; never relax endpoint or profile checks.
@@ -181,8 +197,14 @@ The suite runs a fake browser subprocess and controlled loopback WebSocket/CDP
 server. It verifies a full sign-in exchange with synthetic cookies, exact URL
 scoping, target/domain boundaries, one-cookie jars, private permissions,
 atomic-replace failure, unrelated-file protection, symlinks, stale DevTools
-files, listener/process ownership, cancellation, timeout, browser reaping/profile
-cleanup, CDP error redaction, and rejected WebSocket redirects. It never launches
+files, listener/process ownership, the Flatpak sandbox proof (its own profile and
+app scope accepted; another profile, another scope, no sandbox process, or a
+readable owner outside it refused; and the same file refused and then accepted
+through the real sign-in path), cancellation, timeout, browser reaping/profile
+cleanup, CDP error redaction, and rejected WebSocket redirects. The Flatpak cases
+simulate the sandbox's detached tree and unreadable FD table, because a test
+cannot create a Flatpak app scope; the real browser was checked separately, as
+recorded above. It never launches
 a real browser, reads a normal browser profile, accesses user credentials, or
 requests a third-party page. All cases, including the real controlled-loopback
 WebSocket exchange and subprocess cancellation/cleanup, execute with the system

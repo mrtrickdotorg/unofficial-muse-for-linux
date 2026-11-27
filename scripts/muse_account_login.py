@@ -177,10 +177,12 @@ def validate_cdp_url(url):
     return int(match.group(1))
 
 
-def validate_listener(port, process):
-    """Linux fail-closed proof: loopback listener is owned by our process tree."""
-    if process.poll() is not None:
-        raise LoginError("browser_closed")
+def listener_inodes(port):
+    """The listening socket inodes on `port`: loopback only, and ours.
+
+    Kernel facts from `/proc/net/tcp{,6}`: a listener on any other address, or
+    one this user does not own, is refused before an inode is returned.
+    """
     inodes = set()
     try:
         for table, allowed in (("tcp", "0100007F"),
@@ -195,40 +197,160 @@ def validate_listener(port, process):
                         inodes.add(fields[9])
         if not inodes:
             raise LoginError("unsafe_devtools")
-        parents = {}
-        for entry in Path("/proc").iterdir():
-            if not entry.name.isdigit():
+    except (OSError, ValueError, IndexError):
+        raise LoginError("unsafe_devtools") from None
+    return inodes
+
+
+def process_parents():
+    """`pid -> parent` for every process this user can see."""
+    parents = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid == os.geteuid():
+                fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+                parents[int(entry.name)] = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    return parents
+
+
+def process_snapshot():
+    """`pid -> (parent, cmdline, cgroup)` for every process this user can see.
+
+    These are the entries a user-namespaced process still publishes: what the
+    kernel was told to execute (cmdline is fixed at exec) and where systemd put
+    it (cgroup). Its fd targets, maps, root, environment and user namespace are
+    not readable from outside its namespace, which is why a sandboxed browser
+    cannot answer the fd half of the proof below.
+    """
+    snapshot = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != os.geteuid():
                 continue
-            try:
-                if entry.stat().st_uid == os.geteuid():
-                    fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-                    parents[int(entry.name)] = int(fields[1])
-            except (OSError, ValueError, IndexError):
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            snapshot[int(entry.name)] = (
+                int(fields[1]),
+                (entry / "cmdline").read_text(errors="replace").replace("\0", " "),
+                (entry / "cgroup").read_text(errors="replace").strip(),
+            )
+        except (OSError, ValueError, IndexError):
+            continue
+    return snapshot
+
+
+def fd_holders(inodes):
+    """The processes whose readable fd table names one of `inodes`.
+
+    A sandboxed process publishes no fd targets, so a socket it owns is
+    invisible here: this is every owner the host *can* see, and a process
+    missing from it is unknown, never exonerated by absence.
+    """
+    holders = set()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if entry.stat().st_uid != os.geteuid():
                 continue
-        for pid in parents:
-            ancestor, seen = pid, set()
-            while ancestor != process.pid and ancestor in parents and ancestor not in seen:
-                seen.add(ancestor)
-                ancestor = parents[ancestor]
-            if ancestor != process.pid:
-                continue
-            try:
-                for entry in Path(f"/proc/{pid}/fd").iterdir():
-                    try:
-                        target = os.readlink(entry)
-                    except OSError:
-                        continue
-                    if target.startswith("socket:[") and target[8:-1] in inodes:
-                        if process.poll() is None:
-                            return
-            except OSError:
-                continue
+            for fd in (entry / "fd").iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    holders.add(int(entry.name))
+                    break
+        except (OSError, ValueError):
+            continue
+    return holders
+
+
+def descendant_holds(inodes, process):
+    """The exact proof: a descendant of the launched browser holds the socket."""
+    parents = process_parents()
+    for pid in parents:
+        ancestor, seen = pid, set()
+        while ancestor != process.pid and ancestor in parents and ancestor not in seen:
+            seen.add(ancestor)
+            ancestor = parents[ancestor]
+        if ancestor != process.pid:
+            continue
+        try:
+            for entry in Path(f"/proc/{pid}/fd").iterdir():
+                try:
+                    target = os.readlink(entry)
+                except OSError:
+                    continue
+                if target.startswith("socket:[") and target[8:-1] in inodes:
+                    if process.poll() is None:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
+def sandbox_holds(inodes, process, profile, app_id):
+    """The flatpak proof, for a browser whose fd targets the host cannot read.
+
+    flatpak hands the app to a session helper that double-forks, so the browser
+    is not a descendant of the launcher, and a process inside a user namespace
+    shows the host no fd targets at all (`/proc/<pid>/fd` is EACCES even for its
+    own user). Two facts survive that: this launch's freshly created profile,
+    with a 128-bit name nobody else was told, is in the browser's own
+    `--user-data-dir`, and the app runs in the flatpak scope of the app id we
+    launched. So the proof is: a live process carries this launch's profile and
+    sits in this app's scope, and no process whose fd table the host *can* read
+    holds the socket. A browser cannot bind a port another process already
+    holds, so the port it wrote into our private profile is the one its sandbox
+    owns.
+    """
+    if process.poll() is not None:
+        raise LoginError("browser_closed")
+    marker = "--user-data-dir=" + profile
+    scope = "app-flatpak-" + app_id + "-"
+    sandbox = {
+        pid
+        for pid, (_parent, cmdline, cgroup) in process_snapshot().items()
+        if marker in cmdline and scope in cgroup
+    }
+    if not sandbox:
+        return False
+    if any(pid not in sandbox for pid in fd_holders(inodes)):
+        return False
+    if process.poll() is not None:
+        raise LoginError("browser_closed")
+    return True
+
+
+def validate_listener(port, process, sandbox=None):
+    """Linux fail-closed proof: the loopback listener is our browser's.
+
+    `sandbox` is `(profile, app_id)` for a flatpak launch, whose browser
+    publishes no fd targets to the host. Every other launch must pass the exact
+    fd-and-parentage proof; a flatpak launch must pass the exact loopback/uid
+    facts plus its own scope-and-profile proof, and may never fall through to
+    "unknown, so accept".
+    """
+    if process.poll() is not None:
+        raise LoginError("browser_closed")
+    inodes = listener_inodes(port)
+    try:
+        if descendant_holds(inodes, process):
+            return
+        if sandbox is not None and sandbox_holds(inodes, process, *sandbox):
+            return
     except (OSError, ValueError, IndexError):
         raise LoginError("unsafe_devtools") from None
     raise LoginError("unsafe_devtools")
 
 
-def read_devtools_endpoint(profile, process, launched_ns):
+def read_devtools_endpoint(profile, process, launched_ns, sandbox=None):
     if process.poll() is not None:
         raise LoginError("browser_closed")
     try:
@@ -259,7 +381,7 @@ def read_devtools_endpoint(profile, process, launched_ns):
             raise LoginError("unsafe_devtools")
         url = "ws://127.0.0.1:" + lines[0] + lines[1]
         port = validate_cdp_url(url)
-        validate_listener(port, process)
+        validate_listener(port, process, sandbox)
         return url
     finally:
         os.close(fd)
@@ -473,9 +595,9 @@ class LoopbackWebSocket:
 
 class CDP:
     """A single process-validated loopback socket, no DNS/proxy/redirects."""
-    def __init__(self, url, process, deadline):
+    def __init__(self, url, process, deadline, sandbox=None):
         port = validate_cdp_url(url)
-        validate_listener(port, process)
+        validate_listener(port, process, sandbox)
         self.deadline = deadline
         self.process = process
         self.sequence = 0
@@ -486,9 +608,9 @@ class CDP:
             raw.connect(("127.0.0.1", port))
             if raw.getpeername() != ("127.0.0.1", port):
                 raise LoginError("unsafe_devtools")
-            validate_listener(port, process)
+            validate_listener(port, process, sandbox)
             self.socket = LoopbackWebSocket(raw, url, deadline)
-            validate_listener(port, process)
+            validate_listener(port, process, sandbox)
         except LoginError:
             raw.close()
             raise
@@ -614,6 +736,10 @@ def login_in_directory(request, browser, directory):
         created = True
         profile_fd = os.open(profile_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
         profile = os.path.join(request["config_dir"], profile_name)
+        # A flatpak launch hides the browser's fd table from the host, so it
+        # carries its own scope-and-profile proof; a native launch keeps the
+        # exact fd-and-parentage one.
+        sandbox = (profile, browser[1]) if len(browser) == 2 and browser[1] in FLATPAK_BROWSERS else None
         # Profile is always new and private, never any installed browser's profile.
         environment = dict(os.environ)
         for key in ("CHROME_LOG_FILE", "SSLKEYLOGFILE", "CHROME_REMOTE_DESKTOP_SESSION",
@@ -637,11 +763,11 @@ def login_in_directory(request, browser, directory):
             raise LoginError("browser_launch_failed") from None
         while True:
             remaining(deadline)
-            endpoint = read_devtools_endpoint(profile_fd, process, launched_ns)
+            endpoint = read_devtools_endpoint(profile_fd, process, launched_ns, sandbox)
             if endpoint is not None:
                 break
             time.sleep(min(0.05, remaining(deadline)))
-        client = CDP(endpoint, process, deadline)
+        client = CDP(endpoint, process, deadline, sandbox)
         while True:
             remaining(deadline)
             cookie = client.read_cookie()

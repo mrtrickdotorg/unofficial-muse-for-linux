@@ -269,6 +269,92 @@ class LoginTests(unittest.TestCase):
             finally:
                 os.close(fd)
 
+    def sandboxed_listener(self):
+        """A loopback listener held by a process the fd proof cannot attribute.
+
+        flatpak hands the app to a session helper that double-forks it out of
+        the launcher's tree and runs it in a user namespace, where the host
+        reads no fd target of it at all: the exact fd-and-parentage proof can
+        see nothing, which used to end sign-in as unsafe_devtools.
+        """
+        holder = subprocess.Popen(
+            [sys.executable, "-c",
+             "import socket, sys, time\n"
+             "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+             "print(s.getsockname()[1]); sys.stdout.flush(); time.sleep(30)\n"],
+            stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait, timeout=5)
+        self.addCleanup(holder.kill)
+        assert holder.stdout is not None
+        return holder.pid, int(holder.stdout.readline())
+
+    def test_flatpak_sandbox_proves_its_listener_without_fd_targets(self):
+        helper = load_helper()
+        profile = "/private/app/.login-0123456789abcdef0123456789abcdef"
+        app_id = "com.brave.Browser"
+        pid, port = self.sandboxed_listener()
+        # Not an ancestor of the holder, so the exact proof finds nothing even
+        # when the fd table is readable: the flatpak case itself.
+        process = type("Process", (), {"pid": 999999, "poll": lambda self: None})()
+        ours = {pid: (1, "--user-data-dir=" + profile + " --remote-debugging-port=0",
+                      "0::/user.slice/app.slice/app-flatpak-" + app_id + "-42.scope")}
+        unreadable = patch.object(helper.os, "readlink", side_effect=PermissionError("sandbox"))
+        # The reported failure: nothing to attribute, so sign-in is refused.
+        with patch.object(helper, "process_snapshot", return_value=ours), unreadable:
+            with self.assertRaises(helper.LoginError) as error:
+                helper.validate_listener(port, process)
+            self.assertEqual(error.exception.code, "unsafe_devtools")
+            # The sandbox's own profile and scope are the proof instead.
+            self.assertIsNone(helper.validate_listener(port, process, (profile, app_id)))
+        # A readable owner that is the sandbox itself passes the same proof.
+        with patch.object(helper, "process_snapshot", return_value=ours), \
+             patch.object(helper, "fd_holders", return_value={pid}):
+            self.assertIsNone(helper.validate_listener(port, process, (profile, app_id)))
+        # A readable owner that is not the sandbox is a stranger, and refused.
+        with patch.object(helper, "process_snapshot", return_value=ours), \
+             patch.object(helper, "fd_holders", return_value={4242}):
+            with self.assertRaises(helper.LoginError):
+                helper.validate_listener(port, process, (profile, app_id))
+        # Another profile, another scope, or no sandbox process at all: refused.
+        for snapshot in (
+            {pid: (1, "--user-data-dir=/private/app/.login-ffff",
+                  "0::/app.slice/app-flatpak-" + app_id + "-42.scope")},
+            {pid: (1, "--user-data-dir=" + profile, "0::/user.slice/session.slice/agent.scope")},
+            {},
+        ):
+            with patch.object(helper, "process_snapshot", return_value=snapshot), unreadable:
+                with self.assertRaises(helper.LoginError):
+                    helper.validate_listener(port, process, (profile, app_id))
+
+    def test_flatpak_devtools_file_is_accepted_through_the_sign_in_path(self):
+        # The sign-in path itself, not only the rule: this is where a flatpak
+        # launch used to end as unsafe_devtools.
+        helper = load_helper()
+        profile_path = "/private/app/.login-0123456789abcdef0123456789abcdef"
+        app_id = "com.brave.Browser"
+        pid, port = self.sandboxed_listener()
+        process = type("Process", (), {"pid": 999999, "poll": lambda self: None})()
+        ours = {pid: (1, "--user-data-dir=" + profile_path,
+                      "0::/app.slice/app-flatpak-" + app_id + "-42.scope")}
+        with tempfile.TemporaryDirectory() as root:
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                active = Path(root) / "DevToolsActivePort"
+                active.write_text(str(port) + "\n/devtools/browser/fake-sandbox-token\n")
+                os.chmod(active, 0o600)
+                launched = time.time_ns()
+                endpoint = f"ws://127.0.0.1:{port}/devtools/browser/fake-sandbox-token"
+                with patch.object(helper, "process_snapshot", return_value=ours), \
+                     patch.object(helper.os, "readlink", side_effect=PermissionError("sandbox")):
+                    with self.assertRaises(helper.LoginError):
+                        helper.read_devtools_endpoint(fd, process, launched)
+                    self.assertEqual(
+                        helper.read_devtools_endpoint(fd, process, launched, (profile_path, app_id)),
+                        endpoint,
+                    )
+            finally:
+                os.close(fd)
+
     def test_cdp_urls_cannot_escape_loopback_or_include_ambiguous_authorities(self):
         helper = load_helper()
         for url in ("ws://evil.test:123/devtools/browser/fake", "ws://127.0.0.1.evil:123/devtools/browser/fake",
