@@ -171,16 +171,27 @@ closed. It is never reused on a later attempt.
   temporary profile, and redirects XDG config/cache/data/state into that
   profile. Chromium's new user-data directory provides instance isolation;
   `flatpak run` has no `--new-instance` option.
-- Flatpak browser support is a guarded compatibility path. Its ownership proof
-  was exercised against the real Flatpak Brave on this host (Nov 27, 2026,
-  headless, fresh profile): with the FD-and-parentage proof alone the launch ended
-  as `unsafe_devtools` -- the reported failure -- and with the sandbox proof it
-  reached the endpoint, connected, and listed the `https://muse.ai/` target over
-  CDP. A human sign-in through a Flatpak window is still **not** live-verified.
-  Distribution wrappers, enterprise policy, PID namespace behavior,
-  portal/Wayland/X11 restrictions, AppImage environment contamination, or
-  restricted `/proc` may prevent startup/ownership proof. Fail closed and select
-  a supported native browser instead; never relax endpoint or profile checks.
+- Flatpak browser support is a guarded compatibility path whose sign-in has now
+  been run live, end to end, through a real interactive Flatpak window (Nov 26,
+  2026, 21:11 EST, this host): the app's own helper was given the selector the
+  Sign in button passes (`flatpak:com.brave.Browser`), opened a Flatpak Brave
+  window on `https://muse.ai/`, the reader signed in there, and the helper
+  answered `{"ok": true, "message": "Account sign-in completed."}`. The sandbox
+  ownership proof accepted the listener, CDP found the freshly signed-in
+  `muse.ai` target, and the jar was replaced atomically under the account folder
+  (1008 -> 1013 bytes, mode 0600, 21:11:43 EST); the helper then closed the
+  window, removed its `.login-*` profile (the account folder holds none) and
+  exited 0, and `sessions.list` with that new jar answered the account's 7
+  conversations. The proof itself was measured the same day on a headless launch
+  of the same browser: with the FD-and-parentage proof alone the launch ended as
+  `unsafe_devtools` -- the reported failure -- and with the sandbox proof it
+  reached the endpoint, connected, and listed `https://muse.ai/` over CDP. That
+  is one account, Brave, and this host: the other recognized Flatpak ids were
+  not signed in with. Distribution wrappers, enterprise policy, PID namespace
+  behavior, portal/Wayland/X11 restrictions, AppImage environment contamination,
+  or restricted `/proc` may still prevent startup or the ownership proof. Fail
+  closed and select a supported native browser instead; never relax endpoint or
+  profile checks.
 - The official service or identity provider may change login/session behavior or
   reject a debug-enabled browser. No CAPTCHA/MFA bypass, default-profile
   fallback, all-domain export, password prompt in the app, or live-login unit
