@@ -1,8 +1,9 @@
 # Porting the client to Rust + Tauri + React: analysis and staging plan
 
 **Status: S0 shipped, S1 gate met, S2 seven pages, S3 slices landed (Nov 21, 2026; its paste and
-  decide presses were checked live the same evening), and S4's window opens as the app's window
-  (Nov 23, 2026).** The decision was made to continue
+  decide presses were checked live the same evening), S4's window opens as the app's window and
+  owns the account lifecycle -- a fresh clone signs in there, sign-out returns it to sign-in, and
+  every page is reachable from its drawer (Nov 23, 2026).** The decision was made to continue
 toward the Tauri/React end state. Stage S0 (the palette lift) is in the tree; S1's reference page —
 Library, read-only, in the existing WebKitGTK view with real rows — is implemented and verified on
 this seat; S2 has its first page, Goals, on the same contract. Everything below the stage list is
@@ -258,15 +259,32 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   account read on a worker thread and updates the cache the native page shares. An empty query is
   refused without a read, exactly as the native page refuses it, and a failed read reports beside
   whatever rows are held. Rows carry the conversation id the native row uses to open Chat and are
-  dropped without one, exactly as the native paint drops them, so the two lists cannot disagree;
-  the web row itself is read-only, since this slice has no Chat to open. Because the page
+  dropped without one, exactly as the native paint drops them, so the two lists cannot disagree.
+  A row is a press in both windows (Nov 23, 2026): the page hands the row's conversation id to the
+  shell's own `openThread`, which is the drawer's `history.open` switch, so a search result opens
+  the chat it belongs to instead of sitting there as text. Because the page
   can read on its own, its Web view button is live from the start rather than waiting for a native
   fill; the page says plainly when no search has run yet. Eight DOM tests (`Search.test.tsx`) cover
   the held query and rows, the not-run state, a search carrying its words, the empty query, a
   refused read, a failed native read, the no-matches sentence, and the sentence for matches the
-  service counted but this build could not map to rows — the live account reports `total` 6 and 20
-  with zero rows for every query tried, so the page must not read that as "no matches". That shape
-  gap is in `muse_account::search`'s mapping, not the page: the native list swallows the same rows. The live check also
+  service counted but this build could not map to rows, plus the press that opens a result's
+  conversation and the unpressable row a standalone page renders. That last sentence was the live
+  bug until Nov 23, 2026: every query answered a count (6, then 20) and zero rows. The recorded
+  answer shape (below) is what fixed it; the page's wording stays as the guard for a shape this
+  build does not recognise.
+  **The search answer's shape is recorded now (Nov 23, 2026).** A live probe logged the key names
+  only: `{"has_more": bool, "hits": [{chat_event, session, snippet}]}`, where `session` carries
+  `session_id`, `title`, `pinned`, `archived`, `is_thread` and `chat_event` carries `session_id`,
+  `display_text`, `role`, `seq`, `occurred_at_ms`, `message_id` and friends. No hit has a
+  top-level id, which is exactly why the bridge's alias hunt found none and everything was
+  dropped. `search_rows` now flattens each hit into the conversation it belongs to (the session's
+  id, so the row opens it), titled by the session and lined with the matched snippet; a hit with
+  no session anywhere is counted and not listed, and any other answer shape still goes through the
+  tolerant container hunt. Seen live in the shell window: one press of the page's Search for
+  "Rowyn" answered 20 results, each with its conversation title and snippet, and pressing the
+  first row switched the window to Chat on that conversation (`history.open answered`, the drawer
+  row marked). The bridge's own tests pin the recorded shape, the orphan hit and the legacy
+  container path (`scripts/tests/test_account_bridge.py`). The live check also
   needed a way to type: `scripts/x11-type.py` joins the other host-side helpers (XTEST keys,
   `--clear` for select-all first), since this host has no xdotool.
   Settings is the eighth page, and the first whose native side is held state rather than a listing.
@@ -748,8 +766,10 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   `Checking for updates…`) or if the two cards read different words once settled. By default it
   feeds the app a release JSON on disk (`MUSE_UPDATE_FEED`) whose asset is a `file://` path, paced
   by `MUSE_UPDATE_DELAY_MS` so the busy step can be read on both cards, so a dev build reaches
-  `A newer build is available.` and the staged `Restart to update` state without the network; a
-  Restart press in that copy is refused rather than relaunching the binary under test. `--feed
+  the offered sentence (`A newer build is available: <build> (<size> MB).`, figured from that
+  feed) and the staged `Restart to update` state without the network --
+  harness-driven, so those rounds are regression cover, not live-feed proof; a Restart press in
+  that copy is refused rather than relaunching the binary under test. `--feed
   real` runs the release API instead and asserts only that the cards agree. It also opens a second
   Settings web view before the download press and requires every window to show the staged state;
   that round is what caught the window registry keeping one weak reference per page, so the older
@@ -969,20 +989,230 @@ Each stage is independently useful and leaves the app shippable. Stop at any gat
   same case, and the app stays native from then on. The GTK harnesses ask for their own
   window by name: `scripts/muse-gui.sh` and
   `scripts/settings-two-windows.py` set `MUSE_SHELL=gtk`. Seen live on this seat (Xwayland): the
-  shell window is `1100x700` and viewable, the native `muse` window is `IsUnMapped`, the boot came
-  from the app in 0 ms, the first page command was answered in 84 us, and the drawer then filled
-  with the account and its History rows.
+  shell window is viewable (the geometry is the reader's now -- see "The window's size is the
+  reader's" below), the native `muse` window is `IsUnMapped`, the boot came from the app in 0 ms,
+  the first page command was answered in 84 us, and the drawer then filled with the account and
+  its History rows.
 
-  What still stands between this and retiring GTK: the **sign-in surface**, which stays the native
-  window on an unlinked clone (Tauri mode chooses GTK when there is no usable saved link, and says
-  so); the **folder chooser** and the **update relaunch**, which are a native dialog and a process
-  swap a page cannot be; and **packaging** -- the AppImage bundles WebKitGTK 6.0 for the state
-  layer, and a shipped shell window adds the GTK 3 / 4.1 generation beside it (the doc's risk 3)
-  plus the window binary itself. `apps/muse/src/pages.rs` therefore stays: it is still the
-  reference the pages are checked against, and its tests are still most pages' only assertion.
+  **A fresh clone signs in in the window (Nov 23, 2026).** The last refusal in `web_shell::choose`
+  was the saved link: sign-in was still a page in a GTK window, so an unlinked clone opened the
+  native window and never saw the shell. The window now opens on the sign-in page instead -- the
+  app names its first page over `MUSE_WINDOW_PAGE`, the window asks that page's own snapshot and
+  serves the same bundle with `page: "signin"`, and the app answers it with `signin_surface`, which
+  is the page's own validation, save and isolated browser flow installed before the first command.
+  The one-time setup runs at that point rather than behind a dialog, because the page's own
+  defaults are its product. A saved link then builds the app (`show_main`, the same call the native
+  sign-in surface makes) and the app writes one `{"show": <shell boot>}` line: the window keeps
+  that payload, reloads, and the protocol serves the shell from it. The switch is one document in
+  one window, so there is no second window to close and no moment with neither surface up; a name
+  the app reads before the link lands is not pushed to a page with no drawer. A window that dies
+  before answering any command still falls back to the native sign-in, the surface that can carry
+  a link without one.
 
-- **S5 — Packaging and gates.** AppImage recipe, Flatpak manifest, CI, native-Wayland and
-  screen-reader checks re-run against the new build.
+  **The whole account lifecycle is the window's (Nov 23, 2026).** Sign-out came across on the same
+  rule as sign-in: one press, the app's own state reversal, one `show` line. `pages::sign_out` is
+  now the only clear, the native Settings button calls it too, and `settings.sign_out` carries a
+  page press to it; the Settings page offers the button its footer used to say stayed native. The
+  press clears the saved link, retires the chat panel (`Chat::retire`, so its timers stop reading
+  and its paints stop writing state the next panel owns), empties the held chat so the drawer
+  cannot keep the name it just lost, then installs the sign-in surface's own routes and writes
+  `{"show": <sign-in boot>}`: the same window, reloaded onto the sign-in page, with no GTK window
+  to fall back to and no restart. Signing in there runs the same `show_main` and `show_shell` a
+  fresh launch runs, so the second life of the window has no second code path -- and the drawer's
+  History read, the chat read and the approvals read all start again from the new link.
+
+  The drawer itself now keeps every page: the page list is `flex: 0 0 auto` with no inner
+  scroller and no fade mask, so all eleven pages sit at their own height and none is dimmed by a
+  mask over a row the reader could press; History is the part that continues past the fold, and
+  the drawer scrolls as one, which is the native drawer's model. Row padding is a touch tighter
+  than the rest of the drawer so the list plus the History heading fit a 700px window.
+
+  **The window's size is the reader's, not a constant (Nov 23, 2026).** A first launch opens the
+  window on the primary display and maximizes it there; every later launch restores the size,
+  position and maximized state it was left in. One file carries that for both windows,
+  `$XDG_CONFIG_HOME/unofficial-muse-for-linux/window-state.json`, written by the Tauri window on
+  every resize, move and close (`apps/muse-window/src/window_state.rs`) and by the GTK fallback
+  window on close and maximize (`apps/muse/src/window_state.rs`). The literals that used to fix
+  the window at 1100x700 are gone from both paths: the Tauri window sizes itself from the saved
+  file or from the primary monitor before maximizing, and the GTK window sets its size from the
+  file and maximizes when there is none. Both keep a 900x600 floor, the smallest window the
+  drawer's page list and History were built for. A saved size below the floor, or a file that
+  cannot be parsed, counts as nothing saved; a position is restored only when both coordinates are
+  there, and only the Tauri window can place itself (GTK 4 may not choose a position on Wayland,
+  so the fallback carries the position the other window wrote but never invents one). The state is
+  scoped by the XDG config home, so a test home starts from its own geometry instead of inheriting
+  the seat's. Measured here (Xwayland, primary 2436x1523 at +4309+2161): before, every launch was
+  1100x700 floating; now a fresh launch is a 2436x1415 client inside the maximized frame on that
+  display, and a 1200x820 window moved to +300+240 came back 1200x820 at +300+281 (its frame at
+  +300+240) after a close and relaunch.
+
+  **The folder chooser and the update card are the window's too (Nov 23, 2026).** The last two
+  presses that left the shell are gone. A folder is chosen on a sheet inside the window: the page
+  asks `folders.list` for one level of subfolders and the app answers by reading them (folders
+  only, never files), the same sheet serves the session folder on sign-in (`signin.press`
+  `choose` records the answer in the state `signin::validate_link` and the snapshot read) and a
+  Local host grant (`localhost.grant` now carries the chosen path, and the controller's grant is
+  the press's answer). No `FileChooserNative` is opened from a page press any more. The updater's
+  card is the shell Settings page's: `update.check` and `update.install` are the panel's own
+  `do_check` and `do_update_action`, attached to the shell window's routes with the same
+  `update_press_routes` the native card uses, and `settings.snapshot` projects the live
+  `UpdateCheck` the presses change, so the card offers its presses before any native paint has
+  happened. Seen live at the window: the sheet listed the app's own folder, stepped into a
+  subfolder and back, its answer landed in the Session folder field and in the saved link's
+  `config_dir`, and Connect switched the window back to the shell with the account's data; the
+  Settings card checked (the offered sentence, on the harness feed's own build and size),
+  downloaded a staged build from that feed, and its Restart press relaunched -- `update.install` answered twice, the app exited into the verified
+  child, and the window went with it.
+
+  **The folder sheet can make the folder it stands in (Nov 23, 2026).** The native chooser this
+  sheet replaced offered Create Folder, and the sheet did not: a person whose session folder does
+  not exist yet could not get one from inside the app, because `folders.list` only reads. The
+  sheet now carries a name field and a Create press (`folders.create`), and the app owns the
+  rules: one name, no separators and no `.`/`..`, a parent that is a folder and not a file, no
+  recursion past the folder the sheet stands in, and the folder it makes is 0700 -- the bridge's
+  own privacy rule (`insecure_config`) refuses anything a neighbour could read. A missing parent
+  is made with it, because a first launch's own session folder does not exist until something
+  writes in it and the sheet opens on exactly that path. Seen in the packaged AppImage on a fresh
+  `XDG_CONFIG_HOME` with no link, where that path did not exist yet: the sheet opened on it, a
+  typed `parity-session` plus Create made `…/account/parity-session` at 0700, the sheet stepped
+  into it, "Use this folder" put that path in the Session folder field, and Connect saved a link
+  whose `config_dir` is that folder. That folder held the same session, so the drawer listed the
+  account's threads, the row "Rowyn" opened its transcript, and a message typed into the composer
+  (`chat.send answered in 420us`) appeared in that conversation and was answered there. The
+  session itself was carried into the new folder rather than signed in again: the browser flow
+  needs a person, so the copy stands in for the sign-in the sheet's folder would otherwise get.
+
+  **A conversation started from that folder is that folder's (Nov 23, 2026).** The folder sheet
+  proved a message could be sent, not that the app could begin a conversation: nothing in the app
+  had ever called `AccountClient::start_session`, so "New chat" only cleared the open thread, and a
+  draft send went to `send(None, ...)` -- no session, no id to adopt, and the new chat never
+  appeared in either drawer. The send worker now starts the session when the window holds no
+  thread, sends into the id the service answers with, and hands that id to the UI: `switch_thread`
+  opens it, `adopt_thread` puts the started chat at the head of the held listing (title "New chat"
+  until the service names it, as the web's New chat does), and `drawer_refresh` pushes the shell
+  drawer the listing that has it -- the once-only boot push is cleared so the second one lands.
+  Seen on the packaged AppImage (86,084,088 bytes, build `e092116a`) with
+  `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME` all under one clean home: the sheet made
+  `…/account/fresh-chat`, Connect saved a link whose `config_dir` was that folder, and that
+  folder's own `op-timing.log` carries the pair `op=start_session conn=control ok=1` /
+  `op=send ok=1` for the first message. The drawer showed the new row \"New chat\" ringed as the
+  open thread, with the message and the reply in the transcript (`Thread e72f1a23...`); the push
+  line reads `boot pushed by the app ... (account \"Lotus\", 9 history rows)`, one more than the
+  eight it started with. A real quit and relaunch read it back: the drawer listed
+  \"Drawer check for folder sheet (1 unread)\" -- the service's own title for it -- and opening that
+  row showed the same message and reply in `Thread e72f1a23...`, with every other conversation
+  (\"School\", \"Rowyn\", the earlier sheets' chats) still listed and untouched.
+
+  **The three deferred packaged checks are closed (Nov 23, 2026).** Each was driven on the built
+  `dist/unofficial-muse-for-linux-x86_64.AppImage` with a clean `XDG_CONFIG_HOME`, not on the dev
+  build.
+  *Geometry restores across a real quit.* A fresh launch opened maximized (2436x1415 client at
+  +4309+2202 on the 2436x1523 primary). Unmaximized and resized to 1180x820 at +150+170 the app
+  wrote `{"height":820,"maximized":false,"width":1180,"x":150,"y":170}`; the window was then
+  closed the way its own close button does (`WM_DELETE_WINDOW`, `muse: the shell window closed`,
+  the process exited), and the next launch logged
+  `window built at 112ms (1180x820 at Some((150, 170)), maximized=false)` with the client at
+  1180x820 and no `_NET_WM_STATE_MAXIMIZED_*` — the size and place a person left, not the
+  maximized default.
+  *The folder sheet works end to end* — see the paragraph above: folder made in the sheet, chosen
+  as the session folder, the conversation opened from that folder's account, a sent message landed
+  in it, and the reply came back to the same row.
+  *The native GTK search list opens its conversation.* In `MUSE_SHELL=gtk` on the packaged app,
+  the Search page ran "Rowyn" (typed through the entry's accessible `EditableText`, since this
+  seat delivers no synthetic key events to a GTK window) and painted its rows, each titled with
+  its conversation and lined with the matched snippet. Pressing the first row ran the row's own
+  `chat.switch_thread(id)` and `go_chat`: the window left Search, the title became "Learn about
+  lotus" with its transcript, and the drawer marked that row — the same press the shell window's
+  Search page makes through `history.open`.
+
+  **The retired panel's memory and packaging are closed (Nov 23, 2026).** A sign-out no longer
+  leaks the chat panel: the app owns the live panel in one thread-local slot (`app::hold_chat`),
+  and once `web_shell::install` has replaced the session's page routes that slot is the panel's
+  only strong reference, so `app::release_chat` on sign-out drops it. Seen in the packaged app:
+  `muse: the retired chat panel is released (1 strong reference(s) at release)` right after
+  `muse: signed out; the window switches to sign-in`. The shipping bundle carries the window too:
+  `scripts/build-appimage.sh` builds `apps/muse-window` as its own project and installs it beside
+  `usr/bin/muse` *before* linuxdeploy's deploy, so that step's closure collection brings the
+  window's GTK 3 / WebKitGTK 4.1 libraries in, and the 4.1 helper tree is copied beside the 6.0
+  one (the doc's risk 3, accepted for this slice; S5's paragraph below records the patch story);
+  the native GTK 4 window stays the fallback where the window cannot come up. What keeps
+  the two generations apart is the library-path filter: every entry under `APPDIR` is now dropped
+  from the child's `LD_LIBRARY_PATH` along with the WebKit 6.0 and toolbox paths, and a test pins
+  it. The bundle carries the icon set at 16/32/48/64/128/256/512, the desktop entry and the
+  AppStream metadata, and the app finds `muse-window` beside itself (`window_binary`'s first
+  candidate), never in a `target` directory.
+
+  Measured on the packaged artifact itself -- `dist/unofficial-muse-for-linux-x86_64.AppImage`,
+  86,071,800 bytes, run with `APPIMAGE_EXTRACT_AND_RUN=1` on a clean `XDG_CONFIG_HOME`: the first
+  launch opened 2436x1415 at +4309+2202 inside the maximized frame on the 2436x1523 primary
+  display (`_NET_WM_STATE_MAXIMIZED_VERT/HORZ`); unmaximized, moved to +300+240 and resized to
+  1200x820, the close wrote `{"height":820,"maximized":false,"width":1200,"x":300,"y":240}` and
+  the relaunch restored 1200x820 at +300+281 (the client; its frame at +300+240). In that same
+  installed app the Settings card checked the live feed
+  ("A newer build is available: a6ed625 (79.4 MB).") and, with
+  the harness feed's asset, downloaded into the cache's `muse-updates/` stage and offered "Restart
+  to update"; and sign-out -> the
+  folder sheet (`folders.list`) -> "Use this folder" -> Connect saved a link whose `config_dir`
+  was the sheet's answer and switched the window back to the shell with the account's rows.
+
+  The Tauri bundler carries the window's own metadata (`apps/muse-window/tauri.conf.json`:
+  identifier `org.kythos.MuseWindow`, product name `Muse Shell Window`, the 32/64/128/256 icon
+  set, a hidden desktop entry) and `npx @tauri-apps/cli@2 build --bundles deb` produces
+  `apps/muse-window/target/release/bundle/deb/Muse Shell Window_0.1.0_amd64.deb` with the binary
+  at `usr/bin/muse-window`. It is a component, not the app: Tauri bundles one binary, and this
+  window owns no state, which is why its desktop entry is `NoDisplay=true` and the installable app
+  is the AppImage. The AppImage's own linuxdeploy step needs the container image (see
+  [building](building.md)); a rootless workstation cannot deploy a GTK 4 runtime it does not have,
+  so `scripts/repack-appimage.sh` reuses a released AppImage's runtime tree and repackages this
+  checkout's binaries, sidecars, icons and metadata with the same appimagetool step.
+
+  What remains is `apps/muse/src/pages.rs` itself -- still the reference the pages are checked
+  against, and still most pages' only assertion -- not a missing feature. The update card's real-feed
+  check is answered (Nov 23, 2026), and the earlier "never settles" reading was two defects in the
+  app, not a sandbox block: `webui::settings_updates_changed` and `settings_policy_changed` nudged
+  only separate Settings page windows (`nudge_page` walks `OPEN_WINDOWS`, which holds no entry for
+  the shell), so a press answered in the app -- `muse: update check answered: This build is up to
+  date.` -- while the card kept painting `Working…` and never re-read the state. Both now also call
+  `web_shell::page_changed("settings")`, which rides the pipe to the window, and `muse-window`'s
+  `nudge_script` answers `settings` with `museUpdatesReady()` and `musePolicyReady()`. The second
+  defect is the reason no answer would ever have come from a silent feed: the fetch had no bound of
+  its own. `do_check` now carries a 45-second deadline that answers `Update check failed: the feed
+  did not answer within 45 seconds.`, the shared agent bounds connecting at 15 seconds, and ureq's
+  `proxy-from-env` feature is on so a seat behind a proxy reaches the feed at all instead of
+  bypassing it. Locally built bundles also stamp `UMFL_BUILD_SHA` now -- `scripts/build-appimage.sh`
+  and `scripts/repack-appimage.sh` default it to `git rev-parse HEAD`, printed at build time -- so
+  `local_sha()` is no longer `None` and the answer compares the checkout against the feed instead
+  of always reading up to date.
+
+  Read at the packaged artifact, clean `XDG_CONFIG_HOME`, `APPIMAGE_EXTRACT_AND_RUN=1`, no
+  `MUSE_UPDATE_FEED`: Settings -> Check for updates answered `A newer build is available: a6ed625
+  (79.4 MB).` (`muse: update check answered: A newer build is available: a6ed625 (79.4 MB).`) and
+  painted that sentence with a `Download update` press -- the feed's rolling AppImage is built from
+  `a6ed625`, this bundle from `e092116` -- and the card's button returned to `Check for updates`
+  rather than staying on `Working…`. The sentence names what the feed holds because the panel would
+  otherwise say only that something newer exists: the identifier is the feed's built commit
+  (`update::short_build`, seven characters) and the figure is the release asset's own `size`
+  (`update::asset_size_mb`, MiB to one decimal, 83,249,656 bytes -> 79.4 MB), both read from the
+  release JSON by `update::parse_release` and carried in `ReleaseInfo` into the update state, which
+  `settings.snapshot` projects to the card. A feed whose asset carries no size renders `A newer
+  build is available: <build> (the feed reports no size).` instead of dropping the figure silently;
+  `update.rs`'s tests pin both sentences. An unstamped build answers `This build is up to date.`
+  the same way (that is what a missing `local_sha()` reports, and what the check read before the
+  scripts stamped a commit; the comparison itself is covered by `update.rs`'s own tests). The
+  failure path was driven live too, by giving the packaged app a dead proxy
+  (`HTTPS_PROXY=http://127.0.0.1:9`, honoured because the app now reads the proxy its other traffic
+  uses): the card painted `Update check failed:
+  https://api.github.com/repos/mrtrickdotorg/unofficial-muse-for-linux/releases/tags/appimage-latest:
+  Connection Failed: Connect error: Connection refused (os error 111)` and its button came back to
+  `Check for updates`, so an unreachable feed is an answer, not a busy step. The suspicion that the
+  bundle's TLS roots or runtime tree blocked the fetch is disproved by the app's own ureq stack
+  inside the extracted AppImage environment: DNS 10 ms, `GET` the feed 200 in 78 ms, and 197 ms on
+  the host -- the network was never the problem.
+
+- **S5 — Packaging and gates.** Packaging is done for the AppImage (both binaries, icons, desktop
+  entry, metadata; `scripts/build-appimage.sh`) and for the window's own `.deb`; the Flatpak
+  manifest, CI's container build and the native-Wayland/screen-reader checks still re-run against
+  the new build.
 
   The AppImage half landed Nov 25, 2026: the builder container carries the GTK 3 /
   WebKitGTK 4.1 dev stack beside the 6.0 one, `build-appimage.sh` builds

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Muse Shell Window
+GenericName=Muse window
+Comment=The Muse app's shell window. Start Muse; this window is spawned by it and has nothing to show on its own.
+Exec=muse-window
+Icon={{icon}}
+Terminal=false
+Categories=Utility;
+NoDisplay=true

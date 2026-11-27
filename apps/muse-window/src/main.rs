@@ -15,11 +15,13 @@
 //! carries one `{"id","cmd"}` line per page command to the app; its **stdin**
 //! carries the app's `{"id","reply"}` answers -- handed to the page through
 //! `window.museReply(id, reply)`, so the page's ticket protocol is unchanged --
-//! and three control lines: `{"raise":true}` when a second launch activates the
+//! and four control lines: `{"raise":true}` when a second launch activates the
 //! running instance, `{"boot":{...}}` when the app's own account read first
 //! names the session, which the boot answer below was asked too early to carry,
-//! and `{"nudge":"<page>"}` when a read landed that an open page shows -- the
-//! page asks its own snapshot again, and no data or code crosses the pipe.
+//! `{"nudge":"<page>"}` when a read landed that an open page shows -- the page
+//! asks its own snapshot again, and no data or code crosses the pipe -- and
+//! `{"show":{...}}` when the app has switched this window's page, which the
+//! window paints by keeping that payload and reloading.
 //! The app closing the pipe means the app is gone, and this window goes with
 //! it.
 //!
@@ -32,7 +34,9 @@ use std::sync::mpsc::channel;
 use std::time::Instant;
 
 use serde_json::json;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+
+mod window_state;
 
 /// The committed bundle the app's own windows serve, boot data included.
 const BUNDLE: &str = include_str!("../../muse/ui/built/app.html");
@@ -47,6 +51,37 @@ static FIRST_COMMAND: AtomicBool = AtomicBool::new(false);
 /// its own reads (the account name, the drawer's History) land after it, so the
 /// app pushes a later payload which replaces this one and the drawer adopts it.
 static BOOT: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+/// Which of the app's pages this window paints: the app names it, because the
+/// window has no state. `signin` on a clone with no saved link, `shell` once
+/// the app holds one.
+static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The page named by `MUSE_WINDOW_PAGE`, and `shell` for anything else: an app
+/// that does not set it gets the page this window has always served.
+fn page_from_env(value: Option<&str>) -> &'static str {
+    match value {
+        Some("signin") => "signin",
+        _ => "shell",
+    }
+}
+
+/// Whether this launch asked for the web inspector.
+///
+/// The reader's own launch never does: the setting is read once, from
+/// `MUSE_INSPECTOR`, so a documented run can attach a keyboard-independent
+/// channel to the page (WebKit's remote inspector, with
+/// `WEBKIT_INSPECTOR_SERVER` naming the loopback port) while an ordinary
+/// launch keeps the inspector closed.
+fn inspector_enabled() -> bool {
+    std::env::var_os("MUSE_INSPECTOR").is_some_and(|value| !value.is_empty())
+}
+
+fn page() -> &'static str {
+    PAGE.get_or_init(|| {
+        page_from_env(std::env::var("MUSE_WINDOW_PAGE").ok().as_deref()).to_owned()
+    })
+    .as_str()
+}
 
 fn elapsed_ms() -> u128 {
     STARTED
@@ -107,7 +142,17 @@ fn main() {
                 .expect("a response the window can serve")
         })
         .setup(move |app| {
-            let view = WebviewWindowBuilder::new(
+            // The size and place this window opens on are the reader's, not a
+            // constant: what the last launch saved, or -- on a first launch --
+            // a large window that then takes the whole primary display.
+            let saved = window_state::load();
+            // A first launch opens on the primary display. Maximize alone
+            // maximizes wherever the window manager first placed the window --
+            // on this seat, the large secondary screen -- so the first size and
+            // place are the primary monitor's, and the maximize that follows
+            // takes the display the app belongs on.
+            let primary = app.primary_monitor().ok().flatten();
+            let mut builder = WebviewWindowBuilder::new(
                 app,
                 "shell",
                 WebviewUrl::CustomProtocol(
@@ -115,10 +160,59 @@ fn main() {
                 ),
             )
             .title("Muse")
-            .inner_size(1100.0, 700.0)
+            .min_inner_size(window_state::MIN_WIDTH, window_state::MIN_HEIGHT)
             .initialization_script(SHIM)
-            .build()?;
-            eprintln!("muse-window: window built at {}ms", elapsed_ms());
+            // Opt-in only: a normal launch has no inspector, and the window's
+            // own commands are not reachable from a page it did not serve.
+            .devtools(inspector_enabled());
+            let (width, height) = match saved {
+                Some(geometry) => {
+                    builder =
+                        builder.inner_size(f64::from(geometry.width), f64::from(geometry.height));
+                    if let (Some(x), Some(y)) = (geometry.x, geometry.y) {
+                        builder = builder.position(f64::from(x), f64::from(y));
+                    }
+                    (f64::from(geometry.width), f64::from(geometry.height))
+                }
+                None => match &primary {
+                    Some(monitor) => {
+                        let scale = monitor.scale_factor();
+                        let size = monitor.size().to_logical::<f64>(scale);
+                        let position = monitor.position().to_logical::<f64>(scale);
+                        builder = builder
+                            .inner_size(size.width, size.height)
+                            .position(position.x, position.y);
+                        (size.width, size.height)
+                    }
+                    None => {
+                        builder = builder
+                            .inner_size(window_state::FIRST_WIDTH, window_state::FIRST_HEIGHT);
+                        (window_state::FIRST_WIDTH, window_state::FIRST_HEIGHT)
+                    }
+                },
+            };
+            let view = builder.build()?;
+            // A first launch, or one the reader left maximized, covers the
+            // primary display. A window restored to a plain size is left where
+            // it was saved.
+            if saved.is_none_or(|geometry| geometry.maximized) {
+                let _ = view.maximize();
+            }
+            eprintln!(
+                "muse-window: window built at {}ms ({}x{} at {:?}, maximized={}, primary={:?})",
+                elapsed_ms(),
+                width.round() as i64,
+                height.round() as i64,
+                saved.and_then(|geometry| geometry.x.zip(geometry.y)),
+                saved.is_none_or(|geometry| geometry.maximized),
+                primary.as_ref().map(|monitor| (
+                    monitor.position().x,
+                    monitor.position().y,
+                    monitor.size().width,
+                    monitor.size().height
+                ))
+            );
+            remember(&view);
             let _ = view.show();
             let _ = handle_tx.send(app.handle().clone());
             Ok(())
@@ -129,13 +223,55 @@ fn main() {
     build.run(|_app, _event| {});
 }
 
+/// Keep the reader's geometry: every resize and move writes it, and so does the
+/// close request, so the saved state is already right if this process is ended
+/// without a polite close.
+fn remember(view: &WebviewWindow) {
+    let window = view.clone();
+    view.on_window_event(move |event| match event {
+        WindowEvent::Resized(_) | WindowEvent::Moved(_) | WindowEvent::CloseRequested { .. } => {
+            if let Some(geometry) = geometry_of(&window) {
+                window_state::save(&geometry);
+            }
+        }
+        _ => {}
+    });
+}
+
+/// What the window is now, in the file's own units: logical pixels, the
+/// maximized flag, and the outer position when the window manager reports one.
+/// `None` while the window has no size of its own yet, so maximizing a first
+/// launch never writes the floor in as the reader's window.
+fn geometry_of(view: &WebviewWindow) -> Option<window_state::Geometry> {
+    let scale = view.scale_factor().unwrap_or(1.0);
+    let size = view.inner_size().ok()?.to_logical::<f64>(scale);
+    let width = size.width.round();
+    let height = size.height.round();
+    if width < window_state::MIN_WIDTH || height < window_state::MIN_HEIGHT {
+        return None;
+    }
+    let position = view
+        .outer_position()
+        .ok()
+        .map(|position| position.to_logical::<f64>(scale));
+    Some(window_state::Geometry {
+        width: width as u32,
+        height: height as u32,
+        x: position.map(|position| position.x.round() as i32),
+        y: position.map(|position| position.y.round() as i32),
+        maximized: view.is_maximized().unwrap_or(false),
+    })
+}
+
 /// The boot data the page needs before its first paint. Asked of the app, not
 /// rebuilt here: the page list, the account and the History rows are the app's
-/// answers, so the two surfaces cannot fork them.
+/// answers, so the two surfaces cannot fork them. Which command to ask depends
+/// on the page the app named, and either page answers its own snapshot.
 fn boot(answers: &mut impl BufRead) -> serde_json::Value {
-    if let Err(error) = send(&json!({ "id": 0, "cmd": "shell.snapshot" })) {
+    let command = format!("{}.snapshot", page());
+    if let Err(error) = send(&json!({ "id": 0, "cmd": command })) {
         eprintln!("muse-window: the app's bridge is not open: {error}");
-        return boot_empty();
+        return boot_empty(page());
     }
     read_boot(answers)
 }
@@ -150,18 +286,18 @@ fn read_boot(answers: &mut impl BufRead) -> serde_json::Value {
         match answers.read_line(&mut line) {
             Ok(0) => {
                 eprintln!("muse-window: the app closed the bridge before answering");
-                return boot_empty();
+                return boot_empty(page());
             }
             Ok(_) => {}
             Err(error) => {
                 eprintln!("muse-window: cannot read the app's boot answer: {error}");
-                return boot_empty();
+                return boot_empty(page());
             }
         }
         match parse(&line) {
-            FromApp::Boot(boot) => return boot_with_page(boot),
+            FromApp::Boot(boot) => return boot_with_page(boot, page()),
             FromApp::Reply { id, reply } if id.as_i64() == Some(BOOT_TICKET) => {
-                return boot_with_page(reply);
+                return boot_with_page(reply, page());
             }
             _ => {}
         }
@@ -172,22 +308,22 @@ fn read_boot(answers: &mut impl BufRead) -> serde_json::Value {
 const BOOT_TICKET: i64 = 0;
 
 /// A payload as the document paints it: the app's answer or push, tagged with
-/// the page it belongs to. An answer that is not an object leaves the empty
-/// shell rather than a payload nobody sent.
-fn boot_with_page(payload: serde_json::Value) -> serde_json::Value {
+/// the page the app named. An answer that is not an object leaves the empty
+/// page rather than a payload nobody sent.
+fn boot_with_page(payload: serde_json::Value, page: &str) -> serde_json::Value {
     let mut boot = if payload.is_object() {
         payload
     } else {
-        boot_empty()
+        boot_empty(page)
     };
-    boot["page"] = json!("shell");
+    boot["page"] = json!(page);
     eprintln!("muse-window: boot from the app at {}ms", elapsed_ms());
     boot
 }
 
-fn boot_empty() -> serde_json::Value {
+fn boot_empty(page: &str) -> serde_json::Value {
     json!({
-        "page": "shell",
+        "page": page,
         "pages": [],
         "account": "",
         "build": "dev build",
@@ -202,7 +338,7 @@ fn document() -> String {
         .lock()
         .ok()
         .and_then(|slot| slot.clone())
-        .unwrap_or_else(boot_empty);
+        .unwrap_or_else(|| boot_empty(page()));
     // A title containing `</script>` must not close the data block; the app's
     // own document escapes the same way.
     BUNDLE.replace(BOOT_SLOT, &boot.to_string().replace("</", "<\\/"))
@@ -214,6 +350,9 @@ enum FromApp {
     Raise,
     /// The app's own read landed: the drawer's payload, pushed.
     Boot(serde_json::Value),
+    /// The app's page moved: paint this payload instead, from the same document
+    /// and window.
+    Show(serde_json::Value),
     /// A read moved what an open page shows: ask that page to re-ask.
     Nudge(String),
     /// An answer to a page's command, by the page's own ticket.
@@ -238,6 +377,13 @@ fn parse(line: &str) -> FromApp {
     if let Some(boot) = answer.get("boot") {
         return if boot.is_object() {
             FromApp::Boot(boot.clone())
+        } else {
+            FromApp::Ignore
+        };
+    }
+    if let Some(show) = answer.get("show") {
+        return if show.is_object() {
+            FromApp::Show(show.clone())
         } else {
             FromApp::Ignore
         };
@@ -291,6 +437,7 @@ fn read_loop(mut answers: BufReader<std::io::Stdin>, app: AppHandle) {
             // The app's own read landed: this is the drawer's payload, pushed
             // rather than asked for, so the page keeps no clock of its own.
             FromApp::Boot(boot) => adopt_boot(boot, &app),
+            FromApp::Show(boot) => show_page(boot, &app),
             FromApp::Nudge(page) => {
                 if let Some(script) = nudge_script(&page) {
                     let window = app.clone();
@@ -324,8 +471,40 @@ fn read_loop(mut answers: BufReader<std::io::Stdin>, app: AppHandle) {
 fn nudge_script(page: &str) -> Option<&'static str> {
     match page {
         "upcoming" => Some("window.museUpcomingReady && window.museUpcomingReady();"),
+        // Both Settings cards read one snapshot, and either can be the one that
+        // changed: the updater's answer lands after a press, and the policy
+        // read lands after the page opened. Re-asking both is one read of the
+        // app's own state, never a second source of truth.
+        "settings" => Some(
+            "window.museUpdatesReady && window.museUpdatesReady(); window.musePolicyReady && window.musePolicyReady();",
+        ),
         _ => None,
     }
+}
+
+/// The app switched this window's page: keep the payload and reload, and the
+/// protocol serves the page the payload names. One window and one document URL,
+/// so there is no second window to close and no moment with neither up.
+fn show_page(boot: serde_json::Value, app: &AppHandle) {
+    if !boot.is_object() {
+        return;
+    }
+    eprintln!(
+        "muse-window: the app switched this window to {:?} at {}ms",
+        boot.get("page")
+            .and_then(|page| page.as_str())
+            .unwrap_or("?"),
+        elapsed_ms()
+    );
+    if let Ok(mut slot) = BOOT.lock() {
+        *slot = Some(boot);
+    }
+    let window = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(view) = window.get_webview_window("shell") {
+            let _ = view.eval("window.location.reload();");
+        }
+    });
 }
 
 /// A pushed boot payload: kept for a reload, and handed to the drawer so the
@@ -393,7 +572,10 @@ const SHIM: &str = r#"
 
 #[cfg(test)]
 mod tests {
-    use super::{FromApp, boot_empty, nudge_script, parse, read_boot, reply_script};
+    use super::{
+        FromApp, boot_empty, boot_with_page, nudge_script, page_from_env, parse, read_boot,
+        reply_script,
+    };
     use serde_json::json;
 
     /// A raise is the app's control line, not one of a page's answers: it is
@@ -424,6 +606,11 @@ mod tests {
             nudge_script("upcoming"),
             Some("window.museUpcomingReady && window.museUpcomingReady();")
         );
+        // A Settings nudge wakes both of its cards: each re-asks the app's own
+        // snapshot, so a press that answered before its worker did settles.
+        let settings = nudge_script("settings").expect("settings has a hook");
+        assert!(settings.contains("museUpdatesReady"));
+        assert!(settings.contains("musePolicyReady"));
         assert_eq!(nudge_script("chat"), None);
     }
 
@@ -525,7 +712,34 @@ mod tests {
     #[test]
     fn a_boot_answer_that_is_not_an_object_leaves_the_empty_shell() {
         let mut answers = std::io::Cursor::new("{\"id\":0,\"reply\":\"later\"}\n");
-        assert_eq!(read_boot(&mut answers), boot_empty());
+        assert_eq!(read_boot(&mut answers), boot_empty("shell"));
+    }
+
+    /// The app names the page: the sign-in surface on a clone with no link, the
+    /// shell otherwise, and the page this window always served for anything an
+    /// older or newer app might say.
+    #[test]
+    fn the_app_names_the_page_this_window_opens_on() {
+        assert_eq!(page_from_env(Some("signin")), "signin");
+        assert_eq!(page_from_env(Some("shell")), "shell");
+        assert_eq!(page_from_env(None), "shell");
+        assert_eq!(page_from_env(Some("settings")), "shell");
+        assert_eq!(boot_with_page(json!({ "ok": true }), "signin")["page"], "signin");
+    }
+
+    /// A page switch is a control line carrying the app's payload for the new
+    /// page, and nothing else: the page inside it is what the document renders.
+    #[test]
+    fn a_show_line_carries_the_page_it_switches_to() {
+        let FromApp::Show(boot) = parse(
+            r#"{"show":{"page":"shell","pages":[{"name":"chat","title":"Chat"}]}}"#,
+        ) else {
+            panic!("a show line is a page switch");
+        };
+        assert_eq!(boot["page"], "shell");
+        assert_eq!(boot["pages"][0]["name"], "chat");
+        assert!(matches!(parse(r#"{"show":[1]}"#), FromApp::Ignore));
+        assert!(matches!(parse(r#"{"show":"shell"}"#), FromApp::Ignore));
     }
 
     /// The app closing the pipe before answering is the same case: no payload,
@@ -533,6 +747,6 @@ mod tests {
     #[test]
     fn a_closed_bridge_leaves_the_empty_shell() {
         let mut answers = std::io::Cursor::new("");
-        assert_eq!(read_boot(&mut answers), boot_empty());
+        assert_eq!(read_boot(&mut answers), boot_empty("shell"));
     }
 }

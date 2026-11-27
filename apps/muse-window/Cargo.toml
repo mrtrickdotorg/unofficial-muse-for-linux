@@ -15,6 +15,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # No GTK 4 here on purpose: this window is GTK 3 + WebKitGTK 4.1 (via wry/tao),
 # and GTK aborts when it meets GTK 4 in the same process.
-tauri = { version = "2.12", features = [] }
+# `devtools` is what `WebviewWindowBuilder::devtools` needs in a release build.
+# The window still ships with the inspector off; only a launch that sets
+# `MUSE_INSPECTOR` turns it on (see `inspector_enabled`).
+tauri = { version = "2.12", features = ["devtools"] }
 http = "1"
 serde_json = "1"

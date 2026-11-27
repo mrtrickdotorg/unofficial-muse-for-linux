@@ -10,9 +10,10 @@ turn, and requires that
   * both cards settle on the same words and offer the same press,
   * neither card is left on a busy step -- the exact failure the page used to
     have when a press answered before the worker did,
-  * with the harness feed (the default), both cards reach "A newer build is
-    available." with "Download update", then the staged state with "Restart to
-    update", and a Restart press is refused instead of replacing this copy,
+  * with the harness feed (the default), both cards reach the offered sentence
+    ("A newer build is available: <build> (<size MB>).") with "Download
+    update", then the staged state with "Restart to update", and a Restart
+    press is refused instead of replacing this copy,
   * with two Settings web views open at once, a press reaches every one of
     them -- the app keeps every window a page opened, not just the newest,
   * a Settings web view opened while a check is running boots on the busy
@@ -121,7 +122,9 @@ WEB_VIEW_BUTTON = "Web view"
 CHECK_STATUS = "Checking for updates…"
 DOWNLOAD_STATUS = "Downloading the update…"
 RESTART_STATUS = "Restarting into the update…"
-OFFERED_STATUS = "A newer build is available."
+# The offered sentence names the feed's build and the asset's size, so a round
+# matches its prefix: the figures come from the app, not from this file.
+OFFERED_STATUS = "A newer build is available: "
 CHECK_REFUSAL = "An update check is already running."
 NOT_APPIMAGE = "This copy updates through its own channel (store or checkout), not here."
 # The app's failure prefixes; the rest of each sentence comes from the OS.
@@ -346,6 +349,22 @@ def press(frame_name, button_names, window=2.0):
         time.sleep(0.05)
 
 
+def is_offered(text):
+    """Whether a card's words are the app's newer-build answer."""
+    return isinstance(text, str) and text.startswith(OFFERED_STATUS)
+
+
+def status_matches(expected, actual):
+    """Whether `actual` is the answer `expected` names.
+
+    Every other sentence is compared word for word; the offered one by prefix,
+    because it goes on to name the build and size the feed reported.
+    """
+    if expected == OFFERED_STATUS:
+        return is_offered(actual)
+    return actual == expected
+
+
 def card(frame_name, index=0):
     """The card of the `index`th window named `frame_name`, as rendered."""
     views = frames_named(frame_name)
@@ -434,7 +453,7 @@ def wait_web_windows(status, action, timeout, label):
         views = frames_named(WEB_FRAME)
         if len(views) >= 2:
             seen = [(value[0], value[2]) for value in (card_of(view) for view in views)]
-            if all(value == (status, action) for value in seen):
+            if all(status_matches(status, value[0]) and value[1] == action for value in seen):
                 return len(views)
         time.sleep(POLL)
     detail = ", ".join(f"{value!r}" for value in seen) or "no cards read"
@@ -710,7 +729,7 @@ def restart_round(proc, root, copy, asset, timeout):
     # The page checks itself when it opens; pressing during that check would be
     # refused, so the round waits for the card's own answer and asks only if it
     # did not land on an offer.
-    offered = lambda: card(MAIN_FRAME)[0] == OFFERED_STATUS
+    offered = lambda: is_offered(card(MAIN_FRAME)[0])
     try:
         wait_until(offered, timeout, "the update to be offered")
     except Failure:
@@ -890,12 +909,13 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                 f"press {label} check: both mid-check on {mid!r}; "
                 f"both read {status!r} with {action!r}"
             )
-            if feed_mode == "newer" and (status, action) != (OFFERED_STATUS, "Download update"):
+            if feed_mode == "newer" and (not is_offered(status) or action != "Download update"):
                 dump_tree(MAIN_FRAME)
                 dump_tree(WEB_FRAME)
                 raise Failure(
-                    f"the {label} press should offer {OFFERED_STATUS!r} with "
-                    f"'Download update', got {status!r} with {action!r}"
+                    f"the {label} press should offer a sentence starting "
+                    f"{OFFERED_STATUS!r} with 'Download update', got {status!r} with "
+                    f"{action!r}"
                 )
 
         if feed_mode == "newer":
@@ -1091,7 +1111,7 @@ def run(binary, timeout, busy_window, keep, env_script, feed_mode, delay_ms, no_
                     timeout,
                     busy_window,
                 )
-                if status != OFFERED_STATUS or action != "Download update":
+                if not is_offered(status) or action != "Download update":
                     raise Failure(
                         f"the press after the {label} settled on {status!r} with {action!r}"
                     )
