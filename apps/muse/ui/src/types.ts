@@ -123,6 +123,10 @@ export type ThreadRow = {
   unread: number;
   pinned: boolean;
   side: boolean;
+  /// Archived: the service stopped listing the session and the app's own
+  /// memory put the row back, so it files under "Archived" and offers
+  /// Unarchive.
+  archived: boolean;
 };
 
 // The conversation listing, with `loaded` separating an account with no

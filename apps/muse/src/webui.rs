@@ -569,10 +569,7 @@ type ThreadReadback = (
 fn reread_threads(client: &AccountClient) -> ThreadReadback {
     match client.connect() {
         Ok(snapshot) => (
-            Some(crate::pages::held_threads_from(
-                &snapshot.threads,
-                &crate::app::local_today(),
-            )),
+            Some(crate::pages::listed_rows(&snapshot.threads)),
             snapshot.threads,
             None,
         ),
@@ -812,10 +809,7 @@ fn fresh_threads(client: Option<AccountClient>) -> Receiver<Fetched> {
         let fetched = match client {
             None => Fetched::Failed("no account link in this app".into()),
             Some(client) => match client.connect() {
-                Ok(snapshot) => Fetched::Threads(crate::pages::held_threads_from(
-                    &snapshot.threads,
-                    &crate::app::local_today(),
-                )),
+                Ok(snapshot) => Fetched::Threads(crate::pages::listed_rows(&snapshot.threads)),
                 Err(error) => Fetched::Failed(error.to_string()),
             },
         };
@@ -2169,6 +2163,23 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
             threads,
             reread_error,
         } => {
+            // An accepted archive leaves the listing, so the app remembers it;
+            // an accepted unarchive brings it back, so the memory forgets it.
+            if accepted {
+                match verb.as_str() {
+                    "archive" => {
+                        let title = crate::pages::threads_snapshot()
+                            .threads
+                            .iter()
+                            .find(|row| row.id == id)
+                            .map(|row| row.title.clone())
+                            .unwrap_or_else(|| id.clone());
+                        crate::archived::remember(&id, &title);
+                    }
+                    "unarchive" => crate::archived::forget(&id),
+                    _ => {}
+                }
+            }
             if let Some(rows) = rows {
                 crate::pages::threads_cache(rows);
                 // The drawer is painted from the panel's own listing, so the
@@ -4844,6 +4855,7 @@ mod tests {
                     unread: 2,
                     pinned: false,
                     side: false,
+                    archived: false,
                 },
                 crate::pages::ThreadRow {
                     id: "s-2".into(),

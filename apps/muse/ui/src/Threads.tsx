@@ -100,15 +100,17 @@ function ThreadLine({
               {busy ? "Marking…" : "Mark read"}
             </button>
           )}
-          <button
-            type="button"
-            className="thread-action"
-            aria-label={`${item.pinned ? "Unpin" : "Pin"} ${item.title}`}
-            onClick={() => onOp({ id: item.id, verb: item.pinned ? "unpin" : "pin" })}
-            disabled={busy}
-          >
-            {item.pinned ? "Unpin" : "Pin"}
-          </button>
+          {!item.archived && (
+            <button
+              type="button"
+              className="thread-action"
+              aria-label={`${item.pinned ? "Unpin" : "Pin"} ${item.title}`}
+              onClick={() => onOp({ id: item.id, verb: item.pinned ? "unpin" : "pin" })}
+              disabled={busy}
+            >
+              {item.pinned ? "Unpin" : "Pin"}
+            </button>
+          )}
           <button
             type="button"
             className="thread-action"
@@ -121,11 +123,11 @@ function ThreadLine({
           <button
             type="button"
             className="thread-action"
-            aria-label={`Archive ${item.title}`}
-            onClick={() => onOp({ id: item.id, verb: "archive" })}
+            aria-label={`${item.archived ? "Unarchive" : "Archive"} ${item.title}`}
+            onClick={() => onOp({ id: item.id, verb: item.archived ? "unarchive" : "archive" })}
             disabled={busy}
           >
-            Archive
+            {item.archived ? "Unarchive" : "Archive"}
           </button>
           <button
             type="button"
@@ -379,7 +381,9 @@ export function Threads() {
       <div className="foot">
         Web UI slice of the port: the same rows the native page holds, with the same presses — pin,
         rename, archive and delete go through the app's own `session_op`, and the listing read after
-        each one is what this page paints. Delete asks twice, because a conversation the service removes is gone for good. Opening a
+        each one is what this page paints. An archived row files under Archived and offers Unarchive:
+        the service stops listing an archived session, so the app remembers it until it comes back.
+        Delete asks twice, because a conversation the service removes is gone for good. Opening a
         conversation marks it read the same way, and the row's own Mark read press clears a badge
         without opening anything.
       </div>

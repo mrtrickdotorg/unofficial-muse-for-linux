@@ -8,6 +8,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 
 mod app;
+mod archived;
 mod chat;
 mod chat_view;
 mod composer;

@@ -2294,7 +2294,9 @@ impl Chat {
     /// and both drawers are painted from it, so a change and the badge it
     /// clears show up where a person looks without waiting for a reconnect.
     pub(crate) fn adopt_listing(self: &Rc<Self>, threads: Vec<muse_account::Thread>) {
-        let rows = crate::pages::held_threads_from(&threads, &local_today());
+        // This listing was just read, so it is the evidence that settles the
+        // archive memory: an id it names is archived no longer.
+        let rows = crate::pages::listed_rows(&threads);
         // Only a listing that says something new spends the page's held state:
         // writing it clears an armed delete, and a background read must never
         // eat a press the reader has already made.

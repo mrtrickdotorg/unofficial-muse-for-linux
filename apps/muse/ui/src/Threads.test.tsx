@@ -14,6 +14,7 @@ const row = (overrides: Partial<ThreadRow> = {}): ThreadRow => ({
   unread: 0,
   pinned: false,
   side: false,
+  archived: false,
   ...overrides,
 });
 
@@ -252,6 +253,57 @@ describe("the Threads web page", () => {
     await waitFor(() => expect(screen.queryByText("Done for now")).toBeNull());
     expect(screen.getByText("Still here")).toBeInTheDocument();
     expect(screen.getByText("1 threads")).toBeInTheDocument();
+  });
+
+  // The service stops listing an archived session, so the app keeps the row
+  // under Archived until it is unarchived. That row is the only place Unarchive
+  // can be pressed, so it must render and it must send the service's verb.
+  it("unarchives a row from the Archived section", async () => {
+    const held = bootPayload({
+      threads: [
+        row({ id: "s-1", title: "Still here" }),
+        row({ id: "s-9", title: "Put away", group: "Archived", archived: true, meta: "" }),
+      ],
+      total: 2,
+    });
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (command) => {
+        if (command === "threads.op") {
+          return {
+            ok: true,
+            accepted: true,
+            ...bootPayload({
+              threads: [row({ id: "s-1", title: "Still here" }), row({ id: "s-9", title: "Put away" })],
+              total: 2,
+            }),
+          };
+        }
+        return { ok: true, ...held };
+      },
+      (request) => seen.push(request),
+    );
+
+    render(<Threads />);
+
+    expect(screen.getByText("Archived")).toBeInTheDocument();
+    expect(screen.getByText("Put away")).toBeInTheDocument();
+    // An archived row offers Unarchive, not a second Archive press or a pin.
+    expect(screen.queryByRole("button", { name: "Archive Put away" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Pin Put away" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Unarchive Put away" }));
+
+    await waitFor(() =>
+      expect(seen.some((request) => request.verb === "unarchive" && request.thread === "s-9")).toBe(
+        true,
+      ),
+    );
+    // The listing read back puts the row back in its day group, not under
+    // Archived.
+    await waitFor(() => expect(screen.queryByText("Archived")).toBeNull());
+    expect(screen.getByText("Put away")).toBeInTheDocument();
   });
 
   // Deleting a conversation is a real removal on the service, so the row asks

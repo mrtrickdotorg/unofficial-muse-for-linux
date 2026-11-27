@@ -3354,6 +3354,10 @@ pub(crate) struct ThreadRow {
     pub pinned: bool,
     /// A side chat files under its own header instead of a day group.
     pub side: bool,
+    /// This row is archived: the service stopped listing it and the app's own
+    /// memory put it back, so the row paints under "Archived" and its menu
+    /// offers Unarchive.
+    pub archived: bool,
 }
 
 /// One transcript row as the web page draws it: the same three shapes the
@@ -3691,20 +3695,38 @@ pub(crate) fn held_threads_from(threads: &[muse_account::Thread], today: &str) -
                 thread.title.clone()
             },
             meta: thread_meta(thread.snippet.as_deref(), thread.updated_at.as_deref()),
-            group: thread_group_label(thread.updated_at.as_deref(), today),
+            group: if thread.archived {
+                crate::archived::GROUP.to_owned()
+            } else {
+                thread_group_label(thread.updated_at.as_deref(), today)
+            },
             unread: thread.unread_count,
             pinned: thread.pinned,
             side: !thread.is_primary,
+            archived: thread.archived,
         })
         .collect();
-    // Stable: a pinned row keeps the listing's order among its peers.
-    rows.sort_by_key(|row| !row.pinned);
+    // Stable: a pinned row keeps the listing's order among its peers, and the
+    // archived ones file last under their own header.
+    rows.sort_by_key(|row| (row.archived, !row.pinned));
     HeldThreads {
         total: rows.len() as u64,
         threads: rows,
         loaded: true,
         error: None,
     }
+}
+
+/// The rows the pages paint for a listing that was just read from the service:
+/// fresh evidence settles the archive memory first, then the memory's rows join
+/// the listing. The order is the point -- painting an old listing must not sweep
+/// it -- so it is written once here rather than at each read.
+pub(crate) fn listed_rows(threads: &[muse_account::Thread]) -> HeldThreads {
+    crate::archived::sweep(threads);
+    held_threads_from(
+        &crate::archived::with_archived(threads),
+        &super::app::local_today(),
+    )
 }
 
 /// One Search result as the web view shows it: the conversation's id (the
@@ -5825,6 +5847,13 @@ fn append_thread_row(
         let session_id = thread.session_id.clone();
         let pinned = thread.pinned;
         let archived = thread.archived;
+        // The words the row prints, so the Archived section reads the same as
+        // the listing did.
+        let thread_title_for_archive = if thread.title.trim().is_empty() {
+            "(untitled)".to_owned()
+        } else {
+            thread.title.trim().to_owned()
+        };
         button.connect_clicked(move |_| {
             popover_held.popdown();
             let Some(chat) = ctx.chat.upgrade() else {
@@ -5844,6 +5873,12 @@ fn append_thread_row(
             };
             let line_for_done = line_inner.clone();
             let ctx_for_done = ctx.clone();
+            // The service stops listing an archived session, so the app's
+            // memory is what keeps its Unarchive reachable; unarchiving is
+            // what lets the listing name it again, so the memory forgets it.
+            let session_for_done = session_id.clone();
+            let title_for_done = thread_title_for_archive.clone();
+            let verb_for_done = verb.to_owned();
             super::app::dispatch(
                 &chat,
                 {
@@ -5855,6 +5890,13 @@ fn append_thread_row(
                 move |chat, answer| {
                     let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
                     if accepted {
+                        match verb_for_done.as_str() {
+                            "archive" => {
+                                crate::archived::remember(&session_for_done, &title_for_done)
+                            }
+                            "unarchive" => crate::archived::forget(&session_for_done),
+                            _ => {}
+                        }
                         show(&ctx_for_done, "threads");
                     } else {
                         line_for_done.append(&card_note(
@@ -5880,8 +5922,10 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) -> bool {
         empty_note(&list, "Link your account first.");
         return true;
     };
-    let mut threads = chat.threads();
-    threads.sort_by_key(|thread| std::cmp::Reverse(thread.pinned));
+    // The service stops listing an archived session, so the app's own memory
+    // puts it back: without that row nothing could offer its Unarchive.
+    let mut threads = crate::archived::with_archived(&chat.threads());
+    threads.sort_by_key(|thread| (thread.archived, std::cmp::Reverse(thread.pinned)));
     // The web slice opens on exactly these rows: one cache fill per paint,
     // built by the same helpers that word the native rows, so the two
     // renderers cannot drift on groups, clock times or pin order.
@@ -5900,7 +5944,15 @@ fn fill_threads(ctx: &Ctx, page: &gtk4::Box) -> bool {
     let mut group: Option<String> = None;
     for thread in main {
         if !thread.pinned {
-            let label = thread_group_label(thread.updated_at.as_deref(), &today);
+            // An archived row files under its own header rather than a day:
+            // the service stopped listing it and the app's memory put it back,
+            // so a "Today" or "Earlier" header would be about a listing it is
+            // no longer part of.
+            let label = if thread.archived {
+                crate::archived::GROUP.to_owned()
+            } else {
+                thread_group_label(thread.updated_at.as_deref(), &today)
+            };
             if group.as_deref() != Some(label.as_str()) {
                 let head = gtk4::Label::new(Some(&label));
                 head.set_halign(gtk4::Align::Start);
@@ -9098,6 +9150,32 @@ pub(crate) mod tests {
         assert!(text.lines().last().expect("last").contains("event=visit"));
         assert_ne!(text.lines().next(), Some(first.as_str()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An archived session files under its own header, marked archived: that
+    /// row is the only place the menu's Unarchive can be pressed, because the
+    /// service stops listing it once it is archived.
+    #[test]
+    fn an_archived_row_files_under_its_own_header() {
+        let thread = |id: &str, archived: bool| muse_account::Thread {
+            session_id: id.to_owned(),
+            title: format!("{id} title"),
+            archived,
+            pinned: false,
+            is_thread: true,
+            unread_count: 0,
+            snippet: None,
+            is_primary: true,
+            updated_at: Some("2026-11-20T09:14:00Z".to_owned()),
+        };
+        let rows = held_threads_from(&[thread("s-1", false), thread("s-9", true)], "2026-11-20");
+        assert_eq!(rows.threads.len(), 2);
+        let last = rows.threads.last().unwrap();
+        assert_eq!(last.id, "s-9", "an archived row sorts after the rest");
+        assert!(last.archived);
+        assert_eq!(last.group, "Archived");
+        assert_eq!(rows.threads[0].group, "Today");
+        assert!(!rows.threads[0].archived);
     }
 
     #[test]
