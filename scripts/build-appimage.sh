@@ -41,7 +41,23 @@ fetch_pinned \
     "$APPIMAGETOOL" "$APPIMAGETOOL_SHA256"
 
 cd "$ROOT"
-./scripts/test-account.sh
+# The updater compares this build's commit with the feed's. CI passes its own
+# (`UMFL_BUILD_SHA`); a local build stamps this checkout's HEAD, so a bundle
+# built here can answer the real check instead of only ever saying it is
+# current.
+export UMFL_BUILD_SHA="${UMFL_BUILD_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+if [[ -n "$UMFL_BUILD_SHA" ]]; then
+    printf 'Stamped build commit %s\n' "$UMFL_BUILD_SHA"
+fi
+# The account gate needs the pinned community bridge, which is installed by
+# scripts/setup-account-bridge.sh (CI and the Containerfile do it). A host
+# without it cannot pass the gate: the bridge-backed tests skip, and the gate
+# refuses skips by design. Say so when skipping, rather than pretending it ran.
+if [[ "${MUSE_BUILD_SKIP_ACCOUNT_TESTS:-}" == "1" ]]; then
+    printf 'Skipping the account gate (MUSE_BUILD_SKIP_ACCOUNT_TESTS=1): the pinned bridge is not installed here.\n' >&2
+else
+    ./scripts/test-account.sh
+fi
 cargo test --workspace --locked
 cargo build --release --locked -p muse
 cargo build --release --locked -p muse-reminder-runner
@@ -101,6 +117,13 @@ if [[ -z "$webkit41_helpers" ]]; then
 fi
 cp -r "$webkit41_helpers" "$APPDIR/usr/lib/"
 install -m 644 "$ROOT/resources/unofficial-muse-for-linux.appdata.xml" "$APPDIR/usr/share/metainfo/unofficial-muse-for-linux.appdata.xml"
+# The icon set the bundle carries: a hicolor tree at every size a desktop asks
+# for. linuxdeploy also takes the SVG for the AppImage's own icon; the PNGs are
+# what a menu falls back to on hosts that do not scale SVG app icons.
+for size in 16 32 48 64 128 256 512; do
+    install -Dm644 "$ROOT/resources/icons/${size}x${size}.png" \
+        "$APPDIR/usr/share/icons/hicolor/${size}x${size}/apps/unofficial-muse-for-linux.png"
+done
 # Bundle only this project's typed sidecars, never the external community
 # checkout, Meta-derived protocol assets, Python environment, or account state.
 install -m 644 "$ROOT/scripts/muse_account_bridge.py" "$ACCOUNT_DIR/muse_account_bridge.py"
