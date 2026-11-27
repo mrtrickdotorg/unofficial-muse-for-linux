@@ -2564,21 +2564,84 @@ def _probe_search_shapes(config_dir, payload, param):
         if isinstance(rows, list):
             parts.append("rows={}".format(len(rows)))
             if rows and isinstance(rows[0], dict):
-                parts.append("row:" + ",".join(sorted(rows[0].keys())))
-        timing_log(config_dir, "search-probe " + " | ".join(parts)[:600])
+                first = rows[0]
+                parts.append("row:" + ",".join(sorted(first.keys())))
+                # The row's own dicts carry the conversation and the
+                # matched event; their key names are the shape the
+                # projection needs, and key names are not content.
+                for key in sorted(first.keys()):
+                    value = first.get(key)
+                    if isinstance(value, dict):
+                        parts.append("{}:".format(key)
+                                     + ",".join(sorted(value.keys())[:24]))
+                    elif isinstance(value, list) and value \
+                            and isinstance(value[0], dict):
+                        parts.append("{0}[]:".format(key)
+                                     + ",".join(sorted(value[0].keys())[:24]))
+        timing_log(config_dir, "search-probe " + " | ".join(parts)[:900])
     except Exception:
         pass
+
+
+def _search_hit_rows(payload):
+    """Project the recorded `chat.search` answer into openable rows.
+
+    The live shape (Nov 23, 2026; key names from the probe, no values):
+    `{"has_more": bool, "hits": [{chat_event, session, snippet}]}`, where
+    `session` is the conversation (`session_id`, `title`, `pinned`,
+    `archived`, `is_thread`) and `chat_event` the matched message
+    (`session_id`, `display_text`, `role`, `occurred_at_ms`, ...). A hit
+    therefore carries no top-level id, which is why the generic
+    alias hunt below found none: every result was dropped as unopenable
+    and the page could only count the matches. Here a hit becomes the
+    conversation it belongs to -- the session's own id, so pressing the
+    row opens that chat -- titled by the session and lined with the
+    matched snippet, which is the one thing a search result is for.
+    """
+    hits = payload["hits"]
+    if len(hits) > LISTING_MAX_CONTAINER:
+        raise BridgeFailure("protocol_error")
+    entries = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        session = hit.get("session") if isinstance(hit.get("session"), dict) else {}
+        event = hit.get("chat_event") if isinstance(hit.get("chat_event"), dict) else {}
+        thread = optional_text(session.get("session_id")) or optional_text(
+            event.get("session_id"))
+        if not thread:
+            # Nothing to open: the same refusal to list a conversation the
+            # row cannot open that the generic projection makes.
+            continue
+        snippet = content_text(hit.get("snippet")) or content_text(
+            event.get("display_text"))
+        row = {"id": thread, "snippet": snippet}
+        title = content_text(session.get("title"))
+        if title:
+            row["title"] = title
+        entries.append((row, None, None))
+    return project_listing_rows(
+        entries,
+        len(hits),
+        extras=lambda row: {
+            "kicker": (content_text(row.get("snippet")) or "")[:200] or None,
+        },
+    )
 
 
 def search_rows(payload):
     """Project a chat.search answer into openable result rows.
 
-    The answer's shape is unrecorded, so the container hunt is the
-    tolerant listing one; what is NOT tolerated is a result with
-    no conversation to open -- its id may ride under any of the
-    usual alias keys, and a row carrying none is dropped here
-    rather than listed as a conversation it cannot open.
+    The recorded shape is flattened by `_search_hit_rows`; any other
+    answer falls back to the tolerant listing container hunt, because a
+    shape this build does not recognise must not read as an empty
+    surface. What is NOT tolerated either way is a result with no
+    conversation to open -- its id may ride under any of the usual alias
+    keys, and a row carrying none is dropped here rather than listed as
+    a conversation it cannot open.
     """
+    if isinstance(payload, dict) and isinstance(payload.get("hits"), list):
+        return _search_hit_rows(payload)
     entries, total = listing_container(
         payload, ("results", "items", "matches", "hits",
                   "conversations", "threads", "data"))

@@ -1530,6 +1530,50 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["body"], "the otters return in May")
         self.assertEqual(result["recognized"], 2)
 
+    def test_search_projects_the_recorded_hit_shape_into_conversations(self):
+        # The live answer (Nov 23, 2026) nests the conversation one level
+        # down: hits carry `session`, `chat_event` and `snippet`, and no
+        # hit has a top-level id -- so the alias hunt found nothing and
+        # every match was dropped. Each hit must become the conversation
+        # it belongs to, with the matched words as its line.
+        from contextlib import contextmanager
+        bridge = load_bridge()
+        class Gateway:
+            def call_json(self, method, **kwargs):
+                if (kwargs.get("query") or {}).get("q"):
+                    raise RuntimeError("unknown parameter")
+                return {"has_more": False, "hits": [
+                    {"snippet": "the otters return in May",
+                     "session": {"session_id": "thread-1", "title": "River plans",
+                                 "pinned": True, "archived": False,
+                                 "is_thread": True},
+                     "chat_event": {"session_id": "thread-1",
+                                    "message_id": "assistant-msg-1",
+                                    "display_text": "the otters return in May",
+                                    "role": "assistant", "seq": 12,
+                                    "occurred_at_ms": 1795000000000}},
+                    {"snippet": "more otters \u2014 with a long tail",
+                     "session": {"session_id": "thread-2", "title": "River again"},
+                     "chat_event": {"session_id": "thread-2", "seq": 3}},
+                    # No conversation anywhere: counted, never listed.
+                    {"snippet": "orphan match", "session": {},
+                     "chat_event": {}},
+                ]}
+        class Client(FakeClient):
+            @contextmanager
+            def _gateway(self, config):
+                yield Gateway()
+        result = bridge.Adapter(Client(), {}).dispatch(
+            {"op": "search", "query": "otters"})
+        self.assertEqual([item["id"] for item in result["items"]],
+                         ["thread-1", "thread-2"])
+        self.assertEqual([item["title"] for item in result["items"]],
+                         ["River plans", "River again"])
+        self.assertEqual(result["items"][0]["kicker"], "the otters return in May")
+        self.assertEqual(result["items"][1]["kicker"], "more otters \u2014 with a long tail")
+        self.assertEqual(result["total"], 3)
+        self.assertEqual(result["recognized"], 2)
+
     def test_search_surfaces_the_refusal_when_no_parameter_answers(self):
         from contextlib import contextmanager
         bridge = load_bridge()
