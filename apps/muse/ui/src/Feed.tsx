@@ -3,13 +3,79 @@ import { call, channelAvailable } from "./api";
 import { useHeldRead } from "./held";
 import type { FeedCard as Card, FeedSnapshot } from "./types";
 
+/// Elements that can carry or load code, a document, or a form: none of
+/// them belong in a graphic, and removing the element removes its subtree
+/// with it. `<template>` goes too — its content is inert while it sits in
+/// a template, but it lives in a separate tree the attribute walk below
+/// cannot see into, so it does not get to stay.
+const WIDGET_BANNED_ELEMENTS =
+  "script, iframe, object, embed, form, base, meta, link, title, frame, frameset, applet, xmp, noembed, noframes, template";
+
+/// Attributes whose value is a URL the element dereferences or navigates
+/// to: the places a `javascript:` (or kin) address can hide.
+const WIDGET_URL_ATTRIBUTES = [
+  "href",
+  "src",
+  "xlink:href",
+  "action",
+  "formaction",
+  "poster",
+];
+
+/// True when a URL value names a script-bearing scheme. Browsers ignore
+/// ASCII whitespace and controls inside a scheme (`java\tscript:` still
+/// runs), so the probe strips them everywhere before comparing; the
+/// attribute itself is left untouched unless the probe objects.
+function isScriptUrl(value: string): boolean {
+  const probe = value.replace(/[\u0000-\u0020]+/g, "").toLowerCase();
+  return (
+    probe.startsWith("javascript:") ||
+    probe.startsWith("vbscript:") ||
+    probe.startsWith("data:text/html")
+  );
+}
+
+/// Parse service markup into a fragment with everything script-capable
+/// removed: banned elements, every `on*` event-handler attribute, and
+/// every script URL in a URL-bearing attribute. Parsing into a
+/// `<template>` keeps the walk in fragment context — a leading `<style>`
+/// stays with the graphic instead of being hoisted into a document head
+/// the way a full-document parse would hoist it — and what survives is
+/// what a graphic needs: elements, classes, the service's own `<style>`,
+/// and inert attributes.
+function sanitizeWidgetHtml(html: string): DocumentFragment {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const content = template.content;
+  content
+    .querySelectorAll(WIDGET_BANNED_ELEMENTS)
+    .forEach((el) => el.remove());
+  content.querySelectorAll("*").forEach((el) => {
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase();
+      if (name.startsWith("on")) {
+        el.removeAttribute(attr.name);
+      } else if (
+        WIDGET_URL_ATTRIBUTES.includes(name) &&
+        isScriptUrl(attr.value)
+      ) {
+        el.removeAttribute(attr.name);
+      }
+    }
+  });
+  return content;
+}
+
 /// One graphic's markup, in a shadow root: the service's own `<style>` stays
-/// inside the widget (no leak into this page), its `<script>` never runs
-/// (`innerHTML` does not execute), and link presses are cancelled so a card
-/// cannot navigate the window away. The native frame keeps the same promises
-/// with a caged WebKit view; this build's WebKit renders no subframe at all
-/// (srcdoc and data URLs both come back empty), so the plain-DOM rendering is
-/// the one that actually shows the graphic.
+/// inside the widget (no leak into this page), and link presses are
+/// cancelled so a card cannot navigate the window away. The markup is
+/// sanitized before it is inserted (see `sanitizeWidgetHtml`): a
+/// `<script>` element set through `innerHTML` would not run, but inline
+/// event handlers would — in this page's realm, where the command bridge
+/// answers — so "does not execute" was never the whole promise. The
+/// native frame keeps its promise with a caged WebKit view in another
+/// process; this page has no second process, so the markup itself is
+/// made inert instead.
 function WidgetGraphic({ html }: { html: string }) {
   const host = useRef<HTMLDivElement>(null);
 
@@ -17,7 +83,8 @@ function WidgetGraphic({ html }: { html: string }) {
     const node = host.current;
     if (!node) return;
     const root = node.shadowRoot ?? node.attachShadow({ mode: "open" });
-    root.innerHTML = html;
+    root.innerHTML = "";
+    root.appendChild(sanitizeWidgetHtml(html));
     const onClick = (event: Event) => {
       const target = event.target as Element | null;
       if (target && typeof target.closest === "function" && target.closest("a")) {

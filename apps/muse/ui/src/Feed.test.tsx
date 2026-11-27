@@ -112,6 +112,90 @@ describe("the Feed web page", () => {
     expect(screen.queryByText("graphic text")).not.toBeInTheDocument();
   });
 
+  it("strips event handlers and script elements from a live graphic", () => {
+    const held = bootPayload({
+      cards: [
+        card({
+          id: "u-1",
+          title: "Hostile graphic",
+          widget_html:
+            '<div><img src="x" onerror="steal()"><svg onload="steal()"></svg><script>steal()</script></div>',
+          live: true,
+        }),
+      ],
+      total: 1,
+    });
+    window.__MUSE_BOOT__ = held;
+    installChannel(() => ({ ok: true, ...held }));
+
+    render(<Feed />);
+
+    const host = document.querySelector(".feed-graphic") as HTMLElement;
+    const shadow = host.shadowRoot;
+    expect(shadow).not.toBeNull();
+    // The graphic's shape survives; its payloads do not. A <script>
+    // element would not have run through innerHTML, but the inline
+    // handlers would have — in this page's realm.
+    expect(shadow?.querySelector("div")).not.toBeNull();
+    expect(shadow?.querySelector("img")).not.toBeNull();
+    expect(shadow?.querySelector("img")?.getAttribute("onerror")).toBeNull();
+    expect(shadow?.querySelector("svg")?.getAttribute("onload")).toBeNull();
+    expect(shadow?.querySelector("script")).toBeNull();
+    expect(shadow?.innerHTML).not.toContain("onerror");
+    expect(shadow?.innerHTML).not.toContain("steal()");
+  });
+
+  it("neutralizes a script URL inside a live graphic", () => {
+    const held = bootPayload({
+      cards: [
+        card({
+          id: "u-1",
+          title: "Link graphic",
+          widget_html: '<a href="javascript:steal()">tap</a>',
+          live: true,
+        }),
+      ],
+      total: 1,
+    });
+    window.__MUSE_BOOT__ = held;
+    installChannel(() => ({ ok: true, ...held }));
+
+    render(<Feed />);
+
+    const host = document.querySelector(".feed-graphic") as HTMLElement;
+    const anchor = host.shadowRoot?.querySelector("a");
+    expect(anchor).not.toBeNull();
+    expect(anchor?.getAttribute("href")).toBeNull();
+    expect(anchor?.textContent).toBe("tap");
+  });
+
+  it("keeps a benign graphic — structure, its style, and its SVG — intact", () => {
+    const held = bootPayload({
+      cards: [
+        card({
+          id: "u-1",
+          title: "Benign graphic",
+          widget_html:
+            '<style>.hwk{font-weight:700}</style><div class="hwk"><svg viewBox="0 0 10 10"><rect width="10" height="10" fill="#2f6fed"></rect></svg><span>42%</span></div>',
+          live: true,
+        }),
+      ],
+      total: 1,
+    });
+    window.__MUSE_BOOT__ = held;
+    installChannel(() => ({ ok: true, ...held }));
+
+    render(<Feed />);
+
+    const host = document.querySelector(".feed-graphic") as HTMLElement;
+    const shadow = host.shadowRoot;
+    expect(shadow?.querySelector("style")?.textContent).toContain(".hwk");
+    expect(shadow?.querySelector("div.hwk")).not.toBeNull();
+    expect(shadow?.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 10 10");
+    expect(shadow?.querySelector("svg rect")?.getAttribute("fill")).toBe("#2f6fed");
+    expect(shadow?.textContent).toContain("42%");
+  });
+
   it("renders the native body markup, links included", () => {
     const held = bootPayload({
       cards: [
