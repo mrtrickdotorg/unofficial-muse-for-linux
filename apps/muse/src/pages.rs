@@ -6512,6 +6512,17 @@ pub fn relative_time_ms(ms: Option<i64>, now: i64) -> String {
     relative_time_epoch(ms.map(|ms| ms.div_euclid(1000)), now)
 }
 
+/// A link address made safe to sit inside the double quotes of an
+/// `href`. The body's escape pass has already handled `&`, `<`, `>`
+/// before addresses are lifted out of the text, but a `"` inside an
+/// address would close the attribute early and let the rest of the
+/// address be read as attributes on the anchor -- in the web page,
+/// which renders this markup as HTML, that is an injected event
+/// handler. Both link passes interpolate through here.
+fn escape_href(url: &str) -> String {
+    url.replace('"', "&quot;")
+}
+
 /// A feed body to Pango markup: escaped, markdown `[text](url)` links
 /// and bare URLs linkified, `**bold**` kept. The renderer's markdown
 /// pass is transcript-shaped; the feed needs links first, so this
@@ -6546,7 +6557,7 @@ pub fn feed_body_markup(body: &str) -> String {
                 .collect();
             let url = url.trim();
             if (url.starts_with("https://") || url.starts_with("http://")) && url.len() <= 2048 {
-                linked.push_str(&format!("<a href=\"{url}\">{text}</a>"));
+                linked.push_str(&format!("<a href=\"{}\">{text}</a>", escape_href(url)));
             } else {
                 linked.push_str(
                     &chars[index..index + close + 1 + end + 1]
@@ -6575,7 +6586,7 @@ pub fn feed_body_markup(body: &str) -> String {
             .trim_matches(|mark: char| ".,;:!?)]}'\"".contains(mark))
             .trim_start_matches('(');
         if (bare.starts_with("https://") || bare.starts_with("http://")) && bare.len() <= 2048 {
-            out.push_str(&format!("<a href=\"{bare}\">{bare}</a>"));
+            out.push_str(&format!("<a href=\"{}\">{bare}</a>", escape_href(bare)));
             out.push_str(&word[bare.len().min(word.len())..]);
         } else {
             out.push_str(word);
@@ -9532,6 +9543,30 @@ pub(crate) mod tests {
         let image = feed_body_markup("See ![alt](https://example.com/a.png) here.");
         assert!(!image.contains(">alt</a>"));
         assert!(image.contains("https://example.com/a.png"));
+    }
+
+    #[test]
+    fn feed_body_links_cannot_break_out_of_the_href() {
+        // A quote inside a markdown link's address: escaped, so the
+        // address stays inside the attribute and the handler-shaped
+        // tail never becomes an attribute of its own. (The address
+        // scan stops at the first `)`, which is what leaves the
+        // handler text inside the URL in the first place.)
+        let markup = feed_body_markup("[x](https://a.example/\"onmouseover=\"alert(1))");
+        assert!(markup.contains("&quot;"), "{markup}");
+        assert!(!markup.contains("\"onmouseover"), "{markup}");
+        assert!(
+            markup.contains("href=\"https://a.example/&quot;onmouseover=&quot;alert(1\""),
+            "{markup}"
+        );
+        // A bare address with an interior quote gets the same
+        // treatment: leading/trailing quotes are trimmed as
+        // punctuation, an interior one is escaped into the href.
+        let bare = feed_body_markup("See https://a.example/a\"b now.");
+        assert!(
+            bare.contains("href=\"https://a.example/a&quot;b\""),
+            "{bare}"
+        );
     }
 
     #[test]
