@@ -1261,7 +1261,15 @@ fn extract_part(headers: &[(String, String)], body: &[u8]) -> Result<(String, bo
         let mut text = String::from_utf8_lossy(&decoded).into_owned();
         let mut truncated = false;
         if text.len() > MAX_BODY {
-            text.truncate(MAX_BODY);
+            // Cut on a char boundary: the lossy decode expands each invalid
+            // byte to a 3-byte U+FFFD, so MAX_BODY can land mid-character
+            // and truncate() would panic. Walk back to the largest boundary
+            // at or under the cap (the truncate_utf8 pattern).
+            let mut end = MAX_BODY;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
             truncated = true;
         }
         return Ok((text, truncated));
@@ -1499,6 +1507,17 @@ fn smtp_send(
     )))
 }
 
+/// The 3-digit code opening an SMTP reply line. Goes through `get(..3)`
+/// rather than slicing `line[..3]`: a reply starting with a multi-byte
+/// character has no char boundary at byte 3, and the slice panics where
+/// this must return a Protocol error (the post-DATA reply reader already
+/// parses this way).
+fn smtp_reply_code(line: &str) -> Result<u16, MailError> {
+    line.get(..3)
+        .and_then(|digits| digits.parse().ok())
+        .ok_or_else(|| MailError::Protocol("Bad SMTP reply code.".into()))
+}
+
 fn smtp_command(conn: &mut Conn, cmd: &str) -> Result<(u16, String), MailError> {
     conn.write_line(cmd)?;
     let mut full = String::new();
@@ -1507,9 +1526,7 @@ fn smtp_command(conn: &mut Conn, cmd: &str) -> Result<(u16, String), MailError> 
         if line.len() < 4 {
             return Err(MailError::Protocol("Short SMTP reply.".into()));
         }
-        let code: u16 = line[..3]
-            .parse()
-            .map_err(|_| MailError::Protocol("Bad SMTP reply code.".into()))?;
+        let code: u16 = smtp_reply_code(&line)?;
         if !full.is_empty() {
             full.push(' ');
         }
@@ -1528,9 +1545,7 @@ fn smtp_ehlo(conn: &mut Conn) -> Result<Vec<String>, MailError> {
         if line.len() < 4 {
             return Err(MailError::Protocol("Short SMTP reply.".into()));
         }
-        let code: u16 = line[..3]
-            .parse()
-            .map_err(|_| MailError::Protocol("Bad SMTP reply code.".into()))?;
+        let code: u16 = smtp_reply_code(&line)?;
         if code != 250 {
             return Err(MailError::Protocol("EHLO rejected.".into()));
         }

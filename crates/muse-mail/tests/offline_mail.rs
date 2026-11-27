@@ -263,6 +263,42 @@ fn spawn_fake_smtp(log: Arc<Mutex<SmtpLog>>, drop_after_data: bool) -> u16 {
     port
 }
 
+/// Fake SMTP server that answers one chosen command with a non-ASCII reply
+/// line. 'é' is two bytes (C3 A9), so in "éé broken" byte index 3 lands
+/// inside the second 'é': slicing the reply at [..3] panics on the old code.
+fn spawn_fake_smtp_nonascii_reply(bad_command: &'static str) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut writer = stream;
+        write!(writer, "220 fake smtp\r\n").unwrap();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap() == 0 {
+                break;
+            }
+            let upper = line.to_ascii_uppercase();
+            if upper.starts_with(bad_command) {
+                write!(writer, "\u{00e9}\u{00e9} broken\r\n").unwrap();
+            } else if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                write!(writer, "250-fake\r\n250 AUTH LOGIN PLAIN\r\n").unwrap();
+            } else if upper.starts_with("QUIT") {
+                write!(writer, "221 bye\r\n").unwrap();
+                break;
+            } else {
+                write!(writer, "502 unimplemented\r\n").unwrap();
+            }
+        }
+    });
+    port
+}
+
 // ---------- tests ----------
 
 #[test]
@@ -426,6 +462,39 @@ fn non_utf8_body_does_not_panic_and_yields_text() {
 }
 
 #[test]
+fn oversize_non_utf8_body_truncates_on_a_char_boundary() {
+    // Regression: extract_part truncated the lossy-decoded body at exactly
+    // MAX_BODY bytes. Each invalid byte below expands to a 3-byte U+FFFD,
+    // and 65536 is not a multiple of 3, so the cut landed mid-character and
+    // truncate() panicked on sender-controlled mail. The raw message stays
+    // under the fetch literal cap; only the decoded text exceeds MAX_BODY.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut script = default_script(&log);
+    let mut body =
+        b"Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+            .to_vec();
+    body.extend(std::iter::repeat_n(0xff, 30_000));
+    script.bodies = vec![(101, body)];
+    let port = spawn_fake_imap(script);
+    let msg = MailClient::read_text_via(
+        &test_account(port),
+        "pw",
+        "INBOX",
+        101,
+        TlsMode::LoopbackPlaintext,
+    )
+    .unwrap();
+    assert!(msg.truncated);
+    assert!(msg.text.len() <= MAX_BODY, "got {} bytes", msg.text.len());
+    assert!(
+        msg.text.len() > MAX_BODY - 3,
+        "got {} bytes",
+        msg.text.len()
+    );
+    assert!(msg.text.chars().all(|c| c == '\u{fffd}'));
+}
+
+#[test]
 fn oversize_literal_fails_closed_without_reading_it_all() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let mut script = default_script(&log);
@@ -493,6 +562,31 @@ fn approve_sends_once_and_second_approval_fails() {
         1,
         "must send exactly once"
     );
+}
+
+#[test]
+fn nonascii_ehlo_reply_is_protocol_error_not_panic() {
+    // Regression: smtp_ehlo sliced the reply at [..3] to parse the code; a
+    // reply starting with a multi-byte character panics on that slice
+    // instead of returning a Protocol error.
+    let smtp_port = spawn_fake_smtp_nonascii_reply("EHLO");
+    let pending = queue_send(MailDraft::new("a@b.c", "s", "body").unwrap()).unwrap();
+    let account = MailAccount::new("mail.example.com", 993, "tester@example.com");
+    let err = MailClient::approve_send_via(&account, "pw", &pending, &loopback_smtp(smtp_port))
+        .unwrap_err();
+    assert!(matches!(err, MailError::Protocol(_)), "got {err:?}");
+}
+
+#[test]
+fn nonascii_command_reply_is_protocol_error_not_panic() {
+    // Regression: same [..3] slicing in smtp_command, reached here via the
+    // reply to AUTH LOGIN after a well-formed EHLO exchange.
+    let smtp_port = spawn_fake_smtp_nonascii_reply("AUTH");
+    let pending = queue_send(MailDraft::new("a@b.c", "s", "body").unwrap()).unwrap();
+    let account = MailAccount::new("mail.example.com", 993, "tester@example.com");
+    let err = MailClient::approve_send_via(&account, "pw", &pending, &loopback_smtp(smtp_port))
+        .unwrap_err();
+    assert!(matches!(err, MailError::Protocol(_)), "got {err:?}");
 }
 
 #[test]
