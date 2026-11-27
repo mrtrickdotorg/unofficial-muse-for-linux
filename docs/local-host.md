@@ -95,7 +95,7 @@ Report back per step: PASS/FAIL plus any deviation (card text, log lines, agent 
 
 ## Developer gates
 
-The canonical `scripts/test-account.sh` now includes wire-contract tests using the selected external runtime's real protobuf classes with **fake network IO**. It rejects skipped tests. Install the pinned test runtime with `scripts/setup-account-bridge.sh`, then select its absolute interpreter through `MUSE_ACCOUNT_TEST_PYTHON`. This does not sign in or read credentials.
+The canonical `scripts/test-account.sh` now includes wire-contract tests using the selected external runtime's real protobuf classes with **fake network IO**. It rejects skipped tests. Install the pinned test runtime with `scripts/setup-account-bridge.sh`; the gate then finds that installation's interpreter by itself and fails with the command to run when it is missing, at another revision, or unusable from the current environment. `MUSE_ACCOUNT_TEST_PYTHON` selects a different interpreter, which CI and the AppImage container use for their own installs. This does not sign in or read credentials.
 
 The AppImage builder installs the pinned runtime as a test-only dependency under `/opt/muse-test`; it is not copied into the distributable artifact. CI likewise installs a separate test runtime. Runtime-specific tests must not be silently skipped because an arbitrary system Python lacks those classes.
 

@@ -14,7 +14,10 @@ import subprocess
 import sys
 
 SOURCE_URL = "https://github.com/mrtrick37/muse-mcp.git"
-SOURCE_COMMIT = "438951c4f4c25ae186ddd35e9ba497e14d60c16d"
+# Our fork's head after the route-table sync. scripts/test-account.sh reads this
+# same pin and refuses to run the wire tests against any other revision, so a
+# fresh install and the gate always name one location and one commit.
+SOURCE_COMMIT = "965cc2f197543a8762d3d7067038da6de962730a"
 
 
 def fail(message):

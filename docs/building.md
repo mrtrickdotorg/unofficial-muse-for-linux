@@ -7,7 +7,6 @@ The workspace uses edition 2024 and is verified with Rust 1.99; a lower minimum 
 ```sh
 # One-time, non-root setup of a pinned external test/runtime dependency.
 ./scripts/setup-account-bridge.sh
-export MUSE_ACCOUNT_TEST_PYTHON="$HOME/.local/share/unofficial-muse-for-linux/account-bridge/.venv/bin/python"
 ./scripts/test-account.sh
 cargo fmt --all -- --check
 cargo build --workspace --locked
@@ -18,7 +17,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo run -p muse
 ```
 
-`test-account.sh` syntax-checks all shell scripts under `scripts/`, compiles Python source without writing bytecode, parses the installer's embedded Python via `--help`, and runs all offline unittest cases with the explicitly selected `MUSE_ACCOUNT_TEST_PYTHON`. The gate fails if any test is skipped. Its scratch directory comes from `XDG_RUNTIME_DIR` or `HOME` (verified private: owned by the runner, no group/other bits) rather than `/tmp`, because the sign-in tests prove their config directory's whole path is private and a host whose `/tmp` belongs to `nobody`, or a checkout inside a group-writable tree, would otherwise fail those cases for reasons unrelated to the code. Account/login tests use controlled fakes; local-host wire tests use the pinned external runtime's real protobuf classes with fake gateway IO. No account credentials, live service, or actual installed browser are used. Installing the dependency requires network access; running these tests does not.
+`test-account.sh` syntax-checks all shell scripts under `scripts/`, compiles Python source without writing bytecode, parses the installer's embedded Python via `--help`, and runs all offline unittest cases under the bridge interpreter it finds by itself -- the installation `setup-account-bridge.sh` writes, or the one `MUSE_ACCOUNT_TEST_PYTHON` names -- after checking that installation's commit against the installer's pin. No variable has to be exported for the default install; a missing, stale or unusable bridge fails the gate with the exact command to run instead of skipping the wire tests. The gate fails if any test is skipped. Its scratch directory comes from `XDG_RUNTIME_DIR` or `HOME` (verified private: owned by the runner, no group/other bits) rather than `/tmp`, because the sign-in tests prove their config directory's whole path is private and a host whose `/tmp` belongs to `nobody`, or a checkout inside a group-writable tree, would otherwise fail those cases for reasons unrelated to the code. Account/login tests use controlled fakes; local-host wire tests use the pinned external runtime's real protobuf classes with fake gateway IO. No account credentials, live service, or actual installed browser are used. Installing the dependency requires network access; running these tests does not.
 
 CI installs the same pinned external runtime for tests and retains formatting, locked workspace build/test, explicit native GUI smoke tests, and warning-denying Clippy checks. Unit tests do not establish live browser sign-in, service compatibility, packaged GUI behavior, or actual device registration.
 

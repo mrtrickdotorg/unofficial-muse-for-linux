@@ -50,9 +50,10 @@ if [[ -n "$UMFL_BUILD_SHA" ]]; then
     printf 'Stamped build commit %s\n' "$UMFL_BUILD_SHA"
 fi
 # The account gate needs the pinned community bridge, which is installed by
-# scripts/setup-account-bridge.sh (CI and the Containerfile do it). A host
-# without it cannot pass the gate: the bridge-backed tests skip, and the gate
-# refuses skips by design. Say so when skipping, rather than pretending it ran.
+# scripts/setup-account-bridge.sh (CI and the Containerfile do it, and the
+# gate finds the default installation on its own). A host without it cannot pass
+# the gate: the gate refuses to skip its wire tests and says how to install the
+# bridge. Say so when skipping, rather than pretending it ran.
 if [[ "${MUSE_BUILD_SKIP_ACCOUNT_TESTS:-}" == "1" ]]; then
     printf 'Skipping the account gate (MUSE_BUILD_SKIP_ACCOUNT_TESTS=1): the pinned bridge is not installed here.\n' >&2
 else
