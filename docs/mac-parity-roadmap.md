@@ -633,8 +633,11 @@ and the kernel frees the lock if a holder dies. On top of it, `claim_due` claims
 one atomic persist — the scheduler's at-most-once dispatch step: claim first, deliver after, so a
 crash can lose a notification but can never duplicate one, and anything unclaimed fires on the next
 cycle however late (catch-up by construction). `muse-reminder-runner` is the headless half: a small
-binary that cycles claim → `notify-send` (the session's `org.freedesktop.Notifications` server) →
-sleep, owns no state of its own, and logs failures by task id only. It ships in the AppImage and
+binary that cycles claim → one `Notify` call on the session bus, straight to the session's
+`org.freedesktop.Notifications` server → sleep, owns no state of its own, and logs failures by
+task id only. (Delivery used to shell out to `notify-send`; on a seat without libnotify every
+reminder was claimed, logged as failed and spent unseen. The call now goes over D-Bus itself,
+with `notify-send` only as the fallback where no bus or no server owns the name — Nov 25, 2026.) It ships in the AppImage and
 installs as a user service via `scripts/install-reminder-service.sh` (unit in
 `resources/systemd/`). The Tasks page now reflects the runner without a press: it re-reads the store every 15 seconds
 (selection preserved), so a claimed reminder shows as notified and a newly due one appears in the
@@ -670,6 +673,24 @@ presses). 6) Reboot, log back in: no notification fires for
 the cancelled task, and the runner is active again. Report
 back per step; until it reports, "window closed" and "reboot"
 stand unproven.
+
+*The app-closed half is proven, and it was broken (Nov 25, 2026).* Run against the rebuilt AppImage
+(86,198,776 B at 09:11) with **no app window open** (`ps` showed no `muse` process): a scratch store
+with one reminder due in 20 s (injected in the store's own JSONL shape, not created through the UI)
+was handed to the runner; it logged `delivered 1 due reminder(s)` and the session bus recorded
+`Notify` from `Unofficial Muse` — summary `Gate ping`, body `window closed`, no actions, a 10 s
+timeout — and the store then read `notified: true`. The next cycles (10 s apart, four of them) logged
+nothing and the bus carried exactly one `Notify`: at-most-once holds with the window closed. The
+failure path is proven too: on a private `dbus-run-session` bus with no notification server the runner
+logged `reminder 7: notification failed (the notification server refused it); it stays due and is
+retried next cycle` and the store still read `notified: false`; the same store on the real bus then
+delivered `Retry ping` once and the following cycle claimed nothing. That release-the-claim rule is
+new: the first live attempt found `notify-send` absent on this seat, so every reminder was claimed,
+marked notified and never shown — spent by nobody. `TaskStore::release_claim` and the runner's D-Bus
+delivery close that hole. Still open: the installed `systemd --user` unit and a reboot (nothing on
+this seat installs a user service without the owner saying so), and the runner's binary now needs the
+host's libgio/glib when it is copied out of the AppImage to `~/.local/bin` — present on any desktop
+that can run this app, and worth naming because the unit runs that copy.
 
 *Cancellation from Linux is wired (Nov 9).* The route table's only schedule mutation is
 `tasks.delete` (DELETE /api/tasks/{job_id}) — there is no create, edit or enable/disable route, so
