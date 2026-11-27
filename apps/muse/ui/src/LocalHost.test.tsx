@@ -40,6 +40,16 @@ const bootPayload = (
     "Allow writes in the folders I grant without a per-write card: a saved permission, re-applied whenever I grant the same folder again. Turning this off, or Stop & revoke all, ends it.",
   approvals_head: "Pending file approvals · review the exact path and content before allowing",
   activity_head: "Session activity · commands and outcomes only",
+  search_head: "Find in your folders",
+  search: null,
+  searching: false,
+  search_summary:
+    "No search yet. Names are matched inside the folders you granted, never outside them.",
+  content_head: "Search inside your files",
+  content: null,
+  searching_content: false,
+  content_summary:
+    "No content search yet. Text is matched inside the folders you granted, in UTF-8 files only.",
   ...overrides,
 });
 
@@ -281,29 +291,57 @@ describe("the Local host web page", () => {
     await waitFor(() => expect(consent).not.toBeChecked());
   });
 
-  it("grants with the read-only choice made on the page", async () => {
+  it("grants the folder chosen on the page's own sheet, with the read-only choice", async () => {
     const held = bootPayload();
     window.__MUSE_BOOT__ = held;
     const seen: Record<string, unknown>[] = [];
     installChannel(
-      (command) => (command === "localhost.grant" ? { ok: true } : { ok: true, ...held }),
+      (command) =>
+        command === "folders.list"
+          ? {
+              ok: true,
+              path: "/var/home/phendrick",
+              parent: "/var/home",
+              folders: [
+                { name: "Scratch", path: "/var/home/phendrick/Scratch" },
+              ],
+              note: null,
+            }
+          : { ok: true, ...held },
       (request) => seen.push(request),
     );
 
     render(<LocalHost />);
 
-    // Read-only is the page's default, as the native check starts on.
+    // The sheet stands where the page already has a grant, and the grant is the
+    // app's own press with the folder it returned.
     fireEvent.click(screen.getByRole("button", { name: "Grant a folder to Muse…" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Grant a folder to Muse" }),
+    ).toBeInTheDocument();
+    expect(seen.find((request) => request.cmd === "folders.list")).toMatchObject({
+      path: held.grants[0].root,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Grant this folder" }));
     await waitFor(() =>
       expect(seen.find((request) => request.cmd === "localhost.grant")).toMatchObject({
+        folder: "/var/home/phendrick",
         consent: false,
         writable: false,
       }),
     );
 
+    // Read-only is the page's default, as the native check starts on; the
+    // unchecked box grants read-write, and the consent travels with it. The
+    // press is one at a time, so the button comes back before the second one.
     fireEvent.click(screen.getByRole("checkbox", { name: /I explicitly enable/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Grant read-only/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Grant a folder to Muse…" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Grant a folder to Muse…" }));
+    await screen.findByRole("dialog", { name: "Grant a folder to Muse" });
+    fireEvent.click(screen.getByRole("button", { name: "Grant this folder" }));
     await waitFor(() =>
       expect(
         seen.filter((request) => request.cmd === "localhost.grant").map((r) => r.writable),
@@ -340,5 +378,154 @@ describe("the Local host web page", () => {
       await screen.findByText(/Command failed: the host controller is busy/),
     ).toBeInTheDocument();
     expect(screen.getByText("No folders granted.")).toBeInTheDocument();
+  });
+});
+
+// The filename search: the app's own walk over the granted folders, one
+// sentence for its outcome, and a hit's text in place. The page never walks a
+// folder itself and never invents a result.
+describe("the Local host page's filename search", () => {
+  it("shows the app's one sentence and opens a hit's text", async () => {
+    const held = bootPayload({
+      search: {
+        query: "report",
+        hits: [
+          { folder: "Scratch", path: "alpha-report.md" },
+          { folder: "Scratch", path: "sub/beta-report.md" },
+        ],
+        refused: [{ folder: "Notes", code: "io_denied" }],
+        scanned: 1204,
+        truncated: false,
+      },
+      search_summary:
+        "2 match(es) for “report” in 1204 name(s) scanned. Not searched: Notes (io_denied).",
+    });
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (cmd) =>
+        cmd === "localhost.preview"
+          ? { ok: true, folder: "Scratch", path: "alpha-report.md", content: "# the report\n" }
+          : { ok: true, ...held },
+      (request) => seen.push(request),
+    );
+
+    render(<LocalHost />);
+
+    expect(screen.getByText(/2 match\(es\) for/)).toBeInTheDocument();
+    expect(screen.getByText("Scratch · sub/beta-report.md")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Scratch · alpha-report.md"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByText("# the report")).toBeInTheDocument();
+    const asked = seen.find((request) => request.cmd === "localhost.preview");
+    expect(asked).toMatchObject({ folder: "Scratch", path: "alpha-report.md" });
+  });
+
+  it("sends the query to the app and shows its refusal, not a blank list", async () => {
+    const held = bootPayload({ search: null });
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (cmd) =>
+        cmd === "localhost.search"
+          ? { ok: false, error: "Grant a folder before searching it." }
+          : { ok: true, ...held },
+      (request) => seen.push(request),
+    );
+
+    render(<LocalHost />);
+
+    fireEvent.change(screen.getByLabelText("Find a filename in your folders"), {
+      target: { value: "notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Grant a folder before searching it\./)).toBeInTheDocument(),
+    );
+    const asked = seen.find((request) => request.cmd === "localhost.search");
+    expect(asked).toMatchObject({ query: "notes" });
+  });
+});
+
+// The content search: the matching lines inside the granted files, with the
+// line numbers the broker reported. A line opens the file it lives in through
+// the same bounded read a filename hit uses; a refusal is a refusal.
+describe("the Local host page's content search", () => {
+  it("lists the matching lines and opens the file a line lives in", async () => {
+    const held = bootPayload({
+      content: {
+        query: "revenue",
+        hits: [
+          { folder: "Scratch", path: "alpha-report.md", line: 2, text: "revenue up" },
+          {
+            folder: "Scratch",
+            path: "sub/beta-report.md",
+            line: 2,
+            text: "second revenue line",
+          },
+        ],
+        refused: [{ folder: "Notes", code: "invalid_utf8" }],
+        scanned: 88,
+        truncated: false,
+      },
+      content_summary:
+        "2 matching line(s) for “revenue” in 88 name(s) scanned. Not searched: Notes (invalid_utf8).",
+    });
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (cmd) =>
+        cmd === "localhost.preview"
+          ? {
+              ok: true,
+              folder: "Scratch",
+              path: "alpha-report.md",
+              content: "# Quarter report\nrevenue up\n",
+            }
+          : { ok: true, ...held },
+      (request) => seen.push(request),
+    );
+
+    render(<LocalHost />);
+
+    expect(screen.getByRole("heading", { name: "Search inside your files" })).toBeInTheDocument();
+    expect(screen.getByText(/2 matching line\(s\) for/)).toBeInTheDocument();
+    expect(
+      screen.getByText("Scratch · sub/beta-report.md:2 · second revenue line"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Scratch · alpha-report.md:2 · revenue up"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(document.querySelector(".host-preview .preview")?.textContent).toContain(
+      "revenue up",
+    );
+    const asked = seen.find((request) => request.cmd === "localhost.preview");
+    expect(asked).toMatchObject({ folder: "Scratch", path: "alpha-report.md" });
+  });
+
+  it("sends the query to the app and shows its refusal, not an empty list", async () => {
+    const held = bootPayload({ content: null });
+    window.__MUSE_BOOT__ = held;
+    const seen: Record<string, unknown>[] = [];
+    installChannel(
+      (cmd) =>
+        cmd === "localhost.content"
+          ? { ok: false, error: "Grant a folder before searching inside it." }
+          : { ok: true, ...held },
+      (request) => seen.push(request),
+    );
+
+    render(<LocalHost />);
+
+    fireEvent.change(screen.getByLabelText("Search inside the files in your folders"), {
+      target: { value: "revenue" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Search inside" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Grant a folder before searching inside it\./)).toBeInTheDocument(),
+    );
+    const asked = seen.find((request) => request.cmd === "localhost.content");
+    expect(asked).toMatchObject({ query: "revenue" });
   });
 });

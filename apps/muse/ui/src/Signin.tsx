@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { call, channelAvailable } from "./api";
+import { FolderSheet } from "./FolderSheet";
 import type { SigninSnapshot } from "./types";
 
 /// The presses this page can have in flight: one at a time, because the app
@@ -29,6 +30,9 @@ export function Signin() {
   const [error, setError] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const [pressing, setPressing] = useState<Press | null>(null);
+  // The folder sheet: the choice happens here, in the window, and its answer
+  // goes to the app as the choose press rather than to a native dialog.
+  const [choosing, setChoosing] = useState(false);
 
   const loadSnapshot = useCallback(async () => {
     if (!channelAvailable()) {
@@ -51,7 +55,7 @@ export function Signin() {
     void loadSnapshot();
   }, [loadSnapshot]);
 
-  const press = async (kind: Press) => {
+  const press = async (kind: Press, chosen?: string) => {
     if (pressing) return;
     setPressing(kind);
     setRefusal(null);
@@ -59,7 +63,7 @@ export function Signin() {
       await call("signin.press", 30_000, {
         press: kind,
         python,
-        folder,
+        folder: chosen ?? folder,
         consent,
       });
     } catch (failure) {
@@ -136,7 +140,7 @@ export function Signin() {
           type="button"
           className="inline-button"
           disabled={busy}
-          onClick={() => void press("choose")}
+          onClick={() => setChoosing(true)}
         >
           {data?.choose_label ?? "Choose folder…"}
         </button>
@@ -151,6 +155,21 @@ export function Signin() {
           </button>
         )}
       </div>
+
+      {choosing && (
+        <FolderSheet
+          title="Choose a session folder"
+          start={folder}
+          confirm="Use this folder"
+          note="The app's own folder already qualifies: it is private and holds this clone's session."
+          onCancel={() => setChoosing(false)}
+          onChoose={(path) => {
+            setChoosing(false);
+            setFolder(path);
+            void press("choose", path);
+          }}
+        />
+      )}
     </div>
   );
 }

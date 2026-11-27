@@ -161,6 +161,255 @@ describe("the Threads web page", () => {
     expect(rows()).toBe(0);
   });
 
+  // The mac app's row menu, on this page: a pin is one `threads.op` and the
+  // listing read that comes back is what the page paints.
+  it("pins a conversation through the app and paints the listing it reads back", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "A calmer inbox" })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    const asked: Array<Record<string, unknown>> = [];
+    const commands = installChannel(
+      (command) => {
+        if (command === "threads.op") {
+          return {
+            ok: true,
+            accepted: true,
+            ...bootPayload({
+              threads: [row({ id: "s-1", title: "A calmer inbox", pinned: true })],
+              total: 1,
+            }),
+          };
+        }
+        return { ok: true, ...held };
+      },
+      (request) => {
+        if (request.cmd === "threads.op") asked.push(request);
+      },
+    );
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Pin A calmer inbox" }));
+
+    // The pin shows twice: the row's own 📌 and the press turning into Unpin.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Unpin A calmer inbox" })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Rename A calmer inbox" })).toBeInTheDocument();
+    expect(commands).toEqual(["threads.snapshot", "threads.op"]);
+    expect(asked[0]).toMatchObject({ thread: "s-1", verb: "pin" });
+  });
+
+  it("renames a conversation from the row's own form", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "Old name" })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    const extra: Array<Record<string, unknown>> = [];
+    installChannel(
+      (command) => {
+        if (command === "threads.op") {
+          return {
+            ok: true,
+            accepted: true,
+            ...bootPayload({ threads: [row({ id: "s-1", title: "New name" })], total: 1 }),
+          };
+        }
+        return { ok: true, ...held };
+      },
+      (request) => {
+        if (request.cmd === "threads.op") extra.push(request);
+      },
+    );
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Rename Old name" }));
+    const field = screen.getByRole("textbox", { name: "New title" });
+    fireEvent.change(field, { target: { value: "New name" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("New name")).toBeInTheDocument();
+    expect(screen.queryByText("Old name")).toBeNull();
+    expect(extra[0]).toMatchObject({ thread: "s-1", verb: "rename", title: "New name" });
+  });
+
+  it("archives a conversation and keeps the rows the service reads back", async () => {
+    const held = bootPayload({
+      threads: [row({ id: "s-1", title: "Done for now" }), row({ id: "s-2", title: "Still here", group: "Yesterday" })],
+      total: 2,
+    });
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) => {
+      if (command === "threads.op") {
+        return {
+          ok: true,
+          accepted: true,
+          ...bootPayload({ threads: [row({ id: "s-2", title: "Still here", group: "Yesterday" })], total: 1 }),
+        };
+      }
+      return { ok: true, ...held };
+    });
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Archive Done for now" }));
+
+    await waitFor(() => expect(screen.queryByText("Done for now")).toBeNull());
+    expect(screen.getByText("Still here")).toBeInTheDocument();
+    expect(screen.getByText("1 threads")).toBeInTheDocument();
+  });
+
+  // Deleting a conversation is a real removal on the service, so the row asks
+  // twice: the first press arms it, the second spends the arm.
+  it("deletes a conversation only after a second press on the same row", async () => {
+    const held = bootPayload({
+      threads: [row({ id: "s-1", title: "Done for good" }), row({ id: "s-2", title: "Keep me", group: "Yesterday" })],
+      total: 2,
+    });
+    window.__MUSE_BOOT__ = held;
+    let deletes = 0;
+    const commands = installChannel((command) => {
+      if (command !== "threads.op") return { ok: true, ...held };
+      deletes += 1;
+      if (deletes === 1) {
+        return { ok: true, accepted: false, armed: "s-1", ...held };
+      }
+      return {
+        ok: true,
+        accepted: true,
+        armed: null,
+        ...bootPayload({ threads: [row({ id: "s-2", title: "Keep me", group: "Yesterday" })], total: 1 }),
+      };
+    });
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete Done for good" }));
+
+    // Armed, not deleted: the row is still here and the press now confirms.
+    const confirm = await screen.findByRole("button", { name: "Confirm delete Done for good" });
+    expect(screen.getByText("Done for good")).toBeInTheDocument();
+    expect(commands).toEqual(["threads.snapshot", "threads.op"]);
+
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(screen.queryByText("Done for good")).toBeNull());
+    expect(screen.getByText("Keep me")).toBeInTheDocument();
+    expect(deletes).toBe(2);
+  });
+
+  // The mac app clears a conversation's unread badge when you open it; this
+  // page also lets you clear one from the row, through the same service call.
+  it("marks a row read through the app and paints the listing it reads back", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "Something new", unread: 2 })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    const asked: Array<Record<string, unknown>> = [];
+    const commands = installChannel(
+      (command) =>
+        command === "threads.seen"
+          ? {
+              ok: true,
+              accepted: true,
+              verb: "seen",
+              ...bootPayload({ threads: [row({ id: "s-1", title: "Something new", unread: 0 })], total: 1 }),
+            }
+          : { ok: true, ...held },
+      (request) => {
+        if (request.cmd === "threads.seen") asked.push(request);
+      },
+    );
+
+    render(<Threads />);
+    expect(screen.getByTitle("2 unread")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Mark read Something new" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Mark read Something new" })).toBeNull(),
+    );
+    expect(screen.queryByTitle("2 unread")).toBeNull();
+    expect(commands).toEqual(["threads.snapshot", "threads.seen"]);
+    expect(asked[0]).toMatchObject({ thread: "s-1" });
+  });
+
+  it("offers no Mark read press on a row with nothing unread", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "All caught up", unread: 0 })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    installChannel(() => ({ ok: true, ...held }));
+
+    render(<Threads />);
+
+    await screen.findByText("All caught up");
+    expect(screen.queryByRole("button", { name: "Mark read All caught up" })).toBeNull();
+  });
+
+  it("keeps the badge when the service refuses the read", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "Still new", unread: 1 })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) =>
+      command === "threads.seen"
+        ? { ok: true, accepted: false, verb: "seen", ...held }
+        : { ok: true, ...held },
+    );
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Mark read Still new" }));
+
+    expect(
+      await screen.findByText("Command failed: The service did not change it. Nothing changed."),
+    ).toBeInTheDocument();
+    expect(screen.getByTitle("1 unread")).toBeInTheDocument();
+  });
+
+  it("cancels an armed delete without sending a second press", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "Spared thread" })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    const commands = installChannel((command) =>
+      command === "threads.op"
+        ? { ok: true, accepted: false, armed: "s-1", ...held }
+        : { ok: true, ...held },
+    );
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete Spared thread" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(await screen.findByRole("button", { name: "Delete Spared thread" })).toBeInTheDocument();
+    expect(screen.getByText("Spared thread")).toBeInTheDocument();
+    expect(commands).toEqual(["threads.snapshot", "threads.op"]);
+  });
+
+  it("paints the armed row from the app's snapshot instead of keeping its own", async () => {
+    const held = bootPayload({
+      threads: [row({ id: "s-1", title: "Armed already" })],
+      total: 1,
+      armed: "s-1",
+    });
+    window.__MUSE_BOOT__ = held;
+    installChannel(() => ({ ok: true, ...held }));
+
+    render(<Threads />);
+
+    expect(
+      await screen.findByRole("button", { name: "Confirm delete Armed already" }),
+    ).toBeInTheDocument();
+  });
+
+  it("says a refused change left the rows as they were", async () => {
+    const held = bootPayload({ threads: [row({ id: "s-1", title: "Held thread" })], total: 1 });
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) =>
+      command === "threads.op"
+        ? {
+            ok: true,
+            accepted: false,
+            ...bootPayload({ threads: [row({ id: "s-1", title: "Held thread" })], total: 1 }),
+          }
+        : { ok: true, ...held },
+    );
+
+    render(<Threads />);
+    fireEvent.click(screen.getByRole("button", { name: "Archive Held thread" }));
+
+    expect(
+      await screen.findByText("Command failed: The service did not change it. Nothing changed."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Held thread")).toBeInTheDocument();
+  });
+
   it("reports a failed read beside the rows the page still holds", async () => {
     window.__MUSE_BOOT__ = bootPayload({
       threads: [row({ id: "held", title: "Held thread" })],

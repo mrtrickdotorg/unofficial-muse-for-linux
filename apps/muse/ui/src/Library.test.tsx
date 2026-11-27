@@ -390,6 +390,33 @@ describe("the Library web page", () => {
     }
   });
 
+  // Opening a space is a read through the app: the page asks for the export
+  // the native row fetches and the app draws the preview window, so the reply
+  // carries facts, never markup to render here.
+  it("opens a space through the app's export route and names the window", async () => {
+    const space = artifact({
+      artifact_ref: "space:calm-space",
+      title: "Calm space",
+      target_kind: "space",
+      slug: "calm-space",
+    });
+    const seen: Record<string, unknown>[] = [];
+    const commands = installChannel(
+      () => ({ ok: true, artifacts: [space], total: 1, armed: null, loaded: true }),
+      (request) => seen.push(request),
+    );
+
+    render(<Library />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Open" }));
+
+    expect(
+      await screen.findByText(/Opened "Calm space" in its own preview window/),
+    ).toBeInTheDocument();
+    expect(commands).toContain("library.open-space");
+    expect(seen.filter((request) => request.slug === "calm-space")).toHaveLength(1);
+  });
+
   it("offers no unshare on a file row", async () => {
     installChannel(() => ({
       ok: true,

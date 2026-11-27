@@ -22,6 +22,12 @@ export function Tasks() {
   );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Deleting a schedule is the app's own two-press rule: the first press arms
+  // the row (the app answers with the id it armed and sends nothing), the
+  // second sends the one delete and the listing read back is what is painted.
+  const [armed, setArmed] = useState<string | null>(null);
+  const [pressing, setPressing] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
 
   // Opening the page costs nothing on the wire for the schedules and runs:
   // the native side answers from what it already holds, and re-reads the
@@ -53,6 +59,10 @@ export function Tasks() {
     setBusy(true);
     try {
       setData(await call<TasksSnapshot>("tasks.refresh", 120_000));
+      // The app spends a schedule's delete arm when the listing is read
+      // again, so the row's label and the note go with it.
+      setArmed(null);
+      setNote(null);
       setError(null);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure));
@@ -60,6 +70,56 @@ export function Tasks() {
       setBusy(false);
     }
   }, []);
+
+  const remove = useCallback(
+    async (row: TaskRow) => {
+      if (!channelAvailable() || pressing) return;
+      setPressing(row.id);
+      try {
+        const answer = await call<
+          TasksSnapshot & {
+            ok?: boolean;
+            accepted?: boolean;
+            armed?: string | null;
+            error?: string;
+            reread_error?: string;
+          }
+        >("tasks.delete", 180_000, { job: row.id });
+        setData({
+          schedules: answer.schedules ?? [],
+          runs: answer.runs ?? [],
+          local: answer.local ?? [],
+          loaded: answer.loaded,
+          error: answer.error ?? null,
+        });
+        setArmed(answer.armed ?? null);
+        if (answer.armed) {
+          setNote(
+            `Nothing has been sent yet: press Confirm delete on "${row.label}" to send it.`,
+          );
+        } else if (answer.accepted && answer.reread_error) {
+          setNote(
+            `The service accepted the delete, but the listing could not be read again: ${answer.reread_error}`,
+          );
+        } else if (answer.accepted) {
+          setNote(`The service accepted the delete, and the listing was read again.`);
+        } else {
+          setNote(
+            `The service did not delete it. Nothing changed.${answer.error ? ` (${answer.error})` : ""}`,
+          );
+        }
+      } catch (failure) {
+        setNote(
+          `The app did not answer the delete: ${
+            failure instanceof Error ? failure.message : String(failure)
+          }`,
+        );
+      } finally {
+        setPressing(null);
+      }
+    },
+    [pressing],
+  );
 
   const reading = useHeldRead("tasks", loadSnapshot, refresh);
 
@@ -83,6 +143,7 @@ export function Tasks() {
       </div>
 
       {error && <div className="banner">Command failed: {error}</div>}
+      {note && <div className="note write-note">{note}</div>}
       {data?.error && (
         <div className="banner">The last read failed: {data.error}</div>
       )}
@@ -99,7 +160,32 @@ export function Tasks() {
           {schedules.length === 0 ? (
             <div className="empty">No scheduled jobs on this account.</div>
           ) : (
-            <Rows rows={schedules} />
+            <div className="rows">
+              {schedules.map((row) => (
+                <div className="task" key={row.id}>
+                  <span>{row.label}</span>
+                  {/* The app holds the arm: this label is the app's answer to
+                      the first press, so it cannot disagree with the row. */}
+                  <button
+                    type="button"
+                    className={`inline-button danger${armed === row.id ? " armed" : ""}`}
+                    disabled={pressing !== null}
+                    onClick={() => void remove(row)}
+                    title={
+                      armed === row.id
+                        ? "Press again to delete this schedule"
+                        : "Deleting a schedule is permanent"
+                    }
+                  >
+                    {pressing === row.id
+                      ? "Deleting…"
+                      : armed === row.id
+                        ? "Confirm delete"
+                        : "Delete"}
+                  </button>
+                </div>
+              ))}
+            </div>
           )}
 
           <div className="section">Recent runs</div>

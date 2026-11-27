@@ -9,7 +9,7 @@
 //! durable and at-most-once) or lose one that has not been claimed yet
 //! (it fires on the next cycle, however late: catch-up by construction).
 
-use muse_reminder_runner::{default_store_dir, now_unix_secs, run_cycle, NotifySend};
+use muse_reminder_runner::{default_store_dir, now_unix_secs, run_cycle, Desktop};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         eprintln!("no store directory: HOME is unset and --dir was not given");
         return ExitCode::from(2);
     };
-    let notifier = NotifySend;
+    let notifier = Desktop;
     loop {
         let mut log = |line: String| eprintln!("{line}");
         match run_cycle(&dir, &notifier, now_unix_secs(), &mut log) {

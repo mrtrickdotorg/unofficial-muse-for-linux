@@ -6,4 +6,8 @@ license = "GPL-3.0-only"
 description = "Headless reminder runner: claims due tasks from the muse-tasks store and posts desktop notifications"
 
 [dependencies]
+# The reminder is delivered over the session bus itself, the same
+# `org.freedesktop.Notifications` call the app's window makes, so the runner
+# does not need libnotify's CLI installed to be heard.
+gio = "0.21"
 muse-tasks = { path = "../muse-tasks" }

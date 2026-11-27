@@ -36,6 +36,24 @@ const snapshot = (rows: ChatRow[], over: Partial<ChatSnapshot> = {}): ChatSnapsh
 });
 
 describe("the Chat web page", () => {
+  // The accessibility pass: a screen reader has to know where the
+  // conversation is and hear the agent's status as it changes, without the
+  // growing reply being re-read on every streamed delta.
+  it("exposes the transcript as a log and the agent status as a live region", async () => {
+    const boot = snapshot([message({ id: "m-1", text: "hello" })], {
+      status: "Muse is replying",
+    });
+    window.__MUSE_BOOT__ = boot;
+    installChannel(() => ({ ok: true, ...boot }));
+
+    render(<Chat />);
+
+    const log = await screen.findByRole("log", { name: "Conversation" });
+    expect(log).toHaveAttribute("aria-live", "polite");
+    expect(log).toHaveAttribute("aria-relevant", "additions");
+    expect(screen.getByRole("status")).toHaveTextContent("Muse is replying");
+  });
+
   it("opens on the native transcript's rows, notices and option pills", async () => {
     const boot = snapshot([
       { ...message({}), kind: "day", id: "", day: "Today" },

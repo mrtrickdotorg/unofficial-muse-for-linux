@@ -83,6 +83,15 @@ fn tasks_payload(held: &HeldTasks) -> serde_json::Value {
     })
 }
 
+/// The Tasks page as the shell window paints it from a `show` line: the held
+/// rows and the page's own name, with no document around them. A notification
+/// click opens this page through [`crate::web_shell::show_page`].
+pub(crate) fn tasks_boot() -> serde_json::Value {
+    let mut boot = tasks_payload(&crate::pages::tasks_snapshot());
+    boot["page"] = serde_json::json!("tasks");
+    boot
+}
+
 fn tasks_document(held: &HeldTasks) -> String {
     let mut boot = tasks_payload(held);
     boot["page"] = serde_json::json!("tasks");
@@ -124,6 +133,9 @@ fn threads_payload(held: &HeldThreads) -> serde_json::Value {
         "total": held.total,
         "loaded": held.loaded,
         "error": held.error,
+        // The row whose Delete press is armed, if any: the app owns the
+        // arming, so the page paints it from here instead of keeping a copy.
+        "armed": crate::pages::thread_delete_armed(),
     })
 }
 
@@ -259,9 +271,15 @@ fn signin_payload() -> serde_json::Value {
 }
 
 fn signin_document() -> String {
+    document(&signin_boot())
+}
+
+/// The sign-in page's boot payload, named: the switch line the window paints
+/// when the app has returned to sign-in (see `web_shell::show_signin`).
+pub(crate) fn signin_boot() -> serde_json::Value {
     let mut boot = signin_payload();
     boot["page"] = serde_json::json!("signin");
-    document(&boot)
+    boot
 }
 
 fn signin_reply() -> serde_json::Value {
@@ -404,8 +422,30 @@ pub(crate) enum Fetched {
     Rows(Vec<ArtifactSummary>, u64),
     Goals(HeldGoals),
     Tasks(HeldTasks),
+    /// One schedule's delete answer, and the Tasks rows read again after it:
+    /// acceptance is the service's word, the rows are the proof.
+    TaskDelete {
+        job: String,
+        accepted: bool,
+        error: Option<String>,
+        held: Option<HeldTasks>,
+        reread_error: Option<String>,
+    },
     Ideas(HeldIdeas),
     Threads(HeldThreads),
+    /// One conversation's rename, pin or archive, and the listing read again
+    /// after it: `accepted` is the service's word, the rows are the proof.
+    /// `rows` is None when the verb was refused (nothing changed, so there was
+    /// nothing to read back).
+    ThreadOp {
+        id: String,
+        verb: String,
+        accepted: bool,
+        error: Option<String>,
+        rows: Option<HeldThreads>,
+        threads: Vec<muse_account::Thread>,
+        reread_error: Option<String>,
+    },
     Feed(HeldFeed),
     /// A cached hero's data URI, or None when nothing is cached.
     Hero(Option<String>),
@@ -419,6 +459,13 @@ pub(crate) enum Fetched {
         error: Option<String>,
         listing: Option<(Vec<ArtifactSummary>, u64)>,
         reread_error: Option<String>,
+    },
+    /// One space's export, for the preview window the web page's Open asks
+    /// for. The app draws that window, so the page is handed only the facts
+    /// about what was drawn.
+    SpaceExport {
+        name: String,
+        exported: Result<muse_account::SpaceExportAnswer, String>,
     },
     /// One space's delete answer, and the Library listing read again after
     /// it, for the same reason the unshare carries one: acceptance is not the
@@ -477,6 +524,131 @@ fn fresh_tasks(client: Option<AccountClient>) -> Receiver<Fetched> {
     receiver
 }
 
+/// Delete one schedule on a worker thread, then read the Tasks listing again:
+/// the delete's acceptance and the rows as they now are travel together, so a
+/// reply can say the change is not proven rather than painting a stale row.
+fn fresh_task_delete(client: Option<AccountClient>, job: String) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(client) = client else {
+            let _ = sender.send(Fetched::Failed("no account link in this app".into()));
+            return;
+        };
+        let (accepted, error) = match client.delete_task(&job) {
+            Ok(answer) => (answer.accepted, None),
+            Err(failure) => (false, Some(failure.to_string())),
+        };
+        let (held, reread_error) = match client.tasks() {
+            Ok(snapshot) => (Some(crate::pages::held_tasks_from(&snapshot)), None),
+            Err(failure) => (None, Some(failure.to_string())),
+        };
+        let _ = sender.send(Fetched::TaskDelete {
+            job,
+            accepted,
+            error,
+            held,
+            reread_error,
+        });
+    });
+    receiver
+}
+
+/// The title a rename may carry: the service caps its own, and a page that
+/// pasted a paragraph is refused here rather than on the wire.
+const MAX_THREAD_TITLE: usize = 200;
+
+/// One listing read after a change, shared by every conversation write: the
+/// rows the page paints, the raw threads the panel adopts, and the read's own
+/// failure when it had one -- acceptance is never mistaken for the change.
+type ThreadReadback = (
+    Option<HeldThreads>,
+    Vec<muse_account::Thread>,
+    Option<String>,
+);
+
+fn reread_threads(client: &AccountClient) -> ThreadReadback {
+    match client.connect() {
+        Ok(snapshot) => (
+            Some(crate::pages::held_threads_from(
+                &snapshot.threads,
+                &crate::app::local_today(),
+            )),
+            snapshot.threads,
+            None,
+        ),
+        Err(failure) => (None, Vec::new(), Some(failure.to_string())),
+    }
+}
+
+/// Clear one conversation's unread badge on a worker thread: one `mark_seen`
+/// in the recorded consumer's shape, then the listing read again. The write's
+/// answer is acceptance; the rows are the proof there is.
+fn fresh_thread_seen(client: Option<AccountClient>, id: String) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(client) = client else {
+            let _ = sender.send(Fetched::Failed("no account link in this app".into()));
+            return;
+        };
+        let (accepted, error) = match client.mark_seen(&id) {
+            Ok(answer) => (answer.accepted, None),
+            Err(failure) => (false, Some(failure.to_string())),
+        };
+        let (rows, threads, reread_error) = if accepted {
+            reread_threads(&client)
+        } else {
+            (None, Vec::new(), None)
+        };
+        let _ = sender.send(Fetched::ThreadOp {
+            id,
+            verb: "seen".into(),
+            accepted,
+            error,
+            rows,
+            threads,
+            reread_error,
+        });
+    });
+    receiver
+}
+
+/// Rename, pin or archive one conversation on a worker thread: the verb, then
+/// the listing read again. Acceptance is the service's; the rows are what the
+/// page paints, and a refused verb changes nothing at all.
+fn fresh_thread_op(
+    client: Option<AccountClient>,
+    id: String,
+    verb: String,
+    title: Option<String>,
+) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(client) = client else {
+            let _ = sender.send(Fetched::Failed("no account link in this app".into()));
+            return;
+        };
+        let (accepted, error) = match client.session_op(&id, &verb, title.as_deref()) {
+            Ok(answer) => (answer.accepted, None),
+            Err(failure) => (false, Some(failure.to_string())),
+        };
+        let (rows, threads, reread_error) = if accepted {
+            reread_threads(&client)
+        } else {
+            (None, Vec::new(), None)
+        };
+        let _ = sender.send(Fetched::ThreadOp {
+            id,
+            verb,
+            accepted,
+            error,
+            rows,
+            threads,
+            reread_error,
+        });
+    });
+    receiver
+}
+
 /// One space's unshare, on a worker thread: a single path-only DELETE, never
 /// retried, then the Library listing read again. The DELETE's answer is only
 /// acceptance; the rows in the reply are the proof of what changed.
@@ -502,6 +674,26 @@ fn fresh_unshare(client: Option<AccountClient>, slug: String) -> Receiver<Fetche
             listing,
             reread_error,
         });
+    });
+    receiver
+}
+
+/// Export one space on a worker thread, for its preview window. A read, never
+/// a write: there is no arm, and no listing to read again.
+fn fresh_space_open(
+    client: Option<AccountClient>,
+    slug: String,
+    name: String,
+) -> Receiver<Fetched> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let exported = match client {
+            Some(client) => client
+                .space_export(&slug)
+                .map_err(|failure| failure.to_string()),
+            None => Err("no account link in this app".to_owned()),
+        };
+        let _ = sender.send(Fetched::SpaceExport { name, exported });
     });
     receiver
 }
@@ -739,7 +931,9 @@ pub(crate) type WebHistory = std::rc::Rc<dyn Fn() -> Result<Vec<crate::pages::Hi
 pub(crate) type WebOpenThread = std::rc::Rc<dyn Fn(Option<&str>) -> Result<(), String>>;
 pub(crate) type WebSetPolicy = std::rc::Rc<dyn Fn(&str, &str) -> Result<(), String>>;
 pub(crate) type WebResetConnector = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
-pub(crate) type WebHostGrant = std::rc::Rc<dyn Fn(bool, bool) -> Result<(), String>>;
+/// Grant one folder: the path the page's own sheet returned, then the two
+/// boundaries the native page passes.
+pub(crate) type WebHostGrant = std::rc::Rc<dyn Fn(&str, bool, bool) -> Result<(), String>>;
 pub(crate) type WebHostStart = std::rc::Rc<dyn Fn(bool) -> Result<(), String>>;
 pub(crate) type WebHostStop = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 /// Allow once / Deny on one pending write: the card's own id, never a path.
@@ -749,6 +943,19 @@ pub(crate) type WebHostDecide = std::rc::Rc<dyn Fn(&str, bool) -> Result<(), Str
 pub(crate) type WebHostPolicy = std::rc::Rc<dyn Fn(bool) -> Result<(), String>>;
 /// Clear the session log. Display only: cards and grants are untouched.
 pub(crate) type WebHostClearLog = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+/// The page's filename search over the granted folders: the app validates the
+/// query and queues the walk; the page reads the answer from its next snapshot.
+pub(crate) type WebHostSearch = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
+/// One hit's text, for the page's preview: the broker's own bounded read.
+pub(crate) type WebHostPreview =
+    std::rc::Rc<dyn Fn(&str, &str) -> Result<serde_json::Value, String>>;
+/// The pump a window needs when the Local host page is its only host surface:
+/// poll the controller and re-project, so a queued grant, search or approval
+/// lands without a native page being open to do it.
+pub(crate) type WebHostRefresh = std::rc::Rc<dyn Fn() -> Result<(), String>>;
+/// The page's content search over the granted folders: the app validates the
+/// query and queues the read; the answer travels in the next snapshot.
+pub(crate) type WebHostContent = std::rc::Rc<dyn Fn(&str) -> Result<(), String>>;
 
 /// One press on the sign-in page, with the values the page typed in. The press
 /// names which button; the app's sign-in module validates and saves, so the
@@ -762,6 +969,9 @@ pub(crate) struct SigninPress {
 }
 
 pub(crate) type WebSigninPress = std::rc::Rc<dyn Fn(SigninPress) -> Result<(), String>>;
+/// Clear the saved link and hand the app back to its sign-in surface: the
+/// native Settings button's own press, from a page.
+pub(crate) type WebSignOut = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 /// Run the app's own update check.
 pub(crate) type WebUpdateCheck = std::rc::Rc<dyn Fn() -> Result<(), String>>;
 /// The update's one action: download what was offered, or restart into what is
@@ -803,8 +1013,8 @@ pub(crate) struct WebRoutes {
     /// Reset one connector's grants: the chat panel's own armed press, minus
     /// the arming, which the page holds.
     pub reset_connector: WebResetConnector,
-    /// Ask for a folder grant. The chooser is the app's own native dialog;
-    /// the page gets the outcome from its next snapshot.
+    /// Grant a folder the page chose on its own sheet; the page gets the
+    /// outcome from its next snapshot (or from the refusal this answers).
     pub host_grant: WebHostGrant,
     /// Start the local host, carrying the page's consent.
     pub host_start: WebHostStart,
@@ -813,9 +1023,17 @@ pub(crate) struct WebRoutes {
     pub host_decide: WebHostDecide,
     pub host_policy: WebHostPolicy,
     pub host_clear_log: WebHostClearLog,
+    /// The local host page's filename search and one hit's preview: the app's
+    /// own reads over the folders the person granted.
+    pub host_search: WebHostSearch,
+    pub host_preview: WebHostPreview,
+    pub host_refresh: WebHostRefresh,
+    pub host_content: WebHostContent,
     pub update_check: WebUpdateCheck,
     pub update_install: WebUpdateInstall,
     pub signin_press: WebSigninPress,
+    /// Sign out: clear the saved link and return the app to sign-in.
+    pub sign_out: WebSignOut,
 }
 
 /// The answer a mutating command gets: `ok` when the app took the press, and
@@ -831,6 +1049,204 @@ fn route_answer(result: Option<Result<(), String>>) -> Answer {
         Some(Err(sentence)) => Answer::Now(serde_json::json!({ "ok": false, "error": sentence })),
     }
 }
+
+/// What a folder sheet shows where it stands: the folder's own path, the one
+/// above it, and its subfolders. Folders only, by design -- the app needs a
+/// folder, never a file browser -- and one level at a time, so the page walks
+/// the tree instead of being handed the disk. An empty path starts at the app's
+/// own session folder, which is the default the sign-in form opens on.
+pub(crate) fn folder_listing(raw: &str) -> serde_json::Value {
+    let asked = raw.trim();
+    if asked.is_empty() {
+        return start_listing();
+    }
+    let path = std::path::PathBuf::from(asked);
+    if !path.is_absolute() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "The folder path must be absolute."
+        });
+    }
+    list_folder(&path)
+}
+
+/// The sheet's opening answer: the app's own session folder, or the home
+/// folder when this clone has no config home to name.
+fn start_listing() -> serde_json::Value {
+    if let Some(dir) = crate::session::account_dir() {
+        return list_folder(&dir);
+    }
+    match std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        Some(home) => list_folder(&home),
+        None => serde_json::json!({
+            "ok": false,
+            "error": "No home folder to start from."
+        }),
+    }
+}
+
+/// The rows one level holds. Symlinks to folders count as folders (a session
+/// folder may live behind one); a file never does, and neither does an entry
+/// whose name is not readable as text.
+fn list_folder(path: &std::path::Path) -> serde_json::Value {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": format!("Cannot read that folder: {error}")
+            });
+        }
+    };
+    let mut folders: Vec<(String, String)> = Vec::new();
+    let mut capped = false;
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let is_folder = kind.is_dir() || (kind.is_symlink() && entry.path().is_dir());
+        if !is_folder {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        folders.push((name, entry.path().display().to_string()));
+        if folders.len() >= MAX_FOLDER_ROWS {
+            capped = true;
+            break;
+        }
+    }
+    folders.sort_by(|left, right| {
+        left.0
+            .to_lowercase()
+            .cmp(&right.0.to_lowercase())
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    let folders: Vec<serde_json::Value> = folders
+        .into_iter()
+        .map(|(name, path)| serde_json::json!({ "name": name, "path": path }))
+        .collect();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.display().to_string());
+    serde_json::json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "parent": parent,
+        "folders": folders,
+        "note": capped.then_some("Showing the first 500 folders."),
+    })
+}
+
+/// Make one folder inside the folder the sheet stands in, and answer with the
+/// folder made so the sheet can step into it.
+///
+/// The native chooser this sheet replaced had a Create Folder button, and so
+/// does this one: without it a person who has no folder yet cannot get one from
+/// inside the app. What it refuses it says in the app's own words, and it
+/// refuses before touching the disk: an empty name, a name with a separator or
+/// a control character, `.`/`..`, a parent that is not absolute or not a folder.
+/// The parent may be missing: a first launch's own session folder does not
+/// exist until something writes in it, and the sheet opens on exactly that
+/// path. Creating the chain is what the writer does anyway when it saves a
+/// link, so a folder made here is the app's own folder made early -- never a
+/// path the person did not type into this sheet.
+pub(crate) fn folder_create(raw_parent: &str, raw_name: &str) -> serde_json::Value {
+    let asked = raw_parent.trim();
+    if !asked.is_empty() && !std::path::Path::new(asked).is_absolute() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "The folder path must be absolute."
+        });
+    }
+    let parent = if asked.is_empty() {
+        match crate::session::account_dir() {
+            Some(dir) => dir,
+            None => {
+                return serde_json::json!({
+                    "ok": false,
+                    "error": "No home folder to create in."
+                });
+            }
+        }
+    } else {
+        std::path::PathBuf::from(asked)
+    };
+    let name = raw_name.trim();
+    if name.is_empty() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "Type a name for the new folder."
+        });
+    }
+    if name == "." || name == ".." {
+        return serde_json::json!({
+            "ok": false,
+            "error": "That is not a folder name."
+        });
+    }
+    if name.contains('/') || name.contains('\\') {
+        return serde_json::json!({
+            "ok": false,
+            "error": "A folder name cannot contain a slash."
+        });
+    }
+    if name.chars().any(char::is_control) {
+        return serde_json::json!({
+            "ok": false,
+            "error": "A folder name cannot contain control characters."
+        });
+    }
+    if parent.exists() && !parent.is_dir() {
+        return serde_json::json!({
+            "ok": false,
+            "error": "That path is a file, not a folder."
+        });
+    }
+    let made = parent.join(name);
+    // `create_dir_all` treats an existing folder as success, and that is not
+    // what the press said it was doing: one new folder, and a name already
+    // taken is the app's own sentence, whichever kind of entry holds it.
+    if made.exists() {
+        return serde_json::json!({
+            "ok": false,
+            "error": format!("{name} is already in this folder.")
+        });
+    }
+    match std::fs::create_dir_all(&made) {
+        Ok(()) => {
+            // A session folder is private by the app's own rule -- the bridge
+            // refuses a config folder other people can read (`insecure_config`)
+            // -- so the folder this press makes is the writer's own 0700, not
+            // whatever the umask would have left.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o700));
+            }
+            serde_json::json!({
+                "ok": true,
+                "path": made.display().to_string()
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            serde_json::json!({
+                "ok": false,
+                "error": format!("A folder named {name} is already in this folder.")
+            })
+        }
+        Err(error) => serde_json::json!({
+            "ok": false,
+            "error": format!("Cannot create that folder: {error}")
+        }),
+    }
+}
+
+/// One page's folder list is a sheet, not a file manager: past this many rows
+/// the answer says so rather than painting thousands.
+const MAX_FOLDER_ROWS: usize = 500;
 
 /// One command from the page. Reads only, and by name: an unknown command is
 /// refused instead of guessed at, so a typo in the UI is visible in the page
@@ -934,6 +1350,30 @@ pub(crate) fn handle_command_with(
                 Answer::Later(fresh_space_delete(client, slug.to_owned()))
             }
         }
+        // A space's own Open: the page asks for the export the native row's
+        // Export button fetches, and the app draws the preview window, so the
+        // service's markup is never rendered by the page itself. A read, so
+        // there is no arm and nothing is written.
+        "library.open-space" => {
+            let slug = request
+                .get("slug")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let held = crate::pages::library_snapshot().0;
+            let known = held
+                .iter()
+                .find(|row| {
+                    row.target_kind.as_deref() == Some("space") && row.slug.as_deref() == Some(slug)
+                })
+                .map(|row| row.title.clone());
+            match known {
+                Some(title) => Answer::Later(fresh_space_open(client, slug.to_owned(), title)),
+                None => Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "that space is not in the held Library listing",
+                })),
+            }
+        }
         "goals.snapshot" => {
             let held = crate::pages::goals_snapshot();
             Answer::Now(serde_json::json!({
@@ -954,6 +1394,33 @@ pub(crate) fn handle_command_with(
             Answer::Now(tasks_reply(&crate::pages::tasks_snapshot()))
         }
         "tasks.refresh" => Answer::Later(fresh_tasks(client)),
+        // Deleting one schedule, addressed by the held row's own job id: the
+        // same two-press rule the conversation rows carry. The first press
+        // arms and writes nothing; the second sends the one `tasks.delete` and
+        // the Tasks listing is read again, which is the only proof it is gone.
+        "tasks.delete" => {
+            let job = request
+                .get("job")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let held = crate::pages::tasks_snapshot();
+            let known = held.schedules.iter().any(|row| row.id == job);
+            if !known {
+                Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "that schedule is not in the held Tasks listing",
+                }))
+            } else if !crate::pages::task_delete_press(job) {
+                let mut reply = tasks_payload(&held);
+                reply["ok"] = serde_json::json!(true);
+                reply["accepted"] = serde_json::json!(false);
+                reply["armed"] = serde_json::json!(job);
+                reply["job"] = serde_json::json!(job);
+                Answer::Now(reply)
+            } else {
+                Answer::Later(fresh_task_delete(client, job.to_owned()))
+            }
+        }
         // Upcoming, from the state the panel holds: the next run the last
         // Tasks read named and the approvals the panel last painted. No wire
         // read of its own, so a page open costs nothing and cannot queue
@@ -972,16 +1439,123 @@ pub(crate) fn handle_command_with(
         "ideas.refresh" => Answer::Later(fresh_ideas(client)),
         "threads.snapshot" => Answer::Now(threads_reply(&crate::pages::threads_snapshot())),
         "threads.refresh" => Answer::Later(fresh_threads(client)),
+        // One conversation's change, from its own row. The id must be one the
+        // held listing carries -- never one the page made up -- and a rename
+        // must carry a real title. The open thread's own id is the listing's,
+        // so a stale row is refused rather than sent on the wire.
+        // One row's unread badge, cleared: the same shape as the conversation
+        // changes -- the id must be one the held listing carries, the write
+        // runs off the main loop, and the listing read back is the proof.
+        "threads.seen" => {
+            let id = request
+                .get("thread")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let held = crate::pages::threads_snapshot();
+            if !held.threads.iter().any(|row| row.id == id) {
+                Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "that conversation is not in the held listing",
+                }))
+            } else {
+                Answer::Later(fresh_thread_seen(client, id.to_owned()))
+            }
+        }
+        "threads.op" => {
+            // The row is named by `thread`, not `id`: `id` is the channel's own
+            // reply ticket and the page refuses to overwrite it.
+            let id = request
+                .get("thread")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let verb = request
+                .get("verb")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let title = request
+                .get("title")
+                .and_then(|value| value.as_str())
+                .map(str::trim);
+            let held = crate::pages::threads_snapshot();
+            let known = held.threads.iter().any(|row| row.id == id);
+            let planned: Result<Option<String>, String> = if !known {
+                Err("that conversation is not in the held listing".to_owned())
+            } else {
+                match verb {
+                    "pin" | "unpin" | "archive" | "unarchive" | "delete" => Ok(None),
+                    "rename" => match title {
+                        Some("") => Err("a thread needs a non-blank title".to_owned()),
+                        Some(name) if name.chars().count() > MAX_THREAD_TITLE => Err(format!(
+                            "a thread title is at most {MAX_THREAD_TITLE} characters"
+                        )),
+                        Some(name) => Ok(Some(name.to_owned())),
+                        None => Err("a rename needs a title".to_owned()),
+                    },
+                    _ => Err("that is not a conversation change this app makes".to_owned()),
+                }
+            };
+            match planned {
+                Err(sentence) => Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": sentence,
+                })),
+                // A delete is spent by two presses on the same row: the first
+                // arms it and sends nothing at all, the second confirms. Every
+                // other verb is one press and clears the arm on its way.
+                Ok(title) if verb == "delete" => {
+                    if !crate::pages::thread_delete_press(id) {
+                        let held = crate::pages::threads_snapshot();
+                        Answer::Now(serde_json::json!({
+                            "ok": true,
+                            "accepted": false,
+                            "armed": id,
+                            "thread": id,
+                            "verb": verb,
+                            "threads": held.threads,
+                            "total": held.total,
+                            "loaded": held.loaded,
+                        }))
+                    } else {
+                        Answer::Later(fresh_thread_op(
+                            client,
+                            id.to_owned(),
+                            verb.to_owned(),
+                            title,
+                        ))
+                    }
+                }
+                Ok(title) => {
+                    crate::pages::thread_delete_forget();
+                    Answer::Later(fresh_thread_op(
+                        client,
+                        id.to_owned(),
+                        verb.to_owned(),
+                        title,
+                    ))
+                }
+            }
+        }
         "feed.snapshot" => Answer::Now(feed_reply(&crate::pages::feed_snapshot())),
         "feed.refresh" => Answer::Later(fresh_feed(client)),
         // Settings answers from held state only: the native page owns the
         // presses that write, and the policy is whatever the chat panel last
         // read rather than a second trip here.
         "settings.snapshot" => Answer::Now(settings_reply(&crate::pages::settings_snapshot())),
+        // The app's one sign-out press, whichever surface makes it.
+        "settings.sign_out" => route_answer(routes.map(|routes| (routes.sign_out)())),
         // The host polls its own controller every 250 ms and the native paint
         // re-projects each time, so this answer follows that pump: the page
         // re-asks and sees new cards and log lines without holding a lock.
-        "localhost.snapshot" => Answer::Now(localhost_reply(&crate::pages::localhost_snapshot())),
+        "localhost.snapshot" => {
+            // The pump, for a window whose only host surface is this page: the
+            // native page polls its controller on its own timer, and without
+            // one open a queued grant or search would never land. The answer is
+            // still the projection, re-taken after the poll.
+            if let Some(routes) = routes {
+                let _ = (routes.host_refresh)();
+            }
+            Answer::Now(localhost_reply(&crate::pages::localhost_snapshot()))
+        }
         "chat.snapshot" => Answer::Now(chat_reply(&crate::pages::chat_snapshot())),
         "shell.snapshot" => Answer::Now(shell_reply(routes)),
         // Send dispatches nothing itself: the draft goes back to the
@@ -1165,6 +1739,10 @@ pub(crate) fn handle_command_with(
         // choice is the person's -- but the grant itself is the same call the
         // native page makes, and its outcome arrives in the next snapshot.
         "localhost.grant" => {
+            let folder = request
+                .get("folder")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             let consent = request
                 .get("consent")
                 .and_then(|value| value.as_bool())
@@ -1173,7 +1751,7 @@ pub(crate) fn handle_command_with(
                 .get("writable")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
-            route_answer(routes.map(|routes| (routes.host_grant)(consent, writable)))
+            route_answer(routes.map(|routes| (routes.host_grant)(folder, consent, writable)))
         }
         "localhost.start" => {
             let consent = request
@@ -1206,11 +1784,83 @@ pub(crate) fn handle_command_with(
             route_answer(routes.map(|routes| (routes.host_policy)(allow)))
         }
         "localhost.clear_log" => route_answer(routes.map(|routes| (routes.host_clear_log)())),
+        // The page's own filename search: a read over the folders the person
+        // granted. The app validates the query (an empty one, a path-shaped
+        // one, an overlong one is refused by name), queues the walk and
+        // reprojects, so the page's next snapshot carries the answer.
+        "localhost.search" => {
+            let query = request
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            route_answer(routes.map(|routes| (routes.host_search)(query)))
+        }
+        // The page's content search: the broker's own matching lines, read
+        // over the folders the person granted and reported in the next
+        // snapshot, exactly as the native card reads it.
+        "localhost.content" => {
+            let query = request
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            route_answer(routes.map(|routes| (routes.host_content)(query)))
+        }
+        // One hit's text: the same bounded read the native row makes, with the
+        // path it came from. A refusal is the broker's sentence, never empty
+        // content pretending to be a file.
+        "localhost.preview" => {
+            let folder = request
+                .get("folder")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let path = request
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            match routes.map(|routes| (routes.host_preview)(folder, path)) {
+                None => Answer::Now(serde_json::json!({
+                    "ok": false,
+                    "error": "this window cannot read your folders"
+                })),
+                Some(Ok(mut preview)) => {
+                    preview["ok"] = serde_json::json!(true);
+                    Answer::Now(preview)
+                }
+                Some(Err(sentence)) => {
+                    Answer::Now(serde_json::json!({"ok": false, "error": sentence}))
+                }
+            }
+        }
         // The update surface: the two presses the native card offers. The check
         // and the download run in the app, on its own threads; the page reads
         // their outcome from `settings.snapshot`, like the rest of the card.
         "update.check" => route_answer(routes.map(|routes| (routes.update_check)())),
         "update.install" => route_answer(routes.map(|routes| (routes.update_install)())),
+        // One folder's subfolders, for the folder sheet a page stands in. A
+        // read by path, with no ticket of its own: what it answers is the list
+        // the sheet paints, and nothing is written.
+        "folders.list" => {
+            let path = request
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            Answer::Now(folder_listing(path))
+        }
+        // The sheet's create press: one new folder inside the folder the sheet
+        // stands in. Not recursive -- the app only makes a child of a listing
+        // it just read -- and only a child: the name is one component, so a
+        // typed `..` or a slash cannot walk the write anywhere else.
+        "folders.create" => {
+            let path = request
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let name = request
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            Answer::Now(folder_create(path, name))
+        }
         // The sign-in surface: the page owns the typing, the app owns the
         // rules. One press per message, carrying the values that press used.
         "signin.snapshot" => Answer::Now(signin_reply()),
@@ -1378,6 +2028,66 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
                 started,
             )
         }
+        Fetched::TaskDelete {
+            job,
+            accepted,
+            error,
+            held,
+            reread_error,
+        } => {
+            // A confirm spends the arm whatever its answer was.
+            crate::pages::task_delete_forget();
+            let mut reply = match held {
+                Some(held) => {
+                    // The re-read is the listing the page holds from now on.
+                    crate::pages::tasks_cache(held.clone());
+                    let mut reply = tasks_reply(&held);
+                    reply["loaded"] = serde_json::json!(true);
+                    reply
+                }
+                None => {
+                    let mut reply = tasks_reply(&crate::pages::tasks_snapshot());
+                    reply["loaded"] = serde_json::json!(false);
+                    reply
+                }
+            };
+            reply["accepted"] = serde_json::json!(accepted);
+            reply["job"] = serde_json::json!(job);
+            reply["armed"] = serde_json::Value::Null;
+            if let Some(error) = error {
+                reply["error"] = serde_json::json!(error);
+            }
+            if let Some(reread_error) = reread_error {
+                reply["reread_error"] = serde_json::json!(reread_error);
+            }
+            eprintln!(
+                "muse webui: {command} delete accepted={accepted} job={job} after {}ms",
+                started.elapsed().as_millis()
+            );
+            reply
+        }
+        Fetched::SpaceExport { name, exported } => match exported {
+            Ok(exported) => {
+                // The preview is the app's own window, drawn on the same main
+                // loop this reply already runs on.
+                crate::pages::space_preview_window(&name, &exported, None);
+                eprintln!(
+                    "muse webui: {command} opened {name} ({} bytes, truncated={}) after {}ms",
+                    exported.size,
+                    exported.truncated,
+                    started.elapsed().as_millis()
+                );
+                serde_json::json!({
+                    "ok": true,
+                    "opened": true,
+                    "title": name,
+                    "format": exported.format,
+                    "size": exported.size,
+                    "truncated": exported.truncated,
+                })
+            }
+            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        },
         Fetched::Goals(mut held) => {
             // A failed Tracking read must not empty a section that is merely
             // stale: the rows the native page still shows stay in the cache
@@ -1421,6 +2131,10 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
             ideas_reply(&held)
         }
         Fetched::Tasks(held) => {
+            // The listing painted again: a schedule's armed delete press does
+            // not survive it, so a confirm aimed at a row the service has
+            // since moved cannot delete what took its place.
+            crate::pages::task_delete_forget();
             crate::pages::tasks_cache(held);
             upcoming_changed();
             // Local reminders are local state: the worker did not read them,
@@ -1445,6 +2159,43 @@ pub(crate) fn reply_for(fetched: Fetched, command: &str, started: Instant) -> se
                 started.elapsed().as_millis()
             );
             threads_reply(&held)
+        }
+        Fetched::ThreadOp {
+            id,
+            verb,
+            accepted,
+            error,
+            rows,
+            threads,
+            reread_error,
+        } => {
+            if let Some(rows) = rows {
+                crate::pages::threads_cache(rows);
+                // The drawer is painted from the panel's own listing, so the
+                // read-back lands there too rather than on the page alone.
+                if let Some(chat) = crate::app::live_chat() {
+                    chat.set_threads(threads);
+                }
+            }
+            let held = crate::pages::threads_snapshot();
+            eprintln!(
+                "muse webui: {command} {verb} accepted={} threads={} ms={}",
+                accepted,
+                held.threads.len(),
+                started.elapsed().as_millis()
+            );
+            serde_json::json!({
+                "ok": true,
+                "accepted": accepted,
+                "thread": id,
+                "verb": verb,
+                "error": error,
+                "reread_error": reread_error,
+                "armed": crate::pages::thread_delete_armed(),
+                "threads": held.threads,
+                "total": held.total,
+                "loaded": held.loaded,
+            })
         }
         Fetched::Feed(held) => {
             crate::pages::feed_cache(held.clone());
@@ -1574,12 +2325,20 @@ pub(crate) fn close_page_window(page: &'static str) {
 /// the page reads its own snapshot again instead of being handed data.
 pub(crate) fn settings_updates_changed() {
     nudge_page("settings", "museUpdatesReady");
+    // The shell runs every page in one window, so its Settings card is not one
+    // of `nudge_page`'s: the nudge rides the pipe, and the window calls the
+    // same hook by name. Without this the card a press started stays on its
+    // busy step, because the answer lands after the press's own read.
+    crate::web_shell::page_changed("settings");
 }
 
 /// The policy projection changed: an open Settings window should re-ask, since
 /// the chat panel's read lands after that window opened.
 pub(crate) fn settings_policy_changed() {
     nudge_page("settings", "musePolicyReady");
+    // Same reason as the updater's nudge: the shell's Settings page is the
+    // window's document, not a page window the app can evaluate into.
+    crate::web_shell::page_changed("settings");
 }
 
 /// A Tasks read landed: the next run Upcoming names is that read's answer, so
@@ -1995,15 +2754,24 @@ pub(crate) fn signin_surface(press: WebSigninPress) -> WebRoutes {
         open_thread: std::rc::Rc::new(|_: Option<&str>| no_send()),
         set_policy: std::rc::Rc::new(|_: &str, _: &str| no_send()),
         reset_connector: std::rc::Rc::new(|_: &str| no_send()),
-        host_grant: std::rc::Rc::new(|_: bool, _: bool| no_send()),
+        host_grant: std::rc::Rc::new(|_: &str, _: bool, _: bool| no_send()),
         host_start: std::rc::Rc::new(|_: bool| no_send()),
         host_stop: std::rc::Rc::new(no_send),
         host_decide: std::rc::Rc::new(|_: &str, _: bool| no_send()),
         host_policy: std::rc::Rc::new(|_: bool| no_send()),
         host_clear_log: std::rc::Rc::new(no_send),
+        host_search: std::rc::Rc::new(|_: &str| no_send()),
+        host_refresh: std::rc::Rc::new(no_send),
+        host_content: std::rc::Rc::new(|_: &str| no_send()),
+        host_preview: std::rc::Rc::new(|_: &str, _: &str| {
+            Err("this window cannot read your folders".to_owned())
+        }),
         update_check: std::rc::Rc::new(no_send),
         update_install: std::rc::Rc::new(no_send),
         signin_press: press,
+        sign_out: std::rc::Rc::new(|| {
+            Err("This window is the sign-in surface; it cannot sign out.".to_owned())
+        }),
     }
 }
 
@@ -2063,15 +2831,20 @@ pub(crate) fn stub_routes() -> WebRoutes {
         open_thread: Rc::new(|_: Option<&str>| Ok(())),
         set_policy: Rc::new(|_: &str, _: &str| Ok(())),
         reset_connector: Rc::new(|_: &str| Ok(())),
-        host_grant: Rc::new(|_: bool, _: bool| Ok(())),
+        host_grant: Rc::new(|_: &str, _: bool, _: bool| Ok(())),
         host_start: Rc::new(|_: bool| Ok(())),
         host_stop: Rc::new(|| Ok(())),
         host_decide: Rc::new(|_: &str, _: bool| Ok(())),
         host_policy: Rc::new(|_: bool| Ok(())),
         host_clear_log: Rc::new(|| Ok(())),
+        host_search: Rc::new(|_: &str| Ok(())),
+        host_refresh: Rc::new(|| Ok(())),
+        host_content: Rc::new(|_: &str| Ok(())),
+        host_preview: Rc::new(|_: &str, _: &str| Ok(serde_json::json!({}))),
         update_check: Rc::new(|| Ok(())),
         update_install: Rc::new(|| Ok(())),
         signin_press: Rc::new(|_: SigninPress| Ok(())),
+        sign_out: Rc::new(|| Ok(())),
     }
 }
 
@@ -2284,11 +3057,14 @@ mod tests {
             Fetched::Tasks(..) => panic!("a library read must not answer with tasks"),
             Fetched::Ideas(..) => panic!("a library read must not answer with ideas"),
             Fetched::Threads(..) => panic!("a library read must not answer with threads"),
+            Fetched::ThreadOp { .. } => panic!("a library read must not answer with a thread op"),
             Fetched::Feed(..) => panic!("a library read must not answer with a feed"),
             Fetched::Hero(..) => panic!("a library read must not answer with a hero"),
             Fetched::Search(..) => panic!("a library read must not answer with a search"),
             Fetched::Unshare { .. } => panic!("a library read must not answer with an unshare"),
             Fetched::SpaceDelete { .. } => panic!("a library read must not answer with a delete"),
+            Fetched::SpaceExport { .. } => panic!("a library read must not answer with an export"),
+            Fetched::TaskDelete { .. } => panic!("a library read must not answer with a delete"),
         }
         let request = server.join().expect("server");
         assert!(request.contains(r#""op":"artifacts""#), "{request}");
@@ -2407,11 +3183,117 @@ mod tests {
             Fetched::Tasks(..) => panic!("no client, no tasks"),
             Fetched::Ideas(..) => panic!("no client, no ideas"),
             Fetched::Threads(..) => panic!("no client, no threads"),
+            Fetched::ThreadOp { .. } => panic!("no client, no thread change"),
             Fetched::Feed(..) => panic!("no client, no feed"),
             Fetched::Hero(..) => panic!("no client, no hero"),
             Fetched::Search(..) => panic!("no client, no search"),
             Fetched::Unshare { .. } => panic!("no client, no unshare"),
             Fetched::SpaceDelete { .. } => panic!("no client, no delete"),
+            Fetched::SpaceExport { .. } => panic!("no client, no export"),
+            Fetched::TaskDelete { .. } => panic!("no client, no schedule delete"),
+        }
+    }
+
+    /// A schedule's delete is the app's two-press rule: the first press arms
+    /// the row and writes nothing, a press on another row only re-arms, and
+    /// only the second press on the same row starts the one delete. A listing
+    /// painted again spends the arm.
+    #[test]
+    fn a_schedule_delete_arms_first_and_is_spent_by_a_second_press_or_a_repaint() {
+        crate::pages::task_delete_forget();
+        assert!(!crate::pages::task_delete_press("job-1"));
+        assert!(
+            crate::pages::task_delete_press("job-1"),
+            "the second press confirms"
+        );
+        assert!(
+            !crate::pages::task_delete_press("job-1"),
+            "a confirm spends the arm"
+        );
+        assert!(
+            !crate::pages::task_delete_press("job-2"),
+            "a press on another row re-arms instead of confirming"
+        );
+        assert!(
+            crate::pages::task_delete_press("job-2"),
+            "the row armed last is the one a second press confirms"
+        );
+        crate::pages::task_delete_press("job-3");
+        crate::pages::task_delete_forget();
+        assert!(
+            !crate::pages::task_delete_press("job-3"),
+            "a listing painted again spends the arm"
+        );
+    }
+
+    /// The route refuses a job the held listing does not name, and answers an
+    /// armed first press from the held rows without touching the wire.
+    #[test]
+    fn a_schedule_delete_refuses_an_unknown_row_and_arms_a_known_one() {
+        crate::pages::task_delete_forget();
+        crate::pages::tasks_cache(crate::pages::HeldTasks {
+            schedules: vec![crate::pages::TaskRow {
+                id: "job-1".into(),
+                label: "Nightly build (on)".into(),
+            }],
+            runs: Vec::new(),
+            local: Vec::new(),
+            next_run: None,
+            loaded: true,
+            error: None,
+        });
+        let (_, unknown, command) = handle_command_with(
+            r#"{"id":70,"cmd":"tasks.delete","job":"job-9"}"#,
+            None,
+            None,
+        );
+        assert_eq!(command, "tasks.delete");
+        match unknown {
+            Answer::Now(value) => assert_eq!(value["ok"], serde_json::json!(false)),
+            Answer::Later(_) => panic!("an unknown row must not start a delete"),
+        }
+        let (_, first, _) = handle_command_with(
+            r#"{"id":71,"cmd":"tasks.delete","job":"job-1"}"#,
+            None,
+            None,
+        );
+        match first {
+            Answer::Now(value) => {
+                assert_eq!(value["ok"], serde_json::json!(true));
+                assert_eq!(value["accepted"], serde_json::json!(false));
+                assert_eq!(value["armed"], serde_json::json!("job-1"));
+                assert_eq!(
+                    value["schedules"][0]["label"],
+                    serde_json::json!("Nightly build (on)")
+                );
+            }
+            Answer::Later(_) => panic!("the arming press writes nothing, so it cannot read"),
+        }
+        crate::pages::task_delete_forget();
+    }
+
+    /// Opening a space is addressed by the held listing's own handle: a slug
+    /// the listing does not carry is refused at once, and no export read is
+    /// started for it.
+    #[test]
+    fn an_open_press_refuses_a_handle_the_listing_does_not_carry() {
+        crate::pages::library_cache(Vec::new(), 0);
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":91,"cmd":"library.open-space","slug":"not-held"}"#,
+            None,
+            None,
+        );
+        assert_eq!(command, "library.open-space");
+        match answer {
+            Answer::Now(value) => {
+                assert_eq!(value["ok"], serde_json::json!(false));
+                assert!(
+                    value["error"].as_str().unwrap().contains("not in the held"),
+                    "the refusal names the listing: {}",
+                    value["error"]
+                );
+            }
+            Answer::Later(_) => panic!("an unknown handle must not start an export"),
         }
     }
 
@@ -4022,6 +4904,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("muse-webui-threads-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmp");
+        // The rows a refresh answers with are the listing plus any archive
+        // memory; under test there is none, so the answer is the listing alone.
         let socket = dir.join("host.sock");
         let listener = UnixListener::bind(&socket).expect("bind");
         let service = serde_json::json!({
@@ -4122,6 +5006,244 @@ mod tests {
             Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
             _ => panic!("no client, no rows"),
         }
+    }
+
+    /// One held conversation row, so a route test speaks about a real id.
+    fn hold_one_thread() {
+        crate::pages::threads_cache(HeldThreads {
+            threads: vec![crate::pages::ThreadRow {
+                id: "s-1".into(),
+                title: "A calmer inbox".into(),
+                ..crate::pages::ThreadRow::default()
+            }],
+            total: 1,
+            loaded: true,
+            error: None,
+        });
+    }
+
+    #[test]
+    fn thread_ops_refuse_rows_the_page_invented_and_verbs_it_cannot_send() {
+        hold_one_thread();
+
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":51,"cmd":"threads.op","thread":"made-up","verb":"pin"}"#,
+            None,
+            None,
+        );
+        assert_eq!(command, "threads.op");
+        let Answer::Now(reply) = answer else {
+            panic!("a refusal answers now")
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(
+            reply["error"],
+            "that conversation is not in the held listing"
+        );
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":52,"cmd":"threads.op","thread":"s-1","verb":"rename","title":"   "}"#,
+            None,
+            None,
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a blank title answers now")
+        };
+        assert_eq!(reply["error"], "a thread needs a non-blank title");
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":53,"cmd":"threads.op","thread":"s-1","verb":"explode"}"#,
+            None,
+            None,
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("an unknown verb answers now")
+        };
+        assert_eq!(
+            reply["error"],
+            "that is not a conversation change this app makes"
+        );
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":54,"cmd":"threads.op","thread":"s-1","verb":"rename"}"#,
+            None,
+            None,
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a rename without a title answers now")
+        };
+        assert_eq!(reply["error"], "a rename needs a title");
+    }
+
+    /// Deleting a conversation is the one verb that writes nothing on its
+    /// first press: the row is armed, and only the second press reaches the
+    /// service (which, with no link here, is where it stops).
+    #[test]
+    fn deleting_a_conversation_arms_first_and_writes_on_the_second_press() {
+        hold_one_thread();
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":56,"cmd":"threads.op","thread":"s-1","verb":"delete"}"#,
+            None,
+            None,
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("the arming press answers at once, with nothing written")
+        };
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["accepted"], false);
+        assert_eq!(reply["armed"], "s-1");
+        assert_eq!(reply["threads"][0]["id"], "s-1");
+        assert_eq!(crate::pages::thread_delete_armed().as_deref(), Some("s-1"));
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":57,"cmd":"threads.op","thread":"s-1","verb":"delete","title":"ignored"}"#,
+            None,
+            None,
+        );
+        let Answer::Later(receiver) = answer else {
+            panic!("the confirming press leaves the main loop")
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no delete"),
+        }
+        assert_eq!(
+            crate::pages::thread_delete_armed(),
+            None,
+            "the arm is spent"
+        );
+    }
+
+    /// A painting of the listing clears the arm: a press aimed at a row the
+    /// service has since moved cannot delete what took its place.
+    #[test]
+    fn a_repainted_listing_spends_the_delete_arm() {
+        hold_one_thread();
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":58,"cmd":"threads.op","thread":"s-1","verb":"delete"}"#,
+            None,
+            None,
+        );
+        assert!(matches!(answer, Answer::Now(_)));
+        assert_eq!(crate::pages::thread_delete_armed().as_deref(), Some("s-1"));
+        hold_one_thread();
+        assert_eq!(crate::pages::thread_delete_armed(), None);
+        // And a second delete press after the repaint arms again instead of
+        // deleting something nobody confirmed.
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":59,"cmd":"threads.op","thread":"s-1","verb":"delete"}"#,
+            None,
+            None,
+        );
+        assert!(matches!(answer, Answer::Now(_)));
+    }
+
+    /// Clearing a badge is the same discipline as a rename: a row the held
+    /// listing does not carry is refused here, and with no link the write
+    /// stops at the worker instead of pretending a change.
+    #[test]
+    fn marking_a_conversation_read_refuses_rows_it_does_not_hold() {
+        hold_one_thread();
+        crate::pages::threads_cache(HeldThreads {
+            threads: vec![crate::pages::ThreadRow {
+                id: "s-1".into(),
+                title: "A calmer inbox".into(),
+                unread: 2,
+                ..crate::pages::ThreadRow::default()
+            }],
+            total: 1,
+            loaded: true,
+            error: None,
+        });
+
+        let (_, answer, command) = handle_command_with(
+            r#"{"id":61,"cmd":"threads.seen","thread":"made-up"}"#,
+            None,
+            None,
+        );
+        assert_eq!(command, "threads.seen");
+        let Answer::Now(reply) = answer else {
+            panic!("a refusal answers now")
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(
+            reply["error"],
+            "that conversation is not in the held listing"
+        );
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":62,"cmd":"threads.seen","thread":"s-1"}"#,
+            None,
+            None,
+        );
+        let Answer::Later(receiver) = answer else {
+            panic!("a write leaves the main loop")
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no read mark"),
+        }
+    }
+
+    #[test]
+    fn a_thread_op_with_no_client_reports_the_missing_link() {
+        hold_one_thread();
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":55,"cmd":"threads.op","thread":"s-1","verb":"pin"}"#,
+            None,
+            None,
+        );
+        let Answer::Later(receiver) = answer else {
+            panic!("a change leaves the main loop")
+        };
+        match receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the worker answers")
+        {
+            Fetched::Failed(error) => assert_eq!(error, "no account link in this app"),
+            _ => panic!("no client, no change"),
+        }
+    }
+
+    #[test]
+    fn a_thread_op_reply_carries_the_service_word_and_the_held_rows() {
+        let held = HeldThreads {
+            threads: vec![crate::pages::ThreadRow {
+                id: "s-1".into(),
+                title: "Renamed by the service".into(),
+                ..crate::pages::ThreadRow::default()
+            }],
+            total: 1,
+            loaded: true,
+            error: None,
+        };
+        crate::pages::threads_cache(held.clone());
+        let reply = reply_for(
+            Fetched::ThreadOp {
+                id: "s-1".into(),
+                verb: "rename".into(),
+                accepted: true,
+                error: None,
+                rows: Some(held),
+                threads: Vec::new(),
+                reread_error: None,
+            },
+            "threads.op",
+            Instant::now(),
+        );
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(reply["thread"], "s-1");
+        assert_eq!(reply["threads"][0]["title"], "Renamed by the service");
+        assert_eq!(reply["total"], 1);
+        assert_eq!(reply["loaded"], true);
     }
 
     /// The row projection is the native wording: pinned first, day groups
@@ -4436,6 +5558,123 @@ mod tests {
         assert_eq!(reply["rows"][0]["title"], "Held result");
     }
 
+    /// The folder sheet's one read: the subfolders of the path it names, the
+    /// parent it can step to, and nothing that is not a folder. A refusal is a
+    /// sentence with `ok: false`, never an empty list the sheet could paint as
+    /// "this folder has none".
+    #[test]
+    fn the_folder_sheet_lists_folders_and_refuses_what_it_cannot_read() {
+        let dir = std::env::temp_dir().join(format!("muse-folders-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Beta")).expect("beta folder");
+        std::fs::create_dir_all(dir.join("alpha")).expect("alpha folder");
+        std::fs::write(dir.join("notes.txt"), b"not a folder").expect("a file beside them");
+
+        let listing = folder_listing(&dir.display().to_string());
+        assert_eq!(listing["ok"], true, "the folder reads: {listing}");
+        assert_eq!(listing["path"], dir.display().to_string());
+        assert_eq!(
+            listing["parent"],
+            dir.parent().expect("a parent").display().to_string()
+        );
+        let names: Vec<&str> = listing["folders"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .filter_map(|row| row["name"].as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "Beta"],
+            "folders only, sorted: {names:?}"
+        );
+        assert_eq!(
+            listing["folders"][1]["path"],
+            dir.join("Beta").display().to_string(),
+            "a row carries the path the sheet returns"
+        );
+
+        let relative = folder_listing("relative/folder");
+        assert_eq!(relative["ok"], false);
+        assert_eq!(relative["error"], "The folder path must be absolute.");
+        let missing = folder_listing("/definitely/not/a/folder");
+        assert_eq!(missing["ok"], false);
+        assert!(
+            missing["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("Cannot read that folder:")),
+            "a missing path is the app's sentence: {missing}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sheet's create press: one child of the folder the listing just read,
+    /// and every refusal in the app's own words.
+    #[test]
+    fn the_sheet_creates_one_folder_and_refuses_the_rest() {
+        let dir = std::env::temp_dir().join(format!("muse-folder-create-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a folder to create in");
+        let parent = dir.display().to_string();
+
+        let made = folder_create(&parent, "  parity-session  ");
+        assert_eq!(made["ok"], true, "the folder is made: {made}");
+        assert_eq!(
+            made["path"],
+            dir.join("parity-session").display().to_string(),
+            "the sheet steps into the path made"
+        );
+        assert!(dir.join("parity-session").is_dir(), "the child is on disk");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("parity-session"))
+                .expect("the folder's own mode")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o700, "a session folder is private: {mode:o}");
+        }
+
+        let again = folder_create(&parent, "parity-session");
+        assert_eq!(again["ok"], false);
+        assert_eq!(again["error"], "parity-session is already in this folder.");
+
+        for (name, sentence) in [
+            ("", "Type a name for the new folder."),
+            (".", "That is not a folder name."),
+            ("..", "That is not a folder name."),
+            ("a/b", "A folder name cannot contain a slash."),
+            ("a\\b", "A folder name cannot contain a slash."),
+            (
+                "bad\u{7}name",
+                "A folder name cannot contain control characters.",
+            ),
+        ] {
+            let refused = folder_create(&parent, name);
+            assert_eq!(refused["ok"], false, "{name:?} is refused");
+            assert_eq!(refused["error"], sentence, "{name:?}");
+        }
+
+        let relative = folder_create("relative/folder", "child");
+        assert_eq!(relative["ok"], false);
+        assert_eq!(relative["error"], "The folder path must be absolute.");
+        // A missing parent is made with the folder: a first launch's own
+        // session folder does not exist yet, and the sheet opens on it.
+        let missing = folder_create(&dir.join("not-yet").display().to_string(), "child");
+        assert_eq!(missing["ok"], true, "the chain is made: {missing}");
+        assert!(dir.join("not-yet").join("child").is_dir());
+
+        // A parent that is a file is refused, in the app's words.
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, b"a file, not a folder").expect("a file to refuse");
+        let not_a_folder = folder_create(&file.display().to_string(), "child");
+        assert_eq!(not_a_folder["ok"], false);
+        assert_eq!(not_a_folder["error"], "That path is a file, not a folder.");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Settings opens on the app's own held state: the updater's last answer
     /// and the policy the chat panel read, with the page named for the bundle.
     #[test]
@@ -4508,6 +5747,45 @@ mod tests {
         assert!(reply["policy"]["rows"][0]["flip"].is_null());
     }
 
+    /// Sign-out travels as the app's own press: the page gets the app's answer
+    /// on its ticket, and a window without routes cannot clear the link at all.
+    #[test]
+    fn a_sign_out_press_reaches_the_apps_own_route() {
+        let mut routes = signin_surface(crate::web_signin::routes(|| {}));
+        routes.sign_out = std::rc::Rc::new(|| Err("the app refused".to_owned()));
+
+        let (_, answer, command) =
+            handle_command_with(r#"{"id":9,"cmd":"settings.sign_out"}"#, None, Some(&routes));
+        assert_eq!(command, "settings.sign_out");
+        let Answer::Now(reply) = answer else {
+            panic!("a press answers at once")
+        };
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "the app refused");
+
+        let (_, answer, _) =
+            handle_command_with(r#"{"id":10,"cmd":"settings.sign_out"}"#, None, None);
+        let Answer::Now(reply) = answer else {
+            panic!("a refusal answers at once")
+        };
+        assert_eq!(reply["error"], "this window cannot make that change");
+
+        // The sign-in surface has no link of its own to clear, and says so
+        // rather than accepting a press it cannot carry out.
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":11,"cmd":"settings.sign_out"}"#,
+            None,
+            Some(&signin_surface(crate::web_signin::routes(|| {}))),
+        );
+        let Answer::Now(reply) = answer else {
+            panic!("a refusal answers at once")
+        };
+        assert_eq!(
+            reply["error"],
+            "This window is the sign-in surface; it cannot sign out."
+        );
+    }
+
     /// The Local host page opens on the host's read model, named for the
     /// bundle, so a fresh window paints the same grants, cards and log the
     /// native section already shows.
@@ -4515,6 +5793,10 @@ mod tests {
     fn the_localhost_document_names_its_page_and_carries_the_held_state() {
         crate::pages::localhost_cache(crate::pages::HeldLocalHost {
             identity: "This machine registers as its own device.".into(),
+            search_head: crate::pages::HOST_SEARCH_HEAD.into(),
+            search: None,
+            searching: false,
+            search_summary: "No search yet.".into(),
             phase: "registered".into(),
             notice: "Listening for the account's own node commands.".into(),
             device: Some("linux-0123456789abcdef".into()),
@@ -4604,6 +5886,146 @@ mod tests {
             after["notice"],
             serde_json::json!("Disconnected. No folders shared with Muse.")
         );
+    }
+
+    /// The page's snapshot is also its pump: when no native page is open there
+    /// is nothing else polling the controller, so a queued grant or search
+    /// would never land. Every read polls first, then answers the projection.
+    #[test]
+    fn the_page_snapshot_polls_before_it_answers() {
+        use std::rc::Rc;
+        crate::pages::localhost_cache(crate::pages::HeldLocalHost {
+            notice: "before the poll".into(),
+            ..Default::default()
+        });
+        let refresh = Rc::new(|| {
+            crate::pages::localhost_cache(crate::pages::HeldLocalHost {
+                notice: "after the poll".into(),
+                search: Some(crate::local_host::FileSearch {
+                    query: "report".into(),
+                    hits: Vec::new(),
+                    refused: Vec::new(),
+                    scanned: 3,
+                    truncated: false,
+                }),
+                ..Default::default()
+            });
+            Ok(())
+        });
+        let routes = WebRoutes {
+            host_refresh: refresh,
+            ..stub_routes()
+        };
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":80,"cmd":"localhost.snapshot"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(answer) = answer else {
+            panic!("a held-state read answers at once")
+        };
+        assert_eq!(answer["notice"], serde_json::json!("after the poll"));
+        assert_eq!(answer["search"]["query"], serde_json::json!("report"));
+        assert_eq!(answer["search"]["scanned"], serde_json::json!(3));
+    }
+
+    /// The page's filename search and preview are the app's own: the query is
+    /// passed through untouched, an answer carries the app's text and the path
+    /// it answered for, a refusal is a refusal (never an empty preview posing
+    /// as a file), and a window that cannot read says so.
+    #[test]
+    fn the_page_search_routes_answer_with_the_apps_own_words() {
+        use std::rc::Rc;
+        let seen = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let asked = seen.clone();
+        let search = Rc::new(move |query: &str| {
+            asked.borrow_mut().push(query.to_owned());
+            Ok(())
+        });
+        let preview = Rc::new(|folder: &str, path: &str| {
+            if path == "missing.txt" {
+                return Err("That folder is no longer granted. Search again.".to_owned());
+            }
+            Ok(serde_json::json!({
+                "folder": folder,
+                "path": path,
+                "content": "the report\n",
+            }))
+        });
+        let content_asked = seen.clone();
+        let content = Rc::new(move |query: &str| {
+            content_asked.borrow_mut().push(query.to_owned());
+            Ok(())
+        });
+        let routes = WebRoutes {
+            host_search: search,
+            host_content: content,
+            host_preview: preview,
+            ..stub_routes()
+        };
+
+        let (_, answer, _) = handle_command_with(
+            r#"{"id":70,"cmd":"localhost.search","query":"report"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(answer) = answer else {
+            panic!("a search press answers at once")
+        };
+        assert_eq!(answer["ok"], serde_json::json!(true));
+
+        // The page's content search takes the same route: the app validates
+        // the text and queues the broker's own read.
+        let (_, content, _) = handle_command_with(
+            r#"{"id":74,"cmd":"localhost.content","query":"revenue"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(content) = content else {
+            panic!("a content press answers at once")
+        };
+        assert_eq!(content["ok"], serde_json::json!(true));
+        assert_eq!(
+            seen.borrow().as_slice(),
+            ["report".to_owned(), "revenue".to_owned()]
+        );
+
+        let (_, held, _) = handle_command_with(
+            r#"{"id":71,"cmd":"localhost.preview","folder":"Scratch","path":"alpha-report.md"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(held) = held else {
+            panic!("a preview answers at once")
+        };
+        assert_eq!(held["ok"], serde_json::json!(true));
+        assert_eq!(held["content"], serde_json::json!("the report\n"));
+        assert_eq!(held["path"], serde_json::json!("alpha-report.md"));
+
+        let (_, refused, _) = handle_command_with(
+            r#"{"id":72,"cmd":"localhost.preview","folder":"Scratch","path":"missing.txt"}"#,
+            None,
+            Some(&routes),
+        );
+        let Answer::Now(refused) = refused else {
+            panic!("a refusal answers at once")
+        };
+        assert_eq!(refused["ok"], serde_json::json!(false));
+        assert_eq!(
+            refused["error"],
+            serde_json::json!("That folder is no longer granted. Search again.")
+        );
+
+        let (_, nothing, _) = handle_command_with(
+            r#"{"id":73,"cmd":"localhost.preview","folder":"Scratch","path":"a.txt"}"#,
+            None,
+            None,
+        );
+        let Answer::Now(nothing) = nothing else {
+            panic!("a window with no host answers at once")
+        };
+        assert_eq!(nothing["ok"], serde_json::json!(false));
     }
 
     /// The channel answers the page's one read from the same held state: the

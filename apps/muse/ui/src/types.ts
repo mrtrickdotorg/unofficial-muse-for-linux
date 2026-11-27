@@ -132,6 +132,9 @@ export type ThreadsSnapshot = {
   total: number;
   loaded: boolean;
   error?: string | null;
+  /// The row whose Delete press is armed. The app owns the arming, so the page
+  /// paints the confirmation it is told about instead of keeping its own.
+  armed?: string | null;
 };
 
 // One Tasks row: the native page's own words, so the two renderers agree.
@@ -316,6 +319,42 @@ export type LocalHostCard = {
 };
 
 // The Local host page as this window opens it: the controller's read model.
+// One filename hit from the local host page's search: the granted folder's
+// own label (never its capability id) and the path inside that folder.
+export type LocalHostHit = { folder: string; path: string };
+
+// A granted folder the walk could not read, by label and the broker's code.
+export type LocalHostRefusal = { folder: string; code: string };
+
+// The app's own answer to a filename search: the query it ran, the hits it
+// found, how many names it looked at, and what it could not read.
+export type LocalHostSearch = {
+  query: string;
+  hits: LocalHostHit[];
+  refused: LocalHostRefusal[];
+  scanned: number;
+  truncated: boolean;
+};
+
+// One matching line from a content search: the granted folder's label, the
+// path inside it, the 1-based line number and the line's own text.
+export type LocalHostContentHit = {
+  folder: string;
+  path: string;
+  line: number;
+  text: string;
+};
+
+// The app's own answer to a content search: the text it looked for, the
+// matching lines, the names it scanned, and the folders it could not read.
+export type LocalHostContentSearch = {
+  query: string;
+  hits: LocalHostContentHit[];
+  refused: LocalHostRefusal[];
+  scanned: number;
+  truncated: boolean;
+};
+
 export type LocalHostSnapshot = {
   identity: string;
   phase: string;
@@ -324,12 +363,37 @@ export type LocalHostSnapshot = {
   grants: LocalHostGrant[];
   pending: LocalHostCard[];
   log: string[];
+  // The filename search over the granted folders: the app's last answer, the
+  // one sentence it worded for both windows, and whether a walk is running.
+  search_head: string;
+  search: LocalHostSearch | null;
+  searching: boolean;
+  search_summary: string;
+  // The content search over the same folders: its last answer, its one
+  // sentence, and whether a read is running.
+  content_head: string;
+  content: LocalHostContentSearch | null;
+  searching_content: boolean;
+  content_summary: string;
   // The saved write permission and the words for it, as the native page has
   // them: the switch's state and sentence travel as data.
   policy_on: boolean;
   policy_sentence: string;
   approvals_head: string;
   activity_head: string;
+};
+
+// One folder in a folder sheet's listing: the name it shows and the path the
+// press sends back. Folders only -- the app has no file browser.
+export type FolderRow = { name: string; path: string };
+
+// What the app says one folder holds, and where it stands: its own path, the
+// parent it can step up to (`null` at the root), and its subfolders.
+export type FolderListing = {
+  path: string;
+  parent?: string | null;
+  folders: FolderRow[];
+  note?: string | null;
 };
 
 // One rail page as the shell lists it: the name the page components answer to

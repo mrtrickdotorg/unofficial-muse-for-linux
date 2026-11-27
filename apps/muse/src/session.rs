@@ -251,6 +251,13 @@ impl Session {
         Some(ticket)
     }
 
+    /// Drop this stream's hold without its completion: the read belongs to a
+    /// transcript the app no longer shows (a thread switch), so the late answer
+    /// finds no hold of its own and paints nothing. The slot is free at once.
+    pub fn abandon(&mut self, op: Op) {
+        self.held.remove(&op);
+    }
+
     /// Release the slot for a completion carrying its own ticket. A
     /// stale or foreign ticket owns nothing and releases nothing --
     /// and never touches another stream's slot.
@@ -616,9 +623,25 @@ pub fn bridge_venv_python_in(
     data_home: Option<std::path::PathBuf>,
     home: Option<std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
-    let base = data_home.or_else(|| home.map(|home| home.join(".local/share")))?;
-    let python = base.join("unofficial-muse-for-linux/account-bridge/.venv/bin/python");
-    python.is_file().then_some(python)
+    // A bridge installed under the standard data home is still the right
+    // interpreter when this launch was pointed elsewhere (a throwaway
+    // XDG_DATA_HOME, a test home): the venv carries the packages the bridge
+    // needs, and a system python on this machine does not. So both roots are
+    // tried, the launch's own first.
+    let mut bases: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(base) = data_home {
+        bases.push(base);
+    }
+    if let Some(home) = home {
+        let standard = home.join(".local/share");
+        if !bases.contains(&standard) {
+            bases.push(standard);
+        }
+    }
+    bases
+        .into_iter()
+        .map(|base| base.join("unofficial-muse-for-linux/account-bridge/.venv/bin/python"))
+        .find(|python| python.is_file())
 }
 
 /// First `python3` found in the given directories. The login helper is
@@ -685,6 +708,32 @@ mod tests {
             bridge_venv_python_in(None, Some(root.clone())),
             None,
             "no venv seeded under this home"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_launch_pointed_at_another_data_home_still_finds_the_installed_venv() {
+        let root = unique_root("detect-venv-fallback");
+        let installed =
+            root.join("home/.local/share/unofficial-muse-for-linux/account-bridge/.venv/bin");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("python"), "fake").unwrap();
+        // A throwaway data home with no bridge in it: the installed venv is
+        // what a fresh home must resolve to, not a system python.
+        let throwaway = root.join("throwaway/data");
+        std::fs::create_dir_all(&throwaway).unwrap();
+        assert_eq!(
+            bridge_venv_python_in(Some(throwaway.clone()), Some(root.join("home"))),
+            Some(installed.join("python"))
+        );
+        // And its own venv wins when both exist.
+        let local = throwaway.join("unofficial-muse-for-linux/account-bridge/.venv/bin");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("python"), "fake").unwrap();
+        assert_eq!(
+            bridge_venv_python_in(Some(throwaway), Some(root.join("home"))),
+            Some(local.join("python"))
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -990,5 +1039,18 @@ mod tests {
         assert!(session.accept(&goals));
         assert!(session.accept(&ideas));
         assert!(session.try_begin(Op::Goals).is_some());
+    }
+
+    #[test]
+    fn an_abandoned_history_read_cannot_paint_another_threads_rows() {
+        // A switch clears the transcript while its read is still on the wire:
+        // the answer must land nowhere, or the old thread's words would appear
+        // under the new chat's header.
+        let mut session = Session::new();
+        let ticket = session.try_begin(Op::History).expect("history slot");
+        session.abandon(Op::History);
+        assert!(!session.finish_history(&ticket, Ok(Vec::new())));
+        assert!(session.history.is_empty());
+        assert!(session.try_begin(Op::History).is_some());
     }
 }

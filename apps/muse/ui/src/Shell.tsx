@@ -227,7 +227,15 @@ export function Shell() {
     if (current === "search") {
       // Keyed by the words, so the drawer's entry can hand the page a new
       // query without the page having to watch a prop.
-      return <Search key={`search:${query}`} initialQuery={query} />;
+      // A result row is a conversation: the shell opens it with the same
+      // press the drawer's History rows use.
+      return (
+        <Search
+          key={`search:${query}`}
+          initialQuery={query}
+          onOpenThread={(id) => void openThread(id)}
+        />
+      );
     }
     const Page = COMPONENTS[current];
     if (Page) return <Page key={current} />;

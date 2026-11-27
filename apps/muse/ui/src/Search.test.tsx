@@ -94,6 +94,41 @@ describe("the Search web page", () => {
     expect(sent?.query).toBe("lot ramp");
   });
 
+  it("opens a result's conversation through the shell's own switch", async () => {
+    const held = bootPayload({
+      query: "parking",
+      rows: [row({ id: "thread-9", title: "Visitor parking" })],
+      total: 1,
+    });
+    window.__MUSE_BOOT__ = held;
+    installChannel(() => ({ ok: true, ...held }));
+    const opened: string[] = [];
+
+    render(<Search onOpenThread={(id) => opened.push(id)} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Visitor parking/ }));
+
+    // The row carries the conversation id the native row switches to, and
+    // the press is the shell's own -- not a second, page-made read.
+    expect(opened).toEqual(["thread-9"]);
+  });
+
+  it("leaves a result unpressable when no shell can open it", async () => {
+    const held = bootPayload({
+      query: "parking",
+      rows: [row({ id: "thread-9", title: "Visitor parking" })],
+      total: 1,
+    });
+    window.__MUSE_BOOT__ = held;
+    const commands = installChannel(() => ({ ok: true, ...held }));
+
+    render(<Search />);
+
+    expect(await screen.findByText("Visitor parking")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Visitor parking/ })).not.toBeInTheDocument();
+    expect(rowsOnPage()).toBe(1);
+    expect(commands).toEqual(["search.snapshot"]);
+  });
+
   it("refuses an empty query without asking the channel", async () => {
     const held = bootPayload({ query: "parking", rows: [row({ title: "Held result" })], total: 1 });
     window.__MUSE_BOOT__ = held;

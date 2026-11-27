@@ -30,6 +30,32 @@ pub struct ReleaseInfo {
     pub asset_size: u64,
 }
 
+/// The identifier the panel names for an offered build: the shortened
+/// commit the feed says the release was built from.
+pub fn short_build(sha: &str) -> String {
+    sha.chars().take(7).collect()
+}
+
+/// The asset's bytes as megabytes ("82.1 MB"), or `None` when the feed
+/// published no size for the asset.
+pub fn asset_size_mb(bytes: u64) -> Option<String> {
+    if bytes == 0 {
+        return None;
+    }
+    Some(format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0)))
+}
+
+/// The offered card's sentence: what the feed holds, not merely that it
+/// holds something. A feed that published no size says so instead of
+/// quietly leaving the figure out.
+pub fn offered_status(info: &ReleaseInfo) -> String {
+    let build = short_build(&info.sha);
+    match asset_size_mb(info.asset_size) {
+        Some(size) => format!("A newer build is available: {build} ({size})."),
+        None => format!("A newer build is available: {build} (the feed reports no size)."),
+    }
+}
+
 /// Pull the built commit out of the rolling-release notes
 /// ("... built from <sha> by the AppImage workflow.").
 pub fn parse_built_sha(notes: &str) -> Option<String> {
@@ -178,13 +204,23 @@ fn local_asset(url: &str) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// The agent both fetches share: a TCP handshake that never completes is the
+/// one wait a request timeout does not see, so connecting is bounded separately
+/// and the card reports a failure instead of holding its busy step.
+fn agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .build()
+}
+
 /// Fetch the feed answer. One blocking call, run on a worker.
 pub fn fetch_latest() -> Result<ReleaseInfo, String> {
     if let Some(path) = harness_feed() {
         harness_delay();
         return read_feed(&path);
     }
-    let response = ureq::get(RELEASE_API)
+    let response = agent()
+        .get(RELEASE_API)
         .set("User-Agent", "muse-linux-updater")
         .set("Accept", "application/vnd.github+json")
         .timeout(std::time::Duration::from_secs(30))
@@ -230,7 +266,8 @@ pub fn download_staged(info: &ReleaseInfo) -> Result<PathBuf, String> {
         std::fs::write(&temporary, &bytes)
             .map_err(|_| "Could not write the staged update.".to_string())?;
     } else {
-        let response = ureq::get(&info.asset_url)
+        let response = agent()
+            .get(&info.asset_url)
             .set("User-Agent", "muse-linux-updater")
             .timeout(std::time::Duration::from_secs(600))
             .call()
@@ -386,6 +423,32 @@ mod tests {
         }
         assert!(!dir.join("muse-old.updating").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_offered_build_is_named_with_its_bytes() {
+        let info = ReleaseInfo {
+            sha: "a6ed625ca4f8cabad4c2bb3cefcaebfdbec23b4e".to_owned(),
+            asset_url: "file:///tmp/muse.AppImage".to_owned(),
+            asset_size: 86_071_800,
+        };
+        assert_eq!(
+            offered_status(&info),
+            "A newer build is available: a6ed625 (82.1 MB)."
+        );
+    }
+
+    #[test]
+    fn a_feed_without_an_asset_size_says_so() {
+        let info = ReleaseInfo {
+            sha: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4".to_owned(),
+            asset_url: String::new(),
+            asset_size: 0,
+        };
+        assert_eq!(
+            offered_status(&info),
+            "A newer build is available: 0f1e2d3 (the feed reports no size)."
+        );
     }
 
     fn feed(notes: &str) -> serde_json::Value {

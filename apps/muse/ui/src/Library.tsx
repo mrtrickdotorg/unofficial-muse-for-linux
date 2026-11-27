@@ -27,15 +27,19 @@ function Card({
   armed,
   deleteArmed,
   pressing,
+  opening,
   onUnshare,
   onDelete,
+  onOpen,
 }: {
   artifact: Artifact;
   armed: boolean;
   deleteArmed: boolean;
   pressing: SpaceWrite | null;
+  opening: boolean;
   onUnshare: (artifact: Artifact) => void;
   onDelete: (artifact: Artifact) => void;
+  onOpen: (artifact: Artifact) => void;
 }) {
   const label = isSpace(artifact)
     ? "space"
@@ -54,6 +58,18 @@ function Card({
           native row. */}
       {isSpace(artifact) && artifact.slug && (
         <div className="card-actions">
+          {/* Opening a space is a read: it fetches the export the native row's
+              Export press fetches, and the app draws the preview window, so
+              this page never renders the service's markup itself. */}
+          <button
+            type="button"
+            className="inline-button"
+            disabled={opening}
+            onClick={() => onOpen(artifact)}
+            title="Open this space's export in its own window"
+          >
+            {opening ? "Opening…" : "Open"}
+          </button>
           <button
             type="button"
             className={`inline-button danger${armed ? " armed" : ""}`}
@@ -109,6 +125,9 @@ export function Library() {
   const [pressing, setPressing] = useState<{ slug: string; write: SpaceWrite } | null>(
     null,
   );
+  // The space whose Open is on the wire. Opening is a read, so it has no arm:
+  // one press asks the app to export that space and draw its preview window.
+  const [opening, setOpening] = useState<string | null>(null);
 
   // Opening the page costs nothing on the wire: the native side answers
   // from the rows it already holds, which is the same list the boot payload
@@ -149,6 +168,42 @@ export function Library() {
   }, []);
 
   const reading = useHeldRead("library", loadSnapshot, refresh);
+
+  // A space's Open: the app exports it and draws the preview window, so this
+  // page never renders the service's markup. The reply carries only the facts
+  // about the window the app opened.
+  const openSpace = useCallback(
+    async (artifact: Artifact) => {
+      const slug = artifact.slug;
+      if (!slug || opening) return;
+      if (!channelAvailable()) {
+        setError("The app's command channel is not available in this window.");
+        return;
+      }
+      setOpening(slug);
+      try {
+        const answer = await call<
+          { ok?: boolean; opened?: boolean; title?: string; error?: string }
+        >("library.open-space", 60_000, { slug });
+        if (answer.ok === false) {
+          setNote(`The app could not open that space: ${answer.error ?? "refused"}.`);
+        } else {
+          setNote(
+            `Opened "${answer.title ?? artifact.title}" in its own preview window.`,
+          );
+        }
+      } catch (failure) {
+        setNote(
+          `The app did not answer the open: ${
+            failure instanceof Error ? failure.message : String(failure)
+          }`,
+        );
+      } finally {
+        setOpening(null);
+      }
+    },
+    [opening],
+  );
 
   // A space write, on the app's one-armed-press rule: the first press sends
   // nothing, the second press on the same row and write sends the app's own
@@ -323,6 +378,8 @@ export function Library() {
                     }
                     onUnshare={(artifact) => void spaceWrite(artifact, "unshare")}
                     onDelete={(artifact) => void spaceWrite(artifact, "delete")}
+                    opening={opening === a.slug}
+                    onOpen={(row) => void openSpace(row)}
                   />
                 ))}
               </div>
@@ -345,6 +402,8 @@ export function Library() {
                     }
                     onUnshare={(artifact) => void spaceWrite(artifact, "unshare")}
                     onDelete={(artifact) => void spaceWrite(artifact, "delete")}
+                    opening={opening === a.slug}
+                    onOpen={(row) => void openSpace(row)}
                   />
                 ))}
               </div>
@@ -355,8 +414,9 @@ export function Library() {
 
       <div className="foot">
         Web UI slice of the port: rendered from the same rows the native page
-        holds. Unsharing and deleting a space are the writes here, each the
-        app's own path-only DELETE behind its own armed press.
+        holds. Opening a space previews the export the native row fetches;
+        unsharing and deleting one are the writes here, each the app's own
+        path-only DELETE behind its own armed press.
       </div>
     </div>
   );

@@ -144,6 +144,19 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
   const pendingDraft = useRef<string | null>(null);
   const flushTimer = useRef<number | null>(null);
   const burstStarted = useRef(0);
+  // The transcript is the only part of this page that scrolls: the composer
+  // stays at the window's foot. A reader at the newest turn keeps following it
+  // as rows arrive; one who has scrolled up is left where they are.
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const stuckToBottom = useRef(true);
+
+  const followTranscript = () => {
+    const el = scroller.current;
+    if (!el) {
+      return;
+    }
+    stuckToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+  };
 
   const cancelFlush = () => {
     if (flushTimer.current !== null) {
@@ -431,6 +444,37 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
 
   const rows = useMemo(() => data?.rows ?? [], [data]);
   const loaded = data?.loaded ?? false;
+
+  // A row arriving -- or another conversation in the app -- moves the newest
+  // turn into the reader's view, the way the native page follows it. Nothing
+  // moves while they are reading further back, and the composer never moves.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) {
+      return;
+    }
+    if (stuckToBottom.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [rows.length, data?.thread]);
+
+  // A resize re-wraps every turn and moves the bottom without adding a row: a
+  // reader following the newest turn keeps it in view instead of landing in the
+  // middle of an older bubble. Environments without the observer (the tests)
+  // simply keep the row-driven follow.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      if (stuckToBottom.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const turn: TurnMenu | undefined = data?.turn;
   const dictating = data?.composer?.dictating ?? false;
 
@@ -499,14 +543,26 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
 
       <div className="chat-shell">
         <div className="chat-transcript">
-          {!loaded ? (
+          {/* A log, not a live region over the whole transcript: only turns
+              that are added are announced, so a reply that grows under a
+              reader is not re-read from the top on every delta. */}
+          <div
+            className="chat-scroll"
+            ref={scroller}
+            onScroll={followTranscript}
+            role="log"
+            aria-label="Conversation"
+            aria-live="polite"
+            aria-relevant="additions"
+          >
+          {rows.length === 0 ? (
             <div className="empty">
-              The native Chat page has not read a thread yet, so there is
-              nothing to mirror. Open a conversation in the app — this window
-              is not claiming the thread is empty.
+              {/* A thread nobody has read yet is not an empty one; a new chat
+                  is: the sentence follows the open thread, not the read. */}
+              {!loaded && data?.thread
+                ? "The native Chat page has not read a thread yet, so there is nothing to mirror. Open a conversation in the app — this window is not claiming the thread is empty."
+                : "No messages yet."}
             </div>
-          ) : rows.length === 0 ? (
-            <div className="empty">No messages yet.</div>
           ) : (
             rows.map((row, index) =>
               row.kind === "day" ? (
@@ -525,6 +581,7 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               ),
             )
           )}
+          </div>
 
           {quote && (
             <div className="chat-quote">
@@ -620,12 +677,23 @@ export function Chat({ pollMs = POLL_MS }: { pollMs?: number }) {
               </button>
             )}
           </form>
-          {note && <div className="chat-note">{note}</div>}
+          {note && (
+            <div className="chat-note" role="status" aria-live="polite">
+              {note}
+            </div>
+          )}
         </div>
 
         <aside className="chat-panel">
           <div className="chat-panel-name">{data?.account || "Sign in"}</div>
-          {data?.status && <div className="chat-status">{data.status}</div>}
+          {/* The agent status changes on its own while a turn runs, so it is
+              a polite live region: a screen reader hears "Muse is replying"
+              without the page having to be re-read. */}
+          {data?.status && (
+            <div className="chat-status" role="status" aria-live="polite">
+              {data.status}
+            </div>
+          )}
           <div className="chat-panel-meta">
             {data?.thread ? `Thread ${data.thread.slice(0, 8)}…` : "New chat"}
           </div>

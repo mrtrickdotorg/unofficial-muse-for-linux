@@ -55,6 +55,37 @@ where
     });
 }
 
+thread_local! {
+    /// The chat panel the app is showing. The panel's signal handlers and timers
+    /// hold only weak references, so this slot is the panel's owner: nothing
+    /// else keeps it alive, and nothing else can free it.
+    static LIVE_CHAT: RefCell<Option<Rc<Chat>>> = const { RefCell::new(None) };
+}
+
+/// Take ownership of the chat panel this window shows. A panel a previous
+/// sign-in left behind is dropped here rather than leaked: the window replaced
+/// its content, so nothing still paints it.
+pub(crate) fn hold_chat(chat: Rc<Chat>) {
+    LIVE_CHAT.with(|slot| {
+        *slot.borrow_mut() = Some(chat);
+    });
+}
+
+/// Sign-out retires the panel; this is where it is let go. Returns how many
+/// strong references existed at the release -- one means the panel is freed
+/// now, more means something still holds it and the drop waits for that.
+pub(crate) fn release_chat() -> Option<usize> {
+    LIVE_CHAT
+        .with(|slot| slot.borrow_mut().take())
+        .map(|chat| Rc::strong_count(&chat))
+}
+
+/// The panel this window shows, without taking it. A read that landed off the
+/// main loop hands its listing to the panel that paints the drawers.
+pub(crate) fn live_chat() -> Option<Rc<Chat>> {
+    LIVE_CHAT.with(|slot| slot.borrow().clone())
+}
+
 /// An option button's press, delivered as the reader's next message.
 type OptionCallback = std::rc::Rc<dyn Fn(String)>;
 /// A message reaction toggle: the row's id plus the emoji.
@@ -327,6 +358,10 @@ pub struct Chat {
     /// Whether a press is being held on the divider, the only way a
     /// position change can be the reader's.
     panel_press: std::cell::Cell<bool>,
+    /// Sign-out retired this panel: it no longer owns the account, so its
+    /// timers stop reading and its paints stop writing the state a later
+    /// sign-in owns.
+    retired: std::cell::Cell<bool>,
 }
 
 /// Move the keyboard to the first control under `widget` that will take
@@ -624,6 +659,7 @@ impl Chat {
             panel_tasks: RefCell::new(None),
             panel_dragged: std::cell::Cell::new(false),
             panel_press: std::cell::Cell::new(false),
+            retired: std::cell::Cell::new(false),
             live_tx: RefCell::new(None),
             older_exhausted: RefCell::new(false),
             on_option: RefCell::new(None),
@@ -1010,9 +1046,22 @@ impl Chat {
             let Some(chat) = weak.upgrade() else {
                 return gtk4::glib::ControlFlow::Break;
             };
-            if woke || ticks >= 8 {
+            if chat.retired.get() {
+                return gtk4::glib::ControlFlow::Break;
+            }
+            let fallback = ticks >= 8;
+            if fallback {
                 ticks = 0;
+            }
+            if woke || fallback {
                 chat.reload_history();
+            }
+            // The transcript read cannot carry a badge on a conversation
+            // nobody has open; the listing is read on the slow beat, so an
+            // arriving message shows up within eight seconds without paying
+            // for a connect on every delivered event.
+            if fallback {
+                chat.refresh_listing();
             }
             gtk4::glib::ControlFlow::Continue
         });
@@ -2055,6 +2104,9 @@ impl Chat {
     /// so a page following `chat.snapshot` sees the sentence arrive rather
     /// than a stale copy of its first chunk.
     pub(crate) fn cache_web_chat(&self) {
+        if self.retired.get() {
+            return;
+        }
         let (rows, loaded, account, status) = {
             let session = self.session.borrow();
             (
@@ -2152,6 +2204,16 @@ impl Chat {
     pub fn client_handle(&self) -> Option<AccountClient> {
         self.client.borrow().clone()
     }
+
+    /// Sign-out retires the panel rather than dropping it: the shell window may
+    /// still be painting this session's rows while the next read is in flight,
+    /// and a second sign-in builds a new panel. Retired means its timers stop
+    /// reading and its paints stop writing, so the two cannot fight over one
+    /// cache.
+    pub(crate) fn retire(&self) {
+        self.retired.set(true);
+    }
+
     /// The local host controller: folder grants, host session and
     /// approval cards. The Local host page renders its snapshot;
     /// presses go through it so every mutation keeps the invariants.
@@ -2199,6 +2261,171 @@ impl Chat {
     }
 
     /// The linked account's thread listing, for the threads page.
+    /// Put a conversation the service just started into the held listing, so
+    /// both drawers show the chat the window has open. The listing was read
+    /// before that chat existed, and the only read that brings it is the next
+    /// connect; a started chat has no title yet, which is what the web's New
+    /// chat leaves in the sidebar until the service names it.
+    fn adopt_thread(&self, id: &str) {
+        let mut holding = self.session.borrow_mut();
+        let Some(account) = holding.account.as_mut() else {
+            return;
+        };
+        if account.threads.iter().any(|thread| thread.session_id == id) {
+            return;
+        }
+        account.threads.insert(
+            0,
+            muse_account::Thread {
+                session_id: id.to_owned(),
+                title: "New chat".to_owned(),
+                archived: false,
+                pinned: false,
+                is_thread: true,
+                unread_count: 0,
+                snippet: None,
+                is_primary: true,
+                updated_at: None,
+            },
+        );
+    }
+
+    /// Take the listing a read just answered with: the Threads page's held rows
+    /// and both drawers are painted from it, so a change and the badge it
+    /// clears show up where a person looks without waiting for a reconnect.
+    pub(crate) fn adopt_listing(self: &Rc<Self>, threads: Vec<muse_account::Thread>) {
+        let rows = crate::pages::held_threads_from(&threads, &local_today());
+        // Only a listing that says something new spends the page's held state:
+        // writing it clears an armed delete, and a background read must never
+        // eat a press the reader has already made.
+        if crate::pages::threads_snapshot().threads != rows.threads {
+            crate::pages::threads_cache(rows);
+        }
+        self.set_threads(threads);
+    }
+
+    /// The listing, not just the open transcript: a message arriving on a
+    /// conversation nobody has open changes its unread count there, and the
+    /// drawer and the Threads page are both painted from this read. It holds
+    /// the Connect slot, so it can never stack on a load or another read, and
+    /// it adopts only the rows -- never the whole account -- so an in-flight
+    /// model choice or panel read is left alone.
+    fn refresh_listing(self: &Rc<Self>) {
+        if self.retired.get() {
+            return;
+        }
+        let Some(client) = self.client_handle() else {
+            return;
+        };
+        let Some(ticket) = self.session.borrow_mut().try_begin(Op::Connect) else {
+            return;
+        };
+        dispatch(
+            self,
+            move || client.connect(),
+            move |chat, answer| {
+                let Ok(snapshot) = answer else {
+                    chat.session.borrow_mut().accept(&ticket);
+                    return;
+                };
+                if !chat.session.borrow_mut().accept(&ticket) {
+                    return;
+                }
+                if chat.session.borrow().account.is_none() {
+                    // The link's own connect can fail on a cold start -- the
+                    // bridge's first answer, or a launch seconds after the last
+                    // one was killed -- and nothing retried it, so the window
+                    // sat signed out until a relaunch. This beat carries the
+                    // same whole account, so it signs itself in.
+                    eprintln!(
+                        "muse: the listing beat repaired a launch with no account ({})",
+                        snapshot.identity_name
+                    );
+                    chat.land_account(snapshot, true);
+                } else {
+                    chat.adopt_listing(snapshot.threads);
+                }
+            },
+        );
+    }
+
+    /// Land a whole account read: the name, the listing, and -- on a launch
+    /// with no conversation in hand -- the newest one, which is the one a read
+    /// without a scope would have named. The link's own connect and the slow
+    /// listing beat both finish here, so the two cannot describe the account
+    /// differently.
+    fn land_account(self: &Rc<Self>, snapshot: muse_account::AccountSnapshot, open_newest: bool) {
+        self.session.borrow_mut().account = Some(snapshot.clone());
+        self.adopt_listing(snapshot.threads);
+        if open_newest {
+            let opened = self.thread.borrow().clone();
+            let newest = self.threads().first().map(|row| row.session_id.clone());
+            match (opened, newest) {
+                (None, Some(id)) => self.switch_thread(Some(id)),
+                _ => self.reload_history(),
+            }
+        }
+        self.render();
+        self.load_model();
+        self.start_live();
+    }
+
+    /// Opening a conversation is a read on this side and a write on the
+    /// service's: a row the listing still calls unread is marked seen once, and
+    /// the listing is read again so the badge clears. A row already read costs
+    /// nothing, and a refusal leaves the count exactly as it was.
+    fn mark_opened_seen(self: &Rc<Self>, id: &str) {
+        let unread = self
+            .threads()
+            .iter()
+            .find(|thread| thread.session_id == id)
+            .map(|thread| thread.unread_count)
+            .unwrap_or(0);
+        if unread == 0 {
+            return;
+        }
+        let Some(client) = self.client_handle() else {
+            return;
+        };
+        let thread = id.to_owned();
+        dispatch(
+            self,
+            move || {
+                client.mark_seen(&thread)?;
+                client.connect()
+            },
+            move |chat, answer| {
+                if let Ok(snapshot) = answer {
+                    chat.adopt_listing(snapshot.threads);
+                }
+            },
+        );
+    }
+
+    /// Replace the held listing with one the service just answered. Both
+    /// drawers are painted from it and so is the Threads page's own held
+    /// rows, so a rename, a pin or an archive shows up where a person looks
+    /// for it without waiting for the next connect.
+    pub(crate) fn set_threads(self: &Rc<Self>, threads: Vec<muse_account::Thread>) {
+        let changed = {
+            let mut session = self.session.borrow_mut();
+            match session.account.as_mut() {
+                Some(account) => {
+                    let changed = account.threads != threads;
+                    if changed {
+                        account.threads = threads;
+                    }
+                    changed
+                }
+                None => false,
+            }
+        };
+        if changed {
+            crate::web_shell::drawer_refresh();
+            self.render();
+        }
+    }
+
     pub fn threads(&self) -> Vec<muse_account::Thread> {
         self.session
             .borrow()
@@ -2212,8 +2439,15 @@ impl Chat {
     /// old thread) and the new thread loads. Never mixes two threads'
     /// rows in one transcript.
     pub fn switch_thread(self: &Rc<Self>, thread: Option<String>) {
+        if let Some(id) = thread.as_deref() {
+            self.mark_opened_seen(id);
+        }
         *self.thread.borrow_mut() = thread;
         *self.follow_after_render.borrow_mut() = true;
+        // The read in flight was for the transcript being left: its answer must
+        // find no hold, or it would paint the old thread's rows under the new
+        // header -- a "New chat" showing someone else's words.
+        self.session.borrow_mut().abandon(Op::History);
         self.session.borrow_mut().history.clear();
         self.session.borrow_mut().latest_quota = None;
         *self.older_exhausted.borrow_mut() = false;
@@ -2228,7 +2462,13 @@ impl Chat {
     pub fn load(self: &Rc<Self>, python: &std::path::Path, config_dir: &std::path::Path) {
         let ticket = match self.session.borrow_mut().try_begin(Op::Connect) {
             Some(ticket) => ticket,
-            None => return,
+            None => {
+                // A link that cannot start its own connect is a launch with no
+                // account: say so once rather than looking signed-out for the
+                // rest of the session.
+                eprintln!("muse: the saved link could not start a connect: its slot is held");
+                return;
+            }
         };
         let client = AccountClient::new(muse_account::BridgeConfig {
             python: python.to_owned(),
@@ -2240,10 +2480,20 @@ impl Chat {
             self,
             move || client.connect(),
             move |chat, answer| {
-                if chat.session.borrow_mut().finish_connect(&ticket, answer) {
-                    chat.reload_history();
-                    chat.load_model();
-                    chat.start_live();
+                // The snapshot is kept beside the answer: the name and the
+                // listing are this read's, and a first launch has already read
+                // a transcript, so the repaint cannot wait for a history change
+                // -- it would leave the drawer saying "Sign in" and the page's
+                // header blank over a real conversation.
+                let snapshot = answer.as_ref().ok().cloned();
+                let settled = chat.session.borrow_mut().finish_connect(&ticket, answer);
+                eprintln!(
+                    "muse: the saved link's connect settled={settled} account={:?} threads={}",
+                    chat.session_name(),
+                    chat.threads().len()
+                );
+                if let (true, Some(snapshot)) = (settled, snapshot) {
+                    chat.land_account(snapshot, true);
                 }
             },
         );
@@ -2592,6 +2842,27 @@ impl Chat {
                     })
                     .collect();
                 let with_images = !account_images.is_empty();
+                // A draft has no conversation yet. The first message sent into
+                // one starts it -- the service's own `session.start`, the call
+                // the web's New chat makes -- and the app sends into the id the
+                // service proved. Without this a "New chat" in either window
+                // could never become a conversation: every send would need a
+                // thread the reader had not got. The id travels back with the
+                // answer so the window adopts it as the open conversation; a
+                // start that fails sends nothing and says why.
+                let mut started: Option<String> = None;
+                let scope = match scope {
+                    Some(id) => Some(id),
+                    None => match client.start_session() {
+                        Ok(session) => {
+                            started = Some(session.session_id.clone());
+                            Some(session.session_id)
+                        }
+                        Err(error) => {
+                            return (Err(error), images, with_images, reply_worker, None);
+                        }
+                    },
+                };
                 let answer = match verified {
                     Some((vm_id, identity)) if with_images => client.send_images_verified(
                         scope.as_deref(),
@@ -2612,10 +2883,11 @@ impl Chat {
                 };
                 // The pictures ride back out with the answer: a failed
                 // send restores exactly what it took, dims and all.
-                // The quote rides the same way.
-                (answer, images, with_images, reply_worker)
+                // The quote rides the same way, and so does the id of the
+                // conversation this press started, if it started one.
+                (answer, images, with_images, reply_worker, started)
             },
-            move |chat, (answer, images, with_images, reply)| {
+            move |chat, (answer, images, with_images, reply, started)| {
                 chat.session.borrow_mut().accept(&ticket);
                 let next = chat.composer.borrow_mut().finish_send();
                 chat.composer_row.refresh(&chat.composer.borrow());
@@ -2633,6 +2905,17 @@ impl Chat {
                                  than the one pasted. The text landed; \
                                  re-paste the picture to retry it.",
                             );
+                        }
+                        // The window is showing the conversation this press
+                        // made, not the draft it was typed into: adopt the id
+                        // the service proved, which switches the transcript,
+                        // the title and the drawer's mark to it.
+                        if let Some(id) = started {
+                            chat.adopt_thread(&id);
+                            chat.switch_thread(Some(id));
+                            // The drawer holds the listing read before this
+                            // chat existed: hand it the listing that has it.
+                            crate::web_shell::drawer_refresh();
                         }
                         // Prove by re-read: the reply (or the limit notice)
                         // comes from the service, never from the dispatch.
@@ -2844,7 +3127,16 @@ impl Chat {
         let host_decide_weak = weak.clone();
         let host_policy_weak = weak.clone();
         let host_clear_weak = weak.clone();
+        let host_search_weak = weak.clone();
+        let host_refresh_weak = weak.clone();
+        let host_content_weak = weak.clone();
+        let host_preview_weak = weak.clone();
         crate::webui::WebRoutes {
+            // The link is the app's, not this panel's: the shell window attaches
+            // the press where the split that carried the link is reachable.
+            sign_out: std::rc::Rc::new(|| {
+                Err("Sign out belongs to the app window, not this one.".to_owned())
+            }),
             send: std::rc::Rc::new(move |text: &str, quote| match send_weak.upgrade() {
                 Some(chat) => chat.web_send(text, quote),
                 None => Err("The app window is gone.".to_owned()),
@@ -2907,9 +3199,9 @@ impl Chat {
                 Some(chat) => chat.web_connector_reset(connector),
                 None => Err("The app window is gone.".to_owned()),
             }),
-            host_grant: std::rc::Rc::new(move |consent: bool, writable: bool| {
+            host_grant: std::rc::Rc::new(move |folder: &str, consent: bool, writable: bool| {
                 match grant_weak.upgrade() {
-                    Some(chat) => chat.web_host_grant(consent, writable),
+                    Some(chat) => chat.web_host_grant(folder, consent, writable),
                     None => Err("The app window is gone.".to_owned()),
                 }
             }),
@@ -2929,6 +3221,24 @@ impl Chat {
             }),
             host_policy: std::rc::Rc::new(move |allow: bool| match host_policy_weak.upgrade() {
                 Some(chat) => chat.web_host_policy(allow),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_search: std::rc::Rc::new(move |query: &str| match host_search_weak.upgrade() {
+                Some(chat) => chat.web_host_search(query),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_preview: std::rc::Rc::new(move |folder: &str, path: &str| match host_preview_weak
+                .upgrade()
+            {
+                Some(chat) => chat.web_host_preview(folder, path),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_content: std::rc::Rc::new(move |query: &str| match host_content_weak.upgrade() {
+                Some(chat) => chat.web_host_content(query),
+                None => Err("The app window is gone.".to_owned()),
+            }),
+            host_refresh: std::rc::Rc::new(move || match host_refresh_weak.upgrade() {
+                Some(chat) => chat.web_host_refresh(),
                 None => Err("The app window is gone.".to_owned()),
             }),
             host_clear_log: std::rc::Rc::new(move || match host_clear_weak.upgrade() {
@@ -2999,48 +3309,26 @@ impl Chat {
         Self::run_connector_reset(self, connector)
     }
 
-    /// The Local host page's grant press. The chooser stays the app's own
-    /// native dialog -- a page cannot browse the disk, and the folder is the
-    /// person's choice -- so this answers as soon as the dialog is up; the
-    /// grant lands in the page's next snapshot.
-    fn web_host_grant(self: &Rc<Self>, consent: bool, writable: bool) -> Result<(), String> {
-        let parent = gtk4::prelude::WidgetExt::root(self.panel_policy.upcast_ref::<gtk4::Widget>())
-            .and_then(|root| root.downcast::<gtk4::Window>().ok());
-        let dialog = gtk4::FileChooserNative::new(
-            Some("Grant a folder to Muse"),
-            parent.as_ref(),
-            gtk4::FileChooserAction::SelectFolder,
-            Some("Grant"),
-            Some("Cancel"),
-        );
-        dialog.set_select_multiple(false);
-        dialog.set_modal(true);
-        let weak = Rc::downgrade(self);
-        dialog.connect_response(move |dialog, response| {
-            if response != gtk4::ResponseType::Accept {
-                return;
-            }
-            let Some(path) = dialog
-                .files()
-                .item(0)
-                .and_then(|file| file.downcast::<gtk4::gio::File>().ok())
-                .and_then(|file| file.path())
-            else {
-                return;
-            };
-            let Some(chat) = weak.upgrade() else {
-                return;
-            };
-            chat.web_host_press(|host| {
-                if let Err(refusal) = host.grant(path, consent, writable) {
-                    // A dialog's answer has no reply ticket: the refusal goes
-                    // into the host's own notice line, where every page reads it.
-                    host.note(refusal);
-                }
-            });
-        });
-        dialog.show();
-        Ok(())
+    /// The Local host page's grant press. The folder is the page's own choice,
+    /// made on its sheet and sent with the press, so no dialog stands between
+    /// the page and the controller's grant; the controller's refusal is the
+    /// press's own answer, in its own words, and the grant lands in the page's
+    /// next snapshot.
+    fn web_host_grant(
+        self: &Rc<Self>,
+        folder: &str,
+        consent: bool,
+        writable: bool,
+    ) -> Result<(), String> {
+        let asked = folder.trim();
+        if asked.is_empty() {
+            return Err("Choose a folder first.".to_owned());
+        }
+        let path = std::path::PathBuf::from(asked);
+        if !path.is_absolute() {
+            return Err("The folder path must be absolute.".to_owned());
+        }
+        self.web_host_press(|host| host.grant(path, consent, writable).map_err(str::to_owned))
     }
 
     /// Start the host from a page. The consent it carries is the page's own
@@ -3083,6 +3371,43 @@ impl Chat {
     /// enforced on the broker's grants.
     fn web_host_policy(self: &Rc<Self>, allow: bool) -> Result<(), String> {
         self.web_host_press(|host| host.set_write_policy(allow).map_err(str::to_owned))
+    }
+
+    /// The page's filename search over the folders the person granted. The
+    /// controller validates the query and queues the walk; the answer travels
+    /// in the next snapshot, which is the same one the native page paints.
+    fn web_host_search(self: &Rc<Self>, query: &str) -> Result<(), String> {
+        self.web_host_press(|host| host.search(query).map_err(str::to_owned))
+    }
+
+    /// The page's pump: poll the host's controller and re-project, so a grant
+    /// or a search a worker is still finishing lands in the page's next read
+    /// even when no native page is open to poll on its own timer.
+    fn web_host_refresh(self: &Rc<Self>) -> Result<(), String> {
+        self.web_host_press(|_| ());
+        Ok(())
+    }
+
+    /// The page's content search: the controller validates the query and
+    /// queues the broker's own read; the answer travels in the next snapshot,
+    /// which is the same one the native card paints.
+    fn web_host_content(self: &Rc<Self>, query: &str) -> Result<(), String> {
+        self.web_host_press(|host| host.search_content(query).map_err(str::to_owned))
+    }
+
+    /// One hit's text for the page's preview: the broker's own bounded read,
+    /// with the folder and path it answered for.
+    fn web_host_preview(
+        self: &Rc<Self>,
+        folder: &str,
+        path: &str,
+    ) -> Result<serde_json::Value, String> {
+        let preview = self.host().borrow_mut().read_file(folder, path)?;
+        Ok(serde_json::json!({
+            "folder": preview.folder,
+            "path": preview.path,
+            "content": preview.content,
+        }))
     }
 
     /// Clear the session log from the page: display only, like the native press.
@@ -3318,6 +3643,9 @@ impl Chat {
     }
 
     fn reload_history(self: &Rc<Self>) {
+        if self.retired.get() {
+            return;
+        }
         let ticket = match self.session.borrow_mut().try_begin(Op::History) {
             Some(ticket) => ticket,
             None => return,
@@ -3326,10 +3654,16 @@ impl Chat {
             self.session.borrow_mut().accept(&ticket);
             return;
         };
-        let scope = self.thread_scope();
+        // A new chat has no transcript on the service yet, and a scopeless read
+        // answers with the newest conversation: that would paint one thread's
+        // words under a "New chat" header. Nothing to read is not a read.
+        let Some(scope) = self.thread_scope() else {
+            self.session.borrow_mut().accept(&ticket);
+            return;
+        };
         dispatch(
             self,
-            move || client.history(scope.as_deref(), 32),
+            move || client.history(Some(&scope), 32),
             move |chat, answer| {
                 if chat.session.borrow_mut().finish_history(&ticket, answer) {
                     chat.render();

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { call, channelAvailable } from "./api";
-import type { LocalHostSnapshot } from "./types";
+import { FolderSheet } from "./FolderSheet";
+import type { LocalHostHit, LocalHostSnapshot } from "./types";
 
 /// The controller's phase in the native page's own words.
 const PHASE_WORDS: Record<string, string> = {
@@ -18,7 +19,15 @@ const READ_ONLY =
 
 /// The presses this page can have in flight: one at a time, because the host is
 /// one boundary and a second press must not race the first.
-type Press = "grant" | "start" | "stop" | "decide" | "policy" | "clear";
+type Press =
+  | "grant"
+  | "start"
+  | "stop"
+  | "decide"
+  | "policy"
+  | "clear"
+  | "search"
+  | "content";
 
 function sentence(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
@@ -41,6 +50,20 @@ export function LocalHost() {
   // grant. A second press on any control is ignored until the first answers.
   const [writing, setWriting] = useState<Press | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
+  // The grant's folder, chosen on the page's own sheet: the window never hands
+  // this press to a native dialog.
+  const [choosing, setChoosing] = useState(false);
+  // The filename search over the granted folders, and the one hit whose text
+  // the reader opened. Both are the app's answers, never a second source.
+  const [query, setQuery] = useState("");
+  // The content search's own entry: text inside the granted files, kept apart
+  // from the filename query so neither press changes the other's words.
+  const [contentQuery, setContentQuery] = useState("");
+  const [preview, setPreview] = useState<{
+    folder: string;
+    path: string;
+    content: string;
+  } | null>(null);
 
   const loadSnapshot = useCallback(async () => {
     if (!channelAvailable()) {
@@ -81,9 +104,9 @@ export function LocalHost() {
     setRefusal(null);
     try {
       await call(command, 15_000, extra);
-      // The grant dialog answers on its own; a start or stop has landed by the
-      // time the app replies, so re-read now instead of waiting for the pump.
-      if (kind !== "grant") await loadSnapshot();
+      // The app has answered the write itself, so re-read now instead of
+      // waiting for the host's pump to repaint.
+      await loadSnapshot();
       if (kind === "stop") setConsent(false);
     } catch (failure) {
       setRefusal(sentence(failure));
@@ -92,10 +115,30 @@ export function LocalHost() {
     }
   };
 
+  // A hit's press: the app reads the file with its own bounded read and
+  // answers with the text, or with the sentence explaining the refusal.
+  const openPreview = async (hit: LocalHostHit) => {
+    setRefusal(null);
+    try {
+      const answer = await call<{ folder: string; path: string; content: string }>(
+        "localhost.preview",
+        15_000,
+        { folder: hit.folder, path: hit.path },
+      );
+      setPreview(answer);
+    } catch (failure) {
+      setRefusal(sentence(failure));
+    }
+  };
+
   const phase = data?.phase ?? "";
   const grants = data?.grants ?? [];
   const cards = data?.pending ?? [];
   const log = data?.log ?? [];
+  const hits = data?.search?.hits ?? [];
+  const searching = data?.searching ?? false;
+  const contentHits = data?.content?.hits ?? [];
+  const searchingContent = data?.searching_content ?? false;
 
   return (
     <div className="page host-page">
@@ -134,14 +177,9 @@ export function LocalHost() {
             type="button"
             className="inline-button"
             disabled={writing !== null}
-            onClick={() =>
-              void write("grant", "localhost.grant", {
-                consent,
-                writable: !readOnly,
-              })
-            }
+            onClick={() => setChoosing(true)}
           >
-            {writing === "grant" ? "Choosing a folder…" : "Grant a folder to Muse…"}
+            {writing === "grant" ? "Granting…" : "Grant a folder to Muse…"}
           </button>
           <button
             type="button"
@@ -171,6 +209,93 @@ export function LocalHost() {
             <p className="grant-row" key={`${grant.label}:${grant.root}`}>
               {grant.text}
             </p>
+          ))}
+        </div>
+      )}
+
+      {/* The reader's own way in: the folders they granted are folders they
+          can find a file in, without asking Muse to. The walk is the app's
+          own bounded one, and the query is validated there. */}
+      <h2 className="section">{data?.search_head ?? "Find in your folders"}</h2>
+      <form
+        className="host-actions host-search-row"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void write("search", "localhost.search", { query });
+        }}
+      >
+        <input
+          type="search"
+          className="host-search"
+          aria-label="Find a filename in your folders"
+          placeholder="Part of a filename"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <button
+          type="submit"
+          className="inline-button"
+          disabled={writing !== null || searching}
+        >
+          {searching ? "Searching…" : "Search"}
+        </button>
+      </form>
+      {data?.search_summary && <p className="note host-search-summary">{data.search_summary}</p>}
+      {hits.length > 0 && (
+        <div className="rows host-hits">
+          {hits.map((hit) => (
+            <button
+              type="button"
+              className="inline-button host-hit"
+              key={`${hit.folder}:${hit.path}`}
+              onClick={() => void openPreview(hit)}
+            >
+              {hit.folder} · {hit.path}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* The same folders, one level deeper: the lines that say it, read by
+          the app's own bounded content scan (UTF-8 files only). */}
+      <h2 className="section">{data?.content_head ?? "Search inside your files"}</h2>
+      <form
+        className="host-actions host-search-row"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void write("content", "localhost.content", { query: contentQuery });
+        }}
+      >
+        <input
+          type="search"
+          className="host-search"
+          aria-label="Search inside the files in your folders"
+          placeholder="Text inside a file"
+          value={contentQuery}
+          onChange={(event) => setContentQuery(event.target.value)}
+        />
+        <button
+          type="submit"
+          className="inline-button"
+          disabled={writing !== null || searchingContent}
+        >
+          {searchingContent ? "Searching…" : "Search inside"}
+        </button>
+      </form>
+      {data?.content_summary && (
+        <p className="note host-search-summary">{data.content_summary}</p>
+      )}
+      {contentHits.length > 0 && (
+        <div className="rows host-hits">
+          {contentHits.map((hit) => (
+            <button
+              type="button"
+              className="inline-button host-hit"
+              key={`${hit.folder}:${hit.path}:${hit.line}`}
+              onClick={() => void openPreview(hit)}
+            >
+              {hit.folder} · {hit.path}:{hit.line} · {hit.text}
+            </button>
           ))}
         </div>
       )}
@@ -260,6 +385,46 @@ export function LocalHost() {
             </p>
           ))}
         </div>
+      )}
+
+      {preview && (
+        <div
+          className="host-preview"
+          role="dialog"
+          aria-label={`${preview.folder} · ${preview.path}`}
+        >
+          <h3 className="card-head">
+            {preview.path} · {preview.content.length} bytes
+          </h3>
+          <pre className="preview">{preview.content}</pre>
+          <div className="host-actions">
+            <button
+              type="button"
+              className="inline-button"
+              onClick={() => setPreview(null)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {choosing && (
+        <FolderSheet
+          title="Grant a folder to Muse"
+          start={grants[0]?.root ?? ""}
+          confirm="Grant this folder"
+          note="Muse reads only what is inside a granted folder, and every write still needs your approval."
+          onCancel={() => setChoosing(false)}
+          onChoose={(path) => {
+            setChoosing(false);
+            void write("grant", "localhost.grant", {
+              folder: path,
+              consent,
+              writable: !readOnly,
+            });
+          }}
+        />
       )}
 
       <div className="foot">

@@ -68,7 +68,7 @@ fn a_cycle_claims_and_notifies_exactly_once_across_cycles() {
 }
 
 #[test]
-fn a_failed_notification_is_logged_by_id_and_never_retried() {
+fn a_failed_notification_is_logged_by_id_and_retried_until_it_lands() {
     let dir = tmpdir("fail");
     let t = now();
     let due_id = {
@@ -89,10 +89,27 @@ fn a_failed_notification_is_logged_by_id_and_never_retried() {
         !logs[0].contains("secret body"),
         "reminder text must never reach a log"
     );
-    // At-most-once holds through failure: no second cycle retries it.
+    // The claim is released, so the reminder is still due: nothing spent a
+    // reminder nobody saw. A second failing cycle tries again, and the store
+    // still says it was never delivered.
     let mut logs2 = Vec::new();
     assert_eq!(
         run_cycle(&dir, &recorder, t, &mut |line| logs2.push(line)).unwrap(),
-        0
+        1
     );
+    assert_eq!(logs2.len(), 1);
+    let task = TaskStore::open(&dir).unwrap().get(due_id).unwrap();
+    assert!(!task.notified, "an undelivered reminder is not marked seen");
+
+    // A notifier that works delivers it once, and from then on the store is
+    // quiet: the retry did not turn into a duplicate.
+    let working = Recorder {
+        sent: RefCell::new(Vec::new()),
+        fail_ids: Vec::new(),
+    };
+    assert_eq!(run_cycle(&dir, &working, t, &mut |_| {}).unwrap(), 1);
+    assert_eq!(*working.sent.borrow(), vec![due_id]);
+    assert_eq!(run_cycle(&dir, &working, t, &mut |_| {}).unwrap(), 0);
+    assert_eq!(working.sent.borrow().len(), 1);
+    assert!(TaskStore::open(&dir).unwrap().get(due_id).unwrap().notified);
 }

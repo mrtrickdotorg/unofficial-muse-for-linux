@@ -26,7 +26,9 @@
 //! grants -- is not reachable by any other local process.
 //!
 //! The native GTK window stays the fallback and the reference: no window
-//! binary, no usable saved link, or `MUSE_SHELL=gtk` all open it instead.
+//! binary or `MUSE_SHELL=gtk` open it instead. No saved link is not a reason to
+//! fall back -- the window opens on the sign-in page, and the app switches it to
+//! the shell once a link lands.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -71,6 +73,10 @@ thread_local! {
     /// a recorder in its place and read back the protocol.
     static WRITER: std::cell::RefCell<Option<Box<dyn Write>>> =
         const { std::cell::RefCell::new(None) };
+    /// The page the window is painting: its boot page at launch, then the shell
+    /// once a link lands. A drawer payload belongs to the shell and never to the
+    /// sign-in page, so this is what says which one the window holds.
+    static PAGE: std::cell::RefCell<&'static str> = const { std::cell::RefCell::new("shell") };
     /// Quit the app when the window goes: with the native window hidden, the
     /// shell window is the only surface, so its closing is the app's closing.
     static QUIT: std::cell::RefCell<Option<Rc<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
@@ -82,6 +88,24 @@ thread_local! {
 /// Whether the app opens the Tauri shell window instead of the native one.
 pub(crate) fn tauri() -> bool {
     *MODE.get_or_init(choose) && !FALLEN_BACK.load(Ordering::Relaxed)
+}
+
+/// The page the window opens on: the sign-in surface until the app holds a
+/// link, then the shell. The window has no state of its own, so the app names
+/// it -- over `MUSE_WINDOW_PAGE` at launch, and with a `show` line after a link.
+pub(crate) fn boot_page() -> &'static str {
+    boot_page_for(
+        crate::session::load_saved_link()
+            .filter(|link| link.consent)
+            .map(|_| true),
+    )
+}
+
+fn boot_page_for(linked: Option<bool>) -> &'static str {
+    match linked {
+        Some(true) => "shell",
+        _ => "signin",
+    }
 }
 
 /// `MUSE_SHELL` picks the window; unset means "the shell window when it can
@@ -103,17 +127,6 @@ fn choose() -> bool {
         other => {
             eprintln!("muse: MUSE_SHELL={other} is neither gtk nor tauri; choosing automatically")
         }
-    }
-    // Only a linked account has a shell to show: the sign-in surface is still
-    // the native one, so an unlinked clone keeps the window that can carry it.
-    if crate::session::load_saved_link()
-        .filter(|link| link.consent)
-        .is_none()
-    {
-        eprintln!(
-            "muse: no usable saved link: sign-in is still the native surface, opening the GTK window"
-        );
-        return false;
     }
     let Some(binary) = window_binary() else {
         eprintln!(
@@ -173,8 +186,11 @@ pub(crate) fn launch(quit: Rc<dyn Fn()>, fallback: Rc<dyn Fn()>) -> bool {
     let Some(binary) = window_binary() else {
         return false;
     };
+    let page = boot_page();
+    PAGE.with(|slot| *slot.borrow_mut() = page);
     let mut command = Command::new(&binary);
     command
+        .env("MUSE_WINDOW_PAGE", page)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -244,6 +260,49 @@ pub(crate) fn page_changed(page: &'static str) {
     write(&serde_json::json!({ "nudge": page }));
 }
 
+/// Paint one page in the shell window from the app's own payload, the same
+/// route a press in the rail takes. A notification click uses it to open the
+/// page whose change the reader was told about.
+pub(crate) fn show_page(payload: serde_json::Value) {
+    if !payload.is_object() {
+        return;
+    }
+    write(&serde_json::json!({ "show": payload }));
+}
+
+/// The link was saved: hand the window the shell document over the same pipe.
+/// The payload is the app's own `shell.snapshot` after `show_main` installed the
+/// routes, so the window reloads into a shell that already has answers. No mode
+/// gate, like [`page_changed`]: with no window there is no writer and the line
+/// goes nowhere.
+pub(crate) fn show_shell() {
+    let boot = SOURCE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|source| crate::webui::shell_boot(Some(&source.routes)))
+    });
+    let Some(boot) = boot else {
+        eprintln!("muse: no page state to hand the window; it stays on sign-in");
+        return;
+    };
+    PAGE.with(|slot| *slot.borrow_mut() = "shell");
+    // A switched window is a new document with a new drawer: a payload pushed
+    // for the page before it does not belong to the drawer now on screen.
+    PUSHED.store(false, Ordering::Relaxed);
+    eprintln!("muse: the link is saved; the window switches to the shell");
+    write(&serde_json::json!({ "show": boot }));
+}
+
+/// The app returned to sign-in: hand the window the sign-in document over the
+/// same pipe. The reverse of [`show_shell`], on the same line, so one mechanism
+/// moves the window between the app and its sign-in page.
+pub(crate) fn show_signin() {
+    PAGE.with(|slot| *slot.borrow_mut() = "signin");
+    PUSHED.store(false, Ordering::Relaxed);
+    eprintln!("muse: signed out; the window switches to sign-in");
+    write(&serde_json::json!({ "show": crate::webui::signin_boot() }));
+}
+
 /// The chat cache has named the account: push the window a payload the app's
 /// own read fills, once. The window's boot answer is its first paint, asked
 /// before that read landed, so this is the line that closes the gap -- the app
@@ -256,12 +315,25 @@ pub(crate) fn account_named() {
     push_drawer_boot();
 }
 
+/// A chat the app just started belongs in the drawer now, not on the next
+/// launch: the payload is rebuilt from the state that holds the new row and
+/// pushed again, with the once-only guard cleared so this second push lands.
+pub(crate) fn drawer_refresh() {
+    PUSHED.store(false, Ordering::Relaxed);
+    push_drawer_boot();
+}
+
 /// The push itself, without the mode gate: the payload the drawer's first paint
 /// could not carry, built from the state the app holds now, and written once.
 /// Nothing is lost when there is no window yet -- that launch's own boot request
 /// is asked after this read and carries the name itself.
 fn push_drawer_boot() {
     if PUSHED.load(Ordering::Relaxed) || !WRITER.with(|slot| slot.borrow().is_some()) {
+        return;
+    }
+    // The drawer is the shell's: a name read before the link lands has no drawer
+    // to fill, and the switch itself carries the name.
+    if PAGE.with(|slot| *slot.borrow()) != "shell" {
         return;
     }
     let boot = SOURCE.with(|slot| {
@@ -379,6 +451,19 @@ fn window_gone() {
 /// own WebKit: the window loads the system GTK 3 / WebKitGTK 4.1, and an entry
 /// naming a 6.0 bundle would give it the other generation.
 fn clean_library_path(path: &str) -> Option<String> {
+    let appdir = std::env::var_os("APPDIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from);
+    clean_library_path_outside(path, appdir.as_deref())
+}
+
+/// The filter itself, with the bundle's root named: inside a packaged app the
+/// launcher points `LD_LIBRARY_PATH` at the bundle's own libraries, and the
+/// window must not inherit them. Those are GTK 4 and WebKitGTK 6.0 for the
+/// state layer; the window is GTK 3 and WebKitGTK 4.1, and GTK aborts a
+/// process that meets both. The paths that are *not* the bundle (the seat's
+/// own `/usr/lib`, a user's prefix) are kept.
+fn clean_library_path_outside(path: &str, appdir: Option<&std::path::Path>) -> Option<String> {
     let kept: Vec<&str> = path
         .split(':')
         .filter(|entry| !entry.is_empty())
@@ -386,6 +471,7 @@ fn clean_library_path(path: &str) -> Option<String> {
             !entry.contains("webkitgtk-6.0")
                 && !entry.contains("muse-appimage")
                 && !entry.contains("muse-toolbox")
+                && !appdir.is_some_and(|dir| std::path::Path::new(entry).starts_with(dir))
         })
         .collect();
     if kept.is_empty() {
@@ -398,8 +484,9 @@ fn clean_library_path(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PUSHED, WRITER, candidates, clean_library_path, install, page_changed, push_drawer_boot,
-        serve, write,
+        PAGE, PUSHED, WRITER, boot_page_for, candidates, clean_library_path,
+        clean_library_path_outside, install, page_changed, push_drawer_boot, serve, show_shell,
+        show_signin, write,
     };
     use crate::pages::HistoryRow;
     use crate::webui::{WebRoutes, stub_routes};
@@ -422,6 +509,15 @@ mod tests {
         );
     }
 
+    /// A clone with no link opens on the sign-in page: the shell would have no
+    /// account to draw, and the native window is no longer what carries one.
+    #[test]
+    fn a_clone_without_a_link_opens_on_the_signin_page() {
+        assert_eq!(boot_page_for(None), "signin");
+        assert_eq!(boot_page_for(Some(false)), "signin");
+        assert_eq!(boot_page_for(Some(true)), "shell");
+    }
+
     #[test]
     fn the_windows_library_path_drops_this_process_own_webkit() {
         let inherited = "/run/user/1002/muse-appimage/usr/lib:/home/me/.local/share/muse-toolbox/gtk4/usr/lib:/usr/lib";
@@ -430,6 +526,25 @@ mod tests {
         assert_eq!(
             clean_library_path("/usr/lib:/opt/webkit").as_deref(),
             Some("/usr/lib:/opt/webkit")
+        );
+    }
+
+    #[test]
+    fn the_windows_library_path_leaves_the_bundle_it_was_launched_from() {
+        let appdir = std::path::Path::new("/tmp/.mount_museAbC123");
+        let inherited = "/tmp/.mount_museAbC123/usr/lib:/tmp/.mount_museAbC123/usr/lib/x86_64-linux-gnu:/usr/lib64";
+        assert_eq!(
+            clean_library_path_outside(inherited, Some(appdir)).as_deref(),
+            Some("/usr/lib64")
+        );
+        // Without a bundle named, the same path is the seat's own: untouched.
+        assert_eq!(
+            clean_library_path_outside(inherited, None).as_deref(),
+            Some(inherited)
+        );
+        assert_eq!(
+            clean_library_path_outside("/tmp/.mount_museAbC123/usr/lib", Some(appdir)),
+            None
         );
     }
 
@@ -535,6 +650,88 @@ mod tests {
         assert_eq!(lines(&written), vec![serde_json::json!({ "raise": true })]);
     }
 
+    /// The link landed: the app hands the window the shell document over the
+    /// same pipe, and the switch is one line, so there is no second window and
+    /// no moment with neither surface up.
+    #[test]
+    fn a_saved_link_hands_the_window_the_shell_document() {
+        let _turn = boot_turn();
+        let written = window_stdin();
+        install(None, routes_with_history());
+        PAGE.with(|slot| *slot.borrow_mut() = "signin");
+
+        show_shell();
+
+        let switched = lines(&written);
+        assert_eq!(
+            switched.len(),
+            1,
+            "one line switches the window: {switched:?}"
+        );
+        assert!(
+            switched[0].get("id").is_none(),
+            "a switch answers no ticket: {switched:?}"
+        );
+        let boot = &switched[0]["show"];
+        assert_eq!(boot["page"], "shell");
+        assert_eq!(
+            boot["pages"].as_array().map(Vec::len),
+            Some(crate::pages::PAGES.len())
+        );
+        assert_eq!(boot["history"][0]["text"], "A calmer inbox");
+        assert_eq!(PAGE.with(|slot| *slot.borrow()), "shell");
+    }
+
+    /// Sign-out switches the same window the other way: one line, the sign-in
+    /// page's own boot, and nothing left of the shell's drawer push.
+    #[test]
+    fn a_sign_out_hands_the_window_the_signin_document() {
+        let _turn = boot_turn();
+        PUSHED.store(true, Ordering::Relaxed);
+        let written = window_stdin();
+        PAGE.with(|slot| *slot.borrow_mut() = "shell");
+
+        show_signin();
+
+        let shown = lines(&written);
+        assert_eq!(shown.len(), 1, "one line switches the window: {shown:?}");
+        assert!(
+            shown[0].get("id").is_none(),
+            "a switch answers no ticket: {shown:?}"
+        );
+        assert_eq!(shown[0]["show"]["page"], "signin");
+        assert!(shown[0]["show"]["consent_sentence"].is_string());
+        assert_eq!(PAGE.with(|slot| *slot.borrow()), "signin");
+        assert!(
+            !PUSHED.load(Ordering::Relaxed),
+            "the shell's drawer push is spent with its document"
+        );
+    }
+
+    /// The drawer is the shell's: a name the app reads before the link lands
+    /// cannot be pushed to a page that has no drawer to fill.
+    #[test]
+    fn the_drawer_push_waits_until_the_window_is_the_shell() {
+        let _turn = boot_turn();
+        PUSHED.store(false, Ordering::Relaxed);
+        let written = window_stdin();
+        install(None, routes_with_history());
+        PAGE.with(|slot| *slot.borrow_mut() = "signin");
+
+        push_drawer_boot();
+
+        assert!(
+            lines(&written).is_empty(),
+            "the sign-in page has no drawer: {:?}",
+            lines(&written)
+        );
+        assert!(
+            !PUSHED.load(Ordering::Relaxed),
+            "nothing was written, so nothing was spent"
+        );
+        PAGE.with(|slot| *slot.borrow_mut() = "shell");
+    }
+
     /// A page nudge is a control line too: the page's name and nothing else,
     /// so the window maps it to its own hook and no code crosses the pipe.
     #[test]
@@ -546,6 +743,25 @@ mod tests {
         assert_eq!(
             lines(&written),
             vec![serde_json::json!({ "nudge": "upcoming" })]
+        );
+    }
+
+    /// The Settings cards are the shell's, and the app's own reads land after
+    /// the press that asked for them: without this nudge the card stays on its
+    /// busy step forever, because nothing tells the window to re-ask.
+    #[test]
+    fn a_settings_answer_nudges_the_shell_window() {
+        let written = window_stdin();
+
+        crate::webui::settings_updates_changed();
+        crate::webui::settings_policy_changed();
+
+        assert_eq!(
+            lines(&written),
+            vec![
+                serde_json::json!({ "nudge": "settings" }),
+                serde_json::json!({ "nudge": "settings" }),
+            ]
         );
     }
 

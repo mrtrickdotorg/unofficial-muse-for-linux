@@ -124,6 +124,71 @@ describe("the Tasks web page", () => {
     expect(cards()).toBe(0);
   });
 
+  // Deleting a schedule is the app's two-press rule: the first press only
+  // arms it and the page paints the app's own confirmation label; the second
+  // sends the one delete and paints the listing the app read back.
+  it("arms a schedule's delete, then sends it and paints the re-read rows", async () => {
+    const held = bootPayload({ schedules: [row("job-1", "Nightly build (on)")] });
+    window.__MUSE_BOOT__ = held;
+    let deletes = 0;
+    const commands = installChannel(
+      (command) => {
+        if (command === "tasks.snapshot") return { ok: true, ...held };
+        deletes += 1;
+        if (deletes === 1) {
+          return { ok: true, accepted: false, job: "job-1", armed: "job-1", ...held };
+        }
+        return {
+          ok: true,
+          accepted: true,
+          job: "job-1",
+          armed: null,
+          ...bootPayload({ schedules: [row("job-2", "Weekly report (off)")] }),
+        };
+      },
+      undefined,
+    );
+
+    render(<Tasks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    expect(
+      await screen.findByRole("button", { name: "Confirm delete" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Nothing has been sent yet/)).toBeInTheDocument();
+    expect(screen.getByText("Nightly build (on)")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm delete" }));
+
+    await waitFor(() => expect(screen.queryByText("Nightly build (on)")).toBeNull());
+    expect(screen.getByText("Weekly report (off)")).toBeInTheDocument();
+    expect(screen.getByText(/accepted the delete, and the listing was read again/)).toBeInTheDocument();
+    expect(commands.filter((c) => c === "tasks.delete")).toHaveLength(2);
+  });
+
+  it("drops an armed delete when the listing is read again", async () => {
+    const held = bootPayload({ schedules: [row("job-1", "Nightly build (on)")] });
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) =>
+      command === "tasks.delete"
+        ? { ok: true, accepted: false, job: "job-1", armed: "job-1", ...held }
+        : { ok: true, ...held },
+    );
+
+    render(<Tasks />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
+    expect(
+      await screen.findByRole("button", { name: "Confirm delete" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Confirm delete" })).toBeNull(),
+    );
+    expect(screen.queryByText(/Nothing has been sent yet/)).toBeNull();
+  });
+
   it("reports a failed read beside the rows the page still holds", async () => {
     window.__MUSE_BOOT__ = bootPayload({
       schedules: [row("held", "Held job (on)")],

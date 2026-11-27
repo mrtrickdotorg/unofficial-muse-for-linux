@@ -14,7 +14,9 @@ mod composer;
 mod images;
 mod local_host;
 mod login;
+mod notify;
 mod pages;
+mod scheduler;
 mod session;
 mod signin;
 mod update;
@@ -23,6 +25,7 @@ mod web_shell;
 mod web_signin;
 mod webui;
 pub(crate) mod widget;
+mod window_state;
 
 const APP_ID: &str = "org.kythos.MuseLinux";
 /// Register the bundled icon set. Called once at startup; tests call
@@ -43,8 +46,6 @@ pub(crate) const WEBKIT_STAGING: &str = "/tmp/.webkitgtk-6.0-umfl";
 /// points it at the bundle's 4.1 helpers before it spawns the window,
 /// whose WebKit spawns the same way this process's does.
 pub(crate) const WEBKIT41_STAGING: &str = "/tmp/.webkit2gtk-4.1-umfl";
-const DEFAULT_WINDOW_WIDTH: i32 = 1100;
-const DEFAULT_WINDOW_HEIGHT: i32 = 700;
 
 fn main() {
     crate::webui::mark_start();
@@ -180,9 +181,12 @@ fn build_ui(app: &adw::Application) {
     let window = gtk4::ApplicationWindow::builder()
         .application(app)
         .title("Muse")
-        .default_width(DEFAULT_WINDOW_WIDTH)
-        .default_height(DEFAULT_WINDOW_HEIGHT)
         .build();
+    // The geometry is the reader's: the last launch's size and maximized state,
+    // or the whole primary display on a first launch. No size constant stands
+    // in for that, and the window never opens as a small floating panel.
+    crate::window_state::apply(&window);
+    crate::window_state::remember(&window);
     // Client-side decorations: without a titlebar the window has no
     // drag handle, no resize grip, and no min/max buttons -- it sits
     // stuck wherever the compositor puts it.
@@ -199,11 +203,18 @@ fn build_ui(app: &adw::Application) {
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
     let split = adw::OverlaySplitView::builder().show_sidebar(true).build();
-    let linked = session::load_saved_link().filter(|link| link.consent);
+    let linked = session::load_saved_link()
+        .filter(|link| link.consent)
+        .is_some();
     let mut page_signin = false;
-    if linked.is_some() {
+    if linked {
         eprintln!("muse: saved link found, opening chat");
         show_main(&split);
+    } else if tauri {
+        // The window is the sign-in surface: the same page, the same rules, and
+        // a link that lands builds the app and switches this window to it.
+        eprintln!("muse: no saved link, opening sign-in in the shell window");
+        signin_in_shell(&split);
     } else {
         eprintln!("muse: no saved link, showing sign-in");
         page_signin = show_signin(&split);
@@ -266,11 +277,24 @@ fn build_ui(app: &adw::Application) {
         // anything: the native one takes its place, and the app stays native.
         let fallback = Rc::new({
             let window = window.clone();
-            move || window.present()
+            let split = split.clone();
+            move || {
+                if linked {
+                    window.present();
+                } else {
+                    // No window and no link: the native sign-in is the surface
+                    // that can still carry one.
+                    show_signin(&split);
+                }
+            }
         });
         if !web_shell::launch(quit, fallback) {
             eprintln!("muse: the shell window could not start; showing the native window");
-            window.present();
+            if linked {
+                window.present();
+            } else {
+                show_signin(&split);
+            }
         }
     }
     eprintln!(
@@ -692,18 +716,14 @@ fn show_main(split: &adw::OverlaySplitView) {
     let chat_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     stack.add_named(&chat_box, Some("chat"));
     let chat = app::Chat::install(&chat_box);
-    // The shell window asks this process for the pages' own answers; see
-    // `web_shell`. Installed here, where the chat panel and its routes are
-    // reachable, so a page press reaches the same sender, chooser and decision
-    // path a press in the native window does.
-    if web_shell::tauri() {
-        web_shell::install(chat.client_handle(), chat.web_routes());
-    }
+    // The schedules the service holds are this process's job, not a page's:
+    // the timer starts here, once, and keeps arming and firing for as long as
+    // the app runs, whatever the window is doing.
+    scheduler::start(Rc::downgrade(&chat));
     // App-lifetime singletons: the signal handlers and idle sources
     // hold only weak references, so the strong references live here,
     // leaked for the life of the process.
     let weak_chat = Rc::downgrade(&chat);
-    std::mem::forget(chat);
     split.set_content(Some(&stack));
     let ctx = pages::Ctx {
         chat: weak_chat,
@@ -721,13 +741,35 @@ fn show_main(split: &adw::OverlaySplitView) {
         },
     };
     let ctx = Rc::new(ctx);
+    // The Settings page reads the updater from here, so its card offers the
+    // presses this app can take even when the window is the only surface.
+    pages::hold_updates(ctx.updates.clone());
+    // The shell window asks this process for the pages' own answers; see
+    // `web_shell`. Installed here, where the chat panel, its routes and the
+    // updater's held state are all reachable, so a page press reaches the same
+    // sender, chooser, decision path and updater a press in the native window
+    // does.
+    if web_shell::tauri() {
+        web_shell::install(
+            chat.client_handle(),
+            shell_routes(&chat, &ctx, split.clone()),
+        );
+    }
+    // The panel's owner for the life of this window: sign-out releases it, so
+    // each sign-in in one process builds a new panel instead of adding a
+    // retired one to the process's memory.
+    app::hold_chat(chat);
     // The shell mounts every page, so it carries the same routes the pages'
     // own windows do: wired here, where the app's chat panel is reachable.
     {
         let chat = ctx.chat.clone();
+        let split_for_shell = split.clone();
+        let ctx_for_shell = ctx.clone();
         if let Some(shell) = pages::named_button(&side, "shell") {
             shell.connect_clicked(move |_| {
-                let routes = chat.upgrade().map(|chat| chat.web_routes());
+                let routes = chat
+                    .upgrade()
+                    .map(|chat| shell_routes(&chat, &ctx_for_shell, split_for_shell.clone()));
                 if !crate::webui::open_shell_window(routes) {
                     eprintln!("muse: the web shell is unavailable in this build");
                 }
@@ -955,6 +997,88 @@ fn show_main(split: &adw::OverlaySplitView) {
     {
         window.present();
     }
+}
+
+/// The routes a page in the shell window answers with: the chat panel's own,
+/// plus the two presses that belong to the app rather than to one panel --
+/// sign-out, which also switches the window, and the updater, whose held state
+/// lives with the shell that draws its card. One builder, so the window this
+/// launch opens and the one the drawer raises answer identically.
+fn shell_routes(
+    chat: &Rc<app::Chat>,
+    ctx: &Rc<pages::Ctx>,
+    split: adw::OverlaySplitView,
+) -> crate::webui::WebRoutes {
+    let mut routes = chat.web_routes();
+    routes.sign_out = sign_out_route(Rc::downgrade(chat), split);
+    let (check, install) = pages::update_press_routes(pages::Ctx::clone(ctx));
+    routes.update_check = check;
+    routes.update_install = install;
+    routes
+}
+
+/// The press a page's Sign out makes: the app's one link-clearing function,
+/// then the surface that can take a new link. The window's page moves with the
+/// same `show` line a link uses to reach the shell, so sign-out and sign-in are
+/// one mechanism in both directions.
+fn sign_out_route(
+    chat: std::rc::Weak<app::Chat>,
+    split: adw::OverlaySplitView,
+) -> crate::webui::WebSignOut {
+    Rc::new(move || {
+        crate::pages::sign_out()?;
+        if let Some(chat) = chat.upgrade() {
+            chat.retire();
+        }
+        // Nothing owns the account now: the shell's account line must not keep
+        // the name the retired panel last read.
+        crate::pages::chat_cache(crate::pages::HeldChat::default());
+        let split = split.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            if web_shell::tauri() {
+                // Installing the sign-in surface drops this session's page
+                // routes, and the routes were the last strong reference to the
+                // chat panel besides the app's own.
+                signin_in_shell(&split);
+                web_shell::show_signin();
+            } else {
+                // The drawer's GTK shell window has no sign-in page: it closes,
+                // and the native surface carries the link.
+                crate::webui::close_page_window("shell");
+                show_signin(&split);
+            }
+            if let Some(refs) = app::release_chat() {
+                eprintln!(
+                    "muse: the retired chat panel is released ({refs} strong reference(s) at release)"
+                );
+            }
+        });
+        Ok(())
+    })
+}
+
+/// The sign-in surface in the shell window. A fresh clone has no saved link, so
+/// the window opens on the sign-in page (`web_shell::boot_page`) and this is
+/// what answers it: the app's own validation, save and isolated browser flow,
+/// installed before the window asks its first snapshot. The one-time setup runs
+/// here rather than behind a dialog, because the page's own defaults are its
+/// product. A link that lands builds the app exactly as the native sign-in
+/// surface does, then hands the window the shell document.
+fn signin_in_shell(split: &adw::OverlaySplitView) {
+    if session::first_run_marker().is_none_or(|marker| !marker.is_file()) {
+        session::first_run_setup();
+        session::note_first_run_done();
+    }
+    crate::pages::signin_cache(crate::pages::HeldSignin::opening());
+    let split_for_link = split.clone();
+    let press = web_signin::routes(move || {
+        let split = split_for_link.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            show_main(&split);
+            web_shell::show_shell();
+        });
+    });
+    web_shell::install(None, crate::webui::signin_surface(press));
 }
 
 /// The sign-in surface, shown with no usable saved link and after an explicit

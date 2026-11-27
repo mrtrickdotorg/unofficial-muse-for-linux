@@ -64,6 +64,11 @@ export function Settings() {
   // refused in, so once the app's own status moves on the sentence is about a
   // step that ended.
   const updateStatusSeen = useRef<string | null>(null);
+  // Sign-out clears the app's saved link and returns this window to its
+  // sign-in page: the app repaints the window, so the page only has a refusal
+  // to print.
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutRefusal, setSignOutRefusal] = useState<string | null>(null);
 
   // Opening the page costs nothing: the native side answers with the state its
   // own paints left behind.
@@ -170,6 +175,19 @@ export function Settings() {
     }
   };
 
+  const signOut = async () => {
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutRefusal(null);
+    try {
+      await call("settings.sign_out", 15_000);
+    } catch (failure) {
+      setSignOutRefusal(sentence(failure));
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
   const link = data?.link;
   const updates = data?.updates;
 
@@ -189,11 +207,24 @@ export function Settings() {
           <p className="note">Linked.</p>
           <Row label="Interpreter" value={link.interpreter} />
           <Row label="Session folder" value={link.session_folder} />
+          <div className="host-actions">
+            <button
+              type="button"
+              className="inline-button danger"
+              disabled={signingOut}
+              onClick={() => void signOut()}
+            >
+              {signingOut ? "Signing out…" : "Sign out"}
+            </button>
+          </div>
+          {signOutRefusal && (
+            <p className="note write-refusal">{signOutRefusal}</p>
+          )}
         </div>
       ) : (
         <p className="note">
-          No saved link. Sign in from the native page; this window only shows
-          what the app holds.
+          No saved link. The app is on its sign-in surface; signing in there
+          rebuilds this window's pages.
         </p>
       )}
 
@@ -292,9 +323,9 @@ export function Settings() {
 
       <div className="foot">
         Web UI slice of the port: rendered from the same link, update state and
-        policy the native pages hold. A policy flip and a connector reset go
-        through the app's own update path; check, download, restart and sign out
-        stay in the app.
+        policy the native pages hold. A policy flip, a connector reset and Sign
+        out go through the app's own paths; check, download and restart go
+        through its own updater.
       </div>
     </div>
   );

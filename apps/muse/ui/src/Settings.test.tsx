@@ -80,7 +80,9 @@ describe("the Settings web page", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
     await waitFor(() => expect(commands).toContain("update.check"));
     expect(screen.queryByRole("button", { name: /download update|restart to update/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /sign out/i })).not.toBeInTheDocument();
+    // The link is this window's to clear: the app's own press, offered here
+    // rather than left on the native page.
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 
   it("names a staged update and the restart it is waiting for", async () => {
@@ -136,7 +138,9 @@ describe("the Settings web page", () => {
 
     render(<Settings />);
 
-    expect(screen.getByText(/No saved link\. Sign in from the native page/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/No saved link\. The app is on its sign-in surface/),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Interpreter")).not.toBeInTheDocument();
   });
 
@@ -345,5 +349,43 @@ describe("the Settings web page", () => {
       await screen.findByText(/Command failed: the settings read went away/),
     ).toBeInTheDocument();
     expect(screen.queryByText("Interpreter")).not.toBeInTheDocument();
+  });
+
+  // Sign-out is one press on the app's own route: the page does not clear a
+  // link itself, and it does not paint the signed-in state as gone before the
+  // app has done it.
+  it("signs out with one press of the app's own command", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    const commands = installChannel(() => ({ ok: true, ...held }));
+
+    render(<Settings />);
+
+    const press = await screen.findByRole("button", { name: "Sign out" });
+    fireEvent.click(press);
+    fireEvent.click(press);
+
+    await waitFor(() => expect(commands).toContain("settings.sign_out"));
+    expect(commands.filter((command) => command === "settings.sign_out")).toHaveLength(1);
+  });
+
+  it("prints a refused sign-out and keeps the link it still has", async () => {
+    const held = bootPayload();
+    window.__MUSE_BOOT__ = held;
+    installChannel((command) =>
+      command === "settings.sign_out"
+        ? { ok: false, error: "Cannot clear the saved link: Permission denied" }
+        : { ok: true, ...held },
+    );
+
+    render(<Settings />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+
+    expect(
+      await screen.findByText("Cannot clear the saved link: Permission denied"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/muse\/account-bridge/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeEnabled();
   });
 });

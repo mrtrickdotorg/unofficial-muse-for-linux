@@ -380,6 +380,30 @@ fn claim_due_marks_once_and_only_the_due_pending() {
 }
 
 #[test]
+fn a_released_claim_is_due_again_and_a_spent_one_is_not() {
+    let (mut store, dir) = open("release");
+    let t = now();
+    let due = store.create("due", "", t - 10).unwrap();
+    let claimed = store.claim_due(t).unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    // Released: due again, and still not marked seen.
+    store.release_claim(&[due.id]).unwrap();
+    assert!(!store.get(due.id).unwrap().notified);
+    assert_eq!(store.claim_due(t).unwrap().len(), 1);
+
+    // A claim nobody released stays spent, including across a reopen.
+    drop(store);
+    let mut store2 = TaskStore::open(&dir).unwrap();
+    assert!(store2.claim_due(t).unwrap().is_empty());
+    // An id that was never claimed, and an empty list, change nothing.
+    store2.release_claim(&[due.id + 99]).unwrap();
+    store2.release_claim(&[]).unwrap();
+    assert!(store2.get(due.id).unwrap().notified);
+    assert!(store2.claim_due(t).unwrap().is_empty());
+}
+
+#[test]
 fn a_second_open_waits_for_the_first_handle_to_drop() {
     let (store, dir) = open("lockwait");
     let (tx, rx) = std::sync::mpsc::channel();

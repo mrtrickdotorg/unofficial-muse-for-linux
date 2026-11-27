@@ -78,23 +78,57 @@ describe("the sign-in web page", () => {
     expect(commands.filter((command) => command === "signin.snapshot")).toHaveLength(2);
   });
 
-  it("asks the app's own folder chooser, never a list it invents", async () => {
+  it("chooses the session folder on the app's own sheet, never a native dialog", async () => {
     const held = bootPayload();
     window.__MUSE_BOOT__ = held;
     const seen: Record<string, unknown>[] = [];
     installChannel(
-      () => ({ ok: true, ...held }),
+      (command) =>
+        command === "folders.list"
+          ? {
+              ok: true,
+              path: held.folder,
+              parent: "/run/user/1002",
+              folders: [
+                { name: "bridge", path: `${held.folder}/bridge` },
+              ],
+              note: null,
+            }
+          : { ok: true, ...held },
       (request) => seen.push(request),
     );
 
     render(<Signin />);
 
     fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
+
+    // The sheet is the page's own, standing on the folder the app reports.
+    expect(
+      await screen.findByRole("dialog", { name: "Choose a session folder" }),
+    ).toBeInTheDocument();
+    expect(seen.find((request) => request.cmd === "folders.list")).toMatchObject({
+      path: held.folder,
+    });
+
+    // Stepping in is the app's read again, never a list the page kept.
+    fireEvent.click(screen.getByRole("button", { name: "bridge" }));
+    await waitFor(() =>
+      expect(
+        seen.filter((request) => request.cmd === "folders.list").map((r) => r.path),
+      ).toContain(`${held.folder}/bridge`),
+    );
+
+    // Choosing is the app's own press, with the path the sheet stands in; the
+    // page returns to the form with the app's field value.
+    fireEvent.click(screen.getByRole("button", { name: "Use this folder" }));
     await waitFor(() =>
       expect(seen.find((request) => request.cmd === "signin.press")).toMatchObject({
         press: "choose",
+        folder: held.folder,
       }),
     );
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue(held.folder)).toBeInTheDocument();
   });
 
   it("offers Cancel only while the app's browser flow runs", async () => {

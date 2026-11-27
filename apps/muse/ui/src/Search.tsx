@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { call, channelAvailable } from "./api";
 import type { SearchRow as Row, SearchSnapshot } from "./types";
 
-/// One result: the icon and title the native row shows, then the
-/// kicker/kind/stamp line beneath it. Read-only: the native row opens its
-/// conversation in Chat, and this slice has no page to open.
-function ResultLine({ item }: { item: Row }) {
-  return (
-    <div className="search-row">
+/// One result: the icon and title the native row shows, then the matched
+/// line beneath it. A row is a conversation, so with the shell's own press to
+/// hand it opens that chat in Chat -- the same switch the native row makes;
+/// without one (a page rendered on its own) it is the same row, unpressable.
+function ResultLine({ item, onOpen }: { item: Row; onOpen?: (id: string) => void }) {
+  const words = (
+    <>
       <span className="search-icon" aria-hidden="true">
         {item.icon}
       </span>
@@ -15,14 +16,30 @@ function ResultLine({ item }: { item: Row }) {
         <h3 className="search-title">{item.title}</h3>
         {item.meta && <p className="search-meta">{item.meta}</p>}
       </div>
-    </div>
+    </>
+  );
+  if (!onOpen) return <div className="search-row">{words}</div>;
+  return (
+    <button
+      type="button"
+      className="search-row"
+      title="Open this conversation in Chat"
+      onClick={() => onOpen(item.id)}
+    >
+      {words}
+    </button>
   );
 }
 
 /// `initialQuery` is the drawer's own entry point: the shell hands over the
 /// words the reader typed there. They are typed, not read -- the page's own Run
 /// still makes the one wire read, exactly as it does for words typed here.
-export function Search({ initialQuery }: { initialQuery?: string } = {}) {
+/// `onOpenThread` is the shell's own switch to a conversation: a result row
+/// hands its conversation id to it.
+export function Search({
+  initialQuery,
+  onOpenThread,
+}: { initialQuery?: string; onOpenThread?: (id: string) => void } = {}) {
   const boot = window.__MUSE_BOOT__;
   const [data, setData] = useState<SearchSnapshot | null>(
     boot && "query" in boot ? boot : null,
@@ -151,14 +168,14 @@ export function Search({ initialQuery }: { initialQuery?: string } = {}) {
       ) : (
         <div className="rows">
           {rows.map((item) => (
-            <ResultLine key={item.id} item={item} />
+            <ResultLine key={item.id} item={item} onOpen={onOpenThread} />
           ))}
         </div>
       )}
 
       <div className="foot">
-        Web UI slice of the port: read-only, rendered from the same query and
-        rows the native search holds.
+        Web UI slice of the port: rendered from the same query and rows the
+        native search holds, and a result opens its conversation.
       </div>
     </div>
   );

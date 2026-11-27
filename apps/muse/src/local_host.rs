@@ -38,6 +38,10 @@ pub(crate) struct Card {
 
 enum Completed {
     Grant(Result<(), &'static str>),
+    /// A page's filename search: the whole merged answer, already worded.
+    Search(FileSearch),
+    /// A page's content search: the merged matching lines.
+    Content(ContentSearch),
     // Boxed: an approval card carries a full proposal, and the grant variant must
     // not carry that weight through every channel send.
     Operation(Box<Decision>, Instant, String),
@@ -252,6 +256,80 @@ pub(crate) struct GrantedFolder {
     pub writable: bool,
 }
 
+/// One filename hit: the folder it was found in (the page's label for the
+/// grant, never its capability id) and its path inside that folder.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct FileHit {
+    pub folder: String,
+    pub path: String,
+}
+
+/// A folder the search could not walk, by label and the broker's own code.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct FileRefusal {
+    pub folder: String,
+    pub code: String,
+}
+
+/// The last filename search the page ran. The query travels with the hits, so
+/// a surface shows what was searched, not just what came back.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct FileSearch {
+    pub query: String,
+    pub hits: Vec<FileHit>,
+    pub refused: Vec<FileRefusal>,
+    pub scanned: u64,
+    /// The walk stopped at its own bound, so more names may match.
+    pub truncated: bool,
+}
+
+/// One matching line from a content search: the path inside its granted
+/// folder, the 1-based line number and the line's own text (the broker's own
+/// 200-character excerpt).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ContentHit {
+    pub folder: String,
+    pub path: String,
+    pub line: u64,
+    pub text: String,
+}
+
+/// The last content search the page ran: the text it looked for, the matching
+/// lines, and the same per-folder refusals a filename search reports.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ContentSearch {
+    pub query: String,
+    pub hits: Vec<ContentHit>,
+    pub refused: Vec<FileRefusal>,
+    /// Names the broker looked at across every folder it walked.
+    pub scanned: u64,
+    /// A bound was reached, so more lines may match.
+    pub truncated: bool,
+}
+
+/// A file's text as a row's preview shows it: the whole file the broker
+/// answered, because it refuses one over its 64 KiB read rather than cutting it.
+pub(crate) struct FilePreview {
+    pub folder: String,
+    pub path: String,
+    pub content: String,
+}
+
+/// How many hits one search may carry across all its folders.
+const MAX_SEARCH_HITS: usize = 200;
+/// How many matching lines one content search may carry across all its
+/// folders: the broker caps 50 per folder, and a page that walks eight of them
+/// must still answer in one list.
+const MAX_CONTENT_HITS: usize = 200;
+/// A content search reads whole files, so it gets more wall clock than a walk
+/// over names; the broker's own deadline still ends it.
+const CONTENT_TIMEOUT_MS: u64 = 15_000;
+/// One folder's walk is bounded by the broker's own 10,000-entry cap; this is
+/// the wall clock the page allows it before it answers `expired`.
+const SEARCH_TIMEOUT_MS: u64 = 5_000;
+/// The preview's own read bound, matching the broker's `files.read_text`.
+const PREVIEW_TIMEOUT_MS: u64 = 5_000;
+
 /// The page's read model: everything render() needs, nothing it can
 /// mutate. Cards carry their approval ids; the press handlers call
 /// back into the controller by id.
@@ -263,6 +341,14 @@ pub(crate) struct HostSnapshot {
     pub log: Vec<String>,
     pub policies: Vec<PathBuf>,
     pub node_id: Option<String>,
+    /// The last filename search the page ran, and whether one is running:
+    /// both surfaces read the search from here, never from a second copy.
+    pub search: Option<FileSearch>,
+    pub searching: bool,
+    /// The last content search (matching lines inside the granted folders),
+    /// and whether one is running.
+    pub content: Option<ContentSearch>,
+    pub searching_content: bool,
 }
 
 pub(crate) struct Controller {
@@ -285,6 +371,15 @@ pub(crate) struct Controller {
     /// Folder permissions saved on disk. Kept beside the broker's copy because
     /// Stop replaces the broker, and the switch must still show what is saved.
     policies: Vec<PathBuf>,
+    /// The page's filename search: its last answer and whether one is running.
+    search: Option<FileSearch>,
+    searching: bool,
+    /// The page's content search: its last answer and whether one is running.
+    content: Option<ContentSearch>,
+    searching_content: bool,
+    /// Invocation ids for the page's own reads: the broker refuses a repeated
+    /// id, so every press mints a new one.
+    page_seq: u64,
 }
 impl Controller {
     pub(crate) fn new() -> Self {
@@ -305,6 +400,11 @@ impl Controller {
             notice: "Disconnected. No folders shared with Muse.".into(),
             config_dir: None,
             policies: Vec::new(),
+            search: None,
+            searching: false,
+            content: None,
+            searching_content: false,
+            page_seq: 0,
         }
     }
     /// The page's read model. Render reads this; presses go through the
@@ -327,6 +427,18 @@ impl Controller {
             log: self.log.iter().cloned().collect(),
             policies: self.policies.clone(),
             node_id: self.identity.as_ref().map(|lease| lease.node_id.clone()),
+            // A search is only about folders granted now: a stopped host has
+            // none, and its old answer must not outlive them.
+            search: self
+                .search
+                .clone()
+                .filter(|_| !self.broker.grants().is_empty()),
+            searching: self.searching,
+            content: self
+                .content
+                .clone()
+                .filter(|_| !self.broker.grants().is_empty()),
+            searching_content: self.searching_content,
         }
     }
     fn push_log(&mut self, entry: String) {
@@ -445,6 +557,131 @@ impl Controller {
             )
         })
     }
+    /// The page's filename search: one bounded walk per granted folder, on a
+    /// worker, so a large folder never freezes the window. The answer lands in
+    /// `poll` and both surfaces read it from the snapshot, never from a second
+    /// copy.
+    pub(crate) fn search(&mut self, query: &str) -> Result<(), &'static str> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err("Type part of a filename to search for.");
+        }
+        if query.len() > 256 {
+            return Err("A filename search is at most 256 characters.");
+        }
+        if query.contains(['/', '\0']) {
+            return Err("A filename search is one name fragment, not a path.");
+        }
+        let grants: Vec<(String, String)> = self
+            .broker
+            .grants()
+            .into_iter()
+            .map(|grant| (grant.id, grant.label))
+            .collect();
+        if grants.is_empty() {
+            return Err("Grant a folder before searching it.");
+        }
+        self.page_seq = self.page_seq.wrapping_add(1);
+        let seq = self.page_seq;
+        let query = query.to_owned();
+        // The page shows this query as running from the press, not from the
+        // answer: a walk may take seconds and the entry must not look inert.
+        self.search = Some(FileSearch {
+            query: query.clone(),
+            ..FileSearch::default()
+        });
+        self.searching = true;
+        let broker = self.broker.clone();
+        if let Err(busy) =
+            self.work(move || Completed::Search(search_files(&broker, &grants, &query, seq)))
+        {
+            self.searching = false;
+            return Err(busy);
+        }
+        Ok(())
+    }
+
+    /// The page's content search: the broker's own matching lines per granted
+    /// folder, merged on a worker so a folder of code never freezes the
+    /// window. The broker reads only UTF-8 files and caps files, matches and
+    /// line length; the page reports its answer, not a second implementation.
+    pub(crate) fn search_content(&mut self, query: &str) -> Result<(), &'static str> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err("Type text to look for inside your files.");
+        }
+        if query.len() > 256 {
+            return Err("A content search is at most 256 characters.");
+        }
+        if query.contains('\0') {
+            return Err("A content search cannot carry a NUL byte.");
+        }
+        let grants: Vec<(String, String)> = self
+            .broker
+            .grants()
+            .into_iter()
+            .map(|grant| (grant.id, grant.label))
+            .collect();
+        if grants.is_empty() {
+            return Err("Grant a folder before searching inside it.");
+        }
+        self.page_seq = self.page_seq.wrapping_add(1);
+        let seq = self.page_seq;
+        let query = query.to_owned();
+        self.content = Some(ContentSearch {
+            query: query.clone(),
+            ..ContentSearch::default()
+        });
+        self.searching_content = true;
+        let broker = self.broker.clone();
+        if let Err(busy) =
+            self.work(move || Completed::Content(search_contents(&broker, &grants, &query, seq)))
+        {
+            self.searching_content = false;
+            return Err(busy);
+        }
+        Ok(())
+    }
+
+    /// One row's preview: the broker's own bounded text read. Run here rather
+    /// than on a worker because it reads at most 64 KiB and refuses more.
+    pub(crate) fn read_file(&mut self, folder: &str, path: &str) -> Result<FilePreview, String> {
+        let Some(grant) = self
+            .broker
+            .grants()
+            .into_iter()
+            .find(|grant| grant.label == folder)
+        else {
+            return Err("That folder is no longer granted. Search again.".to_owned());
+        };
+        self.page_seq = self.page_seq.wrapping_add(1);
+        let reply = match self.broker.invoke(Invocation {
+            id: format!("page-read-{}", self.page_seq),
+            command: "files.read_text".to_owned(),
+            params: serde_json::json!({"grant_id": grant.id, "path": path}),
+            timeout_ms: PREVIEW_TIMEOUT_MS,
+        }) {
+            Decision::Reply(reply) => reply,
+            Decision::Approval(_) => {
+                return Err("A read asked for an approval, so nothing was opened.".to_owned());
+            }
+        };
+        if !reply.ok {
+            return Err(read_refusal(reply.error.as_deref().unwrap_or("err")).to_owned());
+        }
+        let content = reply
+            .output
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        Ok(FilePreview {
+            folder: folder.to_owned(),
+            path: path.to_owned(),
+            content,
+        })
+    }
+
     fn invoke(&mut self, invocation: muse_local_link::HostInvocation) {
         if self.phase != Phase::Registered {
             self.stop();
@@ -620,6 +857,52 @@ impl Controller {
                         Err(e) => e.into(),
                     }
                 }
+                Completed::Content(result) => {
+                    self.searching_content = false;
+                    self.push_log(format!(
+                        "{} content search · {} line(s) in {} name(s) scanned{}",
+                        now_hms(),
+                        result.hits.len(),
+                        result.scanned,
+                        if result.truncated {
+                            " (cut at the bound)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    if !result.refused.is_empty() {
+                        self.push_log(format!(
+                            "{} content search · {} folder(s) refused",
+                            now_hms(),
+                            result.refused.len()
+                        ));
+                    }
+                    self.content = Some(result);
+                }
+                Completed::Search(result) => {
+                    self.searching = false;
+                    // Counts, never paths: the log is the same surface a
+                    // service-shaped command writes to.
+                    self.push_log(format!(
+                        "{} filename search · {} hit(s), {} name(s) scanned{}",
+                        now_hms(),
+                        result.hits.len(),
+                        result.scanned,
+                        if result.truncated {
+                            " (cut at the bound)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    if !result.refused.is_empty() {
+                        self.push_log(format!(
+                            "{} filename search · {} folder(s) refused",
+                            now_hms(),
+                            result.refused.len()
+                        ));
+                    }
+                    self.search = Some(result);
+                }
                 Completed::Operation(decision, deadline, command)
                     if self.phase == Phase::Registered =>
                 {
@@ -742,12 +1025,6 @@ impl Controller {
             }
         }
     }
-    /// Record a refusal in the read model's own notice line. A chooser's
-    /// answer has no reply ticket to travel on, so the page that asked for the
-    /// press reads the outcome from its next snapshot.
-    pub(crate) fn note(&mut self, text: &str) {
-        self.notice = text.to_owned();
-    }
     pub(crate) fn stop(&mut self) {
         // Cancellation boundary: stop transport BEFORE revoking file capabilities.
         if let Some(session) = self.session.take() {
@@ -774,6 +1051,176 @@ impl Controller {
             "Disconnected. Grants revoked; new consent, folders and Start are required.".into();
         self.broker.revoke_all();
         self.broker = ToolBroker::new();
+        // The searches were about those folders, so they go with them.
+        self.search = None;
+        self.searching = false;
+        self.content = None;
+        self.searching_content = false;
+    }
+}
+
+/// Every granted folder's own bounded walk, merged into one answer. A folder
+/// the broker refuses is named with its code instead of failing the search:
+/// one unreadable folder must not hide the hits another one has.
+fn search_files(
+    broker: &ToolBroker,
+    grants: &[(String, String)],
+    query: &str,
+    seq: u64,
+) -> FileSearch {
+    let mut out = FileSearch {
+        query: query.to_owned(),
+        ..FileSearch::default()
+    };
+    'folders: for (grant_id, label) in grants {
+        let reply = match broker.invoke(Invocation {
+            id: format!("page-search-{seq}-{label}"),
+            command: "files.search".to_owned(),
+            params: serde_json::json!({"grant_id": grant_id, "query": query}),
+            timeout_ms: SEARCH_TIMEOUT_MS,
+        }) {
+            Decision::Reply(reply) => reply,
+            Decision::Approval(_) => {
+                out.refused.push(FileRefusal {
+                    folder: label.clone(),
+                    code: "approval".to_owned(),
+                });
+                continue;
+            }
+        };
+        if !reply.ok {
+            out.refused.push(FileRefusal {
+                folder: label.clone(),
+                code: reply.error.unwrap_or_else(|| "err".to_owned()),
+            });
+            continue;
+        }
+        out.scanned += reply
+            .output
+            .get("scanned")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        out.truncated |= reply
+            .output
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        for path in reply
+            .output
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(path) = path.as_str() else {
+                continue;
+            };
+            if out.hits.len() == MAX_SEARCH_HITS {
+                out.truncated = true;
+                break 'folders;
+            }
+            out.hits.push(FileHit {
+                folder: label.clone(),
+                path: path.to_owned(),
+            });
+        }
+    }
+    out.hits
+        .sort_by(|a, b| a.folder.cmp(&b.folder).then_with(|| a.path.cmp(&b.path)));
+    out
+}
+
+/// Every granted folder's own matching lines, merged into one answer. The
+/// broker does the reading (UTF-8 only, 200 files and 50 matches per folder,
+/// 200-character excerpts); this only merges and sorts, and a folder it
+/// refused is named with its code instead of hiding another folder's hits.
+fn search_contents(
+    broker: &ToolBroker,
+    grants: &[(String, String)],
+    query: &str,
+    seq: u64,
+) -> ContentSearch {
+    let mut out = ContentSearch {
+        query: query.to_owned(),
+        ..ContentSearch::default()
+    };
+    'folders: for (grant_id, label) in grants {
+        let reply = match broker.invoke(Invocation {
+            id: format!("page-content-{seq}-{label}"),
+            command: "files.search_content".to_owned(),
+            params: serde_json::json!({"grant_id": grant_id, "query": query}),
+            timeout_ms: CONTENT_TIMEOUT_MS,
+        }) {
+            Decision::Reply(reply) => reply,
+            Decision::Approval(_) => {
+                out.refused.push(FileRefusal {
+                    folder: label.clone(),
+                    code: "approval".to_owned(),
+                });
+                continue;
+            }
+        };
+        if !reply.ok {
+            out.refused.push(FileRefusal {
+                folder: label.clone(),
+                code: reply.error.unwrap_or_else(|| "err".to_owned()),
+            });
+            continue;
+        }
+        out.scanned += reply
+            .output
+            .get("scanned")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        out.truncated |= reply
+            .output
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        for hit in reply
+            .output
+            .get("matches")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let (Some(path), Some(line), Some(text)) = (
+                hit.get("path").and_then(serde_json::Value::as_str),
+                hit.get("line").and_then(serde_json::Value::as_u64),
+                hit.get("text").and_then(serde_json::Value::as_str),
+            ) else {
+                continue;
+            };
+            if out.hits.len() == MAX_CONTENT_HITS {
+                out.truncated = true;
+                break 'folders;
+            }
+            out.hits.push(ContentHit {
+                folder: label.clone(),
+                path: path.to_owned(),
+                line,
+                text: text.to_owned(),
+            });
+        }
+    }
+    out.hits.sort_by(|a, b| {
+        a.folder
+            .cmp(&b.folder)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+    out
+}
+
+/// What a refused read means, in the one sentence a row can act on.
+fn read_refusal(code: &str) -> &'static str {
+    match code {
+        "invalid_utf8" => "That file is not UTF-8 text, so it has no preview here.",
+        "too_large" => "That file is larger than the 64 KiB a preview reads.",
+        "special_file" => "That path is not a regular file.",
+        "not_granted" | "revoked" => "That folder is no longer granted. Search again.",
+        "expired" => "The read took too long and was abandoned.",
+        _ => "That file could not be read.",
     }
 }
 fn run_invocation(
@@ -803,6 +1250,153 @@ impl Drop for Controller {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
+
+    /// A search is one name fragment: an empty, overlong or path-shaped query
+    /// is refused before any walk, and with no folder granted the page says
+    /// what to do first rather than answering "no matches".
+    #[test]
+    fn a_search_query_is_one_name_fragment() {
+        let mut host = Controller::new();
+        assert_eq!(
+            host.search(""),
+            Err("Type part of a filename to search for.")
+        );
+        assert_eq!(
+            host.search("   "),
+            Err("Type part of a filename to search for.")
+        );
+        assert_eq!(
+            host.search("dir/notes"),
+            Err("A filename search is one name fragment, not a path.")
+        );
+        assert_eq!(
+            host.search(&"x".repeat(257)),
+            Err("A filename search is at most 256 characters.")
+        );
+        assert_eq!(
+            host.search("notes"),
+            Err("Grant a folder before searching it.")
+        );
+        // A row whose folder is gone is a refusal with the fix named, not a
+        // silent empty preview.
+        assert_eq!(
+            host.read_file("Folder 1", "notes.txt").err().as_deref(),
+            Some("That folder is no longer granted. Search again.")
+        );
+    }
+
+    /// The walk is the broker's own: names are matched recursively inside the
+    /// granted folder, one folder's hits merge with another's, and a query
+    /// nothing matches is an empty answer rather than a refusal.
+    #[test]
+    fn a_search_merges_every_granted_folder() {
+        let dir = Fixture::dir();
+        std::fs::create_dir_all(dir.join("sub")).expect("a scratch subfolder");
+        std::fs::write(dir.join("alpha-report.md"), "a").expect("a scratch file");
+        std::fs::write(dir.join("sub/beta-report.md"), "b").expect("a nested scratch file");
+        std::fs::write(dir.join("notes.txt"), "c").expect("a scratch file");
+        let broker = ToolBroker::new();
+        let grant = broker.grant_read_only(&dir).expect("a granted folder");
+        let grants = vec![(grant.id.clone(), grant.label.clone())];
+
+        let found = search_files(&broker, &grants, "report", 1);
+        let paths: Vec<&str> = found.hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(paths, vec!["alpha-report.md", "sub/beta-report.md"]);
+        assert!(found.hits.iter().all(|hit| hit.folder == grant.label));
+        assert!(found.scanned >= 3, "the walk counts what it looked at");
+        assert!(!found.truncated && found.refused.is_empty());
+
+        let none = search_files(&broker, &grants, "nothing-like-this", 2);
+        assert!(
+            none.hits.is_empty(),
+            "no matches is an answer, not a failure"
+        );
+        assert!(none.refused.is_empty());
+    }
+
+    /// A content query is text, not a path: a slash is legitimate, emptiness,
+    /// an overlong query and a NUL are not, and with no grant the page says
+    /// what to do first instead of answering "no matches".
+    #[test]
+    fn a_content_query_is_text_not_a_path() {
+        let mut host = Controller::new();
+        assert_eq!(
+            host.search_content(""),
+            Err("Type text to look for inside your files.")
+        );
+        assert_eq!(
+            host.search_content("   "),
+            Err("Type text to look for inside your files.")
+        );
+        assert_eq!(
+            host.search_content(&"x".repeat(257)),
+            Err("A content search is at most 256 characters.")
+        );
+        assert_eq!(
+            host.search_content("a\0b"),
+            Err("A content search cannot carry a NUL byte.")
+        );
+        assert_eq!(
+            host.search_content("revenue"),
+            Err("Grant a folder before searching inside it.")
+        );
+    }
+
+    /// The matching lines are the broker's own: UTF-8 files only, with their
+    /// 1-based line numbers and the line text, one folder's lines merged with
+    /// another's, and a query nothing matches is an empty answer.
+    #[test]
+    fn a_content_search_reports_matching_lines_with_line_numbers() {
+        let dir = Fixture::dir();
+        std::fs::create_dir_all(dir.join("sub")).expect("a scratch subfolder");
+        std::fs::write(
+            dir.join("alpha-report.md"),
+            "# Quarter report\nrevenue up\n",
+        )
+        .expect("a scratch file");
+        std::fs::write(
+            dir.join("sub/beta-report.md"),
+            "no match here\nsecond revenue line\n",
+        )
+        .expect("a nested scratch file");
+        std::fs::write(dir.join("notes.txt"), "shopping list\n").expect("a scratch file");
+        let broker = ToolBroker::new();
+        let grant = broker.grant_read_only(&dir).expect("a granted folder");
+        let grants = vec![(grant.id.clone(), grant.label.clone())];
+
+        let found = search_contents(&broker, &grants, "revenue", 1);
+        assert_eq!(found.query, "revenue");
+        let lines: Vec<(&str, u64, &str)> = found
+            .hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.line, hit.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("alpha-report.md", 2, "revenue up"),
+                ("sub/beta-report.md", 2, "second revenue line"),
+            ]
+        );
+        assert!(found.scanned >= 3, "the walk counts what it looked at");
+        assert!(found.refused.is_empty() && !found.truncated);
+
+        let none = search_contents(&broker, &grants, "no-such-text", 2);
+        assert!(
+            none.hits.is_empty(),
+            "no matches is an answer, not a failure"
+        );
+        assert!(none.refused.is_empty());
+    }
+
+    /// A refused read says which refusal it was: each one names a different fix.
+    #[test]
+    fn a_refused_read_names_the_fix() {
+        assert!(read_refusal("too_large").contains("64 KiB"));
+        assert!(read_refusal("invalid_utf8").contains("UTF-8"));
+        assert!(read_refusal("revoked").contains("no longer granted"));
+        assert_eq!(read_refusal("weird"), "That file could not be read.");
+    }
 
     static SCRATCH: AtomicU64 = AtomicU64::new(0);
 

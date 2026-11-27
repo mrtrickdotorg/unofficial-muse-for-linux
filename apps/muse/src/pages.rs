@@ -16,7 +16,7 @@ use super::widget::describe;
 use adw::prelude::*;
 
 use super::app::{Chat, dispatch};
-use super::session::{Op, account_dir};
+use super::session::Op;
 use muse_account::{ArtifactSummary, ListingItem, Schedule, ServiceListing, TaskRun};
 
 /// What a page needs: the chat for reads, the stack to navigate, and
@@ -352,6 +352,13 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
                 });
             }
             inner.append(&head_row);
+            // Said once, above the rows, so a reader learns why before
+            // pressing anything: there is nothing to dispatch to.
+            let run_note = gtk4::Label::new(Some(RUN_NOW_REASON));
+            run_note.set_halign(gtk4::Align::Start);
+            run_note.set_wrap(true);
+            run_note.add_css_class("dim-label");
+            inner.append(&run_note);
             let schedules = gtk4::ListBox::new();
             schedules.set_widget_name("tasks-schedules");
             inner.append(&schedules);
@@ -921,8 +928,10 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             inner.append(&sign_out);
             let show_signin = ctx.show_signin.clone();
             sign_out.connect_clicked(move |_| {
-                if let Some(dir) = account_dir() {
-                    let _ = std::fs::remove_file(dir.join("account-connection.json"));
+                // The native press keeps its silence: the panel has no notice
+                // line, while the page prints the app's refusal.
+                if let Err(sentence) = crate::pages::sign_out() {
+                    eprintln!("muse: sign-out refused: {sentence}");
                 }
                 show_signin();
             });
@@ -1018,6 +1027,58 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
             grants.set_widget_name("localhost-grants");
             grants.set_selection_mode(gtk4::SelectionMode::None);
             inner.append(&grants);
+            // The reader's own way in: the folders they granted are also
+            // folders they can find a file in, without asking Muse.
+            let search_head = gtk4::Label::new(Some(HOST_SEARCH_HEAD));
+            search_head.set_halign(gtk4::Align::Start);
+            search_head.add_css_class("muse-section");
+            inner.append(&search_head);
+            let search_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let search_entry = gtk4::SearchEntry::new();
+            search_entry.set_widget_name("localhost-search");
+            search_entry.set_hexpand(true);
+            search_entry.set_placeholder_text(Some("Part of a filename"));
+            search_row.append(&search_entry);
+            let find = gtk4::Button::with_label("Search");
+            find.set_widget_name("localhost-find");
+            search_row.append(&find);
+            inner.append(&search_row);
+            let search_hint = gtk4::Label::new(None);
+            search_hint.set_widget_name("localhost-search-hint");
+            search_hint.set_xalign(0.0);
+            search_hint.set_wrap(true);
+            search_hint.add_css_class("dim-label");
+            inner.append(&search_hint);
+            let hits = gtk4::ListBox::new();
+            hits.set_widget_name("localhost-hits");
+            hits.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&hits);
+            // The same way in, one level deeper: the lines that say it, not
+            // just the files whose names look right.
+            let content_head = gtk4::Label::new(Some(HOST_CONTENT_HEAD));
+            content_head.set_halign(gtk4::Align::Start);
+            content_head.add_css_class("muse-section");
+            inner.append(&content_head);
+            let content_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+            let content_entry = gtk4::SearchEntry::new();
+            content_entry.set_widget_name("localhost-content");
+            content_entry.set_hexpand(true);
+            content_entry.set_placeholder_text(Some("Text inside a file"));
+            content_row.append(&content_entry);
+            let content_find = gtk4::Button::with_label("Search inside");
+            content_find.set_widget_name("localhost-content-find");
+            content_row.append(&content_find);
+            inner.append(&content_row);
+            let content_hint = gtk4::Label::new(None);
+            content_hint.set_widget_name("localhost-content-hint");
+            content_hint.set_xalign(0.0);
+            content_hint.set_wrap(true);
+            content_hint.add_css_class("dim-label");
+            inner.append(&content_hint);
+            let content_hits = gtk4::ListBox::new();
+            content_hits.set_widget_name("localhost-content-hits");
+            content_hits.set_selection_mode(gtk4::SelectionMode::None);
+            inner.append(&content_hits);
             let allow_writes = gtk4::CheckButton::with_label(HOST_POLICY_SENTENCE);
             allow_writes.set_widget_name("localhost-allow-writes");
             wrap_check(&allow_writes);
@@ -1091,6 +1152,127 @@ fn build(ctx: &Ctx, name: &str) -> gtk4::Box {
     page
 }
 
+/// The page's search entry text, trimmed: the query a press means.
+fn search_query(page: &gtk4::Box) -> String {
+    named_search_entry(page, "localhost-search")
+        .map(|entry| entry.text().trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// The content entry's text, trimmed: the query a press means.
+fn content_query(page: &gtk4::Box) -> String {
+    named_search_entry(page, "localhost-content")
+        .map(|entry| entry.text().trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// The content press: the controller validates the query and queues the read,
+/// and the answer arrives through the page's own pump.
+fn run_localhost_content(ctx: &Ctx, page: &gtk4::glib::WeakRef<gtk4::Box>, query: &str) {
+    let Some(page) = page.upgrade() else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    match chat.host().borrow_mut().search_content(query) {
+        Ok(()) => paint_localhost(ctx, &page),
+        Err(sentence) => {
+            localhost_note(&page, sentence);
+            paint_localhost(ctx, &page);
+        }
+    }
+}
+
+/// The search press: the controller validates the query and queues the walk.
+/// Its answer arrives through the page's pump, which repaints from the
+/// snapshot, so this only reports a refusal the controller did not queue.
+fn run_localhost_search(ctx: &Ctx, page: &gtk4::glib::WeakRef<gtk4::Box>, query: &str) {
+    let Some(page) = page.upgrade() else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    match chat.host().borrow_mut().search(query) {
+        Ok(()) => paint_localhost(ctx, &page),
+        Err(sentence) => {
+            localhost_note(&page, sentence);
+            paint_localhost(ctx, &page);
+        }
+    }
+}
+
+/// A hit's press: the broker's bounded text read, drawn in the app's own
+/// window. A refusal (not UTF-8, too large, folder revoked) is the page's
+/// notice, never a silent nothing.
+fn open_localhost_preview(
+    ctx: &Ctx,
+    page: &gtk4::glib::WeakRef<gtk4::Box>,
+    folder: &str,
+    path: &str,
+) {
+    let Some(page) = page.upgrade() else {
+        return;
+    };
+    let Some(chat) = ctx.chat.upgrade() else {
+        return;
+    };
+    let parent = page
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok());
+    match chat.host().borrow_mut().read_file(folder, path) {
+        Ok(preview) => file_preview_window(&preview, parent.as_ref()),
+        Err(sentence) => localhost_note(&page, &sentence),
+    }
+}
+
+/// A matched file's text in a window of its own: the space preview's shape, so
+/// a preview always looks like the app and never like a page.
+pub(crate) fn file_preview_window(
+    preview: &super::local_host::FilePreview,
+    parent: Option<&gtk4::Window>,
+) {
+    let window = gtk4::Window::new();
+    window.set_modal(true);
+    window.set_default_size(620, 520);
+    window.set_title(Some(&format!("{} · {}", preview.folder, preview.path)));
+    if let Some(root) = parent {
+        window.set_transient_for(Some(root));
+    }
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_start(20);
+    body.set_margin_end(20);
+    body.set_margin_top(16);
+    body.set_margin_bottom(16);
+    let head = gtk4::Label::new(Some(&format!(
+        "{} · {} bytes",
+        preview.path,
+        preview.content.len()
+    )));
+    head.set_xalign(0.0);
+    head.add_css_class("title-4");
+    body.append(&head);
+    let view = gtk4::TextView::new();
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_monospace(true);
+    view.set_wrap_mode(gtk4::WrapMode::WordChar);
+    view.buffer().set_text(&preview.content);
+    let scroll = gtk4::ScrolledWindow::new();
+    scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&view));
+    body.append(&scroll);
+    let close = gtk4::Button::with_label("Close");
+    close.add_css_class("muse-cta");
+    body.append(&close);
+    window.set_child(Some(&body));
+    let window_close = window.clone();
+    close.connect_clicked(move |_| window_close.close());
+    window.present();
+}
+
 /// Re-poll the host and repaint the page: the pump tick and
 /// every press land here, so cards, replies and the notice never
 /// go stale while the page shows.
@@ -1116,6 +1298,50 @@ fn localhost_note(page: &gtk4::Box, text: &str) {
 /// rows, never handlers. Every press repaints afterwards so the
 /// notice, grants and cards always show the controller's answer.
 fn wire_localhost(ctx: &Ctx, page: &gtk4::Box) {
+    let ctx_find = ctx.clone();
+    let page_find = page.downgrade();
+    if let Some(find) = named_button(page, "localhost-find") {
+        find.connect_clicked(move |_| {
+            let Some(page) = page_find.upgrade() else {
+                return;
+            };
+            let query = search_query(&page);
+            run_localhost_search(&ctx_find, &page_find, &query);
+        });
+    }
+    let ctx_enter = ctx.clone();
+    let page_enter = page.downgrade();
+    if let Some(entry) = named_search_entry(page, "localhost-search") {
+        entry.connect_activate(move |_| {
+            let Some(page) = page_enter.upgrade() else {
+                return;
+            };
+            let query = search_query(&page);
+            run_localhost_search(&ctx_enter, &page_enter, &query);
+        });
+    }
+    let ctx_content = ctx.clone();
+    let page_content = page.downgrade();
+    if let Some(find) = named_button(page, "localhost-content-find") {
+        find.connect_clicked(move |_| {
+            let Some(page) = page_content.upgrade() else {
+                return;
+            };
+            let query = content_query(&page);
+            run_localhost_content(&ctx_content, &page_content, &query);
+        });
+    }
+    let ctx_content_enter = ctx.clone();
+    let page_content_enter = page.downgrade();
+    if let Some(entry) = named_search_entry(page, "localhost-content") {
+        entry.connect_activate(move |_| {
+            let Some(page) = page_content_enter.upgrade() else {
+                return;
+            };
+            let query = content_query(&page);
+            run_localhost_content(&ctx_content_enter, &page_content_enter, &query);
+        });
+    }
     let ctx_consent = ctx.clone();
     let page_consent = page.downgrade();
     if let Some(consent) = named_check(page, "localhost-consent") {
@@ -1315,6 +1541,81 @@ fn paint_localhost(ctx: &Ctx, page: &gtk4::Box) {
             line.set_wrap(true);
             row.set_child(Some(&line));
             grants.append(&row);
+        }
+    }
+    if let Some(hint) = named_label(page, "localhost-search-hint") {
+        hint.set_text(&search_summary(&snap.search, snap.searching));
+    }
+    if let Some(hits) = named_list(page, "localhost-hits") {
+        clear_list(&hits);
+        for hit in snap
+            .search
+            .as_ref()
+            .map(|search| search.hits.as_slice())
+            .unwrap_or(&[])
+        {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            // The row opens the file's text: the broker's own bounded read,
+            // never a shell "open" and never a path outside the grant.
+            let button = gtk4::Button::with_label(&format!("{} · {}", hit.folder, hit.path));
+            button.add_css_class("flat");
+            button.set_halign(gtk4::Align::Start);
+            if let Some(label) = button
+                .child()
+                .and_then(|child| child.downcast::<gtk4::Label>().ok())
+            {
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+            }
+            let ctx_hit = ctx.clone();
+            let page_hit = page.downgrade();
+            let folder = hit.folder.clone();
+            let path = hit.path.clone();
+            button.connect_clicked(move |_| {
+                open_localhost_preview(&ctx_hit, &page_hit, &folder, &path);
+            });
+            row.set_child(Some(&button));
+            hits.append(&row);
+        }
+    }
+    if let Some(hint) = named_label(page, "localhost-content-hint") {
+        hint.set_text(&content_summary(&snap.content, snap.searching_content));
+    }
+    if let Some(hits) = named_list(page, "localhost-content-hits") {
+        clear_list(&hits);
+        for hit in snap
+            .content
+            .as_ref()
+            .map(|search| search.hits.as_slice())
+            .unwrap_or(&[])
+        {
+            let row = gtk4::ListBoxRow::new();
+            row.set_selectable(false);
+            // A matching line opens the file it lives in: the same bounded
+            // read a filename hit makes, so both cards end in the same place.
+            let button = gtk4::Button::with_label(&format!(
+                "{} · {}:{} · {}",
+                hit.folder, hit.path, hit.line, hit.text
+            ));
+            button.add_css_class("flat");
+            button.set_halign(gtk4::Align::Start);
+            if let Some(label) = button
+                .child()
+                .and_then(|child| child.downcast::<gtk4::Label>().ok())
+            {
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+            }
+            let ctx_hit = ctx.clone();
+            let page_hit = page.downgrade();
+            let folder = hit.folder.clone();
+            let path = hit.path.clone();
+            button.connect_clicked(move |_| {
+                open_localhost_preview(&ctx_hit, &page_hit, &folder, &path);
+            });
+            row.set_child(Some(&button));
+            hits.append(&row);
         }
     }
     if let Some(cards) = named_list(page, "localhost-cards") {
@@ -1582,6 +1883,20 @@ fn wrap_check(check: &gtk4::CheckButton) {
         }
     }
 }
+
+fn named_search_entry(page: &gtk4::Box, name: &str) -> Option<gtk4::SearchEntry> {
+    find_widget(page.upcast_ref(), name)?
+        .downcast::<gtk4::SearchEntry>()
+        .ok()
+}
+
+/// The local host page's filename search, in the page's own words: one title
+/// for both surfaces, so the card cannot be called two things.
+pub(crate) const HOST_SEARCH_HEAD: &str = "Find in your folders";
+
+/// The content search's title, in the page's own words: the lines inside the
+/// granted files, not their names.
+pub(crate) const HOST_CONTENT_HEAD: &str = "Search inside your files";
 
 fn named_check(page: &gtk4::Box, name: &str) -> Option<gtk4::CheckButton> {
     find_widget(page.upcast_ref(), name)?
@@ -2286,10 +2601,15 @@ fn open_goal_detail(ctx: &Ctx, list: &gtk4::ListBox, goal_id: String) {
     );
 }
 
-/// Fill the tasks page: schedules with a Run button each, plus the run
-/// history. "Run now" is single-press like send: the run holds the
-/// shared page slot, so a double press waits instead of starting two
-/// runs of the same job.
+/// Why a schedule row's "Run now" cannot dispatch. The pinned client's
+/// route table carries `tasks.list`, `tasks.runs`, `tasks.delete` and
+/// `tasks.subscribe`, and no route that starts a run, so the control is
+/// shown disabled with this sentence instead of failing on every press.
+const RUN_NOW_REASON: &str = "No run route: the service runs these schedules itself, so this page reports its runs and cannot start one.";
+
+/// Fill the tasks page: schedules with a disabled Run button each, plus
+/// the run history. The runs are the service's own, announced by the
+/// notifier; nothing here dispatches one.
 /// Paint Upcoming from the state the panel holds: the next run the last Tasks
 /// read named and the approvals the last approvals read painted. No wire read
 /// of its own, so opening the page cannot queue behind a listing -- and a
@@ -2420,13 +2740,52 @@ fn fill_tasks(ctx: &Ctx, page: &gtk4::Box) -> bool {
                 label.set_lines(2);
                 line.append(&label);
                 let run = gtk4::Button::with_label("Run now");
-                let job_id = schedule.id.clone();
-                let weak = Rc::downgrade(&chat_strong);
-                run.connect_clicked(move |_| {
-                    let Some(chat) = weak.upgrade() else { return };
-                    run_schedule(&chat, &job_id);
-                });
+                run.set_sensitive(false);
+                crate::widget::describe(&run, RUN_NOW_REASON);
                 line.append(&run);
+                // Deleting a schedule is the app's own two-press rule, the
+                // same one the concrete conversation rows carry: the first
+                // press arms this row and writes nothing, the second sends
+                // the one `tasks.delete` and the page reads the listing again.
+                let delete = gtk4::Button::with_label("Delete");
+                delete.add_css_class("flat");
+                delete.add_css_class("muse-danger");
+                {
+                    let weak_chat = Rc::downgrade(&chat_strong);
+                    let job = schedule.id.clone();
+                    let pages_for_delete = pages.clone();
+                    let button = delete.clone();
+                    delete.connect_clicked(move |_| {
+                        if !crate::pages::task_delete_press(&job) {
+                            button.set_label("Confirm delete");
+                            return;
+                        }
+                        button.set_label("Delete");
+                        let Some(chat) = weak_chat.upgrade() else {
+                            return;
+                        };
+                        let Some(client) = chat.client_handle() else {
+                            return;
+                        };
+                        let job = job.clone();
+                        let pages_for_done = pages_for_delete.clone();
+                        dispatch(
+                            &chat,
+                            move || client.delete_task(&job),
+                            move |chat, answer| {
+                                let accepted = matches!(answer, Ok(ref ok) if ok.accepted);
+                                if accepted {
+                                    // The Tasks page rebuilt is its own read of
+                                    // the service, which is the proof the row
+                                    // is gone rather than the answer's word.
+                                    show(&pages_for_done, "tasks");
+                                }
+                                let _ = chat;
+                            },
+                        );
+                    });
+                }
+                line.append(&delete);
                 row.set_child(Some(&line));
                 schedules.append(&row);
             }
@@ -2666,28 +3025,6 @@ fn show_reminder_dialog(page: &gtk4::Box) {
 
 /// Start exactly one run of a schedule: the ticket makes a double
 /// press wait, and the refill proves what actually started.
-fn run_schedule(chat: &Rc<Chat>, job_id: &str) {
-    let ticket = match chat.page_begin(Op::Panel) {
-        Some(ticket) => ticket,
-        None => return,
-    };
-    let Some(client) = chat.client_handle() else {
-        chat.page_accept(&ticket);
-        return;
-    };
-    let job_id = job_id.to_owned();
-    dispatch(
-        chat,
-        move || client.tasks_run(&job_id),
-        move |chat, answer| {
-            // Release the slot whatever the outcome; the runs list
-            // refills on the next visit and proves what started.
-            chat.page_accept(&ticket);
-            let _ = answer;
-        },
-    );
-}
-
 /// Fill the library page: the artifact listing, pinned first.
 /// Tabs the library offers: All, Spaces when any space row rides
 /// along, then each file kind in visit order. Buttons exist only for
@@ -2781,6 +3118,16 @@ thread_local! {
     /// confirm the other.
     static SPACE_DELETE_ARMED: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
+    /// The conversation whose delete press is armed. A conversation goes for
+    /// good -- the service keeps no Trash for one -- so it gets its own arm,
+    /// spent only by a second press on the same row.
+    static THREAD_DELETE_ARMED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    /// The schedule whose delete press is armed. A schedule goes for good, so
+    /// it gets the same two-press rule the conversation rows have, in its own
+    /// arm: a conversation's delete press never spends a schedule's.
+    static TASK_DELETE_ARMED: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
     /// Whether a listing has been read into the store above. The shell can be
     /// the only surface, and there no native paint fills it, so a page has to
     /// tell "nothing has been read" from "the account is empty" -- the split
@@ -2870,6 +3217,55 @@ pub(crate) fn space_delete_forget() {
     SPACE_DELETE_ARMED.with(|armed| *armed.borrow_mut() = None);
 }
 
+/// What one Delete press on a conversation row means: the first press arms
+/// that row and sends nothing, the second on the same row confirms. A listing
+/// painted in between clears the arm, so a press aimed at a row the service
+/// has since moved cannot delete what took its place.
+pub(crate) fn thread_delete_press(id: &str) -> bool {
+    THREAD_DELETE_ARMED.with(|armed| {
+        let mut armed = armed.borrow_mut();
+        if armed.as_deref() == Some(id) {
+            *armed = None;
+            true
+        } else {
+            *armed = Some(id.to_owned());
+            false
+        }
+    })
+}
+
+/// The conversation row both surfaces paint as delete-armed, if any.
+pub(crate) fn thread_delete_armed() -> Option<String> {
+    THREAD_DELETE_ARMED.with(|armed| armed.borrow().clone())
+}
+
+/// The conversation listing was painted again: the arm does not survive it.
+pub(crate) fn thread_delete_forget() {
+    THREAD_DELETE_ARMED.with(|armed| *armed.borrow_mut() = None);
+}
+
+/// What one Delete press on a schedule row means: the first press arms that
+/// row and sends nothing, the second on the same row confirms. A read painted
+/// in between clears the arm, so a press aimed at a schedule the service has
+/// since moved cannot delete what took its place.
+pub(crate) fn task_delete_press(job_id: &str) -> bool {
+    TASK_DELETE_ARMED.with(|armed| {
+        let mut armed = armed.borrow_mut();
+        if armed.as_deref() == Some(job_id) {
+            *armed = None;
+            true
+        } else {
+            *armed = Some(job_id.to_owned());
+            false
+        }
+    })
+}
+
+/// A schedule listing was painted again: the arm does not survive it.
+pub(crate) fn task_delete_forget() {
+    TASK_DELETE_ARMED.with(|armed| *armed.borrow_mut() = None);
+}
+
 /// The Goals page as the web view opens it: the roster and the Tracking
 /// section from the last fill, the service's own totals, and the Tracking
 /// failure when that section could not be read -- so an unread section is
@@ -2946,7 +3342,7 @@ pub(crate) fn ideas_cache(held: HeldIdeas) {
 /// snippet-and-clock line, the pin order and the side-chat split are all
 /// computed here by the helpers the native rows use, so the web page cannot
 /// word a row differently from the list beside it.
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub(crate) struct ThreadRow {
     pub id: String,
     pub title: String,
@@ -3276,6 +3672,9 @@ pub(crate) fn threads_snapshot() -> HeldThreads {
 /// read produced, so the page, the boot payload and the channel agree.
 pub(crate) fn threads_cache(held: HeldThreads) {
     THREAD_STORE.with(|store| *store.borrow_mut() = held);
+    // A listing painted again is a new set of rows: an arm that pointed at
+    // one of the old ones is spent by the repaint, not by a press.
+    thread_delete_forget();
 }
 
 /// Project a thread listing into the page's rows: pinned first (the listing's
@@ -3388,6 +3787,13 @@ pub(crate) const UPDATE_ROLLING: &str = "Updates come from the rolling AppImage 
 /// refusal it may show cannot drift apart.
 const CHECKING_STATUS: &str = "Checking for updates…";
 const CHECK_REFUSAL: &str = "An update check is already running.";
+/// The whole check answers within this. The fetch has its own timeouts, but a
+/// name lookup or a peer that accepts the connection and never speaks can sit
+/// outside them; the cards must report something either way, so the busy step
+/// is bounded here rather than by whatever the network does.
+const CHECK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
+const CHECK_TIMEOUT_STATUS: &str =
+    "Update check failed: the feed did not answer within 45 seconds.";
 pub(crate) const SIGNIN_TITLE: &str = "Sign in to Muse";
 pub(crate) const SIGNIN_HINT: &str = "The app finds your Python automatically; pick a private session folder. The app's own folder already qualifies.";
 pub(crate) const SIGNIN_CONSENT: &str =
@@ -3467,6 +3873,33 @@ thread_local! {
         std::cell::RefCell::new(HeldSignin::opening());
 }
 
+/// Clear the saved link: the one press behind the native Settings button and a
+/// page's Sign out. A link that is already gone is the state sign-out wants,
+/// so clearing twice is not a failure.
+pub(crate) fn sign_out() -> Result<(), String> {
+    let Some(dir) = super::session::account_dir() else {
+        return Err("No config home to clear the link from.".to_owned());
+    };
+    sign_out_in(&dir)
+}
+
+/// The clear itself, with explicit inputs so tests never touch the process
+/// environment.
+fn sign_out_in(dir: &std::path::Path) -> Result<(), String> {
+    let path = dir.join("account-connection.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            eprintln!("muse: signed out; cleared {}", path.display());
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("muse: signed out; {} was already clear", path.display());
+            Ok(())
+        }
+        Err(error) => Err(format!("Cannot clear the saved link: {error}")),
+    }
+}
+
 pub(crate) fn signin_snapshot() -> HeldSignin {
     SIGNIN_STORE.with(|store| store.borrow().clone())
 }
@@ -3537,6 +3970,19 @@ pub(crate) struct HeldLocalHost {
     pub policy_sentence: String,
     pub approvals_head: String,
     pub activity_head: String,
+    /// The filename search the page last ran: what was searched, the hits, and
+    /// the folders the walk could not read. The app's own state, projected.
+    pub search_head: String,
+    pub search: Option<super::local_host::FileSearch>,
+    pub searching: bool,
+    /// The search's one status sentence, worded once for both windows.
+    pub search_summary: String,
+    /// The content search (the matching lines inside the granted folders), its
+    /// one status sentence, and whether a walk is running.
+    pub content_head: String,
+    pub content: Option<super::local_host::ContentSearch>,
+    pub searching_content: bool,
+    pub content_summary: String,
 }
 
 thread_local! {
@@ -3625,7 +4071,83 @@ pub(crate) fn held_localhost_from(snapshot: &super::local_host::HostSnapshot) ->
         policy_sentence: HOST_POLICY_SENTENCE.to_owned(),
         approvals_head: HOST_APPROVALS_HEAD.to_owned(),
         activity_head: HOST_ACTIVITY_HEAD.to_owned(),
+        search_head: HOST_SEARCH_HEAD.to_owned(),
+        search: snapshot.search.clone(),
+        searching: snapshot.searching,
+        search_summary: search_summary(&snapshot.search, snapshot.searching),
+        content_head: HOST_CONTENT_HEAD.to_owned(),
+        content: snapshot.content.clone(),
+        searching_content: snapshot.searching_content,
+        content_summary: content_summary(&snapshot.content, snapshot.searching_content),
     }
+}
+
+/// What a content search has to say for itself, worded once for both windows:
+/// the query, how many lines matched, how many names were looked at, a bound
+/// that was reached, and every folder the broker refused.
+pub(crate) fn content_summary(
+    search: &Option<super::local_host::ContentSearch>,
+    searching: bool,
+) -> String {
+    if searching {
+        return "Searching inside your files…".to_owned();
+    }
+    let Some(search) = search else {
+        return "No content search yet. Text is matched inside the folders you granted, in UTF-8 files only."
+            .to_owned();
+    };
+    let mut line = format!(
+        "{} matching line(s) for \u{201c}{}\u{201d} in {} name(s) scanned.",
+        search.hits.len(),
+        search.query,
+        search.scanned
+    );
+    if search.truncated {
+        line.push_str(" The walk stopped at its own bound, so more lines may match.");
+    }
+    if !search.refused.is_empty() {
+        let folders: Vec<String> = search
+            .refused
+            .iter()
+            .map(|refusal| format!("{} ({})", refusal.folder, refusal.code))
+            .collect();
+        line.push_str(&format!(" Not searched: {}.", folders.join(", ")));
+    }
+    line
+}
+
+/// What the search has to say for itself: the query, how many names matched,
+/// how many the walk looked at, and any folder it could not read. One sentence,
+/// so the native page and the web page report the same walk.
+pub(crate) fn search_summary(
+    search: &Option<super::local_host::FileSearch>,
+    searching: bool,
+) -> String {
+    if searching {
+        return "Searching your folders…".to_owned();
+    }
+    let Some(search) = search else {
+        return "No search yet. Names are matched inside the folders you granted, never outside them."
+            .to_owned();
+    };
+    let mut line = format!(
+        "{} match(es) for \u{201c}{}\u{201d} in {} name(s) scanned.",
+        search.hits.len(),
+        search.query,
+        search.scanned
+    );
+    if search.truncated {
+        line.push_str(" The walk stopped at its own bound, so more names may match.");
+    }
+    if !search.refused.is_empty() {
+        let folders: Vec<String> = search
+            .refused
+            .iter()
+            .map(|refusal| format!("{} ({})", refusal.folder, refusal.code))
+            .collect();
+        line.push_str(&format!(" Not searched: {}.", folders.join(", ")));
+    }
+    line
 }
 
 /// One policy row on the settings page: the service's own label and value,
@@ -3686,6 +4208,20 @@ thread_local! {
         std::cell::RefCell::new(UpdatesView::default());
     static SETTINGS_POLICY: std::cell::RefCell<PolicyView> =
         std::cell::RefCell::new(PolicyView::default());
+    /// The updater's state where the app keeps it. The Settings page reads this
+    /// projection when it exists, so a page opened in the shell window -- which
+    /// has no native card to paint -- still offers the check, the download and
+    /// the restart instead of an empty section.
+    static UPDATES_SOURCE: std::cell::RefCell<
+        Option<std::rc::Rc<std::cell::RefCell<super::update::UpdateCheck>>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Hold the updater's state for the Settings page to read. Called where the app
+/// builds its panel, once per process, so both window paths answer from the
+/// same state the update presses change.
+pub(crate) fn hold_updates(source: std::rc::Rc<std::cell::RefCell<super::update::UpdateCheck>>) {
+    UPDATES_SOURCE.with(|slot| *slot.borrow_mut() = Some(source));
 }
 
 /// The settings surface as the web view opens it: the link this clone saved,
@@ -3701,9 +4237,20 @@ pub(crate) fn settings_snapshot() -> HeldSettings {
         },
         None => LinkView::default(),
     };
+    // The live updater state when the app has one: a page that opens before
+    // any paint -- the shell window's Settings -- offers the presses the app
+    // can actually take. The last paint is the fallback for a clone that never
+    // built a panel.
+    let updates = UPDATES_SOURCE
+        .with(|slot| {
+            slot.borrow().as_ref().map(|source| {
+                updates_view_from(&source.borrow(), super::update::running_as_appimage())
+            })
+        })
+        .unwrap_or_else(|| SETTINGS_UPDATES.with(|store| store.borrow().clone()));
     HeldSettings {
         link,
-        updates: SETTINGS_UPDATES.with(|store| store.borrow().clone()),
+        updates,
         policy: SETTINGS_POLICY.with(|store| store.borrow().clone()),
     }
 }
@@ -4460,15 +5007,27 @@ fn connect_space_delete(
 /// The export result, read-only: what came back and how big, with the
 /// page text capped and the cap stated.
 fn show_export_dialog(line: &gtk4::Box, name: &str, exported: &muse_account::SpaceExportAnswer) {
+    let parent = line
+        .root()
+        .and_then(|root| root.downcast::<gtk4::Window>().ok());
+    space_preview_window(name, exported, parent.as_ref());
+}
+
+/// A space's exported HTML in its own window: the native row's Export and the
+/// web page's Open both land here, so the two windows preview one space the
+/// same way. The parent is the dialog's transient owner when the native row
+/// asked; the web page's press has none, because it is not a GTK widget.
+pub(crate) fn space_preview_window(
+    name: &str,
+    exported: &muse_account::SpaceExportAnswer,
+    parent: Option<&gtk4::Window>,
+) {
     let window = gtk4::Window::new();
     window.set_modal(true);
     window.set_default_size(560, -1);
     window.set_title(Some(name));
-    if let Some(root) = line
-        .root()
-        .and_then(|root| root.downcast::<gtk4::Window>().ok())
-    {
-        window.set_transient_for(Some(&root));
+    if let Some(root) = parent {
+        window.set_transient_for(Some(root));
     }
     let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     body.set_margin_start(24);
@@ -5077,6 +5636,52 @@ fn append_thread_row(
     let archive = gtk4::Button::with_label(archive_label);
     archive.add_css_class("flat");
     menu.append(&archive);
+    // The Delete the web page's rows already carry: the same app-held arm, one
+    // press to owe the confirmation and one to send it, so the same row on
+    // either surface behaves the same way. A conversation has no Trash.
+    let delete = gtk4::Button::with_label("Delete");
+    delete.add_css_class("flat");
+    delete.add_css_class("muse-danger");
+    menu.append(&delete);
+    {
+        let ctx = ctx.clone();
+        let line_inner = line.clone();
+        let popover_held = popover.clone();
+        let session_id = thread.session_id.clone();
+        let button = delete.clone();
+        delete.connect_clicked(move |_| {
+            if !crate::pages::thread_delete_press(&session_id) {
+                button.set_label("Confirm delete");
+                return;
+            }
+            button.set_label("Delete");
+            popover_held.popdown();
+            let Some(chat) = ctx.chat.upgrade() else {
+                return;
+            };
+            let Some(client) = chat.client_handle() else {
+                line_inner.append(&card_note("Link your account first."));
+                return;
+            };
+            let ctx_for_done = ctx.clone();
+            let line_for_done = line_inner.clone();
+            let session_id = session_id.clone();
+            super::app::dispatch(
+                &chat,
+                move || client.session_op(&session_id, "delete", None),
+                move |_chat, answer| {
+                    let accepted = answer.as_ref().map(|ok| ok.accepted).unwrap_or(false);
+                    if accepted {
+                        show(&ctx_for_done, "threads");
+                    } else {
+                        line_for_done.append(&card_note(
+                            "The service did not delete it. Nothing changed.",
+                        ));
+                    }
+                },
+            );
+        });
+    }
     popover.set_child(Some(&menu));
     // A press inside the row activates it, and activating a thread
     // row navigates to Chat -- so the menu button unselects its row
@@ -5538,6 +6143,7 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
         state.status = CHECKING_STATUS.to_owned();
     }
     paint_updates(ctx, page);
+    let started = std::time::Instant::now();
     let (done_tx, done_rx) =
         std::sync::mpsc::channel::<Result<super::update::ReleaseInfo, String>>();
     std::thread::spawn(move || {
@@ -5546,6 +6152,20 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
     let ctx = ctx.clone();
     let page_owned = page.cloned();
     gtk4::glib::idle_add_local(move || {
+        if started.elapsed() > CHECK_DEADLINE {
+            {
+                let mut state = ctx.updates.borrow_mut();
+                state.busy = false;
+                state.status = CHECK_TIMEOUT_STATUS.to_owned();
+                state.info = None;
+            }
+            paint_updates(&ctx, page_owned.as_ref());
+            eprintln!(
+                "muse: update check answered: {}",
+                ctx.updates.borrow().status
+            );
+            return gtk4::glib::ControlFlow::Break;
+        }
         let answer = match done_rx.try_recv() {
             Ok(answer) => answer,
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -5572,7 +6192,7 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
                     let offered = super::update::update_available(local, &info)
                         || (local.is_none() && super::update::harness_feed().is_some());
                     if offered {
-                        state.status = "A newer build is available.".to_owned();
+                        state.status = super::update::offered_status(&info);
                         state.info = Some(info);
                     } else {
                         state.status = "This build is up to date.".to_owned();
@@ -5586,6 +6206,10 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
             }
         }
         paint_updates(&ctx, page_owned.as_ref());
+        eprintln!(
+            "muse: update check answered: {}",
+            ctx.updates.borrow().status
+        );
         gtk4::glib::ControlFlow::Break
     });
     Ok(())
@@ -7869,6 +8493,23 @@ pub(crate) mod tests {
         assert_eq!(super::updates_here(true), Ok(()));
     }
 
+    /// Sign-out is the app's own clear: the saved link is gone, and a second
+    /// press finds the state sign-out wanted rather than a failure.
+    #[test]
+    fn signing_out_clears_the_saved_link_and_forgives_a_second_press() {
+        let root = std::env::temp_dir().join(format!("muse-sign-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("account-connection.json");
+        std::fs::write(&link, "{}").unwrap();
+
+        super::sign_out_in(&root).expect("the saved link clears");
+        assert!(!link.exists(), "the link is gone from the account folder");
+
+        super::sign_out_in(&root).expect("a clear link is the state sign-out wants");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The action's label is one rule for both cards: the panel's button and the
     /// page's card cannot offer different presses for the same state, because
     /// the page's view takes its label from the button's own rule.
@@ -8218,6 +8859,90 @@ pub(crate) mod tests {
         }));
     }
 
+    /// The search's own sentence: what was searched, how much was walked, a
+    /// bound that was hit, and every folder that could not be read. Both
+    /// windows print this one line.
+    #[test]
+    fn the_search_summary_says_what_was_searched_and_what_was_refused() {
+        let search = super::super::local_host::FileSearch {
+            query: "report".to_owned(),
+            hits: vec![
+                super::super::local_host::FileHit {
+                    folder: "Scratch".to_owned(),
+                    path: "alpha-report.md".to_owned(),
+                },
+                super::super::local_host::FileHit {
+                    folder: "Scratch".to_owned(),
+                    path: "sub/beta-report.md".to_owned(),
+                },
+            ],
+            refused: vec![super::super::local_host::FileRefusal {
+                folder: "Notes".to_owned(),
+                code: "io_denied".to_owned(),
+            }],
+            scanned: 1204,
+            truncated: true,
+        };
+        let summary = search_summary(&Some(search), false);
+        assert!(
+            summary.contains("2 match(es) for \u{201c}report\u{201d}"),
+            "{summary}"
+        );
+        assert!(summary.contains("1204 name(s) scanned"), "{summary}");
+        assert!(summary.contains("stopped at its own bound"), "{summary}");
+        assert!(
+            summary.contains("Not searched: Notes (io_denied)."),
+            "{summary}"
+        );
+        // A walk in flight says so, and one that never ran says where names are
+        // matched at all -- it never claims an empty result.
+        assert_eq!(search_summary(&None, true), "Searching your folders…");
+        assert!(search_summary(&None, false).contains("No search yet"));
+    }
+
+    /// The content search's sentence: the query, the matching lines, the scan,
+    /// a bound that was reached, and every folder the broker refused.
+    #[test]
+    fn the_content_summary_names_the_lines_the_scan_and_a_refusal() {
+        use super::super::local_host::{ContentHit, ContentSearch, FileRefusal};
+        let search = ContentSearch {
+            query: "revenue".to_owned(),
+            hits: vec![
+                ContentHit {
+                    folder: "Scratch".to_owned(),
+                    path: "alpha-report.md".to_owned(),
+                    line: 2,
+                    text: "revenue up".to_owned(),
+                },
+                ContentHit {
+                    folder: "Scratch".to_owned(),
+                    path: "sub/beta-report.md".to_owned(),
+                    line: 2,
+                    text: "second revenue line".to_owned(),
+                },
+            ],
+            refused: vec![FileRefusal {
+                folder: "Notes".to_owned(),
+                code: "invalid_utf8".to_owned(),
+            }],
+            scanned: 88,
+            truncated: true,
+        };
+        let summary = content_summary(&Some(search), false);
+        assert!(
+            summary.contains("2 matching line(s) for \u{201c}revenue\u{201d}"),
+            "{summary}"
+        );
+        assert!(summary.contains("88 name(s) scanned"), "{summary}");
+        assert!(summary.contains("stopped at its own bound"), "{summary}");
+        assert!(
+            summary.contains("Not searched: Notes (invalid_utf8)."),
+            "{summary}"
+        );
+        assert_eq!(content_summary(&None, true), "Searching inside your files…");
+        assert!(content_summary(&None, false).contains("No content search yet"));
+    }
+
     #[test]
     fn the_localhost_projection_keeps_the_native_wording() {
         // The page must not invent a second description of a grant, a card or
@@ -8225,6 +8950,19 @@ pub(crate) mod tests {
         // change to either list's wording lands in both.
         let root = std::path::PathBuf::from("/var/home/phendrick/Scratch");
         let held = held_localhost_from(&super::super::local_host::HostSnapshot {
+            content: None,
+            searching_content: false,
+            search: Some(super::super::local_host::FileSearch {
+                query: "notes".to_owned(),
+                hits: vec![super::super::local_host::FileHit {
+                    folder: "Scratch".to_owned(),
+                    path: "notes.txt".to_owned(),
+                }],
+                refused: Vec::new(),
+                scanned: 12,
+                truncated: false,
+            }),
+            searching: false,
             phase: super::super::local_host::Phase::Registered,
             notice: "Listening for the account's own node commands.".to_owned(),
             grants: vec![super::super::local_host::GrantedFolder {
@@ -8255,6 +8993,20 @@ pub(crate) mod tests {
         });
 
         assert_eq!(held.phase, "registered");
+        // The page carries the app's own content-search sentence, worded here
+        // rather than by the page.
+        assert_eq!(held.content_head, HOST_CONTENT_HEAD);
+        assert!(held.content_summary.contains("No content search yet"));
+        // The page carries the app's own search answer and its one sentence.
+        assert_eq!(
+            held.search.as_ref().map(|search| search.hits.len()),
+            Some(1)
+        );
+        assert!(
+            held.search_summary.contains("1 match(es)"),
+            "{}",
+            held.search_summary
+        );
         assert_eq!(held.device.as_deref(), Some("linux-0123456789abcdef"));
         assert_eq!(
             held.grants[0].text,

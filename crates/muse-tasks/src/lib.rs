@@ -713,6 +713,36 @@ impl TaskStore {
             .collect())
     }
 
+    /// Give a claim back: the tasks a cycle claimed but could not deliver are
+    /// due again, so the next cycle retries them. Exists because a claim is
+    /// only worth having if the thing it claimed was delivered -- a claimed
+    /// reminder that nobody saw is a lost reminder, not an at-most-once win.
+    /// Terminal tasks are left alone: there is nothing left to deliver.
+    pub fn release_claim(&mut self, ids: &[u64]) -> Result<(), TaskError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let wanted: HashSet<u64> = ids.iter().copied().collect();
+        let mut next = self.tasks.clone();
+        let mut changed = false;
+        for task in next.iter_mut() {
+            if !wanted.contains(&task.id) || !task.notified {
+                continue;
+            }
+            if matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled) {
+                continue;
+            }
+            task.notified = false;
+            changed = true;
+        }
+        if !changed {
+            return Ok(());
+        }
+        persist(&self.dir, &next)?;
+        self.tasks = next;
+        Ok(())
+    }
+
     /// Flag a pending or paused task as notified.
     pub fn mark_notified(&mut self, id: u64) -> Result<Task, TaskError> {
         let idx = self.index_of(id)?;

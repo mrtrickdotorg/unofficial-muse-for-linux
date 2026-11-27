@@ -6,11 +6,11 @@
 //! app would refuse, and the isolated browser flow is the same worker the
 //! native form starts, with the same cancellation.
 //!
-//! The folder chooser is the one press here that needs a window: a page cannot
-//! browse the disk, so `choose` opens the app's own `FileChooserNative` and the
-//! chosen path lands in the held state for the page's next read.
-
-use gtk4::prelude::*;
+//! The session folder is the page's own choice: its sheet lists one level at a
+//! time through [`crate::webui`]'s folder read, and `choose` records the answer
+//! in the held state the form's validation and the next snapshot read. No
+//! window opens here, so a page that can choose its folder never drops out of
+//! the shell for a native dialog.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -43,7 +43,7 @@ pub(crate) fn routes(on_linked: impl Fn() + 'static) -> WebSigninPress {
             });
             Ok(())
         }
-        "choose" => choose(),
+        "choose" => choose(&press),
         other => Err(format!("This page has no {other} press.")),
     })
 }
@@ -149,35 +149,30 @@ fn browser(press: &SigninPress, on_linked: &Rc<dyn Fn()>) -> Result<(), String> 
     Ok(())
 }
 
-/// The folder chooser a session folder needs. The page cannot browse the disk,
-/// so this is the app's own dialog, and its answer lands in the held state.
-fn choose() -> Result<(), String> {
-    let dialog = gtk4::FileChooserNative::new(
-        Some("Choose a session folder"),
-        None::<&gtk4::Window>,
-        gtk4::FileChooserAction::SelectFolder,
-        Some("Use this folder"),
-        Some("Cancel"),
-    );
-    dialog.set_modal(true);
-    dialog.connect_response(|dialog, response| {
-        if response != gtk4::ResponseType::Accept {
-            return;
-        }
-        let Some(path) = dialog
-            .files()
-            .item(0)
-            .and_then(|file| file.downcast::<gtk4::gio::File>().ok())
-            .and_then(|file| file.path())
-        else {
-            return;
-        };
-        signin_update(|held| {
-            held.folder = path.display().to_string();
-            held.error.clear();
-        });
+/// The folder the page's sheet returned: recorded in the same held state the
+/// native form writes, so the field, the next snapshot and the Connect press's
+/// own validation all read one value. The sheet is the page's; this is the
+/// app's answer to it, in the app's own words.
+fn choose(press: &SigninPress) -> Result<(), String> {
+    // The folder is checked before anything is recorded: a refused path must
+    // not become the folder the form shows.
+    let asked = press.folder.trim();
+    if asked.is_empty() {
+        return refuse("Choose a folder first.");
+    }
+    let path = std::path::Path::new(asked);
+    if !path.is_absolute() {
+        return refuse("The session folder path must be absolute.");
+    }
+    if !path.is_dir() {
+        return refuse("No folder at that path.");
+    }
+    signin_update(|held| {
+        held.python = press.python.clone();
+        held.folder = path.display().to_string();
+        held.consent = press.consent;
+        held.error.clear();
     });
-    dialog.show();
     Ok(())
 }
 
@@ -199,4 +194,46 @@ fn refuse(message: &str) -> Result<(), String> {
         held.status.clear();
     });
     Err(message.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The folder press is the page's own sheet answer, recorded in the state
+    /// the form reads: no window opens, and the next snapshot carries the
+    /// folder the Connect press will validate.
+    #[test]
+    fn a_chosen_folder_lands_in_the_state_the_form_reads() {
+        let dir = std::env::temp_dir().join(format!("muse-signin-choose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe folder");
+        crate::pages::signin_cache(crate::pages::HeldSignin::opening());
+
+        let press = routes(|| {});
+        let chosen = press(SigninPress {
+            press: "choose".to_owned(),
+            folder: dir.display().to_string(),
+            ..SigninPress::default()
+        });
+
+        assert_eq!(chosen, Ok(()));
+        let held = crate::pages::signin_snapshot();
+        assert_eq!(held.folder, dir.display().to_string());
+
+        // A folder the app cannot use is refused in its own words, and the
+        // field keeps the folder that was there.
+        let refused = press(SigninPress {
+            press: "choose".to_owned(),
+            folder: "relative/folder".to_owned(),
+            ..SigninPress::default()
+        });
+        assert_eq!(
+            refused,
+            Err("The session folder path must be absolute.".to_owned())
+        );
+        let held = crate::pages::signin_snapshot();
+        assert_eq!(held.folder, dir.display().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
