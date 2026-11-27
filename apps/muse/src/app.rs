@@ -30,12 +30,32 @@ where
     W: FnOnce() -> T + Send + 'static,
     D: FnOnce(&Rc<Chat>, T) + 'static,
 {
+    dispatch_recoverable(chat, work, done, |_| {});
+}
+
+/// `dispatch`, for work whose completion owns state that must be
+/// released even when the worker dies without answering: a panic in
+/// `work` drops the channel, the completion never runs, and whatever
+/// it held -- a session ticket, the composer's in-flight flag, the
+/// press waiting in line behind a send -- would wedge for the life
+/// of the process. `on_dead` runs on the main thread in that case
+/// instead; it must release what the completion would have released
+/// and treat the outcome as unknown, because the work may or may
+/// not have landed.
+pub(crate) fn dispatch_recoverable<T, W, D, X>(chat: &Rc<Chat>, work: W, done: D, on_dead: X)
+where
+    T: Send + 'static,
+    W: FnOnce() -> T + Send + 'static,
+    D: FnOnce(&Rc<Chat>, T) + 'static,
+    X: FnOnce(&Rc<Chat>) + 'static,
+{
     let (tx, rx) = std::sync::mpsc::channel::<T>();
     std::thread::spawn(move || {
         let _ = tx.send(work());
     });
     let weak = Rc::downgrade(chat);
     let mut done = Some(done);
+    let mut on_dead = Some(on_dead);
     gtk4::glib::idle_add_local(move || {
         let answer = match rx.try_recv() {
             Ok(answer) => answer,
@@ -43,6 +63,11 @@ where
                 return gtk4::glib::ControlFlow::Continue;
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                if let Some(on_dead) = on_dead.take()
+                    && let Some(chat) = weak.upgrade()
+                {
+                    on_dead(&chat);
+                }
                 return gtk4::glib::ControlFlow::Break;
             }
         };
@@ -2541,7 +2566,8 @@ impl Chat {
         let dispatch = match self.composer.borrow_mut().begin_send() {
             Some(dispatch) => dispatch,
             None => {
-                if self.composer.borrow_mut().queue_press() {
+                let scope = self.thread_scope();
+                if self.composer.borrow_mut().queue_press(scope) {
                     // The entry clears exactly as a dispatched press
                     // clears it; the words live in the line now.
                     self.composer_row.set_input_text("");
@@ -2755,6 +2781,21 @@ impl Chat {
         images: Vec<StagedImage>,
         reply: Option<super::composer::ReplyQuote>,
     ) -> SendStart {
+        let scope = self.thread_scope();
+        self.send_text_scoped(draft, images, reply, scope)
+    }
+
+    /// `send_text` with the scope named by the caller: a press that
+    /// waited in line carries the scope stamped when it queued, so it
+    /// goes out to the conversation it was written in even if the
+    /// reader has since opened another one.
+    fn send_text_scoped(
+        self: &Rc<Self>,
+        draft: String,
+        images: Vec<StagedImage>,
+        reply: Option<super::composer::ReplyQuote>,
+        scope: Option<String>,
+    ) -> SendStart {
         let ticket = match self.session.borrow_mut().try_begin(Op::Send) {
             Some(ticket) => ticket,
             None => {
@@ -2762,6 +2803,7 @@ impl Chat {
                     text: draft,
                     images,
                     reply,
+                    scope: scope.clone(),
                 };
                 match self.composer.borrow_mut().queue(dispatch) {
                     Ok(()) => {
@@ -2777,8 +2819,10 @@ impl Chat {
                     Err(dispatch) => {
                         // The line is already taken: this press is
                         // refused, and its words go back into the
-                        // entry whole, so "kept" is literal.
-                        let _ = self.composer.borrow_mut().finish_send();
+                        // entry whole, so "kept" is literal. The line
+                        // itself is not this press's to touch -- the
+                        // dispatch waiting in it still goes out when
+                        // the holder lands.
                         self.composer.borrow_mut().restore(dispatch.images);
                         self.restore_words(&dispatch.text);
                         self.paint_chips();
@@ -2799,9 +2843,14 @@ impl Chat {
                 }
             }
         };
+        // The dispatch owns the composer's in-flight flag from here:
+        // a press that began it set the flag already, and a press
+        // drained from the line gets it set now, so Stop shows for
+        // every send in flight and a further press queues behind it.
+        self.composer.borrow_mut().mark_sending();
         let Some(client) = self.client.borrow().clone() else {
             self.session.borrow_mut().accept(&ticket);
-            let _ = self.composer.borrow_mut().finish_send();
+            self.composer.borrow_mut().cancel_send();
             self.composer.borrow_mut().restore(images);
             self.restore_words(&draft);
             self.paint_chips();
@@ -2819,7 +2868,7 @@ impl Chat {
         // hand them back instead of dropping them down the plain path.
         if !images.is_empty() && verified.is_none() {
             self.session.borrow_mut().accept(&ticket);
-            let _ = self.composer.borrow_mut().finish_send();
+            self.composer.borrow_mut().cancel_send();
             self.composer.borrow_mut().restore(images);
             self.restore_words(&draft);
             self.paint_chips();
@@ -2828,12 +2877,11 @@ impl Chat {
             self.composer_row.refresh(&self.composer.borrow());
             return SendStart::Refused("Sign in before sending pictures.");
         }
-        let scope = self.thread_scope();
         let reply_worker = reply.clone();
         // The staged quote's id is what the service records the reply against:
         // the excerpt never travels, and a plain send stays a plain send.
         let reply_target = reply.as_ref().map(|quote| quote.id.clone());
-        dispatch(
+        dispatch_recoverable(
             self,
             move || {
                 let account_images: Vec<muse_account::StagedImage> = images
@@ -2968,7 +3016,26 @@ impl Chat {
                 // messages both land, each with its own receipt and
                 // its own prove-by-re-read reload.
                 if let Some(next) = next {
-                    let _ = chat.send_text(next.text, next.images, next.reply);
+                    let _ = chat.send_text_scoped(next.text, next.images, next.reply, next.scope);
+                }
+            },
+            move |chat| {
+                // The worker died without answering: nothing else
+                // will ever release the ticket or the composer's
+                // flag, and the press waiting in line would strand
+                // with them. The send itself may or may not have
+                // landed -- the re-read is what proves it, the same
+                // as any other send outcome.
+                chat.session.borrow_mut().accept(&ticket);
+                let next = chat.composer.borrow_mut().finish_send();
+                chat.composer_row.refresh(&chat.composer.borrow());
+                chat.say_send_note(
+                    "The send stopped unexpectedly. The thread was re-read -- \
+                     if your message is not in it, it did not go out.",
+                );
+                chat.reload_history();
+                if let Some(next) = next {
+                    let _ = chat.send_text_scoped(next.text, next.images, next.reply, next.scope);
                 }
             },
         );
@@ -3016,7 +3083,8 @@ impl Chat {
                 // they go out when the in-flight send lands. Only a
                 // press that finds the line already taken hears the
                 // refusal, with its words still in the page's own box.
-                if self.composer.borrow_mut().queue_remote(text, reply) {
+                let scope = self.thread_scope();
+                if self.composer.borrow_mut().queue_remote(text, reply, scope) {
                     self.paint_chips();
                     self.paint_reply();
                     self.composer_row.refresh(&self.composer.borrow());
@@ -3460,7 +3528,7 @@ impl Chat {
                 // surfaces, before the service answers.
                 *self.armed_delete.borrow_mut() = None;
                 self.refresh_delete_arm();
-                dispatch(
+                dispatch_recoverable(
                     self,
                     move || client.chat_delete("turn", &id),
                     move |chat, answer| {
@@ -3472,6 +3540,14 @@ impl Chat {
                         }
                         // A send that waited in line behind this
                         // delete goes out now the slot is free.
+                        chat.drain_queued_send();
+                    },
+                    move |chat| {
+                        // The worker died without answering: release
+                        // the ticket, prove the outcome by re-read,
+                        // and let the line behind the delete go out.
+                        chat.session.borrow_mut().accept(&ticket);
+                        chat.reload_history();
                         chat.drain_queued_send();
                     },
                 );
@@ -3567,7 +3643,7 @@ impl Chat {
         let next = self.composer.borrow_mut().finish_send();
         self.composer_row.refresh(&self.composer.borrow());
         if let Some(next) = next {
-            let _ = self.send_text(next.text, next.images, next.reply);
+            let _ = self.send_text_scoped(next.text, next.images, next.reply, next.scope);
         }
     }
 

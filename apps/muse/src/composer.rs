@@ -76,6 +76,12 @@ pub struct Dispatch {
     pub text: String,
     pub images: Vec<StagedImage>,
     pub reply: Option<ReplyQuote>,
+    /// The thread this dispatch belongs to, stamped when it waits in
+    /// line: a queued press goes out to the conversation it was
+    /// written in, even if the reader has since opened another one.
+    /// `None` is the main conversation. An immediately dispatched
+    /// press leaves it unset -- its scope is read at dispatch time.
+    pub scope: Option<String>,
 }
 
 /// A staged reply quote: the quoted row's id plus one capped line. The id
@@ -164,6 +170,7 @@ impl Composer {
             text: self.text.trim().to_owned(),
             images: std::mem::take(&mut self.images),
             reply: self.reply.take(),
+            scope: None,
         };
         self.text.clear();
         Some(dispatch)
@@ -187,6 +194,7 @@ impl Composer {
             text: text.to_owned(),
             images: std::mem::take(&mut self.images),
             reply: None,
+            scope: None,
         })
     }
 
@@ -259,7 +267,7 @@ impl Composer {
     /// draft waits in line instead of the press dropping. `false`
     /// when nothing is sendable or the line is already taken -- then
     /// the draft stands exactly as typed, unqueued and uneaten.
-    pub fn queue_press(&mut self) -> bool {
+    pub fn queue_press(&mut self, scope: Option<String>) -> bool {
         if !self.sending || (self.text.trim().is_empty() && self.images.is_empty()) {
             return false;
         }
@@ -267,6 +275,7 @@ impl Composer {
             text: self.text.trim().to_owned(),
             images: std::mem::take(&mut self.images),
             reply: self.reply.take(),
+            scope,
         };
         match self.queue(dispatch) {
             Ok(()) => {
@@ -287,7 +296,12 @@ impl Composer {
     /// quote, with this composer's staged pictures -- exactly what
     /// `begin_remote` would have dispatched, held in line instead of
     /// refused while a send is in flight.
-    pub fn queue_remote(&mut self, text: &str, reply: Option<ReplyQuote>) -> bool {
+    pub fn queue_remote(
+        &mut self,
+        text: &str,
+        reply: Option<ReplyQuote>,
+        scope: Option<String>,
+    ) -> bool {
         if !self.sending {
             return false;
         }
@@ -299,6 +313,7 @@ impl Composer {
             text: text.to_owned(),
             images: std::mem::take(&mut self.images),
             reply,
+            scope,
         };
         match self.queue(dispatch) {
             Ok(()) => {
@@ -308,7 +323,13 @@ impl Composer {
                 true
             }
             Err(dispatch) => {
+                // Refused whole, like the native press: the pictures
+                // go back to the chips and the quote to its bar, so
+                // nothing the reader staged is silently spent.
                 self.restore(dispatch.images);
+                if let Some(reply) = dispatch.reply {
+                    let _ = self.stage_reply(reply.id, reply.excerpt);
+                }
                 false
             }
         }
@@ -335,6 +356,16 @@ impl Composer {
     pub fn finish_send(&mut self) -> Option<Dispatch> {
         self.sending = false;
         self.queued.take()
+    }
+
+    /// Release the send flag WITHOUT taking the line: a send refused
+    /// before it dispatched ends here. The refused dispatch is the
+    /// caller's to hand back; a press already waiting in line is not
+    /// this send's to spend -- taking it, as `finish_send` does,
+    /// would eat its words without a trace. Only a completion that
+    /// means to drain the line calls `finish_send`.
+    pub fn cancel_send(&mut self) {
+        self.sending = false;
     }
 }
 
@@ -792,13 +823,13 @@ mod tests {
         // second message simply never arrived.
         composer.set_text("second");
         assert!(composer.begin_send().is_none());
-        assert!(composer.queue_press());
+        assert!(composer.queue_press(None));
         assert_eq!(composer.text(), "");
         assert!(composer.queued());
         // A third press finds the line taken and is refused whole:
         // its words stay in the entry, unqueued and uneaten.
         composer.set_text("third");
-        assert!(!composer.queue_press());
+        assert!(!composer.queue_press(None));
         assert_eq!(composer.text(), "third");
         // The first send lands: the waiting press comes back as the
         // next dispatch, in the order it was pressed.
@@ -820,7 +851,7 @@ mod tests {
             .stage("pasted-1.png".to_owned(), vec![7], 4, 5)
             .expect("stage");
         let quote = staged_quote("m9".to_owned(), "quoted".to_owned()).expect("quote");
-        assert!(composer.queue_remote(" second from the page ", Some(quote.clone())));
+        assert!(composer.queue_remote(" second from the page ", Some(quote.clone()), None));
         assert!(
             composer.staged().is_empty(),
             "the picture waits in line with its words"
@@ -841,6 +872,7 @@ mod tests {
             text: "kept".to_owned(),
             images: Vec::new(),
             reply: None,
+            scope: None,
         };
         assert!(composer.queue(dispatch).is_ok());
         assert!(composer.queued());
@@ -849,6 +881,7 @@ mod tests {
             text: "one too many".to_owned(),
             images: Vec::new(),
             reply: None,
+            scope: None,
         };
         assert_eq!(
             composer.queue(refused).map_err(|dispatch| dispatch.text),
@@ -857,5 +890,53 @@ mod tests {
         let next = composer.finish_send().expect("the queued dispatch drains");
         assert_eq!(next.text, "kept");
         assert!(composer.finish_send().is_none());
+    }
+
+    #[test]
+    fn a_queued_press_carries_the_thread_it_was_written_in() {
+        let mut composer = Composer::new();
+        composer.set_text("first");
+        let _ = composer.begin_send().expect("first dispatches");
+        composer.set_text("second");
+        assert!(composer.queue_press(Some("thread-a".to_owned())));
+        // The stamp rides the line: wherever the reader has navigated
+        // by the time the first send lands, the waiting press still
+        // belongs to the conversation it was written in.
+        let next = composer.finish_send().expect("the queued press drains");
+        assert_eq!(next.text, "second");
+        assert_eq!(next.scope.as_deref(), Some("thread-a"));
+    }
+
+    #[test]
+    fn cancel_send_releases_the_flag_and_leaves_the_line_whole() {
+        let mut composer = Composer::new();
+        composer.set_text("first");
+        let _ = composer.begin_send().expect("first dispatches");
+        composer.set_text("second");
+        assert!(composer.queue_press(None));
+        // A refusal that ends the in-flight mark must not spend the
+        // line the way taking finish_send's return would: the waiting
+        // press is still there to drain afterwards.
+        composer.cancel_send();
+        assert!(!composer.sending());
+        assert!(composer.queued());
+        let next = composer.finish_send().expect("the queued press survives");
+        assert_eq!(next.text, "second");
+    }
+
+    #[test]
+    fn a_refused_remote_press_hands_its_quote_back() {
+        let mut composer = Composer::new();
+        let _ = composer
+            .begin_remote("first from the page")
+            .expect("dispatches");
+        let quote = staged_quote("m9".to_owned(), "quoted".to_owned()).expect("quote");
+        assert!(composer.queue_remote("second from the page", Some(quote), None));
+        // The line is taken: this press is refused, and its quote
+        // goes back to the bar the way a refused native press hands
+        // its own back, instead of vanishing with the refusal.
+        let refused = staged_quote("m10".to_owned(), "also quoted".to_owned()).expect("quote");
+        assert!(!composer.queue_remote("third from the page", Some(refused.clone()), None));
+        assert_eq!(composer.reply(), Some(&refused));
     }
 }
