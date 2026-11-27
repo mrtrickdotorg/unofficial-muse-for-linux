@@ -90,6 +90,7 @@ WebKit on the loader's path. Pass --env-script '' to start it bare.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -707,6 +708,7 @@ def write_feed(root, marker=None):
                 "name": STAGED_ASSET,
                 "browser_download_url": asset.as_uri(),
                 "size": len(body),
+                "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
             }
         ],
     }

@@ -8586,6 +8586,7 @@ pub(crate) mod tests {
             sha: "abc1234".to_owned(),
             asset_url: "https://example.invalid/muse.AppImage".to_owned(),
             asset_size: 1024,
+            asset_digest: None,
         });
         assert_eq!(
             updates_action_label(&state).as_deref(),

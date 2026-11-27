@@ -19,6 +19,9 @@ muse-local-tools = { path = "../../crates/muse-local-tools" }
 muse-tasks = { path = "../../crates/muse-tasks" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Already the app's through GTK: its checksum is the SHA-256 the
+# updater verifies downloads with, so the check needs no new crate.
+glib = "0.21"
 libc = "0.2"
 # `proxy-from-env` so a seat behind a proxy can reach the release feed at all;
 # without it the check ignores the proxy its other traffic uses and hangs.

@@ -9,6 +9,12 @@
 //! build. Flatpak installs never reach this module -- the store owns
 //! those updates, exactly like the App Store owns the Mac's.
 //!
+//! A staged download is verified against the feed before it can be
+//! run: the byte count must match the size the feed published and
+//! the SHA-256 must match the digest the feed published. A feed
+//! without a digest is refused, never taken on trust -- the staged
+//! file is executed, so an unverified download is remote code.
+//!
 //! Only pure shapes are unit-tested (feed parsing, version compare,
 //! check gating). The network runs on a worker thread and only the
 //! outcome crosses back to the main thread.
@@ -28,6 +34,10 @@ pub struct ReleaseInfo {
     pub sha: String,
     pub asset_url: String,
     pub asset_size: u64,
+    /// The SHA-256 the feed published for the asset, as lowercase
+    /// hex without the `sha256:` prefix. `None` when the feed
+    /// published no digest; a download is refused in that case.
+    pub asset_digest: Option<String>,
 }
 
 /// The identifier the panel names for an offered build: the shortened
@@ -96,11 +106,40 @@ pub fn parse_release(json: &serde_json::Value) -> Result<ReleaseInfo, String> {
         .get("size")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let asset_digest = parse_asset_digest(asset)?;
     Ok(ReleaseInfo {
         sha,
         asset_url,
         asset_size,
+        asset_digest,
     })
+}
+
+/// The digest the feed published for the asset, normalized to
+/// lowercase hex. The feed's form is `sha256:<64 hex digits>`. An
+/// absent digest is `None` (the download refuses it later); a
+/// present one in any other shape is a feed this client cannot
+/// verify against, which is a parse failure, never a quiet pass --
+/// a checksum that cannot be read must not become a download that
+/// is not checked.
+fn parse_asset_digest(asset: &serde_json::Value) -> Result<Option<String>, String> {
+    let Some(raw) = asset.get("digest") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let raw = raw
+        .as_str()
+        .ok_or_else(|| "Feed asset digest is unreadable.".to_string())?;
+    let hex = raw
+        .strip_prefix("sha256:")
+        .ok_or_else(|| "Feed asset digest is unreadable.".to_string())?;
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(Some(hex.to_lowercase()))
+    } else {
+        Err("Feed asset digest is unreadable.".to_string())
+    }
 }
 
 /// An update exists when both sides name a commit and they differ.
@@ -247,8 +286,70 @@ pub fn stage_dir() -> Option<PathBuf> {
     Some(base.join("muse-updates"))
 }
 
+/// The SHA-256 of a file's bytes, as lowercase hex, streamed in
+/// chunks so a full build never sits in memory twice. GLib's
+/// checksum does the hashing: it is the platform's maintained
+/// implementation and already linked into the app through GTK, so
+/// the updater's verification needs no new crate of its own.
+fn sha256_hex(path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut file =
+        std::fs::File::open(path).map_err(|_| "Could not read the staged update.".to_string())?;
+    let mut checksum = glib::Checksum::new(glib::ChecksumType::Sha256)
+        .ok_or_else(|| "Could not read the staged update.".to_string())?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| "Could not read the staged update.".to_string())?;
+        if read == 0 {
+            break;
+        }
+        checksum.update(&buffer[..read]);
+    }
+    checksum
+        .string()
+        .ok_or_else(|| "Could not read the staged update.".to_string())
+}
+
+/// Prove a downloaded file is the build the feed described before
+/// it is made executable or installed: the feed must have published
+/// a digest at all, the byte count must match the published size
+/// when one was published, and the SHA-256 must match the digest.
+/// Any doubt refuses -- the staged file is executed, so a download
+/// that cannot be verified is not an update.
+pub fn verify_download(path: &Path, info: &ReleaseInfo) -> Result<(), String> {
+    let Some(expected) = &info.asset_digest else {
+        return Err(
+            "The feed published no checksum for this build, so the download cannot be verified. Update refused."
+                .to_string(),
+        );
+    };
+    if info.asset_size > 0 {
+        let len = std::fs::metadata(path)
+            .map_err(|_| "Could not read the staged update.".to_string())?
+            .len();
+        if len != info.asset_size {
+            return Err(
+                "The downloaded build is not the size the feed published. Update refused."
+                    .to_string(),
+            );
+        }
+    }
+    if sha256_hex(path)? != *expected {
+        return Err(
+            "The downloaded build does not match the checksum the feed published. Update refused."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Download the asset to the stage dir, atomically (temp file plus
-/// rename) and executable. One blocking call, run on a worker.
+/// rename) and executable. The temp file is verified against the
+/// feed (see `verify_download`) before the rename installs it, so
+/// the staged path only ever holds a build that was proven. One
+/// blocking call, run on a worker.
 pub fn download_staged(info: &ReleaseInfo) -> Result<PathBuf, String> {
     let dir = stage_dir().ok_or_else(|| "No cache home to stage the update into.".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|_| "Could not create the update stage.".to_string())?;
@@ -277,6 +378,13 @@ pub fn download_staged(info: &ReleaseInfo) -> Result<PathBuf, String> {
         let mut reader = response.into_reader();
         std::io::copy(&mut reader, &mut staged)
             .map_err(|_| "Update download was interrupted.".to_string())?;
+    }
+    if let Err(error) = verify_download(&temporary, info) {
+        // A refused download leaves nothing behind: the temp file
+        // is not executable and never renamed into place, and it
+        // goes away here so the stage holds no unproven build.
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
     }
     #[cfg(unix)]
     {
@@ -431,6 +539,7 @@ mod tests {
             sha: "a6ed625ca4f8cabad4c2bb3cefcaebfdbec23b4e".to_owned(),
             asset_url: "file:///tmp/muse.AppImage".to_owned(),
             asset_size: 86_071_800,
+            asset_digest: None,
         };
         assert_eq!(
             offered_status(&info),
@@ -444,6 +553,7 @@ mod tests {
             sha: "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4".to_owned(),
             asset_url: String::new(),
             asset_size: 0,
+            asset_digest: None,
         };
         assert_eq!(
             offered_status(&info),
@@ -489,6 +599,88 @@ mod tests {
         );
     }
 
+    #[test]
+    fn feed_digest_parses_normalized_and_missing_is_none() {
+        let sha = "e".repeat(40);
+        let notes = format!("built from {sha}.");
+        let mut with = feed(&notes);
+        with["assets"][0]["digest"] = serde_json::json!(format!("sha256:{}", "AB".repeat(32)));
+        let info = parse_release(&with).expect("parses");
+        assert_eq!(info.asset_digest, Some("ab".repeat(32)));
+        // No digest field, and an explicit null, both read as none.
+        let info = parse_release(&feed(&notes)).expect("parses");
+        assert_eq!(info.asset_digest, None);
+        let mut null = feed(&notes);
+        null["assets"][0]["digest"] = serde_json::Value::Null;
+        let info = parse_release(&null).expect("parses");
+        assert_eq!(info.asset_digest, None);
+    }
+
+    #[test]
+    fn a_malformed_feed_digest_is_a_parse_failure() {
+        let sha = "e".repeat(40);
+        let notes = format!("built from {sha}.");
+        for bad in [
+            serde_json::json!("sha256:xyz"),
+            serde_json::json!(format!("sha256:{}", "ab".repeat(31))),
+            serde_json::json!(format!("md5:{}", "ab".repeat(32))),
+            serde_json::json!(123),
+        ] {
+            let mut value = feed(&notes);
+            value["assets"][0]["digest"] = bad;
+            assert!(parse_release(&value).is_err(), "{value}");
+        }
+    }
+
+    /// sha256("abc"), the standard test vector: verification is
+    /// checked against a digest known outside this code, not one
+    /// the code computed itself.
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    fn staged_file(dir: &Path, bytes: &[u8]) -> PathBuf {
+        let path = dir.join("staged.AppImage");
+        std::fs::write(&path, bytes).expect("staged file");
+        path
+    }
+
+    fn info_with(size: u64, digest: Option<&str>) -> ReleaseInfo {
+        ReleaseInfo {
+            sha: "f".repeat(40),
+            asset_url: String::new(),
+            asset_size: size,
+            asset_digest: digest.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_download_is_verified_against_the_feed_before_it_can_run() {
+        let dir = std::env::temp_dir().join(format!("muse-verify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("probe dir");
+        let path = staged_file(&dir, b"abc");
+        // The build the feed described: passes.
+        assert!(verify_download(&path, &info_with(3, Some(ABC_SHA256))).is_ok());
+        // A size the feed did not publish skips only the size check.
+        assert!(verify_download(&path, &info_with(0, Some(ABC_SHA256))).is_ok());
+        // A different size than the feed published: refused.
+        assert!(verify_download(&path, &info_with(4, Some(ABC_SHA256))).is_err());
+        // A different build than the feed's checksum (sha256 of the
+        // empty string): refused.
+        assert!(
+            verify_download(
+                &path,
+                &info_with(
+                    3,
+                    Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                )
+            )
+            .is_err()
+        );
+        // No checksum in the feed at all: refused, never on trust.
+        assert!(verify_download(&path, &info_with(3, None)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The harness feed is read exactly like a network answer, and an asset
     /// URL only becomes a local copy for the absolute `file://` form.
     #[test]
@@ -531,6 +723,7 @@ mod tests {
             sha: "a".repeat(40),
             asset_url: String::new(),
             asset_size: 0,
+            asset_digest: None,
         };
         assert!(!update_available(Some(&"a".repeat(40)), &remote));
         assert!(update_available(Some(&"b".repeat(40)), &remote));
