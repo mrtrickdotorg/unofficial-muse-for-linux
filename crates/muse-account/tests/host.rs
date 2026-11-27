@@ -1,4 +1,4 @@
-use muse_account::{AccountClient, BridgeConfig, ErrorCode};
+use muse_account::{AccountClient, BridgeConfig, Decision, ErrorCode};
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
@@ -262,6 +262,187 @@ fn the_socket_name_matches_the_published_fnv_1a_64_vectors() {
         muse_account::host_socket(Path::new("/home/x/.config/account"))
     );
     assert!(path.to_string_lossy().ends_with(".sock"));
+}
+
+/// A host that takes the first request it ever sees and then closes the
+/// connection without answering -- the ambiguous failure: the request may
+/// already have been dispatched service-side. Every later request is
+/// answered with an identity envelope, so a client that wrongly replays
+/// the first request is both served and caught (the request log grows).
+const DROP_FIRST_HOST: &str = r#"
+import os, socket, sys
+
+config_dir = sys.argv[sys.argv.index("--config-dir") + 1]
+with open(os.path.join(config_dir, "host-socket-path")) as fh:
+    path = fh.read().strip()
+log = os.path.join(config_dir, "requests.log")
+try:
+    os.unlink(path)
+except OSError:
+    pass
+listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+listener.bind(path)
+listener.listen(8)
+listener.settimeout(0.5)
+while os.path.exists(config_dir):
+    try:
+        conn, _ = listener.accept()
+    except socket.timeout:
+        continue
+    except OSError:
+        break
+    try:
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        if data.endswith(b"\n"):
+            with open(log, "a") as fh:
+                fh.write(data.decode("utf-8", "replace"))
+            with open(log) as fh:
+                count = len(fh.read().splitlines())
+            if count > 1:
+                conn.sendall(b'{"ok":true,"data":{"identity_name":"Lotus","vm_id":"vm-9"}}\n')
+            # count == 1: close without replying (the finally does it).
+    except OSError:
+        pass
+    finally:
+        conn.close()
+"#;
+
+struct StubHost(std::process::Child);
+
+impl Drop for StubHost {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Write the drop-first stub where `start_host` looks for it (beside the
+/// bridge script), pre-spawn one instance, and wait until it accepts, so
+/// the client's first dispatch lands on it rather than on a spawn.
+fn drop_first_fixture(fixture: &Fixture) -> (PathBuf, StubHost) {
+    let config_dir = fixture.0.join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(fixture.0.join("muse_account_host.py"), DROP_FIRST_HOST).unwrap();
+    let socket = fixture.0.join("host.sock");
+    fs::write(
+        config_dir.join("host-socket-path"),
+        socket.as_os_str().as_encoded_bytes(),
+    )
+    .unwrap();
+    let child = std::process::Command::new("/usr/bin/python3")
+        .arg("-I")
+        .arg(fixture.0.join("muse_account_host.py"))
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stub host never listened"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    (socket, StubHost(child))
+}
+
+fn request_log(fixture: &Fixture) -> String {
+    fs::read_to_string(fixture.0.join("config").join("requests.log")).unwrap_or_default()
+}
+
+/// One never-replay op under test: its wire name and the call that
+/// submits it, with the answer discarded to a common shape.
+type NeverReplayCall = (
+    &'static str,
+    fn(&AccountClient) -> Result<(), muse_account::AccountError>,
+);
+
+#[test]
+fn never_replay_ops_are_not_redispatched_after_an_ambiguous_failure() {
+    // Regression: host_exchange re-dispatched any op submitted with
+    // sending=false on a fresh host after the first host dropped the
+    // connection -- including ops whose effect must happen exactly once,
+    // so an op that had already executed ran twice. Each op below must
+    // surface the failure with exactly one request on the wire.
+    let calls: [NeverReplayCall; 11] = [
+        ("start_session", |c| c.start_session().map(|_| ())),
+        ("tasks_run", |c| c.tasks_run("job-1").map(|_| ())),
+        ("goal_create", |c| {
+            c.goal_create("Title", "Summary", "Description", "🎯")
+                .map(|_| ())
+        }),
+        ("goal_add_subgoal", |c| {
+            c.goal_add_subgoal("goal-1", "Title", "Summary", "Description", "🎯")
+                .map(|_| ())
+        }),
+        ("idea_execute", |c| c.idea_execute("card-1").map(|_| ())),
+        ("attach_probe", |c| c.attach_probe("thread-1").map(|_| ())),
+        ("message_react", |c| c.message_react("m1", "❤").map(|_| ())),
+        ("decide", |c| {
+            c.decide("approval-1", Decision::AllowOnce).map(|_| ())
+        }),
+        ("cancel", |c| c.cancel().map(|_| ())),
+        ("space_share", |c| {
+            c.space_share("space-1", "cloudflare", None).map(|_| ())
+        }),
+        ("idea_engagement", |c| {
+            c.idea_engagement("idea-1").map(|_| ())
+        }),
+    ];
+    for (op, call) in calls {
+        let fixture = Fixture::new();
+        let (socket, _host) = drop_first_fixture(&fixture);
+        // python3 is real so a replay through start_host could actually
+        // happen (and be logged) if the op lost its protection.
+        let client = fixture
+            .client("/usr/bin/python3", fixture.0.join("bridge.py"))
+            .use_host_socket(socket);
+        let error = call(&client).expect_err(&format!(
+            "{op}: a dropped first answer must surface, never be replayed"
+        ));
+        assert_eq!(error.code, ErrorCode::BridgeFailure, "{op}");
+        assert!(
+            error.uncertain,
+            "{op}: the effect may already have happened"
+        );
+        let log = request_log(&fixture);
+        assert_eq!(
+            log.lines().count(),
+            1,
+            "{op} must be dispatched exactly once, log: {log}"
+        );
+        assert!(log.contains(&format!(r#""op":"{op}""#)), "{op}: {log}");
+    }
+}
+
+#[test]
+fn a_read_still_retries_on_a_fresh_host_after_a_dropped_connection() {
+    // The other half of the contract: replay-safe ops keep the retry --
+    // the resilience is deliberate for them. The stub drops the first
+    // request and answers the replay, so the read succeeds with exactly
+    // two requests on the wire.
+    let fixture = Fixture::new();
+    let (socket, _host) = drop_first_fixture(&fixture);
+    let client = fixture
+        .client("/usr/bin/python3", fixture.0.join("bridge.py"))
+        .use_host_socket(socket);
+    let identity = client
+        .identity()
+        .expect("a read is replay-safe and must be retried");
+    assert_eq!(identity.identity_name, "Lotus");
+    let log = request_log(&fixture);
+    assert_eq!(
+        log.lines().count(),
+        2,
+        "exactly one replay of the read: {log}"
+    );
+    assert!(log.lines().all(|line| line.contains(r#""op":"identity""#)));
 }
 
 #[test]

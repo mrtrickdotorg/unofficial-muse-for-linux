@@ -1691,7 +1691,7 @@ impl AccountClient {
             serde_json::json!({"op": "space_share", "slug": slug,
                               "share_type": share_type,
                               "disclosure_confirmation": disclosure_confirmation}),
-            false,
+            true,
         )
     }
     /// Read one space's HTML export for an in-app preview.
@@ -1795,7 +1795,7 @@ impl AccountClient {
     /// The answer says whether anything was stopped; it is not an intent
     /// record, so UI must not treat the call itself as a successful stop.
     pub fn cancel(&self) -> Result<CancelAnswer, AccountError> {
-        self.request(serde_json::json!({"op": "cancel"}), false)
+        self.request(serde_json::json!({"op": "cancel"}), true)
     }
     /// List what the agent is asking to do. Read-only: listing never decides.
     pub fn approvals(&self) -> Result<PendingApprovals, AccountError> {
@@ -1826,7 +1826,7 @@ impl AccountClient {
                 "approval_id": approval_id,
                 "decision": decision.as_str(),
             }),
-            false,
+            true,
         )
     }
     /// List the grants still in force. Read-only: listing never revokes.
@@ -2003,7 +2003,7 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "tasks_run", "job_id": job_id}),
-            false,
+            true,
         )
     }
     /// Change one connector+method mode, guarded by the revision the read
@@ -2064,7 +2064,7 @@ impl AccountClient {
     /// asked for. The returned id is proven by the bridge against
     /// the session listing, not merely echoed from the start call.
     pub fn start_session(&self) -> Result<StartedSession, AccountError> {
-        self.request(serde_json::json!({"op": "start_session"}), false)
+        self.request(serde_json::json!({"op": "start_session"}), true)
     }
     /// Apply exactly one session mutation, once: pin, unpin,
     /// archive, unarchive, delete, or rename (with its title).
@@ -2136,7 +2136,7 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "attach_probe", "thread": thread}),
-            false,
+            true,
         )
     }
 
@@ -2167,7 +2167,7 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "idea_execute", "idea_id": idea_id}),
-            false,
+            true,
         )
     }
     /// React to exactly one feed unit, once.
@@ -2254,10 +2254,7 @@ impl AccountClient {
         if id.is_empty() || id.len() > 256 || id.contains('\0') {
             return Err(AccountError::new(ErrorCode::InvalidRequest, false));
         }
-        self.request(
-            serde_json::json!({"op": "idea_engagement", "id": id}),
-            false,
-        )
+        self.request(serde_json::json!({"op": "idea_engagement", "id": id}), true)
     }
     /// Record one "Not interested" on an idea, once.
     ///
@@ -2349,7 +2346,7 @@ impl AccountClient {
         }
         self.request(
             serde_json::json!({"op": "message_react", "message_id": message_id, "emoji": emoji}),
-            false,
+            true,
         )
     }
     /// Read one goal's detail: the goal, its updates, its links.
@@ -2398,7 +2395,7 @@ impl AccountClient {
             serde_json::json!({"op": "goal_add_subgoal", "parent_goal_id": parent_goal_id,
                                "title": title, "summary": summary,
                                "description": description, "emoji": emoji}),
-            false,
+            true,
         )
     }
     /// Create one top-level goal, once.
@@ -2428,7 +2425,7 @@ impl AccountClient {
             serde_json::json!({"op": "goal_create",
                                "title": title, "summary": summary,
                                "description": description, "emoji": emoji}),
-            false,
+            true,
         )
     }
     /// Read the assistant-tracking goals for the Tracking section.
@@ -2893,17 +2890,18 @@ impl AccountClient {
                     // of its held connections is wedged. Terminate the host
                     // (SIGTERM is a clean shutdown for it) so the next
                     // exchange starts fresh instead of queueing behind the
-                    // same wedge; a read may retry on the fresh host, a send
-                    // may not be replayed.
+                    // same wedge; a replay-safe op may retry on the fresh
+                    // host, a never-replay op (sending=true) may not.
                     self.kill_host(&socket);
                     if !sending {
                         return self.start_and_exchange(&socket, request, deadline);
                     }
                     return Err(error);
                 }
-                // A socket left behind by a host that has just exited: a read is
-                // idempotent and can be retried on a fresh host, a send cannot
-                // be replayed because it may already have been written.
+                // A socket left behind by a host that has just exited: a
+                // replay-safe op can be retried on a fresh host, a
+                // never-replay op (sending=true) cannot, because it may
+                // already have been written.
                 Err(_) if !sending => return self.start_and_exchange(&socket, request, deadline),
                 Err(error) => return Err(error),
             }
