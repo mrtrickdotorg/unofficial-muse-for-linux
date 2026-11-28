@@ -49,6 +49,12 @@ export UMFL_BUILD_SHA="${UMFL_BUILD_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/
 if [[ -n "$UMFL_BUILD_SHA" ]]; then
     printf 'Stamped build commit %s\n' "$UMFL_BUILD_SHA"
 fi
+# The updater orders builds by when they were built: CI passes the run's
+# instant (`UMFL_BUILD_EPOCH`, the same value its release notes publish);
+# a local build stamps its own build instant, so the ordering the check
+# applies is the one the feed describes.
+export UMFL_BUILD_EPOCH="${UMFL_BUILD_EPOCH:-$(date -u +%s)}"
+printf 'Stamped build epoch %s\n' "$UMFL_BUILD_EPOCH"
 # The account gate needs the pinned community bridge, which is installed by
 # scripts/setup-account-bridge.sh (CI and the Containerfile do it, and the
 # gate finds the default installation on its own). A host without it cannot pass

@@ -15,6 +15,13 @@
 //! without a digest is refused, never taken on trust -- the staged
 //! file is executed, so an unverified download is remote code.
 //!
+//! Builds are ordered by when they were built, not merely by which
+//! commit they name: every build is stamped with its build instant
+//! and the feed publishes the same instant beside its commit, and
+//! an offered build older than the running one is refused. A
+//! different commit is not on its own an update -- a stale or
+//! replayed feed must not walk the app backwards.
+//!
 //! Only pure shapes are unit-tested (feed parsing, version compare,
 //! check gating). The network runs on a worker thread and only the
 //! outcome crosses back to the main thread.
@@ -38,6 +45,11 @@ pub struct ReleaseInfo {
     /// hex without the `sha256:` prefix. `None` when the feed
     /// published no digest; a download is refused in that case.
     pub asset_digest: Option<String>,
+    /// When the offered build was built (seconds since the epoch),
+    /// as published in the feed's notes beside its commit. `None`
+    /// when the notes name no instant; such a build cannot be
+    /// proven not older than the running one and is not offered.
+    pub build_epoch: Option<u64>,
 }
 
 /// The identifier the panel names for an offered build: the shortened
@@ -79,6 +91,19 @@ pub fn parse_built_sha(notes: &str) -> Option<String> {
     }
 }
 
+/// Pull the build instant out of the rolling-release notes
+/// ("... Build epoch 1764300000."). Notes without one, or with an
+/// instant that does not parse, name no instant.
+pub fn parse_built_epoch(notes: &str) -> Option<u64> {
+    let marker = "Build epoch ";
+    let start = notes.find(marker)? + marker.len();
+    let digits: String = notes[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok().filter(|epoch| *epoch > 0)
+}
+
 /// Read the feed answer: notes for the version, assets for the bytes.
 /// Unknown shapes are a client gap, never an update.
 pub fn parse_release(json: &serde_json::Value) -> Result<ReleaseInfo, String> {
@@ -88,6 +113,7 @@ pub fn parse_release(json: &serde_json::Value) -> Result<ReleaseInfo, String> {
         .unwrap_or("");
     let sha =
         parse_built_sha(notes).ok_or_else(|| "Feed did not name a built commit.".to_string())?;
+    let build_epoch = parse_built_epoch(notes);
     let assets = json
         .get("assets")
         .and_then(serde_json::Value::as_array)
@@ -112,6 +138,7 @@ pub fn parse_release(json: &serde_json::Value) -> Result<ReleaseInfo, String> {
         asset_url,
         asset_size,
         asset_digest,
+        build_epoch,
     })
 }
 
@@ -142,19 +169,43 @@ fn parse_asset_digest(asset: &serde_json::Value) -> Result<Option<String>, Strin
     }
 }
 
-/// An update exists when both sides name a commit and they differ.
-/// A dev build (no compiled-in SHA) never counts as up to date and
-/// never as behind: without an identity there is nothing to compare.
-pub fn update_available(local_sha: Option<&str>, remote: &ReleaseInfo) -> bool {
-    match local_sha {
-        Some(local) if !local.is_empty() => local != remote.sha,
-        _ => false,
+/// An update exists when the feed names a different commit that
+/// was built no earlier than this one. A dev build (no compiled-in
+/// SHA) never counts as up to date and never as behind: without an
+/// identity there is nothing to compare. A feed naming no build
+/// instant proves nothing about its age, so it is not an update
+/// either; a local build with no stamped instant (one from before
+/// the stamp existed) counts as the oldest there is, so its way
+/// onto the stamped feed stays open. Two builds stamped in the
+/// same instant cannot be ordered and the different commit stands.
+pub fn update_available(
+    local_sha: Option<&str>,
+    local_epoch: Option<u64>,
+    remote: &ReleaseInfo,
+) -> bool {
+    let Some(local) = local_sha.filter(|sha| !sha.is_empty()) else {
+        return false;
+    };
+    if local == remote.sha {
+        return false;
     }
+    let Some(remote_epoch) = remote.build_epoch else {
+        return false;
+    };
+    remote_epoch >= local_epoch.unwrap_or(0)
 }
 
 /// The commit this binary was built from, stamped by CI.
 pub fn local_sha() -> Option<&'static str> {
     option_env!("UMFL_BUILD_SHA").filter(|sha| !sha.is_empty())
+}
+
+/// When this binary was built (seconds since the epoch), stamped
+/// beside the commit by the same build that stamped it.
+pub fn local_epoch() -> Option<u64> {
+    option_env!("UMFL_BUILD_EPOCH")
+        .and_then(|text| text.parse().ok())
+        .filter(|epoch| *epoch > 0)
 }
 
 /// True when running from an AppImage bundle (the runtime sets
@@ -540,6 +591,7 @@ mod tests {
             asset_url: "file:///tmp/muse.AppImage".to_owned(),
             asset_size: 86_071_800,
             asset_digest: None,
+            build_epoch: None,
         };
         assert_eq!(
             offered_status(&info),
@@ -554,6 +606,7 @@ mod tests {
             asset_url: String::new(),
             asset_size: 0,
             asset_digest: None,
+            build_epoch: None,
         };
         assert_eq!(
             offered_status(&info),
@@ -649,6 +702,7 @@ mod tests {
             asset_url: String::new(),
             asset_size: size,
             asset_digest: digest.map(str::to_owned),
+            build_epoch: None,
         }
     }
 
@@ -717,18 +771,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn only_a_different_named_commit_counts_as_an_update() {
-        let remote = ReleaseInfo {
+    fn remote_at(epoch: Option<u64>) -> ReleaseInfo {
+        ReleaseInfo {
             sha: "a".repeat(40),
             asset_url: String::new(),
             asset_size: 0,
             asset_digest: None,
-        };
-        assert!(!update_available(Some(&"a".repeat(40)), &remote));
-        assert!(update_available(Some(&"b".repeat(40)), &remote));
-        assert!(!update_available(None, &remote));
-        assert!(!update_available(Some(""), &remote));
+            build_epoch: epoch,
+        }
+    }
+
+    #[test]
+    fn only_a_different_commit_built_no_earlier_counts_as_an_update() {
+        let local = "b".repeat(40);
+        // The same commit is never an update, whatever its instant.
+        assert!(!update_available(
+            Some(&"a".repeat(40)),
+            Some(100),
+            &remote_at(Some(200))
+        ));
+        // A different commit built later: an update.
+        assert!(update_available(
+            Some(&local),
+            Some(100),
+            &remote_at(Some(200))
+        ));
+        // The same instant cannot be ordered; the different commit stands.
+        assert!(update_available(
+            Some(&local),
+            Some(100),
+            &remote_at(Some(100))
+        ));
+        // A different commit built earlier: refused -- a stale or
+        // replayed feed does not walk the app backwards.
+        assert!(!update_available(
+            Some(&local),
+            Some(200),
+            &remote_at(Some(100))
+        ));
+        // A feed naming no instant proves nothing about its age.
+        assert!(!update_available(Some(&local), Some(100), &remote_at(None)));
+        // A local build with no stamped instant counts as the oldest
+        // there is, so its way onto the stamped feed stays open.
+        assert!(update_available(Some(&local), None, &remote_at(Some(100))));
+        // No local identity: nothing to compare, never an update.
+        assert!(!update_available(None, None, &remote_at(Some(200))));
+        assert!(!update_available(Some(""), None, &remote_at(Some(200))));
+    }
+
+    #[test]
+    fn built_epoch_comes_from_the_notes_sentence() {
+        let notes = "Rolling x86_64 AppImage built from abc by the AppImage workflow. Build epoch 1764300000.";
+        assert_eq!(parse_built_epoch(notes), Some(1_764_300_000));
+        assert_eq!(parse_built_epoch("no marker here"), None);
+        assert_eq!(parse_built_epoch("Build epoch soon."), None);
+        assert_eq!(parse_built_epoch("Build epoch 0."), None);
+    }
+
+    #[test]
+    fn local_epoch_reports_exactly_what_was_compiled_in() {
+        // Same discipline as the commit stamp: the accessor reports
+        // the compiled-in instant verbatim, so the ordering compares
+        // the real build moment.
+        let compiled: Option<u64> = option_env!("UMFL_BUILD_EPOCH")
+            .and_then(|text| text.parse().ok())
+            .filter(|epoch| *epoch > 0);
+        assert_eq!(local_epoch(), compiled);
     }
 
     #[test]

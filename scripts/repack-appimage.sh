@@ -56,6 +56,11 @@ export UMFL_BUILD_SHA="${UMFL_BUILD_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/
 if [[ -n "$UMFL_BUILD_SHA" ]]; then
     printf 'Stamped build commit %s\n' "$UMFL_BUILD_SHA"
 fi
+# A repack is a new build of its commit, so it stamps its own instant:
+# the updater orders builds by when they were built, and this bundle's
+# place in that order is the repack's moment, not the commit's.
+export UMFL_BUILD_EPOCH="${UMFL_BUILD_EPOCH:-$(date -u +%s)}"
+printf 'Stamped build epoch %s\n' "$UMFL_BUILD_EPOCH"
 cargo test --workspace --locked
 cargo build --release --locked -p muse
 cargo build --release --locked -p muse-reminder-runner

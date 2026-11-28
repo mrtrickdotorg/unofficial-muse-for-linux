@@ -100,6 +100,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import time
 from pathlib import Path
 
 try:
@@ -702,7 +703,7 @@ def write_feed(root, marker=None):
     asset.write_bytes(body)
     sha = "0f1e2d3c4b5a69788796a5b4c3d2e1f0a1b2c3d4"
     feed = {
-        "body": f"Rolling x86_64 AppImage built from {sha} by the AppImage workflow.",
+        "body": f"Rolling x86_64 AppImage built from {sha} by the AppImage workflow. Build epoch {int(time.time())}.",
         "assets": [
             {
                 "name": STAGED_ASSET,

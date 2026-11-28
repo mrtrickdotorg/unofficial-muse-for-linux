@@ -6241,8 +6241,9 @@ fn do_check(ctx: &Ctx, page: Option<&gtk4::Box>) -> Result<(), String> {
                     // A harness copy carries no compiled-in commit, so it
                     // follows the feed it was handed instead of calling itself
                     // current.
-                    let offered = super::update::update_available(local, &info)
-                        || (local.is_none() && super::update::harness_feed().is_some());
+                    let offered =
+                        super::update::update_available(local, super::update::local_epoch(), &info)
+                            || (local.is_none() && super::update::harness_feed().is_some());
                     if offered {
                         state.status = super::update::offered_status(&info);
                         state.info = Some(info);
@@ -8587,6 +8588,7 @@ pub(crate) mod tests {
             asset_url: "https://example.invalid/muse.AppImage".to_owned(),
             asset_size: 1024,
             asset_digest: None,
+            build_epoch: None,
         });
         assert_eq!(
             updates_action_label(&state).as_deref(),
